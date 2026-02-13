@@ -1,3 +1,13 @@
+"""3D Slicer scripted module entrypoint for ROSA Helper.
+
+This UI-oriented layer delegates parsing and transform composition to `rosa_core`.
+It focuses on scene operations:
+- load Analyze volumes
+- center volumes
+- apply composed display transforms
+- create trajectory line markups
+"""
+
 import os
 import sys
 
@@ -27,17 +37,22 @@ from rosa_core import (
 
 
 class RosaHelper(ScriptedLoadableModule):
+    """Slicer module metadata container."""
+
     def __init__(self, parent):
         super().__init__(parent)
         self.parent.title = "ROSA Helper"
         self.parent.categories = ["ROSA"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Ammar", "Codex"]
+        self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = "Load a ROSA case folder into Slicer and apply ROSA transforms."
 
 
 class RosaHelperWidget(ScriptedLoadableModuleWidget):
+    """Qt widget for selecting a case folder and loading it into the scene."""
+
     def setup(self):
+        """Create module UI controls and wire actions."""
         super().setup()
 
         self.logic = RosaHelperLogic()
@@ -52,10 +67,17 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         self.referenceEdit = qt.QLineEdit()
         self.referenceEdit.setPlaceholderText("Optional (auto-detect if blank)")
+        self.referenceEdit.setToolTip(
+            "Root display volume name. If blank, the first ROS display is used."
+        )
         form.addRow("Reference volume", self.referenceEdit)
 
         self.invertCheck = qt.QCheckBox("Invert TRdicomRdisplay")
         self.invertCheck.setChecked(False)
+        self.invertCheck.setToolTip(
+            "Invert the composed transform before applying. Use only for datasets"
+            " where ROS matrices are known to be reversed."
+        )
         form.addRow("Transform option", self.invertCheck)
 
         self.hardenCheck = qt.QCheckBox("Harden transforms")
@@ -78,10 +100,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
     def log(self, msg):
+        """Append status text to the module log panel and stdout."""
         self.statusText.appendPlainText(msg)
         print(msg)
 
     def onLoadClicked(self):
+        """Validate inputs and run the load pipeline."""
         case_dir = self.caseDirSelector.currentPath
         if not case_dir:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Please select a case folder")
@@ -110,6 +134,8 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
 
 class RosaHelperLogic(ScriptedLoadableModuleLogic):
+    """Core scene-loading logic used by UI and headless `run()` entrypoint."""
+
     def load_case(
         self,
         case_dir,
@@ -119,6 +145,24 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         load_trajectories=True,
         logger=None,
     ):
+        """Load a ROSA case directory into the current Slicer scene.
+
+        Parameters
+        ----------
+        case_dir: str
+            Folder containing one `.ros` file and a `DICOM` subfolder.
+        reference: str | None
+            Optional root volume name used for chain composition.
+        invert: bool
+            Invert composed transforms before applying.
+        harden: bool
+            Harden applied transforms into volume geometry.
+        load_trajectories: bool
+            Create line markups from ROS trajectories.
+        logger: callable | None
+            Optional callback used for status messages.
+        """
+
         def log(msg):
             if logger:
                 logger(msg)
@@ -191,6 +235,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         }
 
     def _load_volume(self, path):
+        """Load a scalar volume by path and return the MRML node."""
         try:
             result = slicer.util.loadVolume(path, returnNode=True)
             if isinstance(result, tuple):
@@ -201,6 +246,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             return slicer.util.loadVolume(path)
 
     def _center_volume(self, volume_node):
+        """Center volume origin in Slicer (equivalent to Volumes->Center Volume)."""
         logic = slicer.modules.volumes.logic()
         if logic and hasattr(logic, "CenterVolume"):
             logic.CenterVolume(volume_node)
@@ -217,6 +263,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         volume_node.SetIJKToRASMatrix(ijk_to_ras)
 
     def _apply_transform(self, volume_node, matrix4x4):
+        """Create and assign a linear transform node from a 4x4 matrix."""
         tnode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode")
         vtk_mat = vtk.vtkMatrix4x4()
         for r in range(4):
@@ -227,6 +274,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         return tnode
 
     def _add_trajectories(self, trajectories, logger=None):
+        """Create one Markups line node per trajectory."""
         for traj in trajectories:
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode")
             node.SetName(traj["name"])
@@ -242,6 +290,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
 
 
 def run(case_dir, reference=None, invert=False, harden=True, load_trajectories=True):
+    """Headless convenience entrypoint for scripted smoke tests."""
     return RosaHelperLogic().load_case(
         case_dir=case_dir,
         reference=reference,

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""Command-line utilities built on top of `rosa_core`.
+
+Subcommands support inspection and export of trajectory/transform data from a
+ROSA `.ros` file without launching Slicer.
+"""
+
 import argparse
 import os
 import sys
@@ -22,6 +28,7 @@ from rosa_core.exporters import save_fcsv, save_markups_json  # noqa: E402
 
 
 def cmd_list(args):
+    """Print display metadata and trajectory count."""
     parsed = parse_ros_file(args.ros)
     displays = parsed["displays"]
     trajectories = parsed["trajectories"]
@@ -43,6 +50,7 @@ def cmd_list(args):
 
 
 def _find_display_index(parsed, volume_name):
+    """Return display index for a volume name, case-insensitive."""
     for i, disp in enumerate(parsed["displays"]):
         if disp["volume"].lower() == volume_name.lower():
             return i
@@ -51,6 +59,7 @@ def _find_display_index(parsed, volume_name):
 
 
 def cmd_markups(args):
+    """Export trajectory lines to Slicer Markups JSON format."""
     parsed = parse_ros_file(args.ros)
     displays = parsed["displays"]
     root_index = resolve_reference_index(displays, args.root_volume)
@@ -70,6 +79,7 @@ def cmd_markups(args):
 
 
 def cmd_fcsv(args):
+    """Export trajectory endpoints to Slicer FCSV format."""
     parsed = parse_ros_file(args.ros)
     rows = build_fcsv_rows(
         parsed["trajectories"],
@@ -81,6 +91,7 @@ def cmd_fcsv(args):
 
 
 def cmd_tfm(args):
+    """Export one display transform to ITK `.tfm` text format."""
     parsed = parse_ros_file(args.ros)
     displays = parsed["displays"]
     root_index = resolve_reference_index(displays, args.root_volume)
@@ -97,6 +108,7 @@ def cmd_tfm(args):
 
 
 def main():
+    """CLI entrypoint."""
     parser = argparse.ArgumentParser(description="ROSA export helpers")
     sub = parser.add_subparsers(dest="command", required=True)
 

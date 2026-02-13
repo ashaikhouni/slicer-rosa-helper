@@ -1,4 +1,13 @@
+"""Small matrix/coordinate helpers for ROSA and Slicer transforms.
+
+Conventions used in this project:
+- Points are 3-element XYZ lists in millimeters.
+- Matrices are row-major 4x4 affine transforms.
+- `lps_to_ras_*` converts DICOM LPS conventions to Slicer RAS.
+"""
+
 def apply_affine(matrix4x4, point_xyz):
+    """Apply a 4x4 affine matrix to a 3D point."""
     x, y, z = point_xyz
     vec = [x, y, z, 1.0]
     out = [0.0, 0.0, 0.0, 0.0]
@@ -8,6 +17,7 @@ def apply_affine(matrix4x4, point_xyz):
 
 
 def is_identity_4x4(matrix4x4, tol=1e-4):
+    """Return `True` when matrix is approximately identity."""
     for r in range(4):
         for c in range(4):
             target = 1.0 if r == c else 0.0
@@ -17,7 +27,7 @@ def is_identity_4x4(matrix4x4, tol=1e-4):
 
 
 def invert_4x4(matrix4x4):
-    # Gauss-Jordan inversion for small fixed-size matrices.
+    """Invert a 4x4 matrix using Gauss-Jordan elimination."""
     a = [[float(matrix4x4[r][c]) for c in range(4)] for r in range(4)]
     inv = [[1.0 if r == c else 0.0 for c in range(4)] for r in range(4)]
 
@@ -51,10 +61,12 @@ def invert_4x4(matrix4x4):
 
 
 def lps_to_ras_point(point_xyz):
+    """Convert point from LPS to RAS by flipping X and Y."""
     return [-point_xyz[0], -point_xyz[1], point_xyz[2]]
 
 
 def _matmul4(a, b):
+    """Multiply two 4x4 matrices."""
     out = [[0.0] * 4 for _ in range(4)]
     for i in range(4):
         for j in range(4):
@@ -63,6 +75,7 @@ def _matmul4(a, b):
 
 
 def lps_to_ras_matrix(matrix4x4_lps):
+    """Convert a 4x4 transform matrix from LPS frame to RAS frame."""
     flip = [
         [-1.0, 0.0, 0.0, 0.0],
         [0.0, -1.0, 0.0, 0.0],
@@ -73,10 +86,12 @@ def lps_to_ras_matrix(matrix4x4_lps):
 
 
 def matmul_4x4(a, b):
+    """Public wrapper for 4x4 matrix multiplication."""
     return _matmul4(a, b)
 
 
 def identity_4x4():
+    """Return 4x4 identity matrix."""
     return [
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -86,6 +101,7 @@ def identity_4x4():
 
 
 def to_itk_affine_text(matrix4x4):
+    """Serialize 4x4 affine matrix to ITK `.tfm` text format."""
     params = [
         matrix4x4[0][0],
         matrix4x4[0][1],

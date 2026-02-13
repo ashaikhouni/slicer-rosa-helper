@@ -1,3 +1,13 @@
+"""Parse ROSA `.ros` text into display and trajectory records.
+
+ROSA files are tokenized as bracketed headers followed by free-form payload:
+`[TOKEN]` then one or more lines until the next token.
+This parser extracts only the fields needed by ROSA Helper:
+- display transforms (`TRdicomRdisplay` + `VOLUME`)
+- display metadata (`IMAGERY_NAME`, `SERIE_UID`, `IMAGERY_3DREF`)
+- trajectories (`TRAJECTORY` and `ELLIPS`)
+"""
+
 import re
 from pathlib import Path
 
@@ -6,6 +16,18 @@ _FLOAT_RE = r"[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?"
 
 
 def extract_tokens(text):
+    """Return ordered token blocks from a ROSA text blob.
+
+    Parameters
+    ----------
+    text: str
+        Full `.ros` file content.
+
+    Returns
+    -------
+    list[dict]
+        Each item has `token` and `content` keys.
+    """
     tokens = []
     matches = list(re.finditer(r"\[(.*?)\]", text))
     for i in range(len(matches) - 1):
@@ -18,6 +40,7 @@ def extract_tokens(text):
 
 
 def _parse_display_matrix(block):
+    """Parse a 4x4 matrix from a `TRdicomRdisplay` token payload."""
     nums = re.findall(_FLOAT_RE, block)
     if len(nums) < 16:
         return None
@@ -26,6 +49,7 @@ def _parse_display_matrix(block):
 
 
 def _parse_volume_path(block):
+    """Parse full ROSA volume path from a `VOLUME` payload."""
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
     if not lines:
         return None
@@ -33,6 +57,7 @@ def _parse_volume_path(block):
 
 
 def _parse_volume_name(block):
+    """Parse trailing volume name from a `VOLUME` payload path."""
     volume_path = _parse_volume_path(block)
     if not volume_path:
         return None
@@ -40,11 +65,13 @@ def _parse_volume_name(block):
 
 
 def _parse_name_field(block):
+    """Parse first non-empty line from a simple token payload."""
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
     return lines[0] if lines else None
 
 
 def _parse_int_field(block):
+    """Parse integer payload value; return `None` if not valid."""
     value = _parse_name_field(block)
     if value is None:
         return None
@@ -55,6 +82,7 @@ def _parse_int_field(block):
 
 
 def _parse_trajectory(block):
+    """Parse a single trajectory payload into name/start/end points."""
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
     if len(lines) < 2:
         return None
@@ -71,6 +99,12 @@ def _parse_trajectory(block):
 
 
 def parse_ros_text(text):
+    """Parse ROSA text and return displays + trajectories.
+
+    Output dictionary schema:
+    - `displays`: ordered list of display dictionaries
+    - `trajectories`: ordered list of trajectory dictionaries
+    """
     tokens = extract_tokens(text)
 
     displays = []
@@ -132,6 +166,7 @@ def parse_ros_text(text):
 
 
 def parse_ros_file(ros_path):
+    """Read and parse a `.ros` file path."""
     path = Path(ros_path)
     text = path.read_text(encoding="utf-8", errors="ignore")
     parsed = parse_ros_text(text)

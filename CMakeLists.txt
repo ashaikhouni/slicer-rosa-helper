@@ -5,7 +5,7 @@ project(RosaHelper)
 # Extension meta-information
 set(EXTENSION_HOMEPAGE "https://github.com/<org-or-user>/slicer-rosa-helper")
 set(EXTENSION_CATEGORY "Informatics")
-set(EXTENSION_CONTRIBUTORS "Ammar (project lead)")
+set(EXTENSION_CONTRIBUTORS "Ammar Shaikhouni (project lead)")
 set(EXTENSION_DESCRIPTION "Load ROSA case folders (Analyze volumes + trajectories) into 3D Slicer with centered volumes and registration transforms.")
 set(EXTENSION_ICONURL "")
 set(EXTENSION_SCREENSHOTURLS "")

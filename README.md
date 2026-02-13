@@ -10,6 +10,47 @@ It supports:
 - composing transform chains using `[IMAGERY_3DREF]`
 - loading trajectories as line markups
 
+## ROS File Structure (What We Read)
+
+ROSA `.ros` files are tokenized text files. Each section starts with a bracketed
+token, for example:
+
+```text
+[TRdicomRdisplay]
+<16 matrix values>
+[VOLUME]
+\DICOM\<serie_uid>\<volume_name>
+[IMAGERY_3DREF]
+<display index>
+```
+
+Relevant tokens used by this project:
+- `TRdicomRdisplay`: 4x4 matrix for one display volume
+- `VOLUME`: display volume path/name
+- `IMAGERY_NAME`: human-readable display label
+- `SERIE_UID`: series folder key under `DICOM/`
+- `IMAGERY_3DREF`: parent display index for registration chaining
+- `TRAJECTORY` and `ELLIPS`: trajectory name + two 3D points
+
+## How ROSA Helper Interprets Transforms
+
+For each display `i`, this project interprets:
+- `TRdicomRdisplay(i)` as transform from display `i` to parent display `IMAGERY_3DREF(i)`
+
+Then it composes parent chains into the chosen root display frame:
+- `T(i->root) = T(parent->root) * T(i->parent)`
+
+Finally for Slicer application:
+1. Convert matrix from LPS to RAS.
+2. Optionally invert (module checkbox).
+3. Apply to centered loaded volume.
+
+Default root display is the first display in `.ros` order unless a reference
+volume is explicitly selected.
+
+Trajectories are interpreted as ROSA/LPS points and converted to RAS for Slicer
+markups.
+
 ## Install (Manual Module)
 
 1. Clone or download this repository.
