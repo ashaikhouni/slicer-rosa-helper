@@ -194,10 +194,25 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.contactsNodeNameEdit = qt.QLineEdit("ROSA_Contacts")
         contact_layout.addRow("Output markups", self.contactsNodeNameEdit)
 
+        self.createModelsCheck = qt.QCheckBox("Create electrode models")
+        self.createModelsCheck.setChecked(True)
+        self.createModelsCheck.setToolTip(
+            "Create per-electrode 3D model nodes (shaft + contacts) after contact generation."
+        )
+        contact_layout.addRow("Model option", self.createModelsCheck)
+
         self.generateContactsButton = qt.QPushButton("Generate Contact Fiducials")
         self.generateContactsButton.clicked.connect(self.onGenerateContactsClicked)
         self.generateContactsButton.setEnabled(False)
         contact_layout.addRow(self.generateContactsButton)
+
+        self.updateContactsButton = qt.QPushButton("Update From Edited Trajectories")
+        self.updateContactsButton.clicked.connect(self.onUpdateContactsClicked)
+        self.updateContactsButton.setEnabled(False)
+        self.updateContactsButton.setToolTip(
+            "Recompute contacts/models from current trajectory line markups without creating new nodes."
+        )
+        contact_layout.addRow(self.updateContactsButton)
 
         self.bundleExportDirEdit = qt.QLineEdit()
         self.bundleExportDirEdit.setPlaceholderText("Optional (defaults to <case>/RosaHelper_Export)")
@@ -396,6 +411,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         enabled = bool(trajectories) and bool(self.modelsById)
         self.generateContactsButton.setEnabled(enabled)
+        self.updateContactsButton.setEnabled(enabled)
         self.applyModelAllButton.setEnabled(enabled)
         self.exportBundleButton.setEnabled(False)
         if trajectories:
@@ -417,6 +433,93 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             if traj["name"] == name:
                 return traj
         return None
+
+    def _find_line_markup_node(self, name):
+        """Return trajectory line markup node by exact name."""
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            if node.GetName() == name:
+                return node
+        return None
+
+    def _trajectory_from_line_node(self, name, node):
+        """Extract trajectory start/end from a line node as ROSA/LPS points."""
+        if node is None or node.GetNumberOfControlPoints() < 2:
+            return None
+        p0 = [0.0, 0.0, 0.0]
+        p1 = [0.0, 0.0, 0.0]
+        node.GetNthControlPointPositionWorld(0, p0)
+        node.GetNthControlPointPositionWorld(1, p1)
+        return {
+            "name": name,
+            "start": lps_to_ras_point(p0),
+            "end": lps_to_ras_point(p1),
+        }
+
+    def _build_trajectory_map_with_scene_overrides(self):
+        """Return trajectory map using current scene markups when available."""
+        base = {traj["name"]: traj for traj in self.loadedTrajectories}
+        for name in list(base.keys()):
+            node = self._find_line_markup_node(name)
+            scene_traj = self._trajectory_from_line_node(name, node)
+            if scene_traj is not None:
+                base[name] = scene_traj
+        return base
+
+    def _refresh_trajectory_lengths_from_scene(self):
+        """Refresh trajectory length column from currently edited line markups."""
+        traj_map = self._build_trajectory_map_with_scene_overrides()
+        for row in range(self.contactTable.rowCount):
+            name_item = self.contactTable.item(row, 0)
+            if not name_item:
+                continue
+            name = name_item.text()
+            traj = traj_map.get(name)
+            if traj is None:
+                continue
+            self._set_readonly_text_item(row, 1, f"{self._trajectory_length_mm(traj):.2f}")
+
+    def _run_contact_generation(self, log_context="generate"):
+        """Compute contacts from table assignments and current trajectory markup positions."""
+        assignments = self._collect_assignments()
+        if not assignments["assignments"]:
+            raise ValueError("Select at least one electrode model in the assignment table.")
+
+        traj_map = self._build_trajectory_map_with_scene_overrides()
+        ordered_names = []
+        for row in range(self.contactTable.rowCount):
+            item = self.contactTable.item(row, 0)
+            if item:
+                ordered_names.append(item.text())
+        self.loadedTrajectories = [traj_map[name] for name in ordered_names if name in traj_map]
+        self._refresh_trajectory_lengths_from_scene()
+
+        try:
+            contacts = generate_contacts(self.loadedTrajectories, self.modelsById, assignments)
+        except Exception as exc:
+            raise ValueError(str(exc))
+
+        node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
+        nodes = self.logic.create_contacts_fiducials_nodes_by_trajectory(
+            contacts,
+            node_prefix=node_prefix,
+        )
+
+        model_nodes = {}
+        if self.createModelsCheck.checked:
+            model_nodes = self.logic.create_electrode_models_by_trajectory(
+                contacts=contacts,
+                trajectories_by_name=traj_map,
+                models_by_id=self.modelsById,
+                node_prefix=node_prefix,
+            )
+
+        self.lastGeneratedContacts = contacts
+        self.exportBundleButton.setEnabled(True)
+        self.log(
+            f"[contacts:{log_context}] updated {len(contacts)} points across {len(nodes)} electrode nodes"
+        )
+        if model_nodes:
+            self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
 
     def onApplyModelAllClicked(self):
         """Apply selected default electrode model to all rows."""
@@ -460,30 +563,32 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Load a ROSA case first.")
             return
 
-        assignments = self._collect_assignments()
-        if not assignments["assignments"]:
-            qt.QMessageBox.warning(
-                slicer.util.mainWindow(),
-                "ROSA Helper",
-                "Select at least one electrode model in the assignment table.",
-            )
-            return
-
         try:
-            contacts = generate_contacts(self.loadedTrajectories, self.modelsById, assignments)
+            self._run_contact_generation(log_context="generate")
         except Exception as exc:
             self.log(f"[contacts] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
             return
 
-        node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
-        nodes = self.logic.create_contacts_fiducials_nodes_by_trajectory(
-            contacts,
-            node_prefix=node_prefix,
-        )
-        self.lastGeneratedContacts = contacts
-        self.exportBundleButton.setEnabled(True)
-        self.log(f"[contacts] created {len(contacts)} points across {len(nodes)} electrode nodes")
+    def onUpdateContactsClicked(self):
+        """Recalculate contact and model nodes from edited trajectory markups."""
+        if not self.loadedTrajectories:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Load a ROSA case first.")
+            return
+        if not self.lastGeneratedContacts:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Generate contacts once first, then use update for edited trajectories.",
+            )
+            return
+
+        try:
+            self._run_contact_generation(log_context="update")
+        except Exception as exc:
+            self.log(f"[contacts:update] error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
 
     def onExportAlignedBundleClicked(self):
         """Export aligned volumes as NIfTI and contact coordinates in same frame."""
@@ -727,7 +832,11 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
 
     def create_contacts_fiducials_node(self, contacts, node_name="ROSA_Contacts"):
         """Create a fiducial markups node from contact list in ROSA/LPS space."""
-        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", node_name)
+        node = self._find_node_by_name(node_name, "vtkMRMLMarkupsFiducialNode")
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", node_name)
+        else:
+            node.RemoveAllControlPoints()
         for contact in contacts:
             ras = lps_to_ras_point(contact["position_lps"])
             point_index = node.AddControlPoint(vtk.vtkVector3d(*ras))
@@ -756,6 +865,143 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
                 node_name=node_name,
             )
         return nodes
+
+    def _find_node_by_name(self, node_name, class_name):
+        """Return first node with exact name and class, or None."""
+        for node in slicer.util.getNodesByClass(class_name):
+            if node.GetName() == node_name:
+                return node
+        return None
+
+    def _tube_polydata(self, p0, p1, radius_mm, sides=24):
+        """Build capped tube polydata between two 3D points."""
+        line = vtk.vtkLineSource()
+        line.SetPoint1(float(p0[0]), float(p0[1]), float(p0[2]))
+        line.SetPoint2(float(p1[0]), float(p1[1]), float(p1[2]))
+
+        tube = vtk.vtkTubeFilter()
+        tube.SetInputConnection(line.GetOutputPort())
+        tube.SetRadius(float(radius_mm))
+        tube.SetNumberOfSides(int(sides))
+        tube.CappingOn()
+        tube.Update()
+
+        out = vtk.vtkPolyData()
+        out.DeepCopy(tube.GetOutput())
+        return out
+
+    def create_electrode_models_by_trajectory(
+        self,
+        contacts,
+        trajectories_by_name,
+        models_by_id,
+        node_prefix="ROSA_Contacts",
+    ):
+        """Create per-trajectory model nodes for electrode shaft and contact segments."""
+        by_traj = {}
+        for contact in contacts:
+            traj = contact.get("trajectory", "")
+            by_traj.setdefault(traj, []).append(contact)
+
+        created = {}
+        for traj_name in sorted(by_traj.keys()):
+            group = sorted(by_traj[traj_name], key=lambda c: int(c.get("index", 0)))
+            if not group:
+                continue
+
+            model_id = group[0].get("model_id", "")
+            if model_id not in models_by_id:
+                continue
+            model = models_by_id[model_id]
+            offsets = list(model.get("contact_center_offsets_from_tip_mm", []))
+            if not offsets:
+                continue
+
+            p_first = list(group[0]["position_lps"])
+            if len(group) >= 2:
+                p_last = list(group[-1]["position_lps"])
+                axis = self._vunit(self._vsub(p_last, p_first))
+            else:
+                trajectory = trajectories_by_name.get(traj_name)
+                if trajectory is None:
+                    continue
+                tip_at = (group[0].get("tip_at") or "target").lower()
+                if tip_at == "entry":
+                    axis = self._vunit(self._vsub(trajectory["end"], trajectory["start"]))
+                else:
+                    axis = self._vunit(self._vsub(trajectory["start"], trajectory["end"]))
+
+            tip = self._vsub(p_first, self._vmul(axis, float(offsets[0])))
+            shaft_len = float(model.get("total_exploration_length_mm", 0.0))
+            shaft_end = self._vadd(tip, self._vmul(axis, shaft_len))
+            radius = float(model.get("diameter_mm", 0.8)) / 2.0
+            contact_len = float(model.get("contact_length_mm", 2.0))
+
+            shaft_poly = self._tube_polydata(
+                lps_to_ras_point(tip),
+                lps_to_ras_point(shaft_end),
+                radius_mm=radius,
+                sides=24,
+            )
+
+            append = vtk.vtkAppendPolyData()
+            for contact in group:
+                center = contact["position_lps"]
+                p0 = self._vsub(center, self._vmul(axis, contact_len / 2.0))
+                p1 = self._vadd(center, self._vmul(axis, contact_len / 2.0))
+                segment = self._tube_polydata(
+                    lps_to_ras_point(p0),
+                    lps_to_ras_point(p1),
+                    radius_mm=radius,
+                    sides=24,
+                )
+                append.AddInputData(segment)
+            append.Update()
+            contact_poly = vtk.vtkPolyData()
+            contact_poly.DeepCopy(append.GetOutput())
+
+            shaft_name = f"{node_prefix}_{traj_name}_shaft"
+            contacts_name = f"{node_prefix}_{traj_name}_contacts"
+
+            shaft_node = self._find_node_by_name(shaft_name, "vtkMRMLModelNode")
+            if shaft_node is None:
+                shaft_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", shaft_name)
+            shaft_node.SetAndObservePolyData(shaft_poly)
+            shaft_node.CreateDefaultDisplayNodes()
+            shaft_display = shaft_node.GetDisplayNode()
+            if shaft_display:
+                shaft_display.SetColor(0.80, 0.80, 0.80)
+                shaft_display.SetOpacity(0.40)
+                if hasattr(shaft_display, "SetLineWidth"):
+                    shaft_display.SetLineWidth(7)
+                if hasattr(shaft_display, "SetSliceIntersectionThickness"):
+                    shaft_display.SetSliceIntersectionThickness(7)
+                if hasattr(shaft_display, "SetVisibility2D"):
+                    shaft_display.SetVisibility2D(True)
+                elif hasattr(shaft_display, "SetSliceIntersectionVisibility"):
+                    shaft_display.SetSliceIntersectionVisibility(True)
+
+            contacts_node = self._find_node_by_name(contacts_name, "vtkMRMLModelNode")
+            if contacts_node is None:
+                contacts_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", contacts_name)
+            contacts_node.SetAndObservePolyData(contact_poly)
+            contacts_node.CreateDefaultDisplayNodes()
+            contacts_display = contacts_node.GetDisplayNode()
+            if contacts_display:
+                contacts_display.SetColor(1.00, 0.95, 0.20)
+                contacts_display.SetOpacity(1.00)
+                if hasattr(contacts_display, "SetLineWidth"):
+                    contacts_display.SetLineWidth(7)
+                if hasattr(contacts_display, "SetSliceIntersectionThickness"):
+                    contacts_display.SetSliceIntersectionThickness(7)
+                if hasattr(contacts_display, "SetVisibility2D"):
+                    contacts_display.SetVisibility2D(True)
+                elif hasattr(contacts_display, "SetSliceIntersectionVisibility"):
+                    contacts_display.SetSliceIntersectionVisibility(True)
+
+            created[traj_name] = {"shaft": shaft_node, "contacts": contacts_node}
+
+        return created
 
     def _safe_filename(self, text):
         """Return filesystem-safe filename stem."""

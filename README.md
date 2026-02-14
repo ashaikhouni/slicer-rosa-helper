@@ -12,7 +12,9 @@ It supports:
 - selecting electrode models per trajectory (DIXI AM/BM/CM library)
 - auto-suggesting an electrode model from trajectory length (closest within 5 mm)
 - generating contact fiducials per electrode (one node per trajectory)
+- generating per-electrode 3D models (shaft + contact segments)
 - aligning Red/Yellow/Green slice view to a selected trajectory (`long`/`down`) and centering on it
+- recalculating contacts/models from edited trajectory entry/target points without creating duplicate nodes
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
 
 ## ROS File Structure (What We Read)
@@ -66,6 +68,8 @@ markups.
    - verify auto-selected electrode models
    - adjust model/tip options as needed
    - click `Generate Contact Fiducials`
+   - keep `Create electrode models` enabled to also create 3D model nodes
+   - after moving trajectory line control points, click `Update From Edited Trajectories`
 6. Optional: open `Trajectory Slice View` and align a slice to one trajectory.
    - the selected slice is reoriented and centered on the trajectory midpoint
 7. Click `Export Aligned NIfTI + Coordinates`.
