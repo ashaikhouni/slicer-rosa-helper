@@ -64,7 +64,22 @@ markups.
 
 - `RosaHelper/`: Slicer scripted module
 - `RosaHelper/Lib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
+- `RosaHelper/Resources/electrodes/dixi_d08_electrodes.json`: bundled electrode model library (AM/BM/CM)
 - `tools/`: CLI wrappers for offline conversion/export
+
+## Electrode Model Library
+
+The bundled DIXI D08 electrode library stores per-model geometry needed for
+contact placement:
+- model id and type (`AM`, `BM`, `CM`)
+- number of contacts and grouping
+- contact length and diameter
+- insulation distances (intra-contact and inter-group)
+- total exploration length
+- explicit contact-center offsets from the tip (`contact_center_offsets_from_tip_mm`)
+
+Using explicit center offsets avoids ambiguity for grouped designs (`BM`/`CM`)
+and keeps contact generation deterministic.
 
 ## CLI Usage
 
@@ -100,6 +115,25 @@ python tools/rosa_export.py tfm \
   --root-volume NCAxT1 \
   --ras \
   --out /tmp/post_to_ref.tfm
+```
+
+Create contact-assignment template (trajectory -> model):
+
+```bash
+python tools/rosa_export.py contacts-template \
+  --ros /path/to/case/s54.ros \
+  --out /tmp/s54_assignments.json
+```
+
+Generate contacts from assignments:
+
+```bash
+python tools/rosa_export.py contacts-generate \
+  --ros /path/to/case/s54.ros \
+  --assignments /tmp/s54_assignments.json \
+  --out-rosa-json /tmp/s54_contacts_rosa.json \
+  --out-fcsv /tmp/s54_contacts_ras.fcsv \
+  --out-markups /tmp/s54_contacts_ras.mrk.json
 ```
 
 ## Case Folder Convention

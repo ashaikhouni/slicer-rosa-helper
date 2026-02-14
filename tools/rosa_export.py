@@ -15,13 +15,23 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 from rosa_core import (  # noqa: E402
+    build_assignment_template,
     build_effective_matrices,
     build_fcsv_rows,
     build_markups_lines,
+    contacts_to_fcsv_rows,
+    default_electrode_library_path,
+    generate_contacts,
     invert_4x4,
     lps_to_ras_matrix,
+    load_assignments,
+    load_electrode_library,
+    model_map,
     parse_ros_file,
     resolve_reference_index,
+    save_assignment_template,
+    save_contacts_markups_json,
+    save_contacts_rosa_json,
     to_itk_affine_text,
 )
 from rosa_core.exporters import save_fcsv, save_markups_json  # noqa: E402
@@ -107,6 +117,43 @@ def cmd_tfm(args):
     print(f"Wrote {args.out}")
 
 
+def cmd_contacts_template(args):
+    """Create editable trajectory->electrode assignment template."""
+    parsed = parse_ros_file(args.ros)
+    template = build_assignment_template(
+        parsed["trajectories"],
+        default_model_id=args.default_model_id or "",
+        default_tip_at=args.default_tip_at,
+    )
+    save_assignment_template(args.out, template)
+    print(f"Wrote {args.out} ({len(template['assignments'])} trajectory rows)")
+
+
+def cmd_contacts_generate(args):
+    """Generate contact points from assignments and electrode library."""
+    parsed = parse_ros_file(args.ros)
+    lib = load_electrode_library(args.electrode_library)
+    models = model_map(lib)
+    assignments = load_assignments(args.assignments)
+
+    contacts = generate_contacts(parsed["trajectories"], models, assignments)
+    metadata = {
+        "ros_path": args.ros,
+        "electrode_library": str(args.electrode_library or default_electrode_library_path()),
+    }
+    save_contacts_rosa_json(args.out_rosa_json, contacts, metadata=metadata)
+    print(f"Wrote {args.out_rosa_json} ({len(contacts)} contacts in ROSA_LPS)")
+
+    if args.out_fcsv:
+        rows = contacts_to_fcsv_rows(contacts, to_ras=True)
+        save_fcsv(args.out_fcsv, rows)
+        print(f"Wrote {args.out_fcsv} ({len(rows)} points in RAS)")
+
+    if args.out_markups:
+        save_contacts_markups_json(args.out_markups, contacts, to_ras=True, node_name="contacts")
+        print(f"Wrote {args.out_markups} (markups fiducials)")
+
+
 def main():
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(description="ROSA export helpers")
@@ -157,6 +204,31 @@ def main():
         help="Invert matrix before writing",
     )
     p_tfm.set_defaults(func=cmd_tfm)
+
+    p_contacts_template = sub.add_parser(
+        "contacts-template",
+        help="Create an assignments template for trajectory -> electrode model",
+    )
+    p_contacts_template.add_argument("--ros", required=True)
+    p_contacts_template.add_argument("--out", required=True)
+    p_contacts_template.add_argument("--default-model-id")
+    p_contacts_template.add_argument("--default-tip-at", choices=["entry", "target"], default="target")
+    p_contacts_template.set_defaults(func=cmd_contacts_template)
+
+    p_contacts_generate = sub.add_parser(
+        "contacts-generate",
+        help="Generate contact locations from assignments",
+    )
+    p_contacts_generate.add_argument("--ros", required=True)
+    p_contacts_generate.add_argument("--assignments", required=True)
+    p_contacts_generate.add_argument(
+        "--electrode-library",
+        help="Path to electrode models JSON (defaults to bundled DIXI library)",
+    )
+    p_contacts_generate.add_argument("--out-rosa-json", required=True)
+    p_contacts_generate.add_argument("--out-fcsv")
+    p_contacts_generate.add_argument("--out-markups")
+    p_contacts_generate.set_defaults(func=cmd_contacts_generate)
 
     args = parser.parse_args()
     args.func(args)
