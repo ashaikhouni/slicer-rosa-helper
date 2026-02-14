@@ -901,7 +901,11 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             center[2],
             0,
         )
-        slicer.util.resetSliceViews()
+        # Force slice plane to pass through trajectory center, then pan to keep it visible.
+        if hasattr(slice_node, "JumpSliceByOffsetting"):
+            slice_node.JumpSliceByOffsetting(center[0], center[1], center[2])
+        if hasattr(slice_node, "JumpSliceByCentering"):
+            slice_node.JumpSliceByCentering(center[0], center[1], center[2])
 
 
 def run(case_dir, reference=None, invert=False, harden=True, load_trajectories=True):
