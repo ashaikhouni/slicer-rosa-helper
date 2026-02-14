@@ -54,22 +54,27 @@ def load_assignments(path):
 
 
 def _sub(a, b):
+    """Return vector subtraction `a - b` for 3D points."""
     return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 
 
 def _add(a, b):
+    """Return vector addition `a + b` for 3D points."""
     return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 
 
 def _mul(v, s):
+    """Return scalar multiplication `v * s` for 3D vectors."""
     return [v[0] * s, v[1] * s, v[2] * s]
 
 
 def _norm(v):
+    """Return Euclidean norm of a 3D vector."""
     return (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
 
 
 def _unit(v):
+    """Return unit-length version of `v` and validate non-zero length."""
     n = _norm(v)
     if n <= 1e-9:
         raise ValueError("Zero-length trajectory vector")
@@ -77,6 +82,7 @@ def _unit(v):
 
 
 def _tip_and_axis(trajectory, tip_at):
+    """Resolve tip point and forward axis from entry/target and tip anchor choice."""
     entry = trajectory["start"]
     target = trajectory["end"]
     tip_at_norm = (tip_at or "target").lower()

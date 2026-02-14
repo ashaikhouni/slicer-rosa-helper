@@ -44,6 +44,7 @@ class RosaHelper(ScriptedLoadableModule):
     """Slicer module metadata container."""
 
     def __init__(self, parent):
+        """Initialize static module metadata shown in Slicer UI."""
         super().__init__(parent)
         self.parent.title = "ROSA Helper"
         self.parent.categories = ["ROSA"]
@@ -593,6 +594,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         """
 
         def log(msg):
+            """Forward log messages to callback when provided."""
             if logger:
                 logger(msg)
             else:
@@ -791,6 +793,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         lines.append("# columns: trajectory,label,index,x_ras,y_ras,z_ras,x_lps,y_lps,z_lps,model_id")
 
         def _sort_key(c):
+            """Sort contacts by trajectory then by ascending index."""
             return (str(c.get("trajectory", "")), int(c.get("index", 0)))
 
         for contact in sorted(contacts, key=_sort_key):
@@ -822,18 +825,23 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         }
 
     def _vsub(self, a, b):
+        """Return vector subtraction `a - b`."""
         return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 
     def _vadd(self, a, b):
+        """Return vector addition `a + b`."""
         return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 
     def _vmul(self, a, s):
+        """Return scalar multiplication `a * s`."""
         return [a[0] * s, a[1] * s, a[2] * s]
 
     def _vdot(self, a, b):
+        """Return dot product between two 3D vectors."""
         return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
     def _vcross(self, a, b):
+        """Return cross product `a x b` for 3D vectors."""
         return [
             a[1] * b[2] - a[2] * b[1],
             a[2] * b[0] - a[0] * b[2],
@@ -841,9 +849,11 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         ]
 
     def _vnorm(self, a):
+        """Return Euclidean norm of a 3D vector."""
         return math.sqrt(self._vdot(a, a))
 
     def _vunit(self, a):
+        """Return normalized vector and validate non-zero length."""
         n = self._vnorm(a)
         if n <= 1e-9:
             raise ValueError("Zero-length trajectory vector")

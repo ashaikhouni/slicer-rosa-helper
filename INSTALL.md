@@ -22,6 +22,21 @@
    - `DICOM/` with per-series subfolders containing `.img/.hdr`
 3. Click `Load ROSA case`.
 
+## Basic Usage Flow
+
+1. In `V1 Contact Labels`, review trajectory rows and electrode model suggestions.
+2. Adjust model/tip settings if needed.
+3. Click `Generate Contact Fiducials`.
+4. Optional: use `Trajectory Slice View` to align Red/Yellow/Green along one trajectory.
+5. Click `Export Aligned NIfTI + Coordinates`.
+
+Default export folder:
+- `<case>/RosaHelper_Export`
+
+Exports:
+- aligned `.nii.gz` volumes
+- `<prefix>_aligned_world_coords.txt` (contact coordinates)
+
 ## Troubleshooting
 
 - Module not visible:
@@ -34,3 +49,7 @@
 
 - Analyze warnings:
   - ITK Analyze deprecation warnings are expected and do not block loading
+
+- Coordinates look wrong in external viewers:
+  - Use the aligned export outputs (`.nii.gz` + aligned coordinate TXT), not raw Analyze files
+  - Confirm the external viewer loads the exported NIfTI, not original `.img`

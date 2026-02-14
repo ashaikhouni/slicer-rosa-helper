@@ -9,6 +9,11 @@ It supports:
 - applying `TRdicomRdisplay` transforms
 - composing transform chains using `[IMAGERY_3DREF]`
 - loading trajectories as line markups
+- selecting electrode models per trajectory (DIXI AM/BM/CM library)
+- auto-suggesting an electrode model from trajectory length (closest within 5 mm)
+- generating contact fiducials per electrode (one node per trajectory)
+- aligning Red/Yellow/Green slice view to a selected trajectory (`long`/`down`)
+- exporting aligned NIfTI volumes and contact coordinates together for external tools
 
 ## ROS File Structure (What We Read)
 
@@ -51,6 +56,30 @@ volume is explicitly selected.
 Trajectories are interpreted as ROSA/LPS points and converted to RAS for Slicer
 markups.
 
+## Quick Start (Module UI)
+
+1. Install the module (see `INSTALL.md`).
+2. Open `ROSA Helper` in Slicer.
+3. Set case folder (`<case>/` containing `.ros` and `DICOM/`).
+4. Click `Load ROSA case`.
+5. Open `V1 Contact Labels`:
+   - verify auto-selected electrode models
+   - adjust model/tip options as needed
+   - click `Generate Contact Fiducials`
+6. Optional: open `Trajectory Slice View` and align a slice to one trajectory.
+7. Click `Export Aligned NIfTI + Coordinates`.
+
+Output default folder:
+- `<case>/RosaHelper_Export/`
+
+Output files:
+- One `.nii.gz` per loaded/aligned volume
+- `<prefix>_aligned_world_coords.txt` with contact coordinates and labels
+
+Coordinate columns in export:
+- `x_ras,y_ras,z_ras`: Slicer world RAS (matches exported NIfTI scene)
+- `x_lps,y_lps,z_lps`: corresponding LPS values
+
 ## Install (Manual Module)
 
 1. Clone or download this repository.
@@ -80,6 +109,25 @@ contact placement:
 
 Using explicit center offsets avoids ambiguity for grouped designs (`BM`/`CM`)
 and keeps contact generation deterministic.
+
+Current bundled models:
+- `DIXI-5AM`, `DIXI-8AM`, `DIXI-10AM`, `DIXI-12AM`, `DIXI-15AM`, `DIXI-18AM`
+- `DIXI-15BM`
+- `DIXI-15CM`, `DIXI-18CM`
+
+Contact display defaults in Slicer:
+- per-electrode node naming: `<prefix>_<trajectory>`
+- compact point labels: contact index only (`1`, `2`, ...)
+- glyph scale: `2.00`
+- text scale: `1.50`
+
+## Recommended Interop Workflow (Freeview/Other Tools)
+
+Analyze `.img/.hdr` orientation handling differs across software. To avoid frame
+mismatch:
+- do not interchange raw ROSA Analyze files + coordinates directly
+- use `Export Aligned NIfTI + Coordinates`
+- load exported `.nii.gz` and exported coordinate TXT together in downstream tools
 
 ## CLI Usage
 
