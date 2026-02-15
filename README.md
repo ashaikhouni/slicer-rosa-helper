@@ -80,7 +80,7 @@ markups.
    - `Apply Fit to Trajectories`
    - contacts/models are regenerated from the fitted trajectories
    - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
-8. Click `Export Aligned NIfTI + Coordinates`.
+8. Click `Export Aligned NIfTI + Coordinates/QC`.
 
 Output default folder:
 - `<case>/RosaHelper_Export/`
@@ -88,10 +88,22 @@ Output default folder:
 Output files:
 - One `.nii.gz` per loaded/aligned volume
 - `<prefix>_aligned_world_coords.txt` with contact coordinates and labels
+- `<prefix>_planned_trajectory_points.csv` with planned entry/target points
+- `<prefix>_qc_metrics.csv` with per-trajectory QC metrics
 
 Coordinate columns in export:
 - `x_ras,y_ras,z_ras`: Slicer world RAS (matches exported NIfTI scene)
 - `x_lps,y_lps,z_lps`: corresponding LPS values
+
+QC CSV columns:
+- `trajectory`
+- `entry_radial_mm`
+- `target_radial_mm`
+- `mean_contact_radial_mm`
+- `max_contact_radial_mm`
+- `rms_contact_radial_mm`
+- `angle_deg`
+- `matched_contacts`
 
 ## Contact Localization Modes
 
@@ -121,6 +133,21 @@ After auto-fit, you can continue manual refinement:
 - change electrode model assignment
 - edit entry/target points
 - click `Update From Edited Trajectories` to recompute final contacts/models
+
+## Trajectory QC Metrics
+
+The `Trajectory QC Metrics` panel is populated automatically whenever contacts are
+generated or updated. No separate compute button is required.
+
+QC panel is disabled when:
+- no generated contacts exist
+- planned trajectories (`Plan_*`) are not available
+
+Metrics are computed per trajectory by comparing:
+- planned line (`Plan_<trajectory>`)
+- final line (`<trajectory>`)
+- planned contact centers (from selected model + planned line)
+- final contact centers (manual or auto-fit result)
 
 ## Install (Manual Module)
 
@@ -168,7 +195,7 @@ Contact display defaults in Slicer:
 Analyze `.img/.hdr` orientation handling differs across software. To avoid frame
 mismatch:
 - do not interchange raw ROSA Analyze files + coordinates directly
-- use `Export Aligned NIfTI + Coordinates`
+- use `Export Aligned NIfTI + Coordinates/QC`
 - load exported `.nii.gz` and exported coordinate TXT together in downstream tools
 
 ## CLI Usage

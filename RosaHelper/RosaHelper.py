@@ -68,6 +68,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.loadedTrajectories = []
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
+        self.lastQCMetricsRows = []
         self.loadedVolumeNodeIDs = {}
         self.autoFitCandidatesLPS = []
         self.autoFitResults = {}
@@ -116,6 +117,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(self.statusText)
 
         self._build_contact_ui()
+        self._build_qc_ui()
         self._build_trajectory_view_ui()
         self._build_autofit_ui()
         self._load_electrode_library()
@@ -154,6 +156,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.loadedTrajectories = summary["trajectories"]
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
+        self.lastQCMetricsRows = []
         self.loadedVolumeNodeIDs = summary.get("loaded_volume_node_ids", {})
         self.autoFitCandidatesLPS = []
         self.autoFitResults = {}
@@ -161,6 +164,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self._populate_contact_table(self.loadedTrajectories)
         self._populate_trajectory_selector(self.loadedTrajectories)
         self._populate_autofit_trajectory_selector(self.loadedTrajectories)
+        self._refresh_qc_metrics()
         self._set_autofit_buttons_enabled(False)
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
@@ -234,7 +238,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.bundleExportDirEdit.setPlaceholderText("Optional (defaults to <case>/RosaHelper_Export)")
         contact_layout.addRow("Aligned export folder", self.bundleExportDirEdit)
 
-        self.exportBundleButton = qt.QPushButton("Export Aligned NIfTI + Coordinates")
+        self.exportBundleButton = qt.QPushButton("Export Aligned NIfTI + Coordinates/QC")
         self.exportBundleButton.clicked.connect(self.onExportAlignedBundleClicked)
         self.exportBundleButton.setEnabled(False)
         contact_layout.addRow(self.exportBundleButton)
@@ -271,6 +275,39 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.alignSliceButton.setEnabled(False)
         self.alignSliceButton.clicked.connect(self.onAlignSliceClicked)
         view_layout.addRow(self.alignSliceButton)
+
+    def _build_qc_ui(self):
+        """Create QC table that updates automatically after contact generation."""
+        self.qcSection = ctk.ctkCollapsibleButton()
+        self.qcSection.text = "Trajectory QC Metrics"
+        self.qcSection.collapsed = True
+        self.layout.addWidget(self.qcSection)
+
+        qc_layout = qt.QFormLayout(self.qcSection)
+        self.qcStatusLabel = qt.QLabel("QC metrics are unavailable until contacts are generated.")
+        qc_layout.addRow(self.qcStatusLabel)
+
+        self.qcTable = qt.QTableWidget()
+        self.qcTable.setColumnCount(8)
+        self.qcTable.setHorizontalHeaderLabels(
+            [
+                "Trajectory",
+                "Entry Radial (mm)",
+                "Target Radial (mm)",
+                "Mean Contact Radial (mm)",
+                "Max Contact Radial (mm)",
+                "RMS Contact Radial (mm)",
+                "Angle (deg)",
+                "Matched Contacts",
+            ]
+        )
+        self.qcTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
+        for col in range(1, 8):
+            self.qcTable.horizontalHeader().setSectionResizeMode(col, qt.QHeaderView.ResizeToContents)
+        self.qcTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        self.qcTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        qc_layout.addRow(self.qcTable)
+        self._set_qc_enabled(False, "QC metrics are unavailable until contacts are generated.")
 
     def _build_autofit_ui(self):
         """Create controls for automatic postop CT alignment of trajectories."""
@@ -423,6 +460,187 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         item = qt.QTableWidgetItem(text)
         item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
         self.contactTable.setItem(row, column, item)
+
+    def _set_qc_enabled(self, enabled, message=""):
+        """Enable/disable QC section and update status message."""
+        self.qcSection.setEnabled(bool(enabled))
+        self.qcTable.setEnabled(bool(enabled))
+        if message:
+            self.qcStatusLabel.setText(message)
+
+    def _set_qc_table_item(self, row, column, text):
+        """Set one read-only item in QC table."""
+        item = qt.QTableWidgetItem(str(text))
+        item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
+        self.qcTable.setItem(row, column, item)
+
+    def _sorted_contacts_by_trajectory(self, contacts):
+        """Return map `trajectory -> contacts sorted by index`."""
+        by_traj = {}
+        for contact in contacts:
+            name = str(contact.get("trajectory", ""))
+            if not name:
+                continue
+            by_traj.setdefault(name, []).append(contact)
+        for name in list(by_traj.keys()):
+            by_traj[name] = sorted(by_traj[name], key=lambda c: int(c.get("index", 0)))
+        return by_traj
+
+    def _collect_planned_trajectory_map(self):
+        """Read planned line markups (`Plan_*`) into trajectory dictionaries."""
+        out = {}
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            node_name = node.GetName() or ""
+            if not node_name.startswith("Plan_"):
+                continue
+            traj_name = node_name[len("Plan_") :]
+            traj = self._trajectory_from_line_node(traj_name, node)
+            if traj is not None:
+                out[traj_name] = traj
+        return out
+
+    def _vsub3(self, a, b):
+        """Return vector subtraction `a - b` for 3D vectors."""
+        return [float(a[0]) - float(b[0]), float(a[1]) - float(b[1]), float(a[2]) - float(b[2])]
+
+    def _vdot3(self, a, b):
+        """Return dot product between 3D vectors."""
+        return float(a[0]) * float(b[0]) + float(a[1]) * float(b[1]) + float(a[2]) * float(b[2])
+
+    def _vmul3(self, v, s):
+        """Return scalar multiplication `v * s`."""
+        return [float(v[0]) * float(s), float(v[1]) * float(s), float(v[2]) * float(s)]
+
+    def _vnorm3(self, v):
+        """Return Euclidean norm of a 3D vector."""
+        return math.sqrt(self._vdot3(v, v))
+
+    def _vunit3(self, v):
+        """Return normalized vector and validate non-zero length."""
+        n = self._vnorm3(v)
+        if n <= 1e-9:
+            raise ValueError("Zero-length vector")
+        return [float(v[0]) / n, float(v[1]) / n, float(v[2]) / n]
+
+    def _radial_error_mm(self, delta_vec, axis_unit):
+        """Return radial (perpendicular-to-axis) component length in millimeters."""
+        axial_mm = self._vdot3(delta_vec, axis_unit)
+        axial_vec = self._vmul3(axis_unit, axial_mm)
+        radial_vec = self._vsub3(delta_vec, axial_vec)
+        return self._vnorm3(radial_vec)
+
+    def _trajectory_axis_angle_deg(self, planned, final):
+        """Return angle in degrees between planned and final trajectory axes."""
+        planned_axis = self._vunit3(self._vsub3(planned["end"], planned["start"]))
+        final_axis = self._vunit3(self._vsub3(final["end"], final["start"]))
+        dot = max(-1.0, min(1.0, self._vdot3(planned_axis, final_axis)))
+        return math.degrees(math.acos(dot))
+
+    def _compute_qc_rows(self):
+        """Compute per-trajectory QC metrics using planned vs current contacts/lines."""
+        if not self.lastGeneratedContacts:
+            return [], "QC disabled: generate contacts first."
+
+        planned_map = self._collect_planned_trajectory_map()
+        if not planned_map:
+            return [], "QC disabled: no planned trajectories (Plan_*) found."
+
+        if not self.lastAssignments.get("assignments"):
+            return [], "QC disabled: no electrode assignments available."
+
+        final_map = self._build_trajectory_map_with_scene_overrides()
+        assignments = self.lastAssignments
+
+        try:
+            planned_contacts = generate_contacts(list(planned_map.values()), self.modelsById, assignments)
+        except Exception as exc:
+            return [], f"QC disabled: failed to generate planned contacts ({exc})."
+
+        planned_by_traj = self._sorted_contacts_by_trajectory(planned_contacts)
+        final_by_traj = self._sorted_contacts_by_trajectory(self.lastGeneratedContacts)
+
+        rows = []
+        for traj_name in sorted(final_by_traj.keys()):
+            if traj_name not in planned_map:
+                continue
+            planned = planned_map[traj_name]
+            final = final_map.get(traj_name)
+            if final is None:
+                continue
+
+            try:
+                planned_axis = self._vunit3(self._vsub3(planned["end"], planned["start"]))
+            except Exception:
+                continue
+
+            entry_delta = self._vsub3(final["start"], planned["start"])
+            target_delta = self._vsub3(final["end"], planned["end"])
+            entry_rad = self._radial_error_mm(entry_delta, planned_axis)
+            target_rad = self._radial_error_mm(target_delta, planned_axis)
+            angle_deg = self._trajectory_axis_angle_deg(planned, final)
+
+            planned_index_map = {
+                int(c.get("index", 0)): c
+                for c in planned_by_traj.get(traj_name, [])
+                if int(c.get("index", 0)) > 0
+            }
+            final_index_map = {
+                int(c.get("index", 0)): c
+                for c in final_by_traj.get(traj_name, [])
+                if int(c.get("index", 0)) > 0
+            }
+            matched_idx = sorted(set(planned_index_map.keys()) & set(final_index_map.keys()))
+            if not matched_idx:
+                continue
+
+            radial_errors = []
+            for idx in matched_idx:
+                p_plan = planned_index_map[idx]["position_lps"]
+                p_final = final_index_map[idx]["position_lps"]
+                delta = self._vsub3(p_final, p_plan)
+                radial_errors.append(self._radial_error_mm(delta, planned_axis))
+
+            mean_rad = sum(radial_errors) / float(len(radial_errors))
+            max_rad = max(radial_errors)
+            rms_rad = math.sqrt(sum((v * v for v in radial_errors)) / float(len(radial_errors)))
+
+            rows.append(
+                {
+                    "trajectory": traj_name,
+                    "entry_radial_mm": entry_rad,
+                    "target_radial_mm": target_rad,
+                    "mean_contact_radial_mm": mean_rad,
+                    "max_contact_radial_mm": max_rad,
+                    "rms_contact_radial_mm": rms_rad,
+                    "angle_deg": angle_deg,
+                    "matched_contacts": len(matched_idx),
+                }
+            )
+
+        if not rows:
+            return [], "QC disabled: no matching planned/final trajectories with contacts."
+        return rows, f"QC metrics computed for {len(rows)} trajectories."
+
+    def _refresh_qc_metrics(self):
+        """Refresh QC table state from current trajectories, assignments, and contacts."""
+        rows, status = self._compute_qc_rows()
+        self.lastQCMetricsRows = rows
+        self.qcTable.setRowCount(0)
+        if not rows:
+            self._set_qc_enabled(False, status)
+            return
+
+        self._set_qc_enabled(True, status)
+        self.qcTable.setRowCount(len(rows))
+        for row_index, row in enumerate(rows):
+            self._set_qc_table_item(row_index, 0, row["trajectory"])
+            self._set_qc_table_item(row_index, 1, f"{row['entry_radial_mm']:.2f}")
+            self._set_qc_table_item(row_index, 2, f"{row['target_radial_mm']:.2f}")
+            self._set_qc_table_item(row_index, 3, f"{row['mean_contact_radial_mm']:.2f}")
+            self._set_qc_table_item(row_index, 4, f"{row['max_contact_radial_mm']:.2f}")
+            self._set_qc_table_item(row_index, 5, f"{row['rms_contact_radial_mm']:.2f}")
+            self._set_qc_table_item(row_index, 6, f"{row['angle_deg']:.2f}")
+            self._set_qc_table_item(row_index, 7, str(row["matched_contacts"]))
 
     def _electrode_length_mm(self, model_id):
         """Return electrode exploration length in millimeters for model ID."""
@@ -642,6 +860,9 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         )
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
+        self._refresh_qc_metrics()
+        if self.lastQCMetricsRows:
+            self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
 
     def _assignment_map(self):
         """Return mapping `trajectory_name -> assignment_row` for selected models."""
@@ -964,12 +1185,16 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             out_dir = os.path.join(case_dir, "RosaHelper_Export")
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
+        self._refresh_qc_metrics()
+        planned_map = self._collect_planned_trajectory_map()
         try:
             result = self.logic.export_aligned_bundle(
                 volume_node_ids=self.loadedVolumeNodeIDs,
                 contacts=self.lastGeneratedContacts,
                 out_dir=out_dir,
                 node_prefix=node_prefix,
+                planned_trajectories=planned_map,
+                qc_rows=self.lastQCMetricsRows,
             )
         except Exception as exc:
             self.log(f"[bundle] export warning: {exc}")
@@ -978,7 +1203,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         self.log(
             f"[bundle] exported {result['volume_count']} NIfTI volumes "
-            f"and coordinates to {result['out_dir']}"
+            f"and coordinate/QC files to {result['out_dir']}"
         )
 
     def onAlignSliceClicked(self):
@@ -1467,8 +1692,16 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         stem = "".join(safe).strip("._")
         return stem or "volume"
 
-    def export_aligned_bundle(self, volume_node_ids, contacts, out_dir, node_prefix="ROSA_Contacts"):
-        """Export aligned scene volumes (NIfTI) and contact coordinates in same frame."""
+    def export_aligned_bundle(
+        self,
+        volume_node_ids,
+        contacts,
+        out_dir,
+        node_prefix="ROSA_Contacts",
+        planned_trajectories=None,
+        qc_rows=None,
+    ):
+        """Export aligned scene volumes, coordinates, planned trajectories, and QC metrics."""
         os.makedirs(out_dir, exist_ok=True)
 
         saved_paths = []
@@ -1516,11 +1749,57 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         with open(coord_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
+        planned_path = os.path.join(out_dir, f"{node_prefix}_planned_trajectory_points.csv")
+        planned_rows = []
+        planned_map = planned_trajectories or {}
+        for traj_name in sorted(planned_map.keys()):
+            traj = planned_map[traj_name]
+            for point_type, p_lps in (("entry", traj["start"]), ("target", traj["end"])):
+                p_ras = lps_to_ras_point(p_lps)
+                planned_rows.append(
+                    "{traj},{ptype},{x_ras:.6f},{y_ras:.6f},{z_ras:.6f},{x_lps:.6f},{y_lps:.6f},{z_lps:.6f}".format(
+                        traj=str(traj_name),
+                        ptype=point_type,
+                        x_ras=float(p_ras[0]),
+                        y_ras=float(p_ras[1]),
+                        z_ras=float(p_ras[2]),
+                        x_lps=float(p_lps[0]),
+                        y_lps=float(p_lps[1]),
+                        z_lps=float(p_lps[2]),
+                    )
+                )
+        with open(planned_path, "w", encoding="utf-8") as f:
+            f.write("trajectory,point_type,x_ras,y_ras,z_ras,x_lps,y_lps,z_lps\n")
+            if planned_rows:
+                f.write("\n".join(planned_rows) + "\n")
+
+        qc_path = os.path.join(out_dir, f"{node_prefix}_qc_metrics.csv")
+        with open(qc_path, "w", encoding="utf-8") as f:
+            f.write(
+                "trajectory,entry_radial_mm,target_radial_mm,mean_contact_radial_mm,"
+                "max_contact_radial_mm,rms_contact_radial_mm,angle_deg,matched_contacts\n"
+            )
+            for row in qc_rows or []:
+                f.write(
+                    "{trajectory},{entry:.6f},{target:.6f},{mean:.6f},{maxv:.6f},{rms:.6f},{angle:.6f},{matched}\n".format(
+                        trajectory=str(row.get("trajectory", "")),
+                        entry=float(row.get("entry_radial_mm", 0.0)),
+                        target=float(row.get("target_radial_mm", 0.0)),
+                        mean=float(row.get("mean_contact_radial_mm", 0.0)),
+                        maxv=float(row.get("max_contact_radial_mm", 0.0)),
+                        rms=float(row.get("rms_contact_radial_mm", 0.0)),
+                        angle=float(row.get("angle_deg", 0.0)),
+                        matched=int(row.get("matched_contacts", 0)),
+                    )
+                )
+
         return {
             "out_dir": out_dir,
             "volume_count": len(saved_paths),
             "volume_paths": saved_paths,
             "coordinates_path": coord_path,
+            "planned_trajectories_path": planned_path,
+            "qc_metrics_path": qc_path,
         }
 
     def _vsub(self, a, b):
