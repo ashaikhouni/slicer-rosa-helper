@@ -149,6 +149,39 @@ Metrics are computed per trajectory by comparing:
 - planned contact centers (from selected model + planned line)
 - final contact centers (manual or auto-fit result)
 
+## FreeSurfer Integration (V1)
+
+`FreeSurfer Integration (V1)` supports aligning a recon-all MRI/surfaces to the
+ROSA base frame in the same Slicer scene.
+
+Workflow:
+1. Load ROSA case (ROSA base/reference volume is auto-selected when available).
+2. Load the MRI used for `recon-all` into Slicer.
+3. In `FreeSurfer Integration (V1)`:
+   - set `ROSA base volume` (fixed) and `FreeSurfer MRI` (moving)
+   - click `Register FS MRI -> ROSA` (BRAINSFit rigid registration)
+4. Set FreeSurfer subject path (subject root with `surf/` or direct `surf/` path).
+5. Optional: enable `Load annotation scalars`, choose an annotation
+   (`aparc`, `aparc.a2009s`, `aparc.DKTatlas`, or custom), and optionally set
+   a LUT file (for example `FreeSurferColorLUT.txt`).
+6. Choose surface set (`pial`, `white`, `pial+white`, `inflated`) and click
+   `Load FreeSurfer Surfaces`.
+7. Keep `Apply FS->ROSA transform` enabled to bring surfaces into ROSA space.
+   Optionally harden surface transforms.
+
+Notes:
+- BRAINSFit is expected to be available in standard Slicer installs.
+- Surface loading depends on Slicer model IO support for the selected FreeSurfer files.
+- Annotation fallback order is:
+  `nibabel` `.annot` reader -> SlicerFreeSurfer extension reader (if installed) -> `mris_convert`.
+- `nibabel` path does not require a FreeSurfer license.
+- Annotation color table priority (same for nibabel and extension paths):
+  user-selected LUT -> `FreeSurferLabels` node -> bundled LUT
+  (`RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`).
+- If direct `.pial/.white/.inflated` loading fails, ROSA Helper attempts fallback conversion
+  through `mris_convert` (FreeSurfer) and loads the converted VTK surface.
+- `mris_convert` fallback may require a valid FreeSurfer license.
+
 ## Install (Manual Module)
 
 1. Clone or download this repository.
@@ -163,6 +196,7 @@ Metrics are computed per trajectory by comparing:
 - `RosaHelper/`: Slicer scripted module
 - `RosaHelper/Lib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
 - `RosaHelper/Resources/electrodes/dixi_d08_electrodes.json`: bundled electrode model library (AM/BM/CM)
+- `RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
 - `tools/`: CLI wrappers for offline conversion/export
 
 ## Electrode Model Library
