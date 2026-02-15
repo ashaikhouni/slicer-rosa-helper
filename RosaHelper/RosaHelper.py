@@ -11,6 +11,10 @@ It focuses on scene operations:
 import os
 import sys
 import math
+try:
+    import numpy as np
+except ImportError:
+    np = None
 
 from __main__ import ctk, qt, slicer, vtk
 from slicer.ScriptedLoadableModule import (
@@ -63,7 +67,11 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         self.logic = RosaHelperLogic()
         self.loadedTrajectories = []
         self.lastGeneratedContacts = []
+        self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.loadedVolumeNodeIDs = {}
+        self.autoFitCandidatesLPS = []
+        self.autoFitResults = {}
+        self.autoFitCandidateVolumeNodeID = None
         self.modelsById = {}
         self.modelIds = []
 
@@ -109,6 +117,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         self._build_contact_ui()
         self._build_trajectory_view_ui()
+        self._build_autofit_ui()
         self._load_electrode_library()
 
         self.layout.addStretch(1)
@@ -134,6 +143,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
                 invert=self.invertCheck.checked,
                 harden=self.hardenCheck.checked,
                 load_trajectories=self.markupsCheck.checked,
+                show_planned=self.showPlannedCheck.checked,
                 logger=self.log,
             )
         except Exception as exc:
@@ -143,9 +153,15 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         self.loadedTrajectories = summary["trajectories"]
         self.lastGeneratedContacts = []
+        self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.loadedVolumeNodeIDs = summary.get("loaded_volume_node_ids", {})
+        self.autoFitCandidatesLPS = []
+        self.autoFitResults = {}
+        self.autoFitCandidateVolumeNodeID = None
         self._populate_contact_table(self.loadedTrajectories)
         self._populate_trajectory_selector(self.loadedTrajectories)
+        self._populate_autofit_trajectory_selector(self.loadedTrajectories)
+        self._set_autofit_buttons_enabled(False)
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
             f"created {summary['trajectory_count']} trajectories"
@@ -246,10 +262,104 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         )
         view_layout.addRow("Mode", self.sliceModeSelector)
 
+        self.showPlannedCheck = qt.QCheckBox("Show planned trajectories")
+        self.showPlannedCheck.setChecked(False)
+        self.showPlannedCheck.toggled.connect(self.onShowPlannedToggled)
+        view_layout.addRow(self.showPlannedCheck)
+
         self.alignSliceButton = qt.QPushButton("Align Slice to Trajectory")
         self.alignSliceButton.setEnabled(False)
         self.alignSliceButton.clicked.connect(self.onAlignSliceClicked)
         view_layout.addRow(self.alignSliceButton)
+
+    def _build_autofit_ui(self):
+        """Create controls for automatic postop CT alignment of trajectories."""
+        self.autoFitSection = ctk.ctkCollapsibleButton()
+        self.autoFitSection.text = "Auto Align to Postop CT (V1)"
+        self.autoFitSection.collapsed = True
+        self.layout.addWidget(self.autoFitSection)
+
+        form = qt.QFormLayout(self.autoFitSection)
+
+        self.postopCTSelector = slicer.qMRMLNodeComboBox()
+        self.postopCTSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.postopCTSelector.noneEnabled = True
+        self.postopCTSelector.addEnabled = False
+        self.postopCTSelector.removeEnabled = False
+        self.postopCTSelector.setMRMLScene(slicer.mrmlScene)
+        form.addRow("Postop CT", self.postopCTSelector)
+
+        self.autoThresholdSpin = qt.QDoubleSpinBox()
+        self.autoThresholdSpin.setRange(-2000.0, 6000.0)
+        self.autoThresholdSpin.setDecimals(1)
+        self.autoThresholdSpin.setValue(1800.0)
+        self.autoThresholdSpin.setSingleStep(50.0)
+        form.addRow("Threshold (HU)", self.autoThresholdSpin)
+
+        self.resetCTWindowButton = qt.QPushButton("Reset CT Window")
+        self.resetCTWindowButton.clicked.connect(self.onResetCTWindowClicked)
+        form.addRow(self.resetCTWindowButton)
+
+        self.autoRoiRadiusSpin = qt.QDoubleSpinBox()
+        self.autoRoiRadiusSpin.setRange(0.5, 20.0)
+        self.autoRoiRadiusSpin.setDecimals(2)
+        self.autoRoiRadiusSpin.setValue(2.5)
+        self.autoRoiRadiusSpin.setSingleStep(0.25)
+        self.autoRoiRadiusSpin.setSuffix(" mm")
+        form.addRow("ROI radius", self.autoRoiRadiusSpin)
+
+        self.autoMaxAngleSpin = qt.QDoubleSpinBox()
+        self.autoMaxAngleSpin.setRange(0.0, 90.0)
+        self.autoMaxAngleSpin.setDecimals(1)
+        self.autoMaxAngleSpin.setValue(12.0)
+        self.autoMaxAngleSpin.setSingleStep(0.5)
+        self.autoMaxAngleSpin.setSuffix(" deg")
+        form.addRow("Max angle", self.autoMaxAngleSpin)
+
+        self.autoMaxDepthShiftSpin = qt.QDoubleSpinBox()
+        self.autoMaxDepthShiftSpin.setRange(0.0, 50.0)
+        self.autoMaxDepthShiftSpin.setDecimals(2)
+        self.autoMaxDepthShiftSpin.setValue(20.0)
+        self.autoMaxDepthShiftSpin.setSingleStep(0.5)
+        self.autoMaxDepthShiftSpin.setSuffix(" mm")
+        form.addRow("Max depth shift", self.autoMaxDepthShiftSpin)
+
+        self.autoFitTrajectorySelector = qt.QComboBox()
+        form.addRow("Selected trajectory", self.autoFitTrajectorySelector)
+
+        btn_row = qt.QHBoxLayout()
+        self.detectCandidatesButton = qt.QPushButton("Detect Candidates")
+        self.detectCandidatesButton.clicked.connect(self.onDetectCandidatesClicked)
+        btn_row.addWidget(self.detectCandidatesButton)
+        self.fitSelectedButton = qt.QPushButton("Fit Selected")
+        self.fitSelectedButton.clicked.connect(self.onFitSelectedClicked)
+        btn_row.addWidget(self.fitSelectedButton)
+        self.fitAllButton = qt.QPushButton("Fit All")
+        self.fitAllButton.clicked.connect(self.onFitAllClicked)
+        btn_row.addWidget(self.fitAllButton)
+        form.addRow(btn_row)
+
+        self.applyFitButton = qt.QPushButton("Apply Fit to Trajectories")
+        self.applyFitButton.clicked.connect(self.onApplyFitClicked)
+        form.addRow(self.applyFitButton)
+        self._set_autofit_buttons_enabled(False)
+
+    def _set_autofit_buttons_enabled(self, enabled):
+        """Enable/disable auto-fit action buttons."""
+        enabled = bool(enabled)
+        self.fitSelectedButton.setEnabled(enabled)
+        self.fitAllButton.setEnabled(enabled)
+        self.applyFitButton.setEnabled(enabled and bool(self.autoFitResults))
+
+    def _autofit_candidate_count(self):
+        """Return number of detected postop CT candidate points."""
+        candidates = self.autoFitCandidatesLPS
+        if candidates is None:
+            return 0
+        size_attr = getattr(candidates, "shape", None)
+        if size_attr is not None:
+            return int(candidates.shape[0])
+        return len(candidates)
 
     def _load_electrode_library(self):
         """Load bundled electrode models used by V1 contact generation."""
@@ -427,6 +537,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             self.trajectorySelector.addItem(traj["name"])
         self.alignSliceButton.setEnabled(bool(trajectories))
 
+    def _populate_autofit_trajectory_selector(self, trajectories):
+        """Populate selected-trajectory dropdown in auto-fit section."""
+        self.autoFitTrajectorySelector.clear()
+        for traj in trajectories:
+            self.autoFitTrajectorySelector.addItem(traj["name"])
+
     def _trajectory_by_name(self, name):
         """Find trajectory dictionary by name."""
         for traj in self.loadedTrajectories:
@@ -478,11 +594,17 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
                 continue
             self._set_readonly_text_item(row, 1, f"{self._trajectory_length_mm(traj):.2f}")
 
-    def _run_contact_generation(self, log_context="generate"):
+    def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
         """Compute contacts from table assignments and current trajectory markup positions."""
         assignments = self._collect_assignments()
         if not assignments["assignments"]:
-            raise ValueError("Select at least one electrode model in the assignment table.")
+            if allow_last_assignments and self.lastAssignments.get("assignments"):
+                assignments = self.lastAssignments
+                self.log(f"[contacts:{log_context}] using last non-empty electrode assignments")
+            else:
+                raise ValueError("Select at least one electrode model in the assignment table.")
+        else:
+            self.lastAssignments = assignments
 
         traj_map = self._build_trajectory_map_with_scene_overrides()
         ordered_names = []
@@ -520,6 +642,228 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         )
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
+
+    def _assignment_map(self):
+        """Return mapping `trajectory_name -> assignment_row` for selected models."""
+        amap = {}
+        for row in self._collect_assignments().get("assignments", []):
+            amap[row["trajectory"]] = row
+        return amap
+
+    def _autofit_preview_node_name(self, trajectory_name):
+        """Return preview line node name for one fitted trajectory."""
+        return f"AutoFit_{trajectory_name}"
+
+    def _set_preview_line(self, trajectory_name, start_lps, end_lps):
+        """Create/update a preview line showing the fitted trajectory."""
+        node_name = self._autofit_preview_node_name(trajectory_name)
+        node = self._find_line_markup_node(node_name)
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", node_name)
+            node.CreateDefaultDisplayNodes()
+        start_ras = lps_to_ras_point(start_lps)
+        end_ras = lps_to_ras_point(end_lps)
+        node.RemoveAllControlPoints()
+        node.AddControlPoint(vtk.vtkVector3d(*start_ras))
+        node.AddControlPoint(vtk.vtkVector3d(*end_ras))
+        display = node.GetDisplayNode()
+        if display:
+            display.SetSelectedColor(0.2, 0.8, 1.0)
+            display.SetColor(0.2, 0.8, 1.0)
+            display.SetLineThickness(0.5)
+
+    def _remove_autofit_preview_lines(self, trajectory_names=None):
+        """Remove AutoFit preview line nodes."""
+        nodes = list(slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"))
+        if trajectory_names is None:
+            for node in nodes:
+                node_name = (node.GetName() or "").lower()
+                if node_name.startswith("autofit_"):
+                    slicer.mrmlScene.RemoveNode(node)
+            return
+
+        expected = set()
+        for name in trajectory_names:
+            expected.add(self._autofit_preview_node_name(name).lower())
+            expected.add(f"autofit_{name}".lower())
+
+        for node in nodes:
+            node_name = (node.GetName() or "").lower()
+            if node_name in expected:
+                slicer.mrmlScene.RemoveNode(node)
+
+    def _fit_trajectories(self, names):
+        """Run auto-fit for selected trajectory names and store successful results."""
+        if self._autofit_candidate_count() == 0:
+            raise ValueError("No CT candidates available. Run 'Detect Candidates' first.")
+        try:
+            import importlib
+            import rosa_core.contact_fit as contact_fit
+
+            contact_fit = importlib.reload(contact_fit)
+            fit_electrode_axis_and_tip = contact_fit.fit_electrode_axis_and_tip
+        except Exception as exc:
+            raise ValueError(f"Auto-fit dependency unavailable: {exc}")
+
+        traj_map = self._build_trajectory_map_with_scene_overrides()
+        assign_map = self._assignment_map()
+        roi_radius = self._widget_value(self.autoRoiRadiusSpin)
+        max_angle = self._widget_value(self.autoMaxAngleSpin)
+        max_shift = self._widget_value(self.autoMaxDepthShiftSpin)
+
+        success_count = 0
+        for name in names:
+            traj = traj_map.get(name)
+            if traj is None:
+                self.log(f"[autofit] {name}: skipped (trajectory not found)")
+                continue
+            assignment = assign_map.get(name)
+            if assignment is None:
+                self.log(f"[autofit] {name}: skipped (no electrode model assigned)")
+                continue
+            model = self.modelsById.get(assignment["model_id"])
+            if not model:
+                self.log(f"[autofit] {name}: skipped (unknown model {assignment['model_id']})")
+                continue
+
+            fit = fit_electrode_axis_and_tip(
+                candidate_points_lps=self.autoFitCandidatesLPS,
+                planned_entry_lps=traj["start"],
+                planned_target_lps=traj["end"],
+                contact_offsets_mm=model["contact_center_offsets_from_tip_mm"],
+                tip_at=assignment.get("tip_at", "target"),
+                roi_radius_mm=roi_radius,
+                max_angle_deg=max_angle,
+                max_depth_shift_mm=max_shift,
+            )
+            if fit.get("success"):
+                self.autoFitResults[name] = fit
+                success_count += 1
+                self._set_preview_line(name, fit["entry_lps"], fit["target_lps"])
+                self.log(
+                    "[autofit] {name}: angle={a:.2f} deg depth={s:.2f} mm lateral={l:.2f} mm "
+                    "residual={r:.2f} mm points={n} slabs={sl}/{si}".format(
+                        name=name,
+                        a=float(fit.get("angle_deg", 0.0)),
+                        s=float(fit.get("tip_shift_mm", 0.0)),
+                        l=float(fit.get("lateral_shift_mm", 0.0)),
+                        r=float(fit.get("residual_mm", 0.0)),
+                        n=int(fit.get("points_in_roi", 0)),
+                        sl=int(fit.get("slab_centroids", 0)),
+                        si=int(fit.get("slab_inliers", 0)),
+                    )
+                )
+            else:
+                self.log(f"[autofit] {name}: failed ({fit.get('reason', 'unknown')})")
+
+        self.applyFitButton.setEnabled(bool(self.autoFitResults))
+        self.log(f"[autofit] fitted {success_count}/{len(names)} trajectories")
+
+    def onDetectCandidatesClicked(self):
+        """Extract postop CT high-intensity candidate points for auto-fit."""
+        volume_node = self.postopCTSelector.currentNode()
+        if volume_node is None:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Select a postop CT volume.")
+            return
+        threshold = self._widget_value(self.autoThresholdSpin)
+        try:
+            points_lps = self.logic.extract_threshold_candidates_lps(volume_node, threshold=threshold)
+        except Exception as exc:
+            self.log(f"[autofit] detect error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        self._remove_autofit_preview_lines()
+        self.autoFitCandidatesLPS = points_lps
+        self.autoFitResults = {}
+        self.autoFitCandidateVolumeNodeID = volume_node.GetID()
+        count = int(points_lps.shape[0]) if hasattr(points_lps, "shape") else len(points_lps)
+        self._set_autofit_buttons_enabled(count > 0)
+        self.log(f"[autofit] detected {count} candidate points at threshold {threshold:.1f}")
+
+        try:
+            self.logic.show_volume_in_all_slice_views(volume_node)
+            self.logic.apply_ct_window_from_threshold(volume_node, threshold=threshold)
+        except Exception as exc:
+            self.log(f"[autofit] display warning: {exc}")
+
+    def onResetCTWindowClicked(self):
+        """Reset selected postop CT window/level to Slicer auto preset."""
+        volume_node = self.postopCTSelector.currentNode()
+        if volume_node is None:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Select a postop CT volume.")
+            return
+        try:
+            self.logic.reset_ct_window(volume_node)
+            self.log("[autofit] CT window reset to auto")
+        except Exception as exc:
+            self.log(f"[autofit] CT window reset warning: {exc}")
+
+    def onFitSelectedClicked(self):
+        """Fit only the currently selected trajectory using detected candidates."""
+        name = self._widget_text(self.autoFitTrajectorySelector).strip()
+        if not name:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Select a trajectory to fit.")
+            return
+        try:
+            self._fit_trajectories([name])
+        except Exception as exc:
+            self.log(f"[autofit] error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+
+    def onFitAllClicked(self):
+        """Fit all trajectories that have an assigned electrode model."""
+        names = [row.get("trajectory") for row in self._collect_assignments().get("assignments", [])]
+        names = [n for n in names if n]
+        if not names:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Assign at least one electrode model before fitting.",
+            )
+            return
+        try:
+            self._fit_trajectories(names)
+        except Exception as exc:
+            self.log(f"[autofit] error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+
+    def onApplyFitClicked(self):
+        """Apply successful auto-fit results to trajectory line markups and refresh contacts."""
+        if not self.autoFitResults:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "No successful fit results to apply.",
+            )
+            return
+
+        applied = 0
+        for name, fit in self.autoFitResults.items():
+            if not fit.get("success"):
+                continue
+            node = self._find_line_markup_node(name)
+            if node is None or node.GetNumberOfControlPoints() < 2:
+                continue
+            start_ras = lps_to_ras_point(fit["entry_lps"])
+            end_ras = lps_to_ras_point(fit["target_lps"])
+            node.SetNthControlPointPositionWorld(0, start_ras[0], start_ras[1], start_ras[2])
+            node.SetNthControlPointPositionWorld(1, end_ras[0], end_ras[1], end_ras[2])
+            applied += 1
+
+        self.log(f"[autofit] applied fitted trajectories: {applied}")
+        self._remove_autofit_preview_lines()
+        self.autoFitResults = {}
+        self.applyFitButton.setEnabled(False)
+        try:
+            self._run_contact_generation(log_context="autofit", allow_last_assignments=True)
+        except Exception as exc:
+            self.log(f"[autofit] contact update error: {exc}")
+            qt.QMessageBox.critical(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                f"Applied fit to trajectories, but contact update failed:\n{exc}",
+            )
 
     def onApplyModelAllClicked(self):
         """Apply selected default electrode model to all rows."""
@@ -667,6 +1011,10 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
         self.log(f"[slice] aligned {slice_view} view to {traj_name} ({mode})")
 
+    def onShowPlannedToggled(self, checked):
+        """Toggle visibility of stored planned trajectory lines."""
+        self.logic.set_planned_trajectory_visibility(bool(checked))
+
 
 class RosaHelperLogic(ScriptedLoadableModuleLogic):
     """Core scene-loading logic used by UI and headless `run()` entrypoint."""
@@ -678,6 +1026,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         invert=False,
         harden=True,
         load_trajectories=True,
+        show_planned=False,
         logger=None,
     ):
         """Load a ROSA case directory into the current Slicer scene.
@@ -694,6 +1043,8 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             Harden applied transforms into volume geometry.
         load_trajectories: bool
             Create line markups from ROS trajectories.
+        show_planned: bool
+            Whether planned trajectory backup lines are visible after load.
         logger: callable | None
             Optional callback used for status messages.
         """
@@ -767,7 +1118,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
                 log(f"[xform] {vol_name} reference (none)")
 
         if load_trajectories and trajectories:
-            self._add_trajectories(trajectories, logger=log)
+            self._add_trajectories(trajectories, logger=log, show_planned=show_planned)
 
         return {
             "loaded_volumes": loaded_count,
@@ -815,20 +1166,122 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         volume_node.SetAndObserveTransformNodeID(tnode.GetID())
         return tnode
 
-    def _add_trajectories(self, trajectories, logger=None):
-        """Create one Markups line node per trajectory."""
+    def _vtk_matrix_to_numpy(self, vtk_matrix4x4):
+        """Convert vtkMatrix4x4 to a NumPy 4x4 array."""
+        out = np.eye(4, dtype=float)
+        for r in range(4):
+            for c in range(4):
+                out[r, c] = float(vtk_matrix4x4.GetElement(r, c))
+        return out
+
+    def extract_threshold_candidates_lps(self, volume_node, threshold, max_points=300000):
+        """Extract thresholded CT candidate points in LPS coordinates."""
+        if np is None:
+            raise RuntimeError("NumPy is required for auto-fit candidate extraction.")
+        arr = slicer.util.arrayFromVolume(volume_node)  # K, J, I
+        idx = np.argwhere(arr >= float(threshold))
+        if idx.size == 0:
+            return np.empty((0, 3), dtype=float)
+
+        if idx.shape[0] > int(max_points):
+            rng = np.random.default_rng(0)
+            keep = rng.choice(idx.shape[0], size=int(max_points), replace=False)
+            idx = idx[keep]
+
+        # Convert argwhere KJI indices to IJK homogeneous coordinates.
+        n = idx.shape[0]
+        ijk_h = np.ones((n, 4), dtype=float)
+        ijk_h[:, 0] = idx[:, 2].astype(float)  # I
+        ijk_h[:, 1] = idx[:, 1].astype(float)  # J
+        ijk_h[:, 2] = idx[:, 0].astype(float)  # K
+
+        ijk_to_ras_vtk = vtk.vtkMatrix4x4()
+        volume_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
+        ijk_to_ras = self._vtk_matrix_to_numpy(ijk_to_ras_vtk)
+        ras_h = ijk_h @ ijk_to_ras.T
+        ras = ras_h[:, :3]
+        lps = ras.copy()
+        lps[:, 0] *= -1.0
+        lps[:, 1] *= -1.0
+        return lps
+
+    def show_volume_in_all_slice_views(self, volume_node):
+        """Set provided volume as background in Red/Yellow/Green slice views."""
+        if volume_node is None:
+            return
+        volume_id = volume_node.GetID()
+        for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            composite.SetBackgroundVolumeID(volume_id)
+
+    def apply_ct_window_from_threshold(self, volume_node, threshold):
+        """Apply CT window/level preset centered around the current detection threshold."""
+        if volume_node is None:
+            return
+        display = volume_node.GetDisplayNode()
+        if display is None:
+            return
+        lower = float(threshold) - 250.0
+        upper = float(threshold) + 2200.0
+        display.AutoWindowLevelOff()
+        display.SetWindow(max(upper - lower, 1.0))
+        display.SetLevel((upper + lower) * 0.5)
+
+    def reset_ct_window(self, volume_node):
+        """Reset CT window/level to Slicer auto mode for selected volume."""
+        if volume_node is None:
+            return
+        display = volume_node.GetDisplayNode()
+        if display is None:
+            return
+        display.AutoWindowLevelOn()
+
+    def _add_trajectories(self, trajectories, logger=None, show_planned=False):
+        """Create editable trajectory lines and hidden planned backups."""
         for traj in trajectories:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode")
-            node.SetName(traj["name"])
             start_ras = lps_to_ras_point(traj["start"])
             end_ras = lps_to_ras_point(traj["end"])
+            # Editable working trajectory.
+            node = self._find_node_by_name(traj["name"], "vtkMRMLMarkupsLineNode")
+            if node is None:
+                node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", traj["name"])
+            node.RemoveAllControlPoints()
             node.AddControlPoint(vtk.vtkVector3d(*start_ras))
             node.AddControlPoint(vtk.vtkVector3d(*end_ras))
             node.SetNthControlPointLabel(0, f"{traj['name']}_start")
             node.SetNthControlPointLabel(1, f"{traj['name']}_end")
 
+            # Immutable planned backup trajectory.
+            plan_name = f"Plan_{traj['name']}"
+            plan_node = self._find_node_by_name(plan_name, "vtkMRMLMarkupsLineNode")
+            if plan_node is None:
+                plan_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", plan_name)
+            plan_node.RemoveAllControlPoints()
+            plan_node.AddControlPoint(vtk.vtkVector3d(*start_ras))
+            plan_node.AddControlPoint(vtk.vtkVector3d(*end_ras))
+            plan_node.SetNthControlPointLabel(0, f"{traj['name']}_plan_start")
+            plan_node.SetNthControlPointLabel(1, f"{traj['name']}_plan_end")
+            plan_node.SetLocked(True)
+            plan_display = plan_node.GetDisplayNode()
+            if plan_display:
+                plan_display.SetVisibility(bool(show_planned))
+                plan_display.SetColor(0.65, 0.65, 0.65)
+                plan_display.SetSelectedColor(0.65, 0.65, 0.65)
+                plan_display.SetLineThickness(0.35)
+                if hasattr(plan_display, "SetPointLabelsVisibility"):
+                    plan_display.SetPointLabelsVisibility(False)
+
         if logger:
             logger(f"[markups] created {len(trajectories)} line trajectories")
+
+    def set_planned_trajectory_visibility(self, visible):
+        """Show or hide all planned backup trajectory lines."""
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            name = node.GetName() or ""
+            if not name.startswith("Plan_"):
+                continue
+            display = node.GetDisplayNode()
+            if display:
+                display.SetVisibility(bool(visible))
 
     def create_contacts_fiducials_node(self, contacts, node_name="ROSA_Contacts"):
         """Create a fiducial markups node from contact list in ROSA/LPS space."""

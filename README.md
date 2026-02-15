@@ -15,6 +15,7 @@ It supports:
 - generating per-electrode 3D models (shaft + contact segments)
 - aligning Red/Yellow/Green slice view to a selected trajectory (`long`/`down`) and centering on it
 - recalculating contacts/models from edited trajectory entry/target points without creating duplicate nodes
+- V1 postop CT auto-fit workflow (detect candidates, fit selected/all, apply fit)
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
 
 ## ROS File Structure (What We Read)
@@ -72,7 +73,12 @@ markups.
    - after moving trajectory line control points, click `Update From Edited Trajectories`
 6. Optional: open `Trajectory Slice View` and align a slice to one trajectory.
    - the selected slice is reoriented and centered on the trajectory midpoint
-7. Click `Export Aligned NIfTI + Coordinates`.
+7. Optional: open `Auto Align to Postop CT (V1)`:
+   - select postop CT
+   - `Detect Candidates`
+   - `Fit Selected` or `Fit All`
+   - `Apply Fit to Trajectories`
+8. Click `Export Aligned NIfTI + Coordinates`.
 
 Output default folder:
 - `<case>/RosaHelper_Export/`
