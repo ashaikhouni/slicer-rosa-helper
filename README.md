@@ -78,6 +78,8 @@ markups.
    - `Detect Candidates`
    - `Fit Selected` or `Fit All`
    - `Apply Fit to Trajectories`
+   - contacts/models are regenerated from the fitted trajectories
+   - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
 8. Click `Export Aligned NIfTI + Coordinates`.
 
 Output default folder:
@@ -90,6 +92,35 @@ Output files:
 Coordinate columns in export:
 - `x_ras,y_ras,z_ras`: Slicer world RAS (matches exported NIfTI scene)
 - `x_lps,y_lps,z_lps`: corresponding LPS values
+
+## Contact Localization Modes
+
+### Manual Contact Localization
+
+Use this when you want full manual control.
+
+1. Load case and trajectories.
+2. In `V1 Contact Labels`, set electrode model and tip options per trajectory.
+3. Click `Generate Contact Fiducials`.
+4. If you edit trajectory entry/target points or change electrode model/tip settings, click `Update From Edited Trajectories`.
+
+`Generate` is typically used the first time.
+`Update` is used after edits and recomputes contacts/models in-place.
+
+### Auto Contact Localization (Postop CT V1)
+
+Use this to initialize trajectory placement from postop CT hyperdense contacts.
+
+1. Select postop CT in `Auto Align to Postop CT (V1)`.
+2. Run `Detect Candidates`.
+3. Run `Fit Selected` or `Fit All`.
+4. Run `Apply Fit to Trajectories`.
+
+`Apply Fit to Trajectories` updates trajectory lines and regenerates contacts/models.
+After auto-fit, you can continue manual refinement:
+- change electrode model assignment
+- edit entry/target points
+- click `Update From Edited Trajectories` to recompute final contacts/models
 
 ## Install (Manual Module)
 
@@ -145,31 +176,31 @@ mismatch:
 List ROS volumes/trajectories:
 
 ```bash
-python tools/rosa_export.py list --ros /path/to/case/s54.ros
+python tools/rosa_export.py list --ros /path/to/case/case.ros
 ```
 
 Export trajectories to Markups JSON:
 
 ```bash
 python tools/rosa_export.py markups \
-  --ros /path/to/case/s54.ros \
+  --ros /path/to/case/case.ros \
   --root-volume NCAxT1 \
-  --out /tmp/s54_trajectories.mrk.json
+  --out /tmp/case_trajectories.mrk.json
 ```
 
 Export trajectories to FCSV:
 
 ```bash
 python tools/rosa_export.py fcsv \
-  --ros /path/to/case/s54.ros \
-  --out /tmp/s54_trajectories.fcsv
+  --ros /path/to/case/case.ros \
+  --out /tmp/case_trajectories.fcsv
 ```
 
 Export one display transform to ITK `.tfm`:
 
 ```bash
 python tools/rosa_export.py tfm \
-  --ros /path/to/case/s54.ros \
+  --ros /path/to/case/case.ros \
   --volume-name post \
   --root-volume NCAxT1 \
   --ras \
@@ -180,19 +211,19 @@ Create contact-assignment template (trajectory -> model):
 
 ```bash
 python tools/rosa_export.py contacts-template \
-  --ros /path/to/case/s54.ros \
-  --out /tmp/s54_assignments.json
+  --ros /path/to/case/case.ros \
+  --out /tmp/case_assignments.json
 ```
 
 Generate contacts from assignments:
 
 ```bash
 python tools/rosa_export.py contacts-generate \
-  --ros /path/to/case/s54.ros \
-  --assignments /tmp/s54_assignments.json \
-  --out-rosa-json /tmp/s54_contacts_rosa.json \
-  --out-fcsv /tmp/s54_contacts_ras.fcsv \
-  --out-markups /tmp/s54_contacts_ras.mrk.json
+  --ros /path/to/case/case.ros \
+  --assignments /tmp/case_assignments.json \
+  --out-rosa-json /tmp/case_contacts_rosa.json \
+  --out-fcsv /tmp/case_contacts_ras.fcsv \
+  --out-markups /tmp/case_contacts_ras.mrk.json
 ```
 
 ## Case Folder Convention
