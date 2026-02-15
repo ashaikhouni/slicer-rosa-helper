@@ -11,17 +11,10 @@ It focuses on scene operations:
 import os
 import sys
 import math
-import shutil
-import subprocess
-import tempfile
 try:
     import numpy as np
 except ImportError:
     np = None
-try:
-    import nibabel as nib
-except ImportError:
-    nib = None
 
 from __main__ import ctk, qt, slicer, vtk
 from slicer.ScriptedLoadableModule import (
@@ -38,6 +31,8 @@ if LIB_DIR not in sys.path:
 from rosa_core import (
     build_effective_matrices,
     choose_reference_volume,
+    compute_qc_metrics,
+    electrode_length_mm,
     find_ros_file,
     generate_contacts,
     invert_4x4,
@@ -48,7 +43,11 @@ from rosa_core import (
     parse_ros_file,
     resolve_analyze_volume,
     resolve_reference_index,
+    suggest_model_id_for_trajectory,
+    trajectory_length_mm,
 )
+from rosa_slicer.freesurfer_service import FreeSurferService
+from rosa_slicer.trajectory_scene import TrajectorySceneService
 
 
 class RosaHelper(ScriptedLoadableModule):
@@ -571,67 +570,9 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
         self.qcTable.setItem(row, column, item)
 
-    def _sorted_contacts_by_trajectory(self, contacts):
-        """Return map `trajectory -> contacts sorted by index`."""
-        by_traj = {}
-        for contact in contacts:
-            name = str(contact.get("trajectory", ""))
-            if not name:
-                continue
-            by_traj.setdefault(name, []).append(contact)
-        for name in list(by_traj.keys()):
-            by_traj[name] = sorted(by_traj[name], key=lambda c: int(c.get("index", 0)))
-        return by_traj
-
     def _collect_planned_trajectory_map(self):
         """Read planned line markups (`Plan_*`) into trajectory dictionaries."""
-        out = {}
-        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
-            node_name = node.GetName() or ""
-            if not node_name.startswith("Plan_"):
-                continue
-            traj_name = node_name[len("Plan_") :]
-            traj = self._trajectory_from_line_node(traj_name, node)
-            if traj is not None:
-                out[traj_name] = traj
-        return out
-
-    def _vsub3(self, a, b):
-        """Return vector subtraction `a - b` for 3D vectors."""
-        return [float(a[0]) - float(b[0]), float(a[1]) - float(b[1]), float(a[2]) - float(b[2])]
-
-    def _vdot3(self, a, b):
-        """Return dot product between 3D vectors."""
-        return float(a[0]) * float(b[0]) + float(a[1]) * float(b[1]) + float(a[2]) * float(b[2])
-
-    def _vmul3(self, v, s):
-        """Return scalar multiplication `v * s`."""
-        return [float(v[0]) * float(s), float(v[1]) * float(s), float(v[2]) * float(s)]
-
-    def _vnorm3(self, v):
-        """Return Euclidean norm of a 3D vector."""
-        return math.sqrt(self._vdot3(v, v))
-
-    def _vunit3(self, v):
-        """Return normalized vector and validate non-zero length."""
-        n = self._vnorm3(v)
-        if n <= 1e-9:
-            raise ValueError("Zero-length vector")
-        return [float(v[0]) / n, float(v[1]) / n, float(v[2]) / n]
-
-    def _radial_error_mm(self, delta_vec, axis_unit):
-        """Return radial (perpendicular-to-axis) component length in millimeters."""
-        axial_mm = self._vdot3(delta_vec, axis_unit)
-        axial_vec = self._vmul3(axis_unit, axial_mm)
-        radial_vec = self._vsub3(delta_vec, axial_vec)
-        return self._vnorm3(radial_vec)
-
-    def _trajectory_axis_angle_deg(self, planned, final):
-        """Return angle in degrees between planned and final trajectory axes."""
-        planned_axis = self._vunit3(self._vsub3(planned["end"], planned["start"]))
-        final_axis = self._vunit3(self._vsub3(final["end"], final["start"]))
-        dot = max(-1.0, min(1.0, self._vdot3(planned_axis, final_axis)))
-        return math.degrees(math.acos(dot))
+        return self.logic.trajectory_scene.collect_planned_trajectory_map()
 
     def _compute_qc_rows(self):
         """Compute per-trajectory QC metrics using planned vs current contacts/lines."""
@@ -652,67 +593,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             planned_contacts = generate_contacts(list(planned_map.values()), self.modelsById, assignments)
         except Exception as exc:
             return [], f"QC disabled: failed to generate planned contacts ({exc})."
-
-        planned_by_traj = self._sorted_contacts_by_trajectory(planned_contacts)
-        final_by_traj = self._sorted_contacts_by_trajectory(self.lastGeneratedContacts)
-
-        rows = []
-        for traj_name in sorted(final_by_traj.keys()):
-            if traj_name not in planned_map:
-                continue
-            planned = planned_map[traj_name]
-            final = final_map.get(traj_name)
-            if final is None:
-                continue
-
-            try:
-                planned_axis = self._vunit3(self._vsub3(planned["end"], planned["start"]))
-            except Exception:
-                continue
-
-            entry_delta = self._vsub3(final["start"], planned["start"])
-            target_delta = self._vsub3(final["end"], planned["end"])
-            entry_rad = self._radial_error_mm(entry_delta, planned_axis)
-            target_rad = self._radial_error_mm(target_delta, planned_axis)
-            angle_deg = self._trajectory_axis_angle_deg(planned, final)
-
-            planned_index_map = {
-                int(c.get("index", 0)): c
-                for c in planned_by_traj.get(traj_name, [])
-                if int(c.get("index", 0)) > 0
-            }
-            final_index_map = {
-                int(c.get("index", 0)): c
-                for c in final_by_traj.get(traj_name, [])
-                if int(c.get("index", 0)) > 0
-            }
-            matched_idx = sorted(set(planned_index_map.keys()) & set(final_index_map.keys()))
-            if not matched_idx:
-                continue
-
-            radial_errors = []
-            for idx in matched_idx:
-                p_plan = planned_index_map[idx]["position_lps"]
-                p_final = final_index_map[idx]["position_lps"]
-                delta = self._vsub3(p_final, p_plan)
-                radial_errors.append(self._radial_error_mm(delta, planned_axis))
-
-            mean_rad = sum(radial_errors) / float(len(radial_errors))
-            max_rad = max(radial_errors)
-            rms_rad = math.sqrt(sum((v * v for v in radial_errors)) / float(len(radial_errors)))
-
-            rows.append(
-                {
-                    "trajectory": traj_name,
-                    "entry_radial_mm": entry_rad,
-                    "target_radial_mm": target_rad,
-                    "mean_contact_radial_mm": mean_rad,
-                    "max_contact_radial_mm": max_rad,
-                    "rms_contact_radial_mm": rms_rad,
-                    "angle_deg": angle_deg,
-                    "matched_contacts": len(matched_idx),
-                }
-            )
+        rows = compute_qc_metrics(
+            planned_trajectories_by_name=planned_map,
+            final_trajectories_by_name=final_map,
+            planned_contacts=planned_contacts,
+            final_contacts=self.lastGeneratedContacts,
+        )
 
         if not rows:
             return [], "QC disabled: no matching planned/final trajectories with contacts."
@@ -742,7 +628,7 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
     def _electrode_length_mm(self, model_id):
         """Return electrode exploration length in millimeters for model ID."""
         model = self.modelsById.get(model_id, {})
-        return float(model.get("total_exploration_length_mm", 0.0))
+        return electrode_length_mm(model)
 
     def _update_electrode_length_cell(self, row):
         """Refresh per-row electrode length after model selection change."""
@@ -766,50 +652,16 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
     def _trajectory_length_mm(self, trajectory):
         """Return Euclidean distance between entry/start and target/end in millimeters."""
-        start = trajectory["start"]
-        end = trajectory["end"]
-        dx = float(end[0]) - float(start[0])
-        dy = float(end[1]) - float(start[1])
-        dz = float(end[2]) - float(start[2])
-        return math.sqrt(dx * dx + dy * dy + dz * dz)
+        return trajectory_length_mm(trajectory)
 
     def _suggest_model_id_for_trajectory(self, trajectory):
         """Select model with closest length, constrained to +/- 5 mm from trajectory."""
-        traj_len = self._trajectory_length_mm(trajectory)
-        best_id = ""
-        best_delta = None
-        best_len = 0.0
-        best_contacts = -1
-
-        for model_id in self.modelIds:
-            model = self.modelsById.get(model_id, {})
-            model_len = float(model.get("total_exploration_length_mm", 0.0))
-            delta = abs(model_len - traj_len)
-            if delta > 5.0 + 1e-6:
-                continue
-            contact_count = int(model.get("contact_count", 0))
-            if (
-                best_delta is None
-                or delta < best_delta - 1e-6
-                or (abs(delta - best_delta) <= 1e-6 and contact_count > best_contacts)
-                or (
-                    abs(delta - best_delta) <= 1e-6
-                    and contact_count == best_contacts
-                    and model_len < best_len - 1e-6
-                )
-                or (
-                    abs(delta - best_delta) <= 1e-6
-                    and contact_count == best_contacts
-                    and abs(model_len - best_len) <= 1e-6
-                    and model_id < best_id
-                )
-            ):
-                best_id = model_id
-                best_delta = delta
-                best_len = model_len
-                best_contacts = contact_count
-
-        return best_id
+        return suggest_model_id_for_trajectory(
+            trajectory=trajectory,
+            models_by_id=self.modelsById,
+            model_ids=self.modelIds,
+            tolerance_mm=5.0,
+        )
 
     def _populate_contact_table(self, trajectories):
         """Fill assignment table with one row per trajectory."""
@@ -867,34 +719,17 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 
     def _find_line_markup_node(self, name):
         """Return trajectory line markup node by exact name."""
-        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
-            if node.GetName() == name:
-                return node
-        return None
+        return self.logic.trajectory_scene.find_line_markup_node(name)
 
     def _trajectory_from_line_node(self, name, node):
         """Extract trajectory start/end from a line node as ROSA/LPS points."""
-        if node is None or node.GetNumberOfControlPoints() < 2:
-            return None
-        p0 = [0.0, 0.0, 0.0]
-        p1 = [0.0, 0.0, 0.0]
-        node.GetNthControlPointPositionWorld(0, p0)
-        node.GetNthControlPointPositionWorld(1, p1)
-        return {
-            "name": name,
-            "start": lps_to_ras_point(p0),
-            "end": lps_to_ras_point(p1),
-        }
+        return self.logic.trajectory_scene.trajectory_from_line_node(name, node)
 
     def _build_trajectory_map_with_scene_overrides(self):
         """Return trajectory map using current scene markups when available."""
-        base = {traj["name"]: traj for traj in self.loadedTrajectories}
-        for name in list(base.keys()):
-            node = self._find_line_markup_node(name)
-            scene_traj = self._trajectory_from_line_node(name, node)
-            if scene_traj is not None:
-                base[name] = scene_traj
-        return base
+        return self.logic.trajectory_scene.build_trajectory_map_with_scene_overrides(
+            self.loadedTrajectories
+        )
 
     def _refresh_trajectory_lengths_from_scene(self):
         """Refresh trajectory length column from currently edited line markups."""
@@ -968,47 +803,21 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             amap[row["trajectory"]] = row
         return amap
 
-    def _autofit_preview_node_name(self, trajectory_name):
-        """Return preview line node name for one fitted trajectory."""
-        return f"AutoFit_{trajectory_name}"
-
     def _set_preview_line(self, trajectory_name, start_lps, end_lps):
         """Create/update a preview line showing the fitted trajectory."""
-        node_name = self._autofit_preview_node_name(trajectory_name)
-        node = self._find_line_markup_node(node_name)
-        if node is None:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", node_name)
-            node.CreateDefaultDisplayNodes()
-        start_ras = lps_to_ras_point(start_lps)
-        end_ras = lps_to_ras_point(end_lps)
-        node.RemoveAllControlPoints()
-        node.AddControlPoint(vtk.vtkVector3d(*start_ras))
-        node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-        display = node.GetDisplayNode()
-        if display:
-            display.SetSelectedColor(0.2, 0.8, 1.0)
-            display.SetColor(0.2, 0.8, 1.0)
-            display.SetLineThickness(0.5)
+        self.logic.trajectory_scene.set_preview_line(
+            trajectory_name=trajectory_name,
+            start_lps=start_lps,
+            end_lps=end_lps,
+            node_prefix="AutoFit_",
+        )
 
     def _remove_autofit_preview_lines(self, trajectory_names=None):
         """Remove AutoFit preview line nodes."""
-        nodes = list(slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"))
-        if trajectory_names is None:
-            for node in nodes:
-                node_name = (node.GetName() or "").lower()
-                if node_name.startswith("autofit_"):
-                    slicer.mrmlScene.RemoveNode(node)
-            return
-
-        expected = set()
-        for name in trajectory_names:
-            expected.add(self._autofit_preview_node_name(name).lower())
-            expected.add(f"autofit_{name}".lower())
-
-        for node in nodes:
-            node_name = (node.GetName() or "").lower()
-            if node_name in expected:
-                slicer.mrmlScene.RemoveNode(node)
+        self.logic.trajectory_scene.remove_preview_lines(
+            trajectory_names=trajectory_names,
+            node_prefix="AutoFit_",
+        )
 
     def _fit_trajectories(self, names):
         """Run auto-fit for selected trajectory names and store successful results."""
@@ -1492,6 +1301,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
 class RosaHelperLogic(ScriptedLoadableModuleLogic):
     """Core scene-loading logic used by UI and headless `run()` entrypoint."""
 
+    def __init__(self):
+        """Initialize service delegates used by Slicer-specific workflows."""
+        super().__init__()
+        self.fs_service = FreeSurferService(module_dir=MODULE_DIR)
+        self.trajectory_scene = TrajectorySceneService()
+
     def load_case(
         self,
         case_dir,
@@ -1709,13 +1524,6 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             return
         display.AutoWindowLevelOn()
 
-    def _cli_success(self, cli_node):
-        """Return `True` when a CLI node finished without errors."""
-        if cli_node is None:
-            return False
-        status = (cli_node.GetStatusString() or "").lower()
-        return ("completed" in status) and ("error" not in status)
-
     def run_brainsfit_rigid_registration(
         self,
         fixed_volume_node,
@@ -1724,539 +1532,14 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         initialize_mode="useGeometryAlign",
         logger=None,
     ):
-        """Run BRAINSFit rigid registration for `moving -> fixed` and write linear transform."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        if fixed_volume_node is None or moving_volume_node is None:
-            raise ValueError("Fixed and moving volumes are required.")
-        if output_transform_node is None:
-            raise ValueError("Output transform node is required.")
-        if not hasattr(slicer.modules, "brainsfit"):
-            raise RuntimeError("BRAINSFit module is not available in this Slicer install.")
-
-        identity = vtk.vtkMatrix4x4()
-        output_transform_node.SetMatrixTransformToParent(identity)
-
-        base = {
-            "fixedVolume": fixed_volume_node.GetID(),
-            "movingVolume": moving_volume_node.GetID(),
-            "initializeTransformMode": initialize_mode or "useGeometryAlign",
-            "samplingPercentage": 0.02,
-            "minimumStepLength": 0.001,
-            "maximumStepLength": 0.2,
-        }
-        variants = [
-            dict(base, linearTransform=output_transform_node.GetID(), useRigid=True),
-            dict(base, outputTransform=output_transform_node.GetID(), useRigid=True),
-            dict(base, linearTransform=output_transform_node.GetID(), transformType="Rigid"),
-            dict(base, outputTransform=output_transform_node.GetID(), transformType="Rigid"),
-        ]
-
-        last_error = "Unknown BRAINSFit error"
-        for i, params in enumerate(variants, start=1):
-            cli_node = None
-            try:
-                cli_node = slicer.cli.runSync(slicer.modules.brainsfit, None, params)
-                if self._cli_success(cli_node):
-                    log(f"[fs] BRAINSFit variant {i}/{len(variants)} succeeded")
-                    return output_transform_node
-                status = cli_node.GetStatusString() if cli_node is not None else "no status"
-                err_text = ""
-                if cli_node is not None and hasattr(cli_node, "GetErrorText"):
-                    err_text = cli_node.GetErrorText() or ""
-                last_error = f"{status} {err_text}".strip()
-                log(f"[fs] BRAINSFit variant {i}/{len(variants)} failed: {last_error}")
-            except Exception as exc:
-                last_error = str(exc)
-                log(f"[fs] BRAINSFit variant {i}/{len(variants)} exception: {last_error}")
-            finally:
-                if cli_node is not None and cli_node.GetScene() is not None:
-                    slicer.mrmlScene.RemoveNode(cli_node)
-
-        raise RuntimeError(f"BRAINSFit rigid registration failed: {last_error}")
-
-    def _resolve_freesurfer_surf_dir(self, subject_dir):
-        """Resolve FreeSurfer surf directory from subject root or direct surf path."""
-        root = os.path.abspath(subject_dir)
-        if not os.path.isdir(root):
-            raise ValueError(f"FreeSurfer path not found: {subject_dir}")
-        if os.path.basename(root) == "surf":
-            return root
-        surf_dir = os.path.join(root, "surf")
-        if os.path.isdir(surf_dir):
-            return surf_dir
-        raise ValueError(f"No surf/ directory found under: {subject_dir}")
-
-    def _surface_filenames_for_set(self, surface_set):
-        """Return expected FreeSurfer surface file names for one preset."""
-        key = (surface_set or "pial").strip().lower()
-        mapping = {
-            "pial": ["lh.pial", "rh.pial"],
-            "white": ["lh.white", "rh.white"],
-            "pial+white": ["lh.pial", "rh.pial", "lh.white", "rh.white"],
-            "inflated": ["lh.inflated", "rh.inflated"],
-        }
-        if key not in mapping:
-            raise ValueError(f"Unknown surface set '{surface_set}'")
-        return mapping[key]
-
-    def _style_freesurfer_model(self, node, source_path):
-        """Apply simple default display styling to loaded FreeSurfer model nodes."""
-        if node is None:
-            return
-        node.CreateDefaultDisplayNodes()
-        display = node.GetDisplayNode()
-        if display is None:
-            return
-        base = os.path.basename(source_path).lower()
-        if base.startswith("lh."):
-            display.SetColor(0.90, 0.45, 0.45)
-        elif base.startswith("rh."):
-            display.SetColor(0.45, 0.60, 0.90)
-        else:
-            display.SetColor(0.80, 0.80, 0.80)
-        display.SetOpacity(0.35)
-        if hasattr(display, "SetVisibility2D"):
-            display.SetVisibility2D(False)
-        elif hasattr(display, "SetSliceIntersectionVisibility"):
-            display.SetSliceIntersectionVisibility(False)
-
-    def _load_model_node(self, path):
-        """Load one model path using multiple reader entrypoints."""
-        node = None
-        try:
-            result = slicer.util.loadModel(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                node = node if ok else None
-            else:
-                node = result
-        except Exception:
-            node = None
-        if node is not None:
-            return node
-
-        for file_type in ("ModelFile", "FreeSurferModelFile", "FreeSurfer model"):
-            try:
-                node = slicer.util.loadNodeFromFile(path, file_type)
-            except Exception:
-                node = None
-            if node is not None:
-                return node
-        return None
-
-    def _find_mris_convert(self):
-        """Resolve `mris_convert` executable path if available."""
-        tool = shutil.which("mris_convert")
-        if tool:
-            return tool
-        default_path = "/Applications/freesurfer/7.4.1/bin/mris_convert"
-        if os.path.isfile(default_path):
-            return default_path
-        return None
-
-    def _resolve_freesurfer_label_dir(self, subject_dir):
-        """Resolve FreeSurfer label directory from subject root, surf/, or label/ path."""
-        root = os.path.abspath(subject_dir)
-        if not os.path.isdir(root):
-            return None
-        base = os.path.basename(root)
-        if base == "label":
-            return root
-        if base == "surf":
-            label_dir = os.path.join(os.path.dirname(root), "label")
-            return label_dir if os.path.isdir(label_dir) else None
-        label_dir = os.path.join(root, "label")
-        if os.path.isdir(label_dir):
-            return label_dir
-        return None
-
-    def _annotation_path_for_surface(self, source_surface_path, annotation_name, label_dir):
-        """Return annotation file path for one surface/hemisphere when available."""
-        if not annotation_name or not label_dir or not os.path.isdir(label_dir):
-            return None
-        base = os.path.basename(source_surface_path)
-        hemi = base.split(".", 1)[0].strip().lower()
-        if hemi not in ("lh", "rh"):
-            return None
-        name = str(annotation_name).strip()
-        if not name:
-            return None
-        if os.path.isabs(name) and os.path.isfile(name):
-            return name
-        if name.endswith(".annot"):
-            if name.startswith("lh.") or name.startswith("rh."):
-                filename = f"{hemi}.{name.split('.', 1)[1]}"
-            else:
-                filename = name
-        else:
-            if "{hemi}" in name:
-                filename = f"{name.format(hemi=hemi)}.annot"
-            else:
-                filename = f"{hemi}.{name}.annot"
-        path = os.path.join(label_dir, filename)
-        if os.path.isfile(path):
-            return path
-        return None
-
-    def _default_freesurfer_color_node(self):
-        """Find a likely FreeSurfer color node already present in the scene."""
-        candidates = []
-        try:
-            candidates = list(slicer.util.getNodesByClass("vtkMRMLColorTableNode"))
-        except Exception:
-            candidates = []
-        preferred_names = [
-            "FreeSurferLabels",
-            "FreeSurferParcellation",
-            "FreeSurferColorLUT",
-        ]
-        for target in preferred_names:
-            for node in candidates:
-                if (node.GetName() or "") == target:
-                    return node
-        for node in candidates:
-            name = (node.GetName() or "").lower()
-            if "freesurfer" in name or "aparc" in name:
-                return node
-        return None
-
-    def _bundled_freesurfer_lut_path(self):
-        """Return path to bundled FreeSurfer LUT shipped with the module."""
-        path = os.path.join(MODULE_DIR, "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt")
-        if os.path.isfile(path):
-            return path
-        return None
-
-    def _preferred_annotation_color_node(self, color_lut_path=None, logger=None):
-        """Resolve preferred color node: user LUT -> FreeSurferLabels -> bundled LUT -> fallback."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        if color_lut_path:
-            try:
-                return self._load_color_table_node(color_lut_path, logger=logger)
-            except Exception as exc:
-                log(f"[fs] LUT warning: {exc}")
-
-        for node in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
-            if (node.GetName() or "") == "FreeSurferLabels":
-                return node
-
-        bundled = self._bundled_freesurfer_lut_path()
-        if bundled:
-            try:
-                node = self._load_color_table_node(bundled, logger=logger)
-                log(f"[fs] using bundled LUT: {bundled}")
-                return node
-            except Exception as exc:
-                log(f"[fs] bundled LUT warning: {exc}")
-
-        return self._default_freesurfer_color_node()
-
-    def _load_color_table_node(self, path, logger=None):
-        """Load a color table node from file and return it."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        if not path:
-            return None
-        lut_path = os.path.abspath(path)
-        if not os.path.isfile(lut_path):
-            raise ValueError(f"Color LUT file not found: {path}")
-        if lut_path.lower().endswith(".annot"):
-            raise ValueError(
-                f"Annotation file provided as LUT ({path}). Please select a color table text file (for example FreeSurferColorLUT.txt)."
-            )
-
-        for node in slicer.util.getNodesByClass("vtkMRMLColorTableNode"):
-            storage = node.GetStorageNode()
-            if storage is None:
-                continue
-            file_name = storage.GetFileName() or ""
-            if file_name and os.path.abspath(file_name) == lut_path:
-                return node
-
-        node = None
-        try:
-            if hasattr(slicer.util, "loadColorTable"):
-                node = slicer.util.loadColorTable(lut_path)
-        except Exception:
-            node = None
-        if node is None:
-            try:
-                node = slicer.util.loadNodeFromFile(lut_path, "ColorTableFile")
-            except Exception:
-                node = None
-        if node is None:
-            raise RuntimeError(f"Failed to load color table: {path}")
-        log(f"[fs] loaded LUT: {lut_path}")
-        return node
-
-    def _read_annot_nibabel(self, annot_path):
-        """Read FreeSurfer `.annot` labels with nibabel and return normalized arrays."""
-        if nib is None:
-            raise RuntimeError("Nibabel is not available in this Slicer Python environment.")
-        labels, ctab, names = nib.freesurfer.io.read_annot(annot_path, orig_ids=False)
-        labels = np.asarray(labels, dtype=np.int32).reshape(-1)
-        ctab = np.asarray(ctab) if ctab is not None else np.empty((0, 5), dtype=np.int32)
-        decoded = []
-        for name in names or []:
-            if isinstance(name, bytes):
-                decoded.append(name.decode("utf-8", errors="ignore"))
-            else:
-                decoded.append(str(name))
-        return labels, ctab, decoded
-
-    def _ensure_color_table_from_annot(self, node_name, ctab, names):
-        """Create/update a color table node from annotation colortable."""
-        color_node = self._find_node_by_name(node_name, "vtkMRMLColorTableNode")
-        if color_node is None:
-            color_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", node_name)
-        color_node.SetTypeToUser()
-
-        entry_count = max(len(names), int(ctab.shape[0]) if ctab is not None else 0)
-        color_node.SetNumberOfColors(entry_count + 1)
-        color_node.SetColor(0, "Unknown", 0.5, 0.5, 0.5, 0.0)
-
-        for idx in range(entry_count):
-            label_name = names[idx] if idx < len(names) else f"Label_{idx}"
-            if ctab is not None and idx < int(ctab.shape[0]) and int(ctab.shape[1]) >= 4:
-                r = float(ctab[idx, 0]) / 255.0
-                g = float(ctab[idx, 1]) / 255.0
-                b = float(ctab[idx, 2]) / 255.0
-                t = float(ctab[idx, 3])
-                a = max(0.0, min(1.0, 1.0 - t / 255.0))
-            else:
-                r = g = b = 0.7
-                a = 1.0
-            color_node.SetColor(idx + 1, label_name, r, g, b, a)
-
-        return color_node
-
-    def _apply_annotation_labels_with_nibabel(self, model_node, annot_path, color_node=None):
-        """Attach nibabel-loaded annotation labels as model point scalars and enable display."""
-        if model_node is None:
-            return False, None
-        poly = model_node.GetPolyData()
-        if poly is None:
-            return False, None
-        point_count = int(poly.GetNumberOfPoints())
-        labels, ctab, names = self._read_annot_nibabel(annot_path)
-        if int(labels.shape[0]) != point_count:
-            raise RuntimeError(
-                f"Annot vertex count mismatch: annot={int(labels.shape[0])}, surface={point_count}"
-            )
-
-        # Use index-based labels (+1 so unknown -1 maps to 0).
-        # This keeps scalar IDs aligned with both generated annot LUTs and FreeSurfer-style label tables.
-        scalar_values = labels + 1
-        array_name = f"FSAnnot_{os.path.basename(annot_path)}"
-        vtk_arr = vtk.vtkIntArray()
-        vtk_arr.SetName(array_name)
-        vtk_arr.SetNumberOfComponents(1)
-        vtk_arr.SetNumberOfTuples(point_count)
-        for i in range(point_count):
-            vtk_arr.SetValue(i, int(scalar_values[i]))
-
-        pdata = poly.GetPointData()
-        existing = pdata.GetArray(array_name)
-        if existing is not None:
-            pdata.RemoveArray(array_name)
-        pdata.AddArray(vtk_arr)
-        pdata.SetActiveScalars(array_name)
-        poly.Modified()
-        model_node.Modified()
-
-        if color_node is None:
-            hemi = (os.path.basename(annot_path).split(".", 1)[0] or "hemi").lower()
-            annot_base = os.path.basename(annot_path).replace(".annot", "")
-            if annot_base.startswith("lh.") or annot_base.startswith("rh."):
-                annot_base = annot_base.split(".", 1)[1]
-            color_node = self._ensure_color_table_from_annot(
-                f"FS_{hemi}_{annot_base}_LUT",
-                ctab=ctab,
-                names=names,
-            )
-
-        display = model_node.GetDisplayNode()
-        if display is None:
-            model_node.CreateDefaultDisplayNodes()
-            display = model_node.GetDisplayNode()
-        if display is None:
-            return False, color_node
-
-        if hasattr(display, "SetScalarVisibility"):
-            display.SetScalarVisibility(True)
-        if hasattr(display, "SetActiveScalarName"):
-            display.SetActiveScalarName(array_name)
-        if color_node is not None and hasattr(display, "SetAndObserveColorNodeID"):
-            display.SetAndObserveColorNodeID(color_node.GetID())
-        if hasattr(display, "SetOpacity"):
-            display.SetOpacity(1.0)
-        if hasattr(display, "SetScalarRangeFlag"):
-            try:
-                display.SetScalarRangeFlag(display.UseColorNodeScalarRange)
-            except Exception:
-                pass
-        return True, color_node
-
-    def _select_annotation_scalar_array_name(self, model_node):
-        """Pick a scalar array name likely containing annotation labels."""
-        if model_node is None:
-            return None
-        poly = model_node.GetPolyData()
-        if poly is None:
-            return None
-        pdata = poly.GetPointData()
-        if pdata is None:
-            return None
-        n_arrays = int(pdata.GetNumberOfArrays())
-        if n_arrays <= 0:
-            return None
-
-        preferred = []
-        fallback = []
-        n_points = int(poly.GetNumberOfPoints())
-        for idx in range(n_arrays):
-            arr = pdata.GetArray(idx)
-            if arr is None:
-                continue
-            name = arr.GetName() or f"Array_{idx}"
-            tuples = int(arr.GetNumberOfTuples())
-            comps = int(arr.GetNumberOfComponents())
-            if tuples <= 0:
-                continue
-            lower = name.lower()
-            if tuples == n_points and comps == 1:
-                if ("annot" in lower) or ("label" in lower) or ("parc" in lower):
-                    preferred.append(name)
-                else:
-                    fallback.append(name)
-        if preferred:
-            return preferred[0]
-        if fallback:
-            return fallback[0]
-        return None
-
-    def _apply_annotation_display(self, model_node, color_node=None):
-        """Enable scalar annotation display on one model node when available."""
-        if model_node is None:
-            return False
-        scalar_name = self._select_annotation_scalar_array_name(model_node)
-        if not scalar_name:
-            return False
-        display = model_node.GetDisplayNode()
-        if display is None:
-            model_node.CreateDefaultDisplayNodes()
-            display = model_node.GetDisplayNode()
-        if display is None:
-            return False
-        if hasattr(display, "SetScalarVisibility"):
-            display.SetScalarVisibility(True)
-        if hasattr(display, "SetActiveScalarName"):
-            display.SetActiveScalarName(scalar_name)
-        if color_node is not None and hasattr(display, "SetAndObserveColorNodeID"):
-            display.SetAndObserveColorNodeID(color_node.GetID())
-        if hasattr(display, "SetOpacity"):
-            display.SetOpacity(1.0)
-        if color_node is not None and hasattr(display, "SetScalarRangeFlag"):
-            try:
-                display.SetScalarRangeFlag(display.UseColorNodeScalarRange)
-            except Exception:
-                pass
-        elif hasattr(display, "SetScalarRangeFlagFromData"):
-            display.SetScalarRangeFlagFromData()
-        return True
-
-    def _has_freesurfer_extension(self):
-        """Return True when a FreeSurfer-related Slicer module appears available."""
-        names = []
-        try:
-            names = dir(slicer.modules)
-        except Exception:
-            names = []
-        for name in names:
-            lower = str(name).lower()
-            if "freesurfer" in lower:
-                return True
-        return False
-
-    def _apply_annotation_with_slicerfreesurfer(self, model_node, annot_path, color_node=None, logger=None):
-        """Best-effort annotation import via SlicerFreeSurfer reader pipeline."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        if model_node is None or not annot_path or not os.path.isfile(annot_path):
-            return False
-        if not self._has_freesurfer_extension():
-            return False
-        if not hasattr(slicer.modules, "freesurferimporter"):
-            return False
-
-        poly = model_node.GetPolyData()
-        pdata = poly.GetPointData() if poly is not None else None
-        before_arrays = int(pdata.GetNumberOfArrays()) if pdata is not None else 0
-
-        logic = slicer.modules.freesurferimporter.logic()
-        if logic is None:
-            return False
-
-        loaded_any = False
-        try:
-            loaded_any = bool(logic.LoadFreeSurferScalarOverlay(annot_path, model_node))
-        except Exception:
-            loaded_any = False
-        if not loaded_any:
-            try:
-                collection = vtk.vtkCollection()
-                collection.AddItem(model_node)
-                loaded_any = bool(logic.LoadFreeSurferScalarOverlay(annot_path, collection))
-            except Exception:
-                loaded_any = False
-
-        poly = model_node.GetPolyData()
-        pdata = poly.GetPointData() if poly is not None else None
-        after_arrays = int(pdata.GetNumberOfArrays()) if pdata is not None else 0
-        added_arrays = after_arrays > before_arrays
-        display_applied = self._apply_annotation_display(model_node, color_node=color_node)
-        success = bool(added_arrays or display_applied)
-        if success:
-            log(f"[fs] applied annotation via SlicerFreeSurfer: {annot_path}")
-        return success
-
-    def _convert_freesurfer_surface_to_vtk(self, source_path, annot_path=None):
-        """Convert a FreeSurfer surface to VTK polydata using `mris_convert`."""
-        tool = self._find_mris_convert()
-        if not tool:
-            raise RuntimeError("mris_convert not found (FreeSurfer is required for conversion fallback).")
-
-        stem = os.path.basename(source_path).replace(".", "_")
-        if annot_path:
-            annot_stem = os.path.basename(annot_path).replace(".", "_")
-            stem = f"{stem}_{annot_stem}"
-        out_dir = os.path.join(tempfile.gettempdir(), "rosa_helper_fs_cache")
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"{stem}.vtk")
-        cmd = [tool]
-        if annot_path:
-            cmd.extend(["--annot", annot_path])
-        cmd.extend([source_path, out_path])
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode != 0 or not os.path.isfile(out_path):
-            err = (proc.stderr or proc.stdout or "").strip()
-            extra = f" annot={annot_path}" if annot_path else ""
-            raise RuntimeError(err or f"mris_convert failed for {source_path}{extra}")
-        return out_path
+        """Delegate FreeSurfer MRI->ROSA rigid registration to service layer."""
+        return self.fs_service.run_brainsfit_rigid_registration(
+            fixed_volume_node=fixed_volume_node,
+            moving_volume_node=moving_volume_node,
+            output_transform_node=output_transform_node,
+            initialize_mode=initialize_mode,
+            logger=logger,
+        )
 
     def load_freesurfer_surfaces(
         self,
@@ -2266,125 +1549,22 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         color_lut_path=None,
         logger=None,
     ):
-        """Load FreeSurfer surface models and optional annotation scalars/LUT."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        surf_dir = self._resolve_freesurfer_surf_dir(subject_dir)
-        label_dir = self._resolve_freesurfer_label_dir(subject_dir)
-        names = self._surface_filenames_for_set(surface_set)
-        loaded_nodes = []
-        missing_paths = []
-        failed_paths = []
-        missing_annotation_paths = []
-        annotated_nodes = 0
-        color_node = None
-        if annotation_name:
-            color_node = self._preferred_annotation_color_node(color_lut_path=color_lut_path, logger=logger)
-            if color_node is None:
-                log("[fs] no LUT color node available; annotations will still load but colors may be generic")
-
-        for name in names:
-            path = os.path.join(surf_dir, name)
-            if not os.path.isfile(path):
-                missing_paths.append(path)
-                continue
-            annot_path = None
-            if annotation_name:
-                annot_path = self._annotation_path_for_surface(path, annotation_name, label_dir)
-                if annot_path is None:
-                    hemi = os.path.basename(path).split(".", 1)[0]
-                    missing_annotation_paths.append(
-                        os.path.join(label_dir or "<missing_label_dir>", f"{hemi}.{annotation_name}.annot")
-                    )
-
-            node = None
-            try:
-                node = self._load_model_node(path)
-            except Exception:
-                node = None
-
-            if node is None:
-                try:
-                    vtk_path = self._convert_freesurfer_surface_to_vtk(path, annot_path=annot_path)
-                    node = self._load_model_node(vtk_path)
-                    if node is not None:
-                        log(f"[fs] converted and loaded: {path} -> {vtk_path}")
-                except Exception as exc:
-                    log(f"[fs] convert fallback failed for {path}: {exc}")
-                    if "license" in str(exc).lower():
-                        log(
-                            "[fs] FreeSurfer license is required for mris_convert-based annotation conversion. "
-                            "Set FS_LICENSE or install .license."
-                        )
-
-            if node is None:
-                failed_paths.append(path)
-                continue
-
-            node.SetName(f"FS_{name}")
-            self._style_freesurfer_model(node, path)
-            annotation_applied = False
-            if annotation_name and annot_path and nib is not None and np is not None:
-                try:
-                    annotation_applied, inferred_color_node = self._apply_annotation_labels_with_nibabel(
-                        node,
-                        annot_path,
-                        color_node=color_node,
-                    )
-                    if color_node is None and inferred_color_node is not None:
-                        color_node = inferred_color_node
-                    if annotation_applied:
-                        log(f"[fs] applied annotation via nibabel: {annot_path}")
-                except Exception as exc:
-                    log(f"[fs] nibabel annot apply failed for {path}: {exc}")
-            elif annotation_name and annot_path and nib is None:
-                log("[fs] nibabel not available; cannot read .annot directly in this environment.")
-
-            if annotation_name and annot_path and not annotation_applied:
-                try:
-                    annotation_applied = self._apply_annotation_with_slicerfreesurfer(
-                        node,
-                        annot_path,
-                        color_node=color_node,
-                        logger=logger,
-                    )
-                except Exception as exc:
-                    log(f"[fs] SlicerFreeSurfer annot apply failed for {path}: {exc}")
-
-            if annotation_name and not annotation_applied:
-                # If loader produced scalar arrays already, activate them as a fallback.
-                annotation_applied = self._apply_annotation_display(
-                    node,
-                    color_node=color_node,
-                )
-
-            if annotation_applied:
-                annotated_nodes += 1
-            loaded_nodes.append(node)
-            log(f"[fs] loaded surface: {path}")
-
-        return {
-            "loaded_nodes": loaded_nodes,
-            "missing_surface_paths": missing_paths,
-            "failed_surface_paths": failed_paths,
-            "missing_annotation_paths": sorted(set(missing_annotation_paths)),
-            "annotated_nodes": int(annotated_nodes),
-            "color_node_name": color_node.GetName() if color_node is not None else "",
-        }
+        """Delegate FreeSurfer surface and annotation loading to service layer."""
+        return self.fs_service.load_freesurfer_surfaces(
+            subject_dir=subject_dir,
+            surface_set=surface_set,
+            annotation_name=annotation_name,
+            color_lut_path=color_lut_path,
+            logger=logger,
+        )
 
     def apply_transform_to_model_nodes(self, model_nodes, transform_node, harden=False):
-        """Apply one transform node to all model nodes and optionally harden."""
-        if transform_node is None:
-            raise ValueError("Transform node is required.")
-        for node in model_nodes or []:
-            if node is None:
-                continue
-            node.SetAndObserveTransformNodeID(transform_node.GetID())
-            if harden:
-                slicer.vtkSlicerTransformLogic().hardenTransform(node)
+        """Delegate model transform application/hardening to service layer."""
+        return self.fs_service.apply_transform_to_model_nodes(
+            model_nodes=model_nodes,
+            transform_node=transform_node,
+            harden=harden,
+        )
 
     def _add_trajectories(self, trajectories, logger=None, show_planned=False):
         """Create editable trajectory lines and hidden planned backups."""

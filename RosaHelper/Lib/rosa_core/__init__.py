@@ -5,6 +5,7 @@ from .case_loader import (
     resolve_analyze_volume,
     resolve_reference_index,
 )
+from .assignments import electrode_length_mm, suggest_model_id_for_trajectory, trajectory_length_mm
 from .contacts import (
     build_assignment_template,
     contacts_to_fcsv_rows,
@@ -17,6 +18,7 @@ from .contacts import (
 from .electrode_models import default_electrode_library_path, load_electrode_library, model_map
 from .exporters import build_fcsv_rows, build_markups_lines, build_markups_document
 from .ros_parser import parse_ros_file
+from .qc import compute_qc_metrics
 from .transforms import (
     apply_affine,
     invert_4x4,
@@ -31,9 +33,11 @@ __all__ = [
     "build_fcsv_rows",
     "build_markups_document",
     "build_markups_lines",
+    "electrode_length_mm",
     "build_effective_matrices",
     "build_assignment_template",
     "choose_reference_volume",
+    "compute_qc_metrics",
     "contacts_to_fcsv_rows",
     "default_electrode_library_path",
     "find_ros_file",
@@ -51,5 +55,7 @@ __all__ = [
     "save_assignment_template",
     "save_contacts_markups_json",
     "save_contacts_rosa_json",
+    "suggest_model_id_for_trajectory",
     "to_itk_affine_text",
+    "trajectory_length_mm",
 ]

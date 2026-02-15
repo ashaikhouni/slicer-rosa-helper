@@ -203,6 +203,9 @@ Quick checklist:
 
 - `RosaHelper/`: Slicer scripted module
 - `RosaHelper/Lib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
+- `RosaHelper/Lib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
+- `RosaHelper/Lib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation
+- `RosaHelper/Lib/rosa_slicer/`: Slicer scene/services layer (`freesurfer_service.py`, `trajectory_scene.py`)
 - `RosaHelper/Resources/electrodes/dixi_d08_electrodes.json`: bundled electrode model library (AM/BM/CM)
 - `RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
 - `tools/`: CLI wrappers for offline conversion/export
