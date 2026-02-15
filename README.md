@@ -156,11 +156,14 @@ ROSA base frame in the same Slicer scene.
 
 Workflow:
 1. Load ROSA case (ROSA base/reference volume is auto-selected when available).
-2. Load the MRI used for `recon-all` into Slicer.
+2. Add the exact MRI volume used for `recon-all` to the Slicer scene using Slicer's standard
+   `Add Data` workflow (not through ROSA Helper). This is the moving image.
 3. In `FreeSurfer Integration (V1)`:
    - set `ROSA base volume` (fixed) and `FreeSurfer MRI` (moving)
    - click `Register FS MRI -> ROSA` (BRAINSFit rigid registration)
-4. Set FreeSurfer subject path (subject root with `surf/` or direct `surf/` path).
+4. Set FreeSurfer subject path:
+   - subject root containing `surf/` and `label/`, or
+   - direct `surf/` path inside your segmentation folder.
 5. Optional: enable `Load annotation scalars`, choose an annotation
    (`aparc`, `aparc.a2009s`, `aparc.DKTatlas`, or custom), and optionally set
    a LUT file (for example `FreeSurferColorLUT.txt`).
@@ -181,6 +184,11 @@ Notes:
 - If direct `.pial/.white/.inflated` loading fails, ROSA Helper attempts fallback conversion
   through `mris_convert` (FreeSurfer) and loads the converted VTK surface.
 - `mris_convert` fallback may require a valid FreeSurfer license.
+
+Quick checklist:
+- The MRI selected in `FreeSurfer MRI` must be the same scan used to build recon-all surfaces.
+- Registration (`Register FS MRI -> ROSA`) should be run before loading surfaces.
+- The folder selected in `FreeSurfer subject` must contain `surf/` (and `label/` for `.annot` overlays).
 
 ## Install (Manual Module)
 
