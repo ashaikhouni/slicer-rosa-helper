@@ -18,6 +18,14 @@ It supports:
 - V1 postop CT auto-fit workflow (detect candidates, fit selected/all, apply fit)
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
 
+This extension also includes `Shank Detect` for CT-only workflows (no `.ros` required):
+- threshold-based shank trajectory detection from postop CT artifact
+- optional exact trajectory-count mode (otherwise up to 30 detections)
+- lock/unlock accepted trajectories across reruns
+- side-aware default naming (`R##` / `L##`) with editable names
+- per-trajectory electrode assignment and contact generation
+- row selection auto-aligns Red slice along the selected trajectory
+
 ## ROS File Structure (What We Read)
 
 ROSA `.ros` files are tokenized text files. Each section starts with a bracketed
@@ -81,6 +89,28 @@ markups.
    - contacts/models are regenerated from the fitted trajectories
    - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
 8. Click `Export Aligned NIfTI + Coordinates/QC`.
+
+## Quick Start (Shank Detect)
+
+Use this when you only have a CT with electrode artifact and no ROSA `.ros` metadata.
+
+1. Open module `Shank Detect`.
+2. Select postop CT volume.
+3. Set detection parameters (threshold, inlier radius, min length, min inliers).
+   - optional head-mask gating (`Use head mask filter`) to suppress external wire artifacts
+   - use `Min metal depth` / `Max metal depth` to keep only metal points at a plausible depth from the outer head surface
+   - optional model-template scoring (`Enable model-template scoring`) to rank/reject lines by expected contact pattern
+   - optional mask visualization (`Show metal/head masks in slice views`) to inspect thresholded metal and head gating
+4. Click `Preview Masks` to inspect the gated metal mask before running trajectory extraction.
+5. Optional: click `Show Depth Curve` to inspect the survival curve `N(depth >= t)` for all head-gated metal points vs kept points.
+6. Optional: enable `Use exact trajectory count` and set count.
+7. Click `Detect Trajectories`.
+   - locked rows are preserved on rerun
+   - unlocked rows are replaced by newly detected lines
+8. Edit trajectory names if needed; select a row to auto-align Red view along it.
+9. Assign electrode model per row (or use `Apply model to all`).
+10. Click `Generate Contacts`.
+11. Optional: click `Reset Ax/Cor/Sag` to restore standard slice orientations.
 
 Output default folder:
 - `<case>/RosaHelper_Export/`
@@ -198,10 +228,12 @@ Quick checklist:
    - `<repo>/RosaHelper`
 4. Restart Slicer.
 5. Open module `ROSA Helper` (category `ROSA`).
+6. Open module `Shank Detect` (category `ROSA`) for CT-only shank detection.
 
 ## Repository Layout
 
 - `RosaHelper/`: Slicer scripted module
+- `ShankDetect/`: Slicer scripted module for CT-only trajectory detection and contact generation
 - `RosaHelper/Lib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
 - `RosaHelper/Lib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
 - `RosaHelper/Lib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation

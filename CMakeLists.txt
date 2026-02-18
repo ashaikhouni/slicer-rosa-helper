@@ -15,6 +15,7 @@ find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})
 
 add_subdirectory(RosaHelper)
+add_subdirectory(ShankDetect)
 
 include(${Slicer_EXTENSION_GENERATE_CONFIG})
 include(${Slicer_EXTENSION_CPACK})
