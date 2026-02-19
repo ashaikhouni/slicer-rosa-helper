@@ -11,6 +11,8 @@ import math
 import os
 import re
 import sys
+import inspect
+from collections import OrderedDict
 
 try:
     import numpy as np
@@ -44,6 +46,7 @@ from rosa_core import (
     trajectory_length_mm,
 )
 from shank_core import masking as shank_masking
+from shank_core import pipeline as shank_pipeline
 
 
 class ShankDetect(ScriptedLoadableModule):
@@ -185,34 +188,27 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.minMetalDepthSpin = qt.QDoubleSpinBox()
         self.minMetalDepthSpin.setRange(0.0, 100.0)
         self.minMetalDepthSpin.setDecimals(2)
-        self.minMetalDepthSpin.setValue(0.0)
+        self.minMetalDepthSpin.setValue(5.0)
         self.minMetalDepthSpin.setSingleStep(0.25)
         self.minMetalDepthSpin.setSuffix(" mm")
         self.minMetalDepthSpin.setToolTip("Minimum depth from outer head surface for metal points.")
         form.addRow("Min metal depth", self.minMetalDepthSpin)
 
         self.maxMetalDepthSpin = qt.QDoubleSpinBox()
-        self.maxMetalDepthSpin.setRange(0.0, 200.0)
+        self.maxMetalDepthSpin.setRange(0.0, 300.0)
         self.maxMetalDepthSpin.setDecimals(2)
-        self.maxMetalDepthSpin.setValue(200.0)
+        self.maxMetalDepthSpin.setValue(220.0)
         self.maxMetalDepthSpin.setSingleStep(0.5)
         self.maxMetalDepthSpin.setSuffix(" mm")
         self.maxMetalDepthSpin.setToolTip("Maximum depth from outer head surface for metal points.")
         form.addRow("Max metal depth", self.maxMetalDepthSpin)
 
         self.aggressiveHeadCleanupCheck = qt.QCheckBox("Aggressive 3-plane island cleanup")
-        self.aggressiveHeadCleanupCheck.setChecked(True)
+        self.aggressiveHeadCleanupCheck.setChecked(False)
         self.aggressiveHeadCleanupCheck.setToolTip(
-            "Use stronger island removal (axial/coronal/sagittal) for head-mask Refine + Fill."
+            "Use stronger island removal (axial/coronal/sagittal). Slower but may improve difficult masks."
         )
         form.addRow(self.aggressiveHeadCleanupCheck)
-
-        self.minInsideFractionSpin = qt.QDoubleSpinBox()
-        self.minInsideFractionSpin.setRange(0.0, 1.0)
-        self.minInsideFractionSpin.setDecimals(2)
-        self.minInsideFractionSpin.setValue(0.70)
-        self.minInsideFractionSpin.setSingleStep(0.05)
-        form.addRow("Min in-head fraction", self.minInsideFractionSpin)
 
         self.useModelScoreCheck = qt.QCheckBox("Enable model-template scoring")
         self.useModelScoreCheck.setChecked(True)
@@ -654,8 +650,8 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 rows.append(info)
         return rows
 
-    def _nextSiteAwareNames(self, lines, existing_names):
-        """Assign side-aware names (R##/L##) for new detected lines."""
+    def _nextSiteAwareNames(self, lines, existing_names, midline_x_ras=0.0):
+        """Assign side-aware names (R##/L##) using a midline X in RAS."""
         used = set(existing_names)
         counts = {"R": 0, "L": 0}
         pattern = re.compile(r"^([RL])(\d+)$", re.IGNORECASE)
@@ -669,7 +665,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         assigned = []
         for line in lines:
             mid_x = 0.5 * (float(line["start_ras"][0]) + float(line["end_ras"][0]))
-            side = "R" if mid_x >= 0.0 else "L"
+            side = "R" if mid_x >= float(midline_x_ras) else "L"
             idx = counts[side] + 1
             name = f"{side}{idx:02d}"
             while name in used:
@@ -723,6 +719,12 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
             self._setReadOnlyItem(row, 6, "")
             if model_combo.currentText.strip():
                 self._setReadOnlyItem(row, 6, f"{self._modelLengthMm(model_combo.currentText.strip()):.2f}")
+
+            node = slicer.mrmlScene.GetNodeByID(traj.get("node_id", ""))
+            if node is not None and node.IsA("vtkMRMLMarkupsLineNode"):
+                display = node.GetDisplayNode()
+                if display is not None and hasattr(display, "SetPropertiesLabelVisibility"):
+                    display.SetPropertiesLabelVisibility(False)
 
         self._updatingTable = False
         has_rows = self.trajectoryTable.rowCount > 0
@@ -818,7 +820,6 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
             "min_metal_depth_mm": float(self.minMetalDepthSpin.value),
             "max_metal_depth_mm": float(self.maxMetalDepthSpin.value),
             "head_mask_aggressive_cleanup": bool(self.aggressiveHeadCleanupCheck.checked),
-            "min_inside_fraction": float(self.minInsideFractionSpin.value),
             "use_model_score": bool(self.useModelScoreCheck.checked),
             "min_model_score": float(self.modelScoreMinSpin.value),
             "show_masks": bool(self.showMasksCheck.checked),
@@ -1006,6 +1007,26 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 self.logic.clear_in_mask_points_node(volume_node)
         except Exception as exc:
             self.log(f"[mask] in-mask points warning: {exc}")
+        profile = result.get("profile_ms", {})
+        if profile:
+            self.log(
+                "[profile] preview "
+                f"total={float(profile.get('total', 0.0)):.1f}ms "
+                f"(threshold={float(profile.get('threshold', 0.0)):.1f}, "
+                f"head_mask={float(profile.get('head_mask', 0.0)):.1f}, "
+                f"distance={float(profile.get('distance_map', 0.0)):.1f}, "
+                f"enum={float(profile.get('candidate_enum', 0.0)):.1f}, "
+                f"gate={float(profile.get('head_gate', 0.0)):.1f}, "
+                f"depth={float(profile.get('depth_gate', 0.0)):.1f})"
+            )
+        flags = result.get("profile_flags", {})
+        if flags:
+            self.log(
+                "[profile] preview cache "
+                f"head_cache_hit={bool(flags.get('head_cache_hit', False))} "
+                f"gating={bool(flags.get('used_precomputed_gating_mask', False))} "
+                f"distance={bool(flags.get('used_precomputed_distance_map', False))}"
+            )
         self.log("[depth] preview complete; click 'Show Depth Curve' to plot.")
 
     def onDetectClicked(self):
@@ -1068,7 +1089,6 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 head_mask_close_mm=settings["head_mask_close_mm"],
                 min_metal_depth_mm=settings["min_metal_depth_mm"],
                 max_metal_depth_mm=settings["max_metal_depth_mm"],
-                min_inside_fraction=settings["min_inside_fraction"],
                 models_by_id=self.modelsById if settings["use_model_score"] else None,
                 min_model_score=settings["min_model_score"] if settings["use_model_score"] else None,
             )
@@ -1111,10 +1131,45 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 self.logic.clear_in_mask_points_node(volume_node)
         except Exception as exc:
             self.log(f"[mask] in-mask points warning: {exc}")
+        profile = result.get("profile_ms", {})
+        if profile:
+            p_prev = profile.get("preview", {}) if isinstance(profile.get("preview"), dict) else {}
+            p_det = profile.get("detect", {}) if isinstance(profile.get("detect"), dict) else {}
+            self.log(
+                "[profile] detect "
+                f"total={float(profile.get('total', 0.0)):.1f}ms "
+                f"(preview_stage={float(profile.get('preview_stage', 0.0)):.1f}, "
+                f"detect_stage={float(profile.get('detect_stage', 0.0)):.1f})"
+            )
+            self.log(
+                "[profile] detect detail "
+                f"preview(head_mask={float(p_prev.get('head_mask', 0.0)):.1f}, "
+                f"distance={float(p_prev.get('distance_map', 0.0)):.1f}) "
+                f"fit(first_pass={float(p_det.get('first_pass', 0.0)):.1f}, "
+                f"refine={float(p_det.get('refine', 0.0)):.1f})"
+            )
+        flags = result.get("profile_flags", {})
+        if flags:
+            self.log(
+                "[profile] detect cache "
+                f"head_cache_hit={bool(flags.get('head_cache_hit', False))} "
+                f"gating={bool(flags.get('used_precomputed_gating_mask', False))} "
+                f"distance={bool(flags.get('used_precomputed_distance_map', False))}"
+            )
         self.log("[depth] detect complete; click 'Show Depth Curve' to plot.")
 
         existing_names = [row["name"] for row in locked]
-        new_names = self._nextSiteAwareNames(detected, existing_names)
+        midline_x = 0.0
+        try:
+            head_mask = result.get("head_mask_kji")
+            if head_mask is not None:
+                center_ras = self.logic.mask_centroid_ras(volume_node, head_mask)
+                if center_ras is not None:
+                    midline_x = float(center_ras[0])
+        except Exception as exc:
+            self.log(f"[name] midline estimate warning: {exc}")
+        self.log(f"[name] side split midline X (RAS): {midline_x:.2f} mm")
+        new_names = self._nextSiteAwareNames(detected, existing_names, midline_x_ras=midline_x)
 
         new_rows = []
         for idx, line in enumerate(detected):
@@ -1242,12 +1297,75 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
 class ShankDetectLogic(ScriptedLoadableModuleLogic):
     """Logic for CT artifact thresholding, line fitting, and visualization."""
 
+    def __init__(self):
+        super().__init__()
+        # Cache expensive head-mask + distance-map computations by volume/settings.
+        self._head_distance_cache = OrderedDict()
+        self._max_head_cache_entries = 4
+
+    def _head_cache_key(self, volume_node, head_mask_threshold_hu, head_mask_close_mm, head_mask_aggressive_cleanup):
+        """Build a stable cache key for head-mask-dependent computations."""
+        image_data = volume_node.GetImageData()
+        dims = tuple(int(x) for x in image_data.GetDimensions()) if image_data is not None else (0, 0, 0)
+        spacing = tuple(round(float(s), 6) for s in volume_node.GetSpacing())
+        return (
+            str(volume_node.GetID()),
+            dims,
+            spacing,
+            round(float(head_mask_threshold_hu), 2),
+            round(float(head_mask_close_mm), 2),
+            bool(head_mask_aggressive_cleanup),
+        )
+
+    def _get_head_distance_cache(
+        self,
+        volume_node,
+        arr_kji,
+        head_mask_threshold_hu,
+        head_mask_close_mm,
+        head_mask_aggressive_cleanup,
+    ):
+        """Return cached head gating mask + distance map, computing them if needed.
+
+        Returns
+        -------
+        (cache_payload, cache_hit)
+        """
+        key = self._head_cache_key(
+            volume_node,
+            head_mask_threshold_hu=head_mask_threshold_hu,
+            head_mask_close_mm=head_mask_close_mm,
+            head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+        )
+        cached = self._head_distance_cache.get(key)
+        if cached is not None:
+            self._head_distance_cache.move_to_end(key)
+            return cached, True
+
+        self._ensure_masking_api()
+        gating_mask = shank_masking.build_head_mask_kji(
+            arr_kji=arr_kji,
+            spacing_xyz=volume_node.GetSpacing(),
+            threshold_hu=head_mask_threshold_hu,
+            close_mm=head_mask_close_mm,
+            aggressive_cleanup=head_mask_aggressive_cleanup,
+        )
+        distance_map = shank_masking.compute_head_distance_map_kji(
+            gating_mask,
+            spacing_xyz=volume_node.GetSpacing(),
+        )
+        cached = {
+            "gating_mask_kji": np.asarray(gating_mask, dtype=np.uint8),
+            "head_distance_map_kji": np.asarray(distance_map, dtype=np.float32),
+        }
+        self._head_distance_cache[key] = cached
+        while len(self._head_distance_cache) > int(self._max_head_cache_entries):
+            self._head_distance_cache.popitem(last=False)
+        return cached, False
+
     def _ensure_masking_api(self):
         """Ensure `shank_core.masking` exposes required API after hot-reload."""
         global shank_masking  # pylint: disable=global-statement
-
-        if hasattr(shank_masking, "build_preview_masks"):
-            return
 
         import importlib
 
@@ -1258,37 +1376,53 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
 
             shank_masking = _masking
 
-        if not hasattr(shank_masking, "build_preview_masks"):
+        has_api = hasattr(shank_masking, "build_preview_masks") and hasattr(shank_masking, "compute_head_distance_map_kji")
+        has_precompute_args = False
+        if has_api:
+            try:
+                params = inspect.signature(shank_masking.build_preview_masks).parameters
+                has_precompute_args = "precomputed_gating_mask_kji" in params and "precomputed_head_distance_map_kji" in params
+            except Exception:
+                has_precompute_args = False
+        if not has_api or not has_precompute_args:
             module_path = getattr(shank_masking, "__file__", "<unknown>")
             raise RuntimeError(
-                "Loaded shank_core.masking is stale and missing build_preview_masks "
+                "Loaded shank_core.masking is stale and missing required APIs "
                 f"(module={module_path}). Reload module paths in Slicer and restart once."
             )
 
-    def extract_threshold_points_ras(self, volume_node, threshold, max_points=300000):
-        """Return sampled threshold voxels as RAS points from a scalar volume."""
-        if np is None:
-            raise RuntimeError("numpy is required for threshold candidate extraction")
+    def _ensure_pipeline_api(self):
+        """Ensure `shank_core.pipeline` exposes required API after hot-reload."""
+        global shank_pipeline, shank_masking  # pylint: disable=global-statement
 
-        arr_kji = slicer.util.arrayFromVolume(volume_node)
-        ijk_kji = self._sample_threshold_ijk_kji(arr_kji, threshold=threshold, max_points=max_points)
-        if ijk_kji.size == 0:
-            return np.empty((0, 3), dtype=float)
+        import importlib
 
-        return self._ijk_kji_to_ras_points(volume_node, ijk_kji)
+        try:
+            # Reload masking first, then pipeline, because pipeline imports masking symbols at module import time.
+            shank_masking = importlib.reload(shank_masking)
+            # Reload detect core too, so pipeline binds the latest profiling + fitting code.
+            detect_mod = importlib.import_module("shank_core.detect")
+            importlib.reload(detect_mod)
+            shank_pipeline = importlib.reload(shank_pipeline)
+        except Exception:
+            import shank_core.pipeline as _pipeline
 
-    def _sample_threshold_ijk_kji(self, arr_kji, threshold, max_points=300000):
-        """Return sampled `(k,j,i)` index array for thresholded voxels."""
-        ijk_kji = np.argwhere(arr_kji >= float(threshold))
-        if ijk_kji.size == 0:
-            return ijk_kji.reshape(0, 3)
+            shank_pipeline = _pipeline
 
-        n = int(ijk_kji.shape[0])
-        if n > int(max_points):
-            rng = np.random.default_rng(0)
-            pick = rng.choice(n, size=int(max_points), replace=False)
-            ijk_kji = ijk_kji[pick]
-        return ijk_kji
+        has_api = hasattr(shank_pipeline, "run_detection")
+        has_precompute_args = False
+        if has_api:
+            try:
+                params = inspect.signature(shank_pipeline.run_detection).parameters
+                has_precompute_args = "precomputed_gating_mask_kji" in params and "precomputed_head_distance_map_kji" in params
+            except Exception:
+                has_precompute_args = False
+        if not has_api or not has_precompute_args:
+            module_path = getattr(shank_pipeline, "__file__", "<unknown>")
+            raise RuntimeError(
+                "Loaded shank_core.pipeline is stale and missing run_detection "
+                f"(module={module_path}). Reload module paths in Slicer and restart once."
+            )
 
     def _ijk_kji_to_ras_points(self, volume_node, ijk_kji):
         """Convert `(k,j,i)` voxel indices to RAS points."""
@@ -1304,6 +1438,21 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         m = np.array([[m_vtk.GetElement(r, c) for c in range(4)] for r in range(4)], dtype=float)
         ras_h = (m @ ijk_h.T).T
         return ras_h[:, :3]
+
+    def mask_centroid_ras(self, volume_node, mask_kji):
+        """Return centroid of a binary KJI mask in RAS coordinates, or None."""
+        if mask_kji is None:
+            return None
+        idx = np.argwhere(np.asarray(mask_kji, dtype=bool))
+        if idx.size == 0:
+            return None
+        kji_center = idx.mean(axis=0)
+        ijk_h = np.array([kji_center[2], kji_center[1], kji_center[0], 1.0], dtype=float)
+        m_vtk = vtk.vtkMatrix4x4()
+        volume_node.GetIJKToRASMatrix(m_vtk)
+        m = np.array([[m_vtk.GetElement(r, c) for c in range(4)] for r in range(4)], dtype=float)
+        ras = m @ ijk_h
+        return ras[:3]
 
     def _build_head_mask_kji(
         self,
@@ -1489,627 +1638,6 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         ijk = m @ ras_h
         return ijk[:3]
 
-    def _segment_inside_mask_fraction(self, volume_node, start_ras, end_ras, mask_kji, step_mm=1.0):
-        """Fraction of sampled segment points that fall inside `mask_kji`."""
-        start = np.asarray(start_ras, dtype=float)
-        end = np.asarray(end_ras, dtype=float)
-        seg = end - start
-        length = float(np.linalg.norm(seg))
-        if length <= 1e-9:
-            return 0.0
-        n = max(2, int(math.ceil(length / max(1e-3, float(step_mm)))) + 1)
-        ts = np.linspace(0.0, 1.0, n)
-
-        dims = mask_kji.shape  # (k, j, i)
-        inside = 0
-        total = 0
-        for t in ts:
-            p = start + t * seg
-            ijk = self._ras_to_ijk_float(volume_node, p)
-            i = int(round(float(ijk[0])))
-            j = int(round(float(ijk[1])))
-            k = int(round(float(ijk[2])))
-            total += 1
-            if 0 <= k < dims[0] and 0 <= j < dims[1] and 0 <= i < dims[2]:
-                if bool(mask_kji[k, j, i]):
-                    inside += 1
-        return float(inside) / float(max(1, total))
-
-    def _clamp_segment_to_mask(self, volume_node, start_ras, end_ras, mask_kji, step_mm=0.5):
-        """Clip segment endpoints to first/last in-mask samples along the segment."""
-        start = np.asarray(start_ras, dtype=float)
-        end = np.asarray(end_ras, dtype=float)
-        seg = end - start
-        length = float(np.linalg.norm(seg))
-        if length <= 1e-9:
-            return None
-        n = max(2, int(math.ceil(length / max(1e-3, float(step_mm)))) + 1)
-        ts = np.linspace(0.0, 1.0, n)
-        pts = start.reshape(1, 3) + np.outer(ts, seg)
-
-        dims = mask_kji.shape  # (k,j,i)
-        inside = np.zeros((n,), dtype=bool)
-        for idx in range(n):
-            ijk = self._ras_to_ijk_float(volume_node, pts[idx])
-            i = int(round(float(ijk[0])))
-            j = int(round(float(ijk[1])))
-            k = int(round(float(ijk[2])))
-            if 0 <= k < dims[0] and 0 <= j < dims[1] and 0 <= i < dims[2]:
-                inside[idx] = bool(mask_kji[k, j, i])
-        idxs = np.where(inside)[0]
-        if idxs.size < 2:
-            return None
-        p0 = pts[int(idxs[0])]
-        p1 = pts[int(idxs[-1])]
-        if float(np.linalg.norm(p1 - p0)) <= 1e-3:
-            return None
-        return [float(p0[0]), float(p0[1]), float(p0[2])], [float(p1[0]), float(p1[1]), float(p1[2])]
-
-    def _sample_local_max_hu(self, arr_kji, ijk_float, radius_vox_ijk):
-        """Sample local max HU near one continuous IJK location."""
-        i0 = int(round(float(ijk_float[0])))
-        j0 = int(round(float(ijk_float[1])))
-        k0 = int(round(float(ijk_float[2])))
-        ri, rj, rk = radius_vox_ijk
-        i1 = max(0, i0 - ri)
-        i2 = min(arr_kji.shape[2] - 1, i0 + ri)
-        j1 = max(0, j0 - rj)
-        j2 = min(arr_kji.shape[1] - 1, j0 + rj)
-        k1 = max(0, k0 - rk)
-        k2 = min(arr_kji.shape[0] - 1, k0 + rk)
-        if i1 > i2 or j1 > j2 or k1 > k2:
-            return float("-inf")
-        patch = arr_kji[k1 : k2 + 1, j1 : j2 + 1, i1 : i2 + 1]
-        return float(np.max(patch)) if patch.size else float("-inf")
-
-    def _sample_axis_profile_hu(
-        self,
-        volume_node,
-        arr_kji,
-        tip_ras,
-        entry_ras,
-        step_mm=0.5,
-        radial_sample_mm=0.8,
-    ):
-        """Sample local-max HU profile from tip towards entry along trajectory axis."""
-        tip = np.asarray(tip_ras, dtype=float)
-        entry = np.asarray(entry_ras, dtype=float)
-        axis = entry - tip
-        length = float(np.linalg.norm(axis))
-        if length <= 1e-6:
-            return np.empty((0,), dtype=float), np.empty((0,), dtype=float)
-        axis = axis / length
-
-        spacing = volume_node.GetSpacing()  # xyz
-        ri = max(0, int(round(float(radial_sample_mm) / max(1e-6, float(spacing[0])))))
-        rj = max(0, int(round(float(radial_sample_mm) / max(1e-6, float(spacing[1])))))
-        rk = max(0, int(round(float(radial_sample_mm) / max(1e-6, float(spacing[2])))))
-        radius_vox_ijk = (ri, rj, rk)
-
-        n = max(2, int(math.floor(length / max(1e-6, float(step_mm)))) + 1)
-        t = np.linspace(0.0, length, n)
-        vals = np.zeros((n,), dtype=float)
-        for idx, dist in enumerate(t):
-            p = tip + dist * axis
-            ijk = self._ras_to_ijk_float(volume_node, p)
-            vals[idx] = self._sample_local_max_hu(arr_kji, ijk, radius_vox_ijk)
-        return t, vals
-
-    def _score_model_template_on_profile(self, t_mm, hu_vals, model, line_length_mm):
-        """Return best template score for one model across small depth shifts."""
-        if t_mm.size < 8:
-            return {"score": float("-inf"), "shift_mm": 0.0}
-        offsets = [float(x) for x in model.get("contact_center_offsets_from_tip_mm", [])]
-        if not offsets:
-            return {"score": float("-inf"), "shift_mm": 0.0}
-
-        mean = float(np.mean(hu_vals))
-        std = float(np.std(hu_vals))
-        if std <= 1e-6:
-            return {"score": float("-inf"), "shift_mm": 0.0}
-        z = (hu_vals - mean) / std
-        t_max = float(np.max(t_mm))
-
-        shifts = np.arange(-6.0, 6.01, 0.5)
-        best_score = float("-inf")
-        best_shift = 0.0
-        for shift in shifts:
-            centers = [o + float(shift) for o in offsets]
-            centers = [c for c in centers if 0.0 <= c <= t_max]
-            if len(centers) < max(3, int(0.4 * len(offsets))):
-                continue
-            contact_vals = np.interp(centers, t_mm, z)
-
-            gap_vals = []
-            for i in range(len(centers) - 1):
-                gap_vals.append(0.5 * (centers[i] + centers[i + 1]))
-            if gap_vals:
-                gap_vals = np.interp(np.asarray(gap_vals, dtype=float), t_mm, z)
-                gap_mean = float(np.mean(gap_vals))
-            else:
-                gap_mean = 0.0
-            contact_mean = float(np.mean(contact_vals))
-
-            score = contact_mean - gap_mean
-            model_len = float(model.get("total_exploration_length_mm", line_length_mm))
-            length_mismatch = abs(float(line_length_mm) - model_len)
-            score -= max(0.0, length_mismatch - 5.0) * 0.05
-
-            if score > best_score:
-                best_score = score
-                best_shift = float(shift)
-        return {"score": best_score, "shift_mm": best_shift}
-
-    def _select_best_model_for_line(self, volume_node, arr_kji, line, models_by_id):
-        """Evaluate electrode model templates on one candidate line profile."""
-        t_mm, hu_vals = self._sample_axis_profile_hu(
-            volume_node=volume_node,
-            arr_kji=arr_kji,
-            tip_ras=line["end_ras"],
-            entry_ras=line["start_ras"],
-            step_mm=0.5,
-            radial_sample_mm=0.8,
-        )
-        if t_mm.size < 8:
-            return {"best_model_id": "", "best_model_score": None, "best_model_shift_mm": None}
-
-        best_id = ""
-        best_score = float("-inf")
-        best_shift = 0.0
-        for model_id in sorted(models_by_id.keys()):
-            score = self._score_model_template_on_profile(
-                t_mm=t_mm,
-                hu_vals=hu_vals,
-                model=models_by_id[model_id],
-                line_length_mm=float(line["length_mm"]),
-            )
-            if score["score"] > best_score:
-                best_score = float(score["score"])
-                best_shift = float(score["shift_mm"])
-                best_id = model_id
-        if not best_id:
-            return {"best_model_id": "", "best_model_score": None, "best_model_shift_mm": None}
-        return {
-            "best_model_id": best_id,
-            "best_model_score": float(best_score),
-            "best_model_shift_mm": float(best_shift),
-        }
-
-    def _model_max_center_gap_mm(self, model):
-        """Return maximum adjacent contact-center spacing for one electrode model."""
-        offsets = [float(x) for x in model.get("contact_center_offsets_from_tip_mm", [])]
-        if len(offsets) < 2:
-            return 0.0
-        return float(max(offsets[i + 1] - offsets[i] for i in range(len(offsets) - 1)))
-
-    def _max_empty_gap_mm_from_line_inliers(self, t_vals, lo, hi, bin_mm=0.5):
-        """Estimate largest empty gap along fitted line span from inlier projections."""
-        span = float(hi - lo)
-        if span <= max(1e-6, float(bin_mm)):
-            return 0.0
-        t = np.asarray(t_vals, dtype=float)
-        t = t[np.isfinite(t)]
-        t = t[(t >= float(lo)) & (t <= float(hi))]
-        if t.size < 2:
-            return span
-
-        n_bins = max(2, int(math.ceil(span / max(1e-6, float(bin_mm)))))
-        occ = np.zeros((n_bins,), dtype=np.uint8)
-        u = t - float(lo)
-        idx = np.floor(u / max(1e-6, float(bin_mm))).astype(int)
-        idx = np.clip(idx, 0, n_bins - 1)
-        occ[idx] = 1
-
-        # Bridge 1-bin pinholes, keep only true long empty stretches.
-        occ_dil = occ.copy()
-        occ_dil[1:] = np.maximum(occ_dil[1:], occ[:-1])
-        occ_dil[:-1] = np.maximum(occ_dil[:-1], occ[1:])
-        occ = occ_dil
-        occ_idx = np.where(occ > 0)[0]
-        if occ_idx.size < 2:
-            return span
-        gaps_bins = np.diff(occ_idx) - 1
-        max_gap_bins = int(np.max(gaps_bins)) if gaps_bins.size else 0
-        return float(max(0, max_gap_bins)) * float(bin_mm)
-
-    def _line_distances(self, points, p0, direction_unit):
-        """Distance of points to an infinite 3D line defined by p0 + t*d."""
-        rel = points - p0
-        t = rel @ direction_unit
-        closest = p0 + np.outer(t, direction_unit)
-        return np.linalg.norm(points - closest, axis=1)
-
-    def _fit_axis_pca(self, points):
-        """Principal-axis line fit using PCA."""
-        center = np.mean(points, axis=0)
-        x = points - center
-        cov = x.T @ x / max(points.shape[0] - 1, 1)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        axis = eigvecs[:, int(np.argmax(eigvals))]
-        n = np.linalg.norm(axis)
-        if n <= 1e-9:
-            raise ValueError("failed to estimate principal axis")
-        return center, axis / n
-
-    def _ransac_fit_line(self, points, distance_threshold_mm=1.2, min_inliers=250, iterations=240):
-        """Robust line fit from point cloud using pair-sampling RANSAC."""
-        n = int(points.shape[0])
-        if n < 2:
-            return None
-
-        rng = np.random.default_rng(0)
-        best_mask = None
-        best_count = -1
-        best_score = float("inf")
-
-        for _ in range(int(iterations)):
-            i, j = rng.choice(n, size=2, replace=False)
-            p0 = points[i]
-            d = points[j] - p0
-            dn = float(np.linalg.norm(d))
-            if dn <= 1e-9:
-                continue
-            d = d / dn
-            dist = self._line_distances(points, p0, d)
-            mask = dist <= float(distance_threshold_mm)
-            count = int(np.count_nonzero(mask))
-            if count <= 0:
-                continue
-            score = float(np.mean(dist[mask]))
-            if count > best_count or (count == best_count and score < best_score):
-                best_mask = mask
-                best_count = count
-                best_score = score
-
-        if best_mask is None or best_count < int(min_inliers):
-            return None
-
-        inliers = points[best_mask]
-        center, axis = self._fit_axis_pca(inliers)
-        dist = self._line_distances(inliers, center, axis)
-        rms = float(np.sqrt(np.mean(dist**2))) if dist.size else 0.0
-        return {
-            "inlier_mask": best_mask,
-            "center": center,
-            "axis": axis,
-            "inlier_count": int(best_count),
-            "rms_mm": rms,
-        }
-
-    def _distance_to_segment_mask(self, points, start, end, radius_mm):
-        """Boolean mask for points within radius of a finite 3D line segment."""
-        start = np.asarray(start, dtype=float)
-        end = np.asarray(end, dtype=float)
-        seg = end - start
-        seg_len2 = float(np.dot(seg, seg))
-        if seg_len2 <= 1e-9:
-            d = np.linalg.norm(points - start.reshape(1, 3), axis=1)
-            return d <= float(radius_mm)
-
-        rel = points - start.reshape(1, 3)
-        t = (rel @ seg) / seg_len2
-        t = np.clip(t, 0.0, 1.0)
-        closest = start.reshape(1, 3) + np.outer(t, seg)
-        d = np.linalg.norm(points - closest, axis=1)
-        return d <= float(radius_mm)
-
-    def _distance_to_segment(self, points, start, end):
-        """Distance from many 3D points to one finite segment."""
-        start = np.asarray(start, dtype=float)
-        end = np.asarray(end, dtype=float)
-        seg = end - start
-        seg_len2 = float(np.dot(seg, seg))
-        if seg_len2 <= 1e-9:
-            return np.linalg.norm(points - start.reshape(1, 3), axis=1)
-        rel = points - start.reshape(1, 3)
-        t = (rel @ seg) / seg_len2
-        t = np.clip(t, 0.0, 1.0)
-        closest = start.reshape(1, 3) + np.outer(t, seg)
-        return np.linalg.norm(points - closest, axis=1)
-
-    def _distance_to_line_with_extension(self, points, start, end, extension_mm=8.0):
-        """Distance to line axis with finite extent extended at both ends."""
-        start = np.asarray(start, dtype=float)
-        end = np.asarray(end, dtype=float)
-        seg = end - start
-        length = float(np.linalg.norm(seg))
-        if length <= 1e-9:
-            d = np.linalg.norm(points - start.reshape(1, 3), axis=1)
-            return d, np.zeros((points.shape[0],), dtype=bool)
-        u = seg / length
-        rel = points - start.reshape(1, 3)
-        t = rel @ u
-        closest = start.reshape(1, 3) + np.outer(t, u)
-        d = np.linalg.norm(points - closest, axis=1)
-        ext = float(max(0.0, extension_mm))
-        valid = (t >= -ext) & (t <= (length + ext))
-        return d, valid
-
-    def _point_to_segment_distance(self, point, start, end):
-        """Distance from one 3D point to one finite segment."""
-        p = np.asarray(point, dtype=float)
-        s = np.asarray(start, dtype=float)
-        e = np.asarray(end, dtype=float)
-        v = e - s
-        vv = float(np.dot(v, v))
-        if vv <= 1e-9:
-            return float(np.linalg.norm(p - s))
-        t = float(np.dot(p - s, v) / vv)
-        t = max(0.0, min(1.0, t))
-        c = s + t * v
-        return float(np.linalg.norm(p - c))
-
-    def _line_quality_tuple(self, line):
-        """Sortable quality tuple for choosing between duplicate line hypotheses."""
-        model_score = line.get("best_model_score", None)
-        has_model = 1 if model_score is not None else 0
-        model_val = float(model_score) if model_score is not None else -1e9
-        return (
-            has_model,
-            model_val,
-            float(line.get("inside_fraction", 0.0)),
-            float(line.get("inlier_count", 0.0)),
-            -float(line.get("rms_mm", 999.0)),
-        )
-
-    def _are_lines_duplicate(self, line_a, line_b, distance_mm=1.8, angle_deg=3.0):
-        """Return True if two detected lines likely represent the same shank."""
-        a0 = np.asarray(line_a["start_ras"], dtype=float)
-        a1 = np.asarray(line_a["end_ras"], dtype=float)
-        b0 = np.asarray(line_b["start_ras"], dtype=float)
-        b1 = np.asarray(line_b["end_ras"], dtype=float)
-
-        da = a1 - a0
-        db = b1 - b0
-        na = float(np.linalg.norm(da))
-        nb = float(np.linalg.norm(db))
-        if na <= 1e-6 or nb <= 1e-6:
-            return False
-        ua = da / na
-        ub = db / nb
-        ang = float(np.degrees(np.arccos(np.clip(abs(np.dot(ua, ub)), 0.0, 1.0))))
-        if ang > float(angle_deg):
-            return False
-
-        d = [
-            self._point_to_segment_distance(a0, b0, b1),
-            self._point_to_segment_distance(a1, b0, b1),
-            self._point_to_segment_distance(b0, a0, a1),
-            self._point_to_segment_distance(b1, a0, a1),
-        ]
-        return float(np.mean(d)) <= float(distance_mm)
-
-    def _suppress_duplicate_lines(self, lines, distance_mm=1.8, angle_deg=3.0):
-        """Non-max suppression for near-duplicate shank detections."""
-        if not lines:
-            return [], 0
-        ordered = sorted(lines, key=self._line_quality_tuple, reverse=True)
-        kept = []
-        rejected = 0
-        for cand in ordered:
-            dup = False
-            for k in kept:
-                if self._are_lines_duplicate(k, cand, distance_mm=distance_mm, angle_deg=angle_deg):
-                    dup = True
-                    break
-            if dup:
-                rejected += 1
-                continue
-            kept.append(cand)
-        return kept, rejected
-
-    def _suppress_conflicting_lines_by_support(
-        self,
-        lines,
-        support_points,
-        support_radius_mm=1.2,
-        overlap_threshold=0.60,
-    ):
-        """Suppress lines that share most supporting points with a better line."""
-        if not lines or support_points is None or support_points.shape[0] == 0:
-            return list(lines), 0
-
-        ordered = sorted(lines, key=self._line_quality_tuple, reverse=True)
-        kept = []
-        kept_masks = []
-        rejected = 0
-        for cand in ordered:
-            c_mask = self._distance_to_segment_mask(
-                support_points,
-                start=cand["start_ras"],
-                end=cand["end_ras"],
-                radius_mm=support_radius_mm,
-            )
-            c_count = int(np.count_nonzero(c_mask))
-            if c_count <= 0:
-                continue
-
-            conflict = False
-            for k_mask in kept_masks:
-                k_count = int(np.count_nonzero(k_mask))
-                inter = int(np.count_nonzero(np.logical_and(c_mask, k_mask)))
-                denom = max(1, min(c_count, k_count))
-                if (float(inter) / float(denom)) >= float(overlap_threshold):
-                    conflict = True
-                    break
-            if conflict:
-                rejected += 1
-                continue
-            kept.append(cand)
-            kept_masks.append(c_mask)
-
-        return kept, rejected
-
-    def _point_near_mask(self, volume_node, point_ras, mask_kji, radius_mm=2.0):
-        """Return True if point is within radius of any positive mask voxel."""
-        if mask_kji is None:
-            return False
-        p = np.asarray(self._ras_to_ijk_float(volume_node, point_ras), dtype=float)
-        i0, j0, k0 = p
-        sx, sy, sz = volume_node.GetSpacing()
-        ri = max(1, int(round(float(radius_mm) / max(1e-6, float(sx)))))
-        rj = max(1, int(round(float(radius_mm) / max(1e-6, float(sy)))))
-        rk = max(1, int(round(float(radius_mm) / max(1e-6, float(sz)))))
-        i1 = max(0, int(math.floor(i0 - ri)))
-        i2 = min(mask_kji.shape[2] - 1, int(math.ceil(i0 + ri)))
-        j1 = max(0, int(math.floor(j0 - rj)))
-        j2 = min(mask_kji.shape[1] - 1, int(math.ceil(j0 + rj)))
-        k1 = max(0, int(math.floor(k0 - rk)))
-        k2 = min(mask_kji.shape[0] - 1, int(math.ceil(k0 + rk)))
-        if i1 > i2 or j1 > j2 or k1 > k2:
-            return False
-        patch = mask_kji[k1 : k2 + 1, j1 : j2 + 1, i1 : i2 + 1]
-        return bool(np.any(patch))
-
-    def _refine_lines_exclusive(
-        self,
-        volume_node,
-        arr_kji,
-        support_points,
-        raw_lines,
-        inlier_radius_mm,
-        min_length_mm,
-        min_inliers,
-        gating_mask_kji,
-        skull_mask_kji,
-        min_inside_fraction,
-        models_by_id=None,
-        min_model_score=None,
-    ):
-        """Second-pass exclusive assignment: each support point belongs to at most one line."""
-        if not raw_lines or support_points is None or support_points.shape[0] == 0:
-            return [], {"gap_reject_count": 0, "duplicate_reject_count": 0}
-
-        n = support_points.shape[0]
-        m = len(raw_lines)
-        dist_mat = np.full((n, m), np.inf, dtype=float)
-        for li, line in enumerate(raw_lines):
-            d, valid = self._distance_to_line_with_extension(
-                support_points,
-                start=line["start_ras"],
-                end=line["end_ras"],
-                extension_mm=8.0,
-            )
-            d[~valid] = np.inf
-            dist_mat[:, li] = d
-
-        assign_radius_mm = max(1.5, float(inlier_radius_mm) * 1.25)
-        best_idx = np.argmin(dist_mat, axis=1)
-        best_dist = dist_mat[np.arange(n), best_idx]
-        assigned = np.full((n,), -1, dtype=int)
-        assigned[best_dist <= assign_radius_mm] = best_idx[best_dist <= assign_radius_mm]
-
-        center_ras = self._volume_center_ras(volume_node)
-        kept = []
-        gap_reject_count = 0
-
-        for li in range(m):
-            pts = support_points[assigned == li]
-            if pts.shape[0] < int(min_inliers):
-                continue
-            center, axis = self._fit_axis_pca(pts)
-            t = (pts - center.reshape(1, 3)) @ axis
-            if t.size < 2:
-                continue
-            lo = float(np.percentile(t, 2.0))
-            hi = float(np.percentile(t, 98.0))
-            length = float(hi - lo)
-            if length < float(min_length_mm):
-                continue
-
-            p0 = center + axis * lo
-            p1 = center + axis * hi
-            d0 = float(np.linalg.norm(p0 - center_ras))
-            d1 = float(np.linalg.norm(p1 - center_ras))
-            if d0 < d1:
-                entry_ras = p1
-                target_ras = p0
-            else:
-                entry_ras = p0
-                target_ras = p1
-
-            inside_fraction = 1.0
-            if gating_mask_kji is not None:
-                inside_fraction = self._segment_inside_mask_fraction(
-                    volume_node=volume_node,
-                    start_ras=entry_ras,
-                    end_ras=target_ras,
-                    mask_kji=gating_mask_kji,
-                    step_mm=1.0,
-                )
-                if inside_fraction < float(min_inside_fraction):
-                    continue
-                clamped = self._clamp_segment_to_mask(
-                    volume_node=volume_node,
-                    start_ras=entry_ras,
-                    end_ras=target_ras,
-                    mask_kji=gating_mask_kji,
-                    step_mm=0.5,
-                )
-                if clamped is None:
-                    continue
-                entry_ras, target_ras = clamped
-                length = float(np.linalg.norm(np.asarray(entry_ras) - np.asarray(target_ras)))
-                if length < float(min_length_mm):
-                    continue
-
-            if skull_mask_kji is not None:
-                if not self._point_near_mask(
-                    volume_node=volume_node,
-                    point_ras=entry_ras,
-                    mask_kji=skull_mask_kji,
-                    radius_mm=3.0,
-                ):
-                    continue
-
-            rms = float(np.sqrt(np.mean(self._line_distances(pts, center, axis) ** 2))) if pts.shape[0] else 0.0
-            line = {
-                "start_ras": [float(entry_ras[0]), float(entry_ras[1]), float(entry_ras[2])],
-                "end_ras": [float(target_ras[0]), float(target_ras[1]), float(target_ras[2])],
-                "length_mm": float(length),
-                "inlier_count": int(pts.shape[0]),
-                "rms_mm": float(rms),
-                "inside_fraction": float(inside_fraction),
-            }
-
-            if models_by_id:
-                model_fit = self._select_best_model_for_line(
-                    volume_node=volume_node,
-                    arr_kji=arr_kji,
-                    line=line,
-                    models_by_id=models_by_id,
-                )
-                line.update(model_fit)
-                best_model_id = str(model_fit.get("best_model_id") or "")
-                if min_model_score is not None and model_fit.get("best_model_score") is not None:
-                    if float(model_fit["best_model_score"]) < float(min_model_score):
-                        continue
-
-                observed_gap = self._max_empty_gap_mm_from_line_inliers(t_vals=t, lo=lo, hi=hi, bin_mm=0.5)
-                if best_model_id and best_model_id in models_by_id:
-                    max_model_gap = self._model_max_center_gap_mm(models_by_id[best_model_id])
-                    allowed_gap = float(max_model_gap) + 3.0
-                else:
-                    allowed_gap = 14.0
-                line["max_observed_gap_mm"] = float(observed_gap)
-                line["max_allowed_gap_mm"] = float(allowed_gap)
-                if observed_gap > allowed_gap:
-                    gap_reject_count += 1
-                    continue
-
-            kept.append(line)
-
-        kept, duplicate_reject_count = self._suppress_conflicting_lines_by_support(
-            lines=kept,
-            support_points=support_points,
-            support_radius_mm=max(1.0, float(inlier_radius_mm)),
-            overlap_threshold=0.60,
-        )
-        return kept, {
-            "gap_reject_count": int(gap_reject_count),
-            "duplicate_reject_count": int(duplicate_reject_count),
-        }
-
     def preview_masks(
         self,
         volume_node,
@@ -2119,12 +1647,25 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         head_mask_threshold_hu=-300.0,
         head_mask_aggressive_cleanup=True,
         head_mask_close_mm=2.0,
-        min_metal_depth_mm=0.0,
-        max_metal_depth_mm=999.0,
+        min_metal_depth_mm=5.0,
+        max_metal_depth_mm=220.0,
     ):
         """Build and preview head-distance masks only (no line fitting)."""
         self._ensure_masking_api()
         arr_kji = slicer.util.arrayFromVolume(volume_node)
+        precomputed_gating_mask_kji = None
+        precomputed_head_distance_map_kji = None
+        cache_hit = False
+        if bool(use_head_mask) or bool(build_head_mask):
+            cached, cache_hit = self._get_head_distance_cache(
+                volume_node=volume_node,
+                arr_kji=arr_kji,
+                head_mask_threshold_hu=head_mask_threshold_hu,
+                head_mask_close_mm=head_mask_close_mm,
+                head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+            )
+            precomputed_gating_mask_kji = cached["gating_mask_kji"]
+            precomputed_head_distance_map_kji = cached["head_distance_map_kji"]
         result = shank_masking.build_preview_masks(
             arr_kji=arr_kji,
             spacing_xyz=volume_node.GetSpacing(),
@@ -2136,7 +1677,12 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             head_mask_close_mm=head_mask_close_mm,
             min_metal_depth_mm=min_metal_depth_mm,
             max_metal_depth_mm=max_metal_depth_mm,
+            precomputed_gating_mask_kji=precomputed_gating_mask_kji,
+            precomputed_head_distance_map_kji=precomputed_head_distance_map_kji,
         )
+        result_flags = result.get("profile_flags") if isinstance(result.get("profile_flags"), dict) else {}
+        result_flags["head_cache_hit"] = bool(cache_hit)
+        result["profile_flags"] = result_flags
         ijk_kji = result.get("in_mask_ijk_kji")
         if ijk_kji is None or int(ijk_kji.shape[0]) == 0:
             in_mask_points_ras = np.empty((0, 3), dtype=float)
@@ -2176,9 +1722,8 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         head_mask_threshold_hu=-300.0,
         head_mask_aggressive_cleanup=True,
         head_mask_close_mm=2.0,
-        min_metal_depth_mm=0.0,
-        max_metal_depth_mm=999.0,
-        min_inside_fraction=0.70,
+        min_metal_depth_mm=5.0,
+        max_metal_depth_mm=220.0,
         models_by_id=None,
         min_model_score=None,
     ):
@@ -2187,11 +1732,40 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             raise RuntimeError("numpy is required for trajectory detection")
 
         self._ensure_masking_api()
+        self._ensure_pipeline_api()
+
         arr_kji = slicer.util.arrayFromVolume(volume_node)
-        preview = shank_masking.build_preview_masks(
+        center_ras = self._volume_center_ras(volume_node)
+        precomputed_gating_mask_kji = None
+        precomputed_head_distance_map_kji = None
+        cache_hit = False
+        if bool(use_head_mask) or bool(build_head_mask):
+            cached, cache_hit = self._get_head_distance_cache(
+                volume_node=volume_node,
+                arr_kji=arr_kji,
+                head_mask_threshold_hu=head_mask_threshold_hu,
+                head_mask_close_mm=head_mask_close_mm,
+                head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+            )
+            precomputed_gating_mask_kji = cached["gating_mask_kji"]
+            precomputed_head_distance_map_kji = cached["head_distance_map_kji"]
+
+        # Delegate detection math to reusable core pipeline; this keeps UI thin.
+        result = shank_pipeline.run_detection(
             arr_kji=arr_kji,
             spacing_xyz=volume_node.GetSpacing(),
             threshold=threshold,
+            ijk_kji_to_ras_fn=lambda ijk_kji: self._ijk_kji_to_ras_points(volume_node, ijk_kji),
+            ras_to_ijk_fn=lambda ras_xyz: self._ras_to_ijk_float(volume_node, ras_xyz),
+            center_ras=center_ras,
+            max_points=max_points,
+            max_lines=max_lines,
+            inlier_radius_mm=inlier_radius_mm,
+            min_length_mm=min_length_mm,
+            min_inliers=min_inliers,
+            ransac_iterations=ransac_iterations,
+            exclude_segments=exclude_segments,
+            exclude_radius_mm=exclude_radius_mm,
             use_head_mask=use_head_mask,
             build_head_mask=build_head_mask,
             head_mask_threshold_hu=head_mask_threshold_hu,
@@ -2199,219 +1773,15 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             head_mask_close_mm=head_mask_close_mm,
             min_metal_depth_mm=min_metal_depth_mm,
             max_metal_depth_mm=max_metal_depth_mm,
-        )
-        candidate_count = int(preview.get("candidate_count", 0))
-        if candidate_count == 0:
-            return {
-                "candidate_count": 0,
-                "head_mask_kept_count": 0,
-                "inside_method": "none",
-                "metal_in_head_count": 0,
-                "depth_kept_count": 0,
-                "gap_reject_count": 0,
-                "duplicate_reject_count": 0,
-                "metal_mask_kji": (arr_kji >= float(threshold)).astype(np.uint8),
-                "head_mask_kji": None,
-                "skull_mask_kji": None,
-                "inside_skull_mask_kji": None,
-                "metal_depth_all_mm": np.empty((0,), dtype=float),
-                "metal_depth_values_mm": np.empty((0,), dtype=float),
-                "in_mask_points_ras": np.empty((0, 3), dtype=float),
-                "lines": [],
-            }
-
-        gating_mask_kji = preview.get("head_mask_kji")
-        inside_skull_mask_kji = preview.get("inside_skull_mask_kji")
-        skull_mask_kji = preview.get("skull_mask_kji")
-        inside_method = str(preview.get("inside_method", "none"))
-        gating_mask_type = str(preview.get("gating_mask_type", "none"))
-
-        ijk_all = np.asarray(preview.get("in_mask_ijk_kji"), dtype=int).reshape(-1, 3)
-        head_mask_kept_count_full = int(ijk_all.shape[0])
-        metal_in_head_count = int(preview.get("metal_in_head_count", head_mask_kept_count_full))
-        depth_kept_count = int(preview.get("depth_kept_count", head_mask_kept_count_full))
-        metal_depth_all_mm = np.asarray(preview.get("metal_depth_all_mm"), dtype=float).reshape(-1)
-        metal_depth_values_mm = np.asarray(preview.get("metal_depth_values_mm"), dtype=float).reshape(-1)
-        if head_mask_kept_count_full > int(max_points):
-            rng = np.random.default_rng(0)
-            pick = rng.choice(head_mask_kept_count_full, size=int(max_points), replace=False)
-            ijk_kji = ijk_all[pick]
-        else:
-            ijk_kji = ijk_all
-
-        head_mask_kept_count = int(head_mask_kept_count_full)
-        in_mask_points_ras = np.empty((0, 3), dtype=float)
-        points = self._ijk_kji_to_ras_points(volume_node, ijk_kji)
-        in_mask_points_ras = points.copy()
-        if head_mask_kept_count == 0:
-            return {
-                "candidate_count": candidate_count,
-                "head_mask_kept_count": 0,
-                "gating_mask_type": gating_mask_type,
-                "inside_method": inside_method,
-                "metal_in_head_count": metal_in_head_count,
-                "depth_kept_count": depth_kept_count,
-                "gap_reject_count": 0,
-                "duplicate_reject_count": 0,
-                "metal_mask_kji": (arr_kji >= float(threshold)).astype(np.uint8),
-                "head_mask_kji": gating_mask_kji.astype(np.uint8) if gating_mask_kji is not None else None,
-                "skull_mask_kji": skull_mask_kji.astype(np.uint8) if skull_mask_kji is not None else None,
-                "inside_skull_mask_kji": inside_skull_mask_kji.astype(np.uint8)
-                if inside_skull_mask_kji is not None
-                else None,
-                "metal_depth_all_mm": metal_depth_all_mm,
-                "metal_depth_values_mm": metal_depth_values_mm,
-                "in_mask_points_ras": in_mask_points_ras,
-                "lines": [],
-            }
-
-        remaining = points
-
-        if exclude_segments:
-            keep = np.ones((remaining.shape[0],), dtype=bool)
-            for seg in exclude_segments:
-                seg_mask = self._distance_to_segment_mask(
-                    remaining,
-                    seg["start_ras"],
-                    seg["end_ras"],
-                    radius_mm=exclude_radius_mm,
-                )
-                keep &= ~seg_mask
-            remaining = remaining[keep]
-
-        lines = []
-        support_points = remaining.copy()
-        center_ras = self._volume_center_ras(volume_node)
-
-        for _ in range(int(max_lines)):
-            if remaining.shape[0] < int(min_inliers):
-                break
-
-            fit = self._ransac_fit_line(
-                remaining,
-                distance_threshold_mm=inlier_radius_mm,
-                min_inliers=min_inliers,
-                iterations=ransac_iterations,
-            )
-            if fit is None:
-                break
-
-            mask = fit["inlier_mask"]
-            inliers = remaining[mask]
-            center = fit["center"]
-            axis = fit["axis"]
-
-            t = (inliers - center.reshape(1, 3)) @ axis
-            if t.size < 2:
-                remaining = remaining[~mask]
-                continue
-
-            lo = float(np.percentile(t, 2.0))
-            hi = float(np.percentile(t, 98.0))
-            length = hi - lo
-            if length < float(min_length_mm):
-                remaining = remaining[~mask]
-                continue
-
-            p_start = center + axis * lo
-            p_end = center + axis * hi
-
-            # Heuristic orientation: target/deep point is closer to volume center.
-            d_start = float(np.linalg.norm(p_start - center_ras))
-            d_end = float(np.linalg.norm(p_end - center_ras))
-            if d_start < d_end:
-                entry_ras = p_end
-                target_ras = p_start
-            else:
-                entry_ras = p_start
-                target_ras = p_end
-
-            inside_fraction = 1.0
-            if gating_mask_kji is not None:
-                inside_fraction = self._segment_inside_mask_fraction(
-                    volume_node=volume_node,
-                    start_ras=entry_ras,
-                    end_ras=target_ras,
-                    mask_kji=gating_mask_kji,
-                    step_mm=1.0,
-                )
-                if inside_fraction < float(min_inside_fraction):
-                    remaining = remaining[~mask]
-                    continue
-                clamped = self._clamp_segment_to_mask(
-                    volume_node=volume_node,
-                    start_ras=entry_ras,
-                    end_ras=target_ras,
-                    mask_kji=gating_mask_kji,
-                    step_mm=0.5,
-                )
-                if clamped is None:
-                    remaining = remaining[~mask]
-                    continue
-                entry_ras, target_ras = clamped
-                length = float(np.linalg.norm(np.asarray(entry_ras) - np.asarray(target_ras)))
-                if length < float(min_length_mm):
-                    remaining = remaining[~mask]
-                    continue
-
-            line = {
-                "start_ras": [float(entry_ras[0]), float(entry_ras[1]), float(entry_ras[2])],
-                "end_ras": [float(target_ras[0]), float(target_ras[1]), float(target_ras[2])],
-                "length_mm": float(length),
-                "inlier_count": int(fit["inlier_count"]),
-                "rms_mm": float(fit["rms_mm"]),
-                "inside_fraction": float(inside_fraction),
-            }
-
-            lines.append(line)
-
-            remaining = remaining[~mask]
-        lines, refine_stats = self._refine_lines_exclusive(
-            volume_node=volume_node,
-            arr_kji=arr_kji,
-            support_points=support_points,
-            raw_lines=lines,
-            inlier_radius_mm=float(inlier_radius_mm),
-            min_length_mm=float(min_length_mm),
-            min_inliers=int(min_inliers),
-            gating_mask_kji=gating_mask_kji,
-            skull_mask_kji=skull_mask_kji,
-            min_inside_fraction=float(min_inside_fraction),
             models_by_id=models_by_id,
             min_model_score=min_model_score,
+            precomputed_gating_mask_kji=precomputed_gating_mask_kji,
+            precomputed_head_distance_map_kji=precomputed_head_distance_map_kji,
         )
-        gap_reject_count = int(refine_stats.get("gap_reject_count", 0))
-        duplicate_reject_count = int(refine_stats.get("duplicate_reject_count", 0))
-        lines = sorted(
-            lines,
-            key=lambda line: (
-                float(line.get("best_model_score", 0.0)) if line.get("best_model_score") is not None else -1e9,
-                float(line.get("inside_fraction", 0.0)),
-                float(line.get("inlier_count", 0)),
-                -float(line.get("rms_mm", 999.0)),
-            ),
-            reverse=True,
-        )
-        return {
-            "candidate_count": candidate_count,
-            "head_mask_kept_count": head_mask_kept_count,
-            "gating_mask_type": gating_mask_type,
-            "inside_method": inside_method,
-            "metal_in_head_count": metal_in_head_count,
-            "depth_kept_count": depth_kept_count,
-            "gap_reject_count": int(gap_reject_count),
-            "duplicate_reject_count": int(duplicate_reject_count),
-            "metal_mask_kji": (arr_kji >= float(threshold)).astype(np.uint8),
-            "head_mask_kji": gating_mask_kji.astype(np.uint8) if gating_mask_kji is not None else None,
-            "skull_mask_kji": skull_mask_kji.astype(np.uint8) if skull_mask_kji is not None else None,
-            "inside_skull_mask_kji": inside_skull_mask_kji.astype(np.uint8)
-            if inside_skull_mask_kji is not None
-            else None,
-            "metal_depth_all_mm": metal_depth_all_mm,
-            "metal_depth_values_mm": metal_depth_values_mm,
-            "in_mask_points_ras": in_mask_points_ras,
-            "lines": lines,
-        }
+        result_flags = result.get("profile_flags") if isinstance(result.get("profile_flags"), dict) else {}
+        result_flags["head_cache_hit"] = bool(cache_hit)
+        result["profile_flags"] = result_flags
+        return result
 
     def remove_nodes_by_ids(self, node_ids):
         """Remove nodes by ID if present in scene."""
@@ -2442,6 +1812,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             display.SetSelectedColor(1.0, 0.4, 0.4)
             display.SetLineThickness(0.5)
             display.SetPointLabelsVisibility(True)
+            # Keep control-point labels (e.g., R02-1/R02-2) but hide auto length text.
+            if hasattr(display, "SetPropertiesLabelVisibility"):
+                display.SetPropertiesLabelVisibility(False)
         return node
 
     def create_contacts_fiducials_nodes_by_trajectory(self, contacts, node_prefix="CTShankContacts"):

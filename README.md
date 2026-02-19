@@ -99,6 +99,7 @@ Use this when you only have a CT with electrode artifact and no ROSA `.ros` meta
 3. Set detection parameters (threshold, inlier radius, min length, min inliers).
    - optional head-mask gating (`Use head mask filter`) to suppress external wire artifacts
    - use `Min metal depth` / `Max metal depth` to keep only metal points at a plausible depth from the outer head surface
+   - defaults: `Min metal depth = 5 mm`, `Max metal depth = 220 mm`
    - optional model-template scoring (`Enable model-template scoring`) to rank/reject lines by expected contact pattern
    - optional mask visualization (`Show metal/head masks in slice views`) to inspect thresholded metal and head gating
 4. Click `Preview Masks` to inspect the gated metal mask before running trajectory extraction.
@@ -277,6 +278,10 @@ mismatch:
 
 ## CLI Usage
 
+`tools/shank_detect.py` can run with:
+- standard Python if `numpy` and `SimpleITK` are installed
+- or Slicer Python (`Slicer --python-script ...`) if you prefer to reuse Slicer's bundled environment
+
 List ROS volumes/trajectories:
 
 ```bash
@@ -328,6 +333,35 @@ python tools/rosa_export.py contacts-generate \
   --out-rosa-json /tmp/case_contacts_rosa.json \
   --out-fcsv /tmp/case_contacts_ras.fcsv \
   --out-markups /tmp/case_contacts_ras.mrk.json
+```
+
+Preview CT metal/head-depth masks for shank detection:
+
+```bash
+python tools/shank_detect.py preview-masks \
+  --ct /path/to/postop_ct.nii.gz \
+  --out-dir /tmp/shank_preview \
+  --metal-threshold-hu 1800 \
+  --use-head-mask \
+  --head-mask-threshold-hu -300 \
+  --head-mask-close-mm 2.0 \
+  --min-metal-depth-mm 5.0 \
+  --max-metal-depth-mm 220
+```
+
+Run full CT trajectory detection (no Slicer UI):
+
+```bash
+python tools/shank_detect.py detect \
+  --ct /path/to/postop_ct.nii.gz \
+  --out-dir /tmp/shank_detect \
+  --metal-threshold-hu 1800 \
+  --use-head-mask \
+  --head-mask-threshold-hu -300 \
+  --head-mask-close-mm 2.0 \
+  --min-metal-depth-mm 5.0 \
+  --max-metal-depth-mm 220 \
+  --max-lines 30
 ```
 
 ## Case Folder Convention
