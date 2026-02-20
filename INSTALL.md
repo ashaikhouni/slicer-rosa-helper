@@ -4,6 +4,23 @@
 
 - 3D Slicer installed (tested with Slicer 5.x)
 - Local copy of this repository
+- Python environment for CLI tools:
+  - `numpy`
+  - `SimpleITK`
+- Optional for ANTs-based segmentation integration workflows:
+  - `antspyx` (ANTsPy)
+
+Optional environment setup command:
+
+```bash
+conda env update -f environment.yml
+```
+
+Optional ANTsPy install (only if you use ANTs-based segmentation integration):
+
+```bash
+pip install antspyx
+```
 
 ## Install Steps
 
@@ -36,6 +53,20 @@ Default export folder:
 Exports:
 - aligned `.nii.gz` volumes
 - `<prefix>_aligned_world_coords.txt` (contact coordinates)
+
+## THOMAS to DICOM (Optional)
+
+If you want a ROSA-importable DICOM with THOMAS labels burned into MRI:
+
+1. Load the original MRI DICOM series in Slicer.
+2. Register THOMAS MRI -> ROSA base in `ROSA Helper`.
+3. Load THOMAS masks from the THOMAS output folder (`left/` and `right/`).
+4. In `Segment Editor -> Mask volume`, burn selected segment(s) into a new scalar volume.
+5. In Subject Hierarchy, right-click the new volume and `Export to DICOM...` as a new series.
+
+Notes:
+- Use the DICOM-based MRI as `Input Volume` for best metadata compatibility.
+- `Mask volume` uses the currently selected segment only; combine segments first if needed.
 
 ## Troubleshooting
 

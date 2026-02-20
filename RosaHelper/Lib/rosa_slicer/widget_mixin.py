@@ -212,6 +212,64 @@ class RosaHelperWidgetMixin:
         self.fsLoadSurfacesButton.clicked.connect(self.onLoadFSSurfacesClicked)
         fs_layout.addRow(self.fsLoadSurfacesButton)
 
+    def _build_thomas_ui(self):
+        """Create controls for THOMAS thalamus mask registration/import."""
+        self.thomasSection = ctk.ctkCollapsibleButton()
+        self.thomasSection.text = "THOMAS Thalamus Integration (V1)"
+        self.thomasSection.collapsed = True
+        self.layout.addWidget(self.thomasSection)
+
+        th_layout = qt.QFormLayout(self.thomasSection)
+
+        self.thomasFixedSelector = slicer.qMRMLNodeComboBox()
+        self.thomasFixedSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.thomasFixedSelector.noneEnabled = True
+        self.thomasFixedSelector.addEnabled = False
+        self.thomasFixedSelector.removeEnabled = False
+        self.thomasFixedSelector.setMRMLScene(slicer.mrmlScene)
+        self.thomasFixedSelector.setToolTip("ROSA base/reference volume (fixed image)")
+        th_layout.addRow("ROSA base volume", self.thomasFixedSelector)
+
+        self.thomasMovingSelector = slicer.qMRMLNodeComboBox()
+        self.thomasMovingSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.thomasMovingSelector.noneEnabled = True
+        self.thomasMovingSelector.addEnabled = False
+        self.thomasMovingSelector.removeEnabled = False
+        self.thomasMovingSelector.setMRMLScene(slicer.mrmlScene)
+        self.thomasMovingSelector.setToolTip("MRI used to run THOMAS segmentation")
+        th_layout.addRow("THOMAS MRI", self.thomasMovingSelector)
+
+        self.thomasInitModeCombo = qt.QComboBox()
+        self.thomasInitModeCombo.addItems(["useGeometryAlign", "useMomentsAlign"])
+        self.thomasInitModeCombo.setCurrentText("useGeometryAlign")
+        th_layout.addRow("Init mode", self.thomasInitModeCombo)
+
+        self.thomasTransformNameEdit = qt.QLineEdit("THOMAS_to_ROSA")
+        th_layout.addRow("Output transform", self.thomasTransformNameEdit)
+
+        self.thomasRegisterButton = qt.QPushButton("Register THOMAS MRI -> ROSA")
+        self.thomasRegisterButton.clicked.connect(self.onRegisterThomasMRIToRosaClicked)
+        th_layout.addRow(self.thomasRegisterButton)
+
+        self.thomasMaskDirSelector = ctk.ctkPathLineEdit()
+        self.thomasMaskDirSelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.thomasMaskDirSelector.setToolTip(
+            "Directory containing THOMAS outputs (searched recursively for *THALAMUS*.nii/.nii.gz)"
+        )
+        th_layout.addRow("THOMAS output dir", self.thomasMaskDirSelector)
+
+        self.thomasApplyTransformCheck = qt.QCheckBox("Apply THOMAS->ROSA transform")
+        self.thomasApplyTransformCheck.setChecked(True)
+        th_layout.addRow(self.thomasApplyTransformCheck)
+
+        self.thomasHardenCheck = qt.QCheckBox("Harden loaded thalamus transforms")
+        self.thomasHardenCheck.setChecked(True)
+        th_layout.addRow(self.thomasHardenCheck)
+
+        self.thomasLoadMasksButton = qt.QPushButton("Load THOMAS Thalamus Masks")
+        self.thomasLoadMasksButton.clicked.connect(self.onLoadThomasMasksClicked)
+        th_layout.addRow(self.thomasLoadMasksButton)
+
     def _build_qc_ui(self):
         """Create QC table that updates automatically after contact generation."""
         self.qcSection = ctk.ctkCollapsibleButton()
@@ -996,9 +1054,27 @@ class RosaHelperWidgetMixin:
             first_name = sorted(self.loadedVolumeNodeIDs.keys())[0]
             self.fsFixedSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[first_name])
 
+    def _preselect_thomas_reference_volume(self):
+        """Default THOMAS fixed volume selector to loaded ROSA reference volume."""
+        if self.referenceVolumeName and self.referenceVolumeName in self.loadedVolumeNodeIDs:
+            node_id = self.loadedVolumeNodeIDs[self.referenceVolumeName]
+            self.thomasFixedSelector.setCurrentNodeID(node_id)
+            return
+        if self.loadedVolumeNodeIDs:
+            first_name = sorted(self.loadedVolumeNodeIDs.keys())[0]
+            self.thomasFixedSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[first_name])
+
     def _get_or_create_fs_transform_node(self):
         """Return existing or newly created linear transform for FS->ROSA mapping."""
         name = self.fsTransformNameEdit.text.strip() or "FS_to_ROSA"
+        node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
+        return node
+
+    def _get_or_create_thomas_transform_node(self):
+        """Return existing or newly created linear transform for THOMAS->ROSA mapping."""
+        name = self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA"
         node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
         if node is None:
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
@@ -1136,3 +1212,115 @@ class RosaHelperWidgetMixin:
                 self.log(f"[fs] annotation color node: {color_node_name}")
 
         self.log(f"[fs] loaded {len(loaded_nodes)} surface models")
+
+    def onRegisterThomasMRIToRosaClicked(self):
+        """Run rigid registration from THOMAS MRI to selected ROSA base volume."""
+        fixed_node = self.thomasFixedSelector.currentNode()
+        moving_node = self.thomasMovingSelector.currentNode()
+        if fixed_node is None or moving_node is None:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select both ROSA base volume and THOMAS MRI volume.",
+            )
+            return
+        if fixed_node.GetID() == moving_node.GetID():
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Fixed and moving volumes must be different nodes.",
+            )
+            return
+
+        transform_node = self._get_or_create_thomas_transform_node()
+        init_mode = self._widget_text(self.thomasInitModeCombo) or "useGeometryAlign"
+        self.log(
+            f"[thomas] registration start: moving={moving_node.GetName()} -> fixed={fixed_node.GetName()} "
+            f"(init={init_mode})"
+        )
+        try:
+            self.logic.run_brainsfit_rigid_registration(
+                fixed_volume_node=fixed_node,
+                moving_volume_node=moving_node,
+                output_transform_node=transform_node,
+                initialize_mode=init_mode,
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[thomas] registration error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        self.thomasToRosaTransformNodeID = transform_node.GetID()
+        self.log(f"[thomas] registration done: transform={transform_node.GetName()}")
+
+    def onLoadThomasMasksClicked(self):
+        """Load THOMAS thalamus masks and optionally map them to ROSA space."""
+        thomas_dir = self.thomasMaskDirSelector.currentPath
+        if not thomas_dir:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select THOMAS output directory.",
+            )
+            return
+
+        apply_transform = bool(self.thomasApplyTransformCheck.checked)
+        transform_node = None
+        if apply_transform:
+            if self.thomasToRosaTransformNodeID:
+                transform_node = slicer.mrmlScene.GetNodeByID(self.thomasToRosaTransformNodeID)
+            if transform_node is None:
+                name = self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA"
+                transform_node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
+            if transform_node is None and self.fsToRosaTransformNodeID:
+                transform_node = slicer.mrmlScene.GetNodeByID(self.fsToRosaTransformNodeID)
+            if transform_node is None:
+                fs_name = self.fsTransformNameEdit.text.strip() or "FS_to_ROSA"
+                transform_node = self.logic._find_node_by_name(fs_name, "vtkMRMLLinearTransformNode")
+            if transform_node is None:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "ROSA Helper",
+                    "THOMAS->ROSA transform is not available. Run THOMAS registration first or disable transform application.",
+                )
+                return
+
+        try:
+            result = self.logic.load_thomas_thalamus_masks(
+                thomas_dir=thomas_dir,
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[thomas] load error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        loaded_nodes = result.get("loaded_nodes", [])
+        loaded_paths = result.get("loaded_mask_paths", [])
+        failed_paths = result.get("failed_mask_paths", [])
+        missing_paths = result.get("missing_mask_paths", [])
+        skipped_paths = result.get("skipped_mask_paths", [])
+        if apply_transform and transform_node is not None and loaded_nodes:
+            self.logic.apply_transform_to_nodes(
+                nodes=loaded_nodes,
+                transform_node=transform_node,
+                harden=bool(self.thomasHardenCheck.checked),
+            )
+            self.log(
+                f"[thomas] applied transform {transform_node.GetName()} to {len(loaded_nodes)} segmentations"
+            )
+
+        if missing_paths:
+            self.log(f"[thomas] missing mask files: {len(missing_paths)}")
+            for path in missing_paths:
+                self.log(f"[thomas] missing: {path}")
+        if failed_paths:
+            self.log(f"[thomas] failed to load masks: {len(failed_paths)}")
+            for path in failed_paths:
+                self.log(f"[thomas] failed: {path}")
+        if skipped_paths:
+            self.log(f"[thomas] skipped masks: {len(skipped_paths)} (EXTRAS/cropped/resampled/full)")
+        self.log(f"[thomas] loaded {len(loaded_nodes)} THOMAS segmentation nodes")
+        for path in loaded_paths:
+            self.log(f"[thomas] loaded: {path}")

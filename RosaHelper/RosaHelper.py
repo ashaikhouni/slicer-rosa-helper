@@ -11,6 +11,8 @@ It focuses on scene operations:
 import os
 import sys
 import math
+import importlib
+import hashlib
 try:
     import numpy as np
 except ImportError:
@@ -41,7 +43,11 @@ from rosa_core import (
 )
 from rosa_slicer.freesurfer_service import FreeSurferService
 from rosa_slicer.trajectory_scene import TrajectorySceneService
-from rosa_slicer.widget_mixin import RosaHelperWidgetMixin
+from rosa_slicer import widget_mixin as _widget_mixin_mod
+
+# Hot-reload helper submodule so Widget mixin updates are picked up without full app restart.
+_widget_mixin_mod = importlib.reload(_widget_mixin_mod)
+RosaHelperWidgetMixin = _widget_mixin_mod.RosaHelperWidgetMixin
 
 
 class RosaHelper(ScriptedLoadableModule):
@@ -75,6 +81,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.autoFitResults = {}
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
+        self.thomasToRosaTransformNodeID = None
         self.modelsById = {}
         self.modelIds = []
 
@@ -120,6 +127,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
 
         self._build_contact_ui()
         self._build_freesurfer_ui()
+        self._build_thomas_ui()
         self._build_qc_ui()
         self._build_trajectory_view_ui()
         self._build_autofit_ui()
@@ -166,12 +174,14 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.autoFitResults = {}
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
+        self.thomasToRosaTransformNodeID = None
         self._populate_contact_table(self.loadedTrajectories)
         self._populate_trajectory_selector(self.loadedTrajectories)
         self._populate_autofit_trajectory_selector(self.loadedTrajectories)
         self._refresh_qc_metrics()
         self._set_autofit_buttons_enabled(False)
         self._preselect_freesurfer_reference_volume()
+        self._preselect_thomas_reference_volume()
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
             f"created {summary['trajectory_count']} trajectories"
@@ -447,6 +457,232 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             transform_node=transform_node,
             harden=harden,
         )
+
+    def apply_transform_to_nodes(self, nodes, transform_node, harden=False):
+        """Apply one linear transform to any transformable MRML nodes."""
+        if transform_node is None:
+            raise ValueError("Transform node is required.")
+        transform_id = transform_node.GetID()
+        for node in nodes or []:
+            if node is None:
+                continue
+            if hasattr(node, "SetAndObserveTransformNodeID"):
+                node.SetAndObserveTransformNodeID(transform_id)
+                if bool(harden):
+                    slicer.vtkSlicerTransformLogic().hardenTransform(node)
+        return nodes
+
+    def _load_label_volume_node(self, path):
+        """Load one NIfTI mask as labelmap volume node."""
+        try:
+            result = slicer.util.loadLabelVolume(path, returnNode=True)
+            if isinstance(result, tuple):
+                ok, node = result
+                return node if ok else None
+            return result
+        except Exception:
+            try:
+                result = slicer.util.loadVolume(path, properties={"labelmap": True}, returnNode=True)
+                if isinstance(result, tuple):
+                    ok, node = result
+                    return node if ok else None
+                return result
+            except Exception:
+                return None
+
+    def _infer_thomas_side(self, path):
+        """Infer side tag from path/name."""
+        text = (path or "").lower()
+        if "/left/" in text or text.endswith("/left") or "lh" in os.path.basename(text):
+            return "left"
+        if "/right/" in text or text.endswith("/right") or "rh" in os.path.basename(text):
+            return "right"
+        return "unknown"
+
+    def _thomas_segment_name_from_path(self, path):
+        """Build display segment name from THOMAS file name."""
+        base = os.path.basename(path)
+        name = base.replace(".nii.gz", "").replace(".nii", "")
+        side = self._infer_thomas_side(path)
+        if name.lower().endswith("_l") or name.lower().endswith("_r"):
+            name = name[:-2]
+        # Common THOMAS naming: "11-CM", "6_VLPd", "CL_L", "1-THALAMUS"
+        # Prefer anatomical token over numeric index for readability.
+        token = name
+        if "-" in token:
+            token = token.split("-", 1)[1]
+        elif "_" in token:
+            parts = token.split("_")
+            if parts and parts[0].isdigit():
+                token = "_".join(parts[1:]) or token
+        token = token.strip("_- ") or name
+        return f"{side.upper()}_{token}"
+
+    def _thomas_color_for_label(self, segment_name, side):
+        """Return deterministic RGB color for THOMAS segment label."""
+        key = (segment_name or "UNKNOWN").upper()
+        base_map = {
+            "THALAMUS": (0.90, 0.80, 0.20),
+            "CM": (0.95, 0.35, 0.35),
+            "VA": (0.95, 0.55, 0.20),
+            "VLA": (0.90, 0.55, 0.45),
+            "VL": (0.85, 0.50, 0.55),
+            "VLP": (0.85, 0.45, 0.70),
+            "VLPD": (0.75, 0.45, 0.80),
+            "VLPV": (0.75, 0.55, 0.85),
+            "VPL": (0.45, 0.70, 0.95),
+            "PUL": (0.40, 0.75, 0.70),
+            "LGN": (0.35, 0.75, 0.55),
+            "MGN": (0.35, 0.65, 0.50),
+            "MD-PF": (0.60, 0.70, 0.45),
+            "HB": (0.45, 0.85, 0.45),
+            "MTT": (0.60, 0.85, 0.45),
+            "AV": (0.75, 0.75, 0.35),
+        }
+        token = key.split("_", 1)[-1] if "_" in key else key
+        color = base_map.get(token)
+        if color is None:
+            digest = hashlib.md5(token.encode("utf-8")).hexdigest()
+            val = int(digest[:8], 16)
+            # Stable fallback palette sampling in HSV-like space.
+            r = 0.35 + ((val >> 16) & 0xFF) / 255.0 * 0.55
+            g = 0.35 + ((val >> 8) & 0xFF) / 255.0 * 0.55
+            b = 0.35 + (val & 0xFF) / 255.0 * 0.55
+            color = (r, g, b)
+
+        # Side tint to make L/R distinguishable when same nucleus is shown.
+        if side == "left":
+            return (max(0.0, color[0] * 0.90), min(1.0, color[1] * 1.03), min(1.0, color[2] * 1.08))
+        if side == "right":
+            return (min(1.0, color[0] * 1.08), min(1.0, color[1] * 1.02), max(0.0, color[2] * 0.90))
+        return color
+
+    def _style_thomas_segmentation(self, seg_node, side):
+        """Apply standard display and hemisphere color for THOMAS segmentations."""
+        if seg_node is None:
+            return
+        seg_node.CreateDefaultDisplayNodes()
+        display = seg_node.GetDisplayNode()
+        if display:
+            display.SetVisibility(True)
+            if hasattr(display, "SetVisibility2D"):
+                display.SetVisibility2D(True)
+            if hasattr(display, "SetVisibility3D"):
+                display.SetVisibility3D(True)
+            if hasattr(display, "SetOpacity2DFill"):
+                display.SetOpacity2DFill(0.25)
+            if hasattr(display, "SetOpacity2DOutline"):
+                display.SetOpacity2DOutline(1.0)
+            if hasattr(display, "SetOpacity3D"):
+                display.SetOpacity3D(0.55)
+            if hasattr(display, "SetPreferredDisplayRepresentationName2D"):
+                display.SetPreferredDisplayRepresentationName2D("Binary labelmap")
+            if hasattr(display, "SetPreferredDisplayRepresentationName3D"):
+                display.SetPreferredDisplayRepresentationName3D("Closed surface")
+
+    def _find_thomas_mask_paths(self, thomas_dir):
+        """Collect THOMAS structure masks under left/right dirs (top-level only)."""
+        root = os.path.abspath(thomas_dir)
+        if not os.path.isdir(root):
+            raise ValueError(f"THOMAS output directory not found: {thomas_dir}")
+        by_side = {"left": [], "right": []}
+        skipped = []
+        excluded_tokens = (
+            "crop",
+            "resampled",
+            "ocrop",
+            "thomasfull",
+            "regn_",
+            "sthomas",
+            "mask_inp",
+        )
+        for side in ("left", "right"):
+            side_dir = os.path.join(root, side)
+            if not os.path.isdir(side_dir):
+                continue
+            files = sorted(os.listdir(side_dir))
+            for fname in files:
+                full = os.path.join(side_dir, fname)
+                if not os.path.isfile(full):
+                    continue
+                lower = fname.lower()
+                if not (lower.endswith(".nii") or lower.endswith(".nii.gz")):
+                    continue
+                if any(tok in lower for tok in excluded_tokens):
+                    skipped.append(full)
+                    continue
+                by_side[side].append(full)
+        return by_side, skipped
+
+    def load_thomas_thalamus_masks(self, thomas_dir, logger=None):
+        """Load THOMAS left/right structure masks into segmentation nodes."""
+        if not hasattr(slicer.modules, "segmentations"):
+            raise RuntimeError("Segmentations module is not available in this Slicer install.")
+        seg_logic = slicer.modules.segmentations.logic()
+        if seg_logic is None:
+            raise RuntimeError("Segmentations logic is unavailable.")
+
+        by_side, skipped = self._find_thomas_mask_paths(thomas_dir)
+        total_candidates = sum(len(v) for v in by_side.values())
+        if total_candidates == 0:
+            raise ValueError(
+                "No THOMAS structure masks found under left/right directories "
+                "(top-level only; EXTRAS/cropped/resampled files are ignored)."
+            )
+
+        loaded_nodes = []
+        loaded_paths = []
+        failed_paths = []
+        for side in ("left", "right"):
+            paths = by_side.get(side, [])
+            if not paths:
+                continue
+            seg_name = f"THOMAS_{side.capitalize()}_Structures"
+            existing = self._find_node_by_name(seg_name, "vtkMRMLSegmentationNode")
+            if existing is not None:
+                slicer.mrmlScene.RemoveNode(existing)
+            seg_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", seg_name)
+            seg_node.CreateDefaultDisplayNodes()
+            self._style_thomas_segmentation(seg_node, side)
+            segmentation = seg_node.GetSegmentation()
+            for path in paths:
+                label_node = self._load_label_volume_node(path)
+                if label_node is None:
+                    failed_paths.append(path)
+                    continue
+                pre_count = segmentation.GetNumberOfSegments()
+                seg_logic.ImportLabelmapToSegmentationNode(label_node, seg_node)
+                post_count = segmentation.GetNumberOfSegments()
+                if post_count <= pre_count:
+                    failed_paths.append(path)
+                    slicer.mrmlScene.RemoveNode(label_node)
+                    continue
+
+                new_segment_id = segmentation.GetNthSegmentID(post_count - 1)
+                new_segment = segmentation.GetSegment(new_segment_id)
+                if new_segment is not None:
+                    seg_label = self._thomas_segment_name_from_path(path)
+                    new_segment.SetName(seg_label)
+                    color = self._thomas_color_for_label(seg_label, side)
+                    new_segment.SetColor(float(color[0]), float(color[1]), float(color[2]))
+
+                loaded_paths.append(path)
+                slicer.mrmlScene.RemoveNode(label_node)
+                if logger:
+                    logger(f"[thomas] loaded structure: {path}")
+
+            if segmentation.GetNumberOfSegments() > 0:
+                loaded_nodes.append(seg_node)
+            else:
+                slicer.mrmlScene.RemoveNode(seg_node)
+
+        return {
+            "loaded_nodes": loaded_nodes,
+            "loaded_mask_paths": loaded_paths,
+            "failed_mask_paths": failed_paths,
+            "missing_mask_paths": [],
+            "skipped_mask_paths": skipped,
+        }
 
     def _add_trajectories(self, trajectories, logger=None, show_planned=False):
         """Create editable trajectory lines and hidden planned backups."""

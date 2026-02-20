@@ -221,6 +221,48 @@ Quick checklist:
 - Registration (`Register FS MRI -> ROSA`) should be run before loading surfaces.
 - The folder selected in `FreeSurfer subject` must contain `surf/` (and `label/` for `.annot` overlays).
 
+## THOMAS Integration (V1)
+
+`THOMAS Thalamus Integration (V1)` supports loading THOMAS left/right structure
+masks and bringing them into ROSA base space.
+
+Workflow:
+1. Load ROSA case in `ROSA Helper`.
+2. Add the MRI used to generate THOMAS (via Slicer's standard `Add Data`).
+3. In `THOMAS Thalamus Integration (V1)`:
+   - set `ROSA base volume` (fixed) and `THOMAS MRI` (moving)
+   - click `Register THOMAS MRI -> ROSA`
+4. Set `THOMAS output dir` to the THOMAS subject folder that contains `left/` and `right/`.
+5. Click `Load THOMAS Thalamus Masks`.
+6. Keep `Apply THOMAS->ROSA transform` enabled to align segmentations to ROSA space.
+
+Notes:
+- Loader scans only `left/` and `right/` mask files and skips helper/cropped/resampled/full outputs.
+- THOMAS MRI registration is rigid (`BRAINSFit`) and should be reviewed in slice views before downstream export.
+
+## Burn THOMAS Segments Into DICOM (ROSA Navigation)
+
+ROSA imports DICOM. If you need a navigation MRI with thalamus labels burned in:
+
+1. Load the original navigation MRI from DICOM (recommended base for export metadata).
+2. Ensure THOMAS segmentation is aligned to that MRI space (via THOMAS registration and transform application/hardening).
+3. Open `Segment Editor` and choose the THOMAS segmentation node.
+4. Use `Mask volume`:
+   - `Input Volume`: the DICOM-based MRI to export
+   - `Output Volume`: create a new volume
+   - operation:
+     - `Fill inside` to highlight selected structure(s), or
+     - `Fill outside` to keep only ROI
+5. Click `Apply`.
+6. Export the new scalar volume as DICOM:
+   - in `Data`/Subject Hierarchy, right-click output volume
+   - `Export to DICOM...` as a new series (do not overwrite original MRI)
+7. Re-import exported DICOM in Slicer and verify alignment/intensity before sending to ROSA.
+
+Important:
+- `Mask volume` applies to the currently selected segment. To burn multiple structures, combine segments first or run per segment.
+- Use a fill value outside background MRI range for clear visibility (for many T1 scans, bright values around `1000-1500` work well).
+
 ## Install (Manual Module)
 
 1. Clone or download this repository.
@@ -281,6 +323,9 @@ mismatch:
 `tools/shank_detect.py` can run with:
 - standard Python if `numpy` and `SimpleITK` are installed
 - or Slicer Python (`Slicer --python-script ...`) if you prefer to reuse Slicer's bundled environment
+
+Optional dependency:
+- `antspyx` is only needed for ANTs-based segmentation integration workflows.
 
 List ROS volumes/trajectories:
 
