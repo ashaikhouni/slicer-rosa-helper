@@ -39,8 +39,20 @@ def _add_common_mask_args(parser):
     parser.add_argument("--metal-threshold-hu", type=float, default=1800.0)
     parser.add_argument("--use-head-mask", action=bool_action, default=True)
     parser.add_argument("--build-head-mask", action=bool_action, default=True)
-    parser.add_argument("--head-mask-threshold-hu", type=float, default=-300.0)
+    parser.add_argument("--head-mask-threshold-hu", type=float, default=-500.0)
     parser.add_argument("--head-mask-close-mm", type=float, default=2.0)
+    parser.add_argument(
+        "--head-mask-method",
+        choices=["legacy", "tissue_cut", "tissue_cut_noclose", "outside_air"],
+        default="outside_air",
+        help="Head mask construction method (tissue_cut_noclose skips closing for speed comparison).",
+    )
+    parser.add_argument(
+        "--head-mask-metal-dilate-mm",
+        type=float,
+        default=1.0,
+        help="Only for tissue_cut: dilation radius to suppress metal bridges before closing/fill.",
+    )
     parser.add_argument("--min-metal-depth-mm", type=float, default=5.0)
     parser.add_argument("--max-metal-depth-mm", type=float, default=220.0)
     parser.add_argument("--head-mask-aggressive-cleanup", action=bool_action, default=True)
@@ -75,6 +87,8 @@ def cmd_preview_masks(args):
         head_mask_threshold_hu=args.head_mask_threshold_hu,
         head_mask_aggressive_cleanup=args.head_mask_aggressive_cleanup,
         head_mask_close_mm=args.head_mask_close_mm,
+        head_mask_method=args.head_mask_method,
+        head_mask_metal_dilate_mm=args.head_mask_metal_dilate_mm,
         min_metal_depth_mm=args.min_metal_depth_mm,
         max_metal_depth_mm=args.max_metal_depth_mm,
     )
@@ -109,6 +123,8 @@ def cmd_preview_masks(args):
         "inside_method": str(result.get("inside_method", "none")),
         "profile_ms": result.get("profile_ms", {}),
         "profile_flags": result.get("profile_flags", {}),
+        "head_mask_method": args.head_mask_method,
+        "head_mask_metal_dilate_mm": float(args.head_mask_metal_dilate_mm),
         "outputs": {
             "metal_mask": os.path.join(masks_dir, "metal_mask.nii.gz"),
             "gating_mask": os.path.join(masks_dir, "gating_mask.nii.gz"),
@@ -177,6 +193,8 @@ def cmd_detect(args):
         head_mask_threshold_hu=args.head_mask_threshold_hu,
         head_mask_aggressive_cleanup=args.head_mask_aggressive_cleanup,
         head_mask_close_mm=args.head_mask_close_mm,
+        head_mask_method=args.head_mask_method,
+        head_mask_metal_dilate_mm=args.head_mask_metal_dilate_mm,
         min_metal_depth_mm=args.min_metal_depth_mm,
         max_metal_depth_mm=args.max_metal_depth_mm,
         models_by_id=models_by_id,
@@ -219,6 +237,8 @@ def cmd_detect(args):
         "line_count": len(lines),
         "use_model_score": bool(args.use_model_score),
         "min_model_score": float(args.min_model_score),
+        "head_mask_method": args.head_mask_method,
+        "head_mask_metal_dilate_mm": float(args.head_mask_metal_dilate_mm),
         "profile_ms": result.get("profile_ms", {}),
         "profile_flags": result.get("profile_flags", {}),
         "outputs": {

@@ -78,6 +78,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self._headPreviewPass = 0
         self._headPreviewKey = None
         self._lastMaskResult = None
+        self._cleanupLegacyDepthPlotNodes()
 
         self.statusText = qt.QPlainTextEdit()
         self.statusText.setReadOnly(True)
@@ -153,14 +154,14 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.headMaskThresholdSpin = qt.QDoubleSpinBox()
         self.headMaskThresholdSpin.setRange(-1200.0, 1000.0)
         self.headMaskThresholdSpin.setDecimals(1)
-        self.headMaskThresholdSpin.setValue(-300.0)
+        self.headMaskThresholdSpin.setValue(-500.0)
         self.headMaskThresholdSpin.setSingleStep(25.0)
         self.headMaskThresholdSpin.setSuffix(" HU")
         self.headMaskThresholdSlider = qt.QSlider(qt.Qt.Horizontal)
         self.headMaskThresholdSlider.setRange(-1200, 1000)
         self.headMaskThresholdSlider.setSingleStep(25)
         self.headMaskThresholdSlider.setPageStep(100)
-        self.headMaskThresholdSlider.setValue(-300)
+        self.headMaskThresholdSlider.setValue(-500)
         self.previewHeadMaskButton = qt.QPushButton("Refine + Fill")
         self.previewHeadMaskButton.setToolTip(
             "Run full head-mask refinement (closing + fill holes). Repeated clicks increase closing radius to "
@@ -184,6 +185,28 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.headMaskCloseSpin.setSingleStep(0.5)
         self.headMaskCloseSpin.setSuffix(" mm")
         form.addRow("Head mask closing", self.headMaskCloseSpin)
+
+        self.headMaskMethodCombo = qt.QComboBox()
+        self.headMaskMethodCombo.addItem("Legacy cleanup", "legacy")
+        self.headMaskMethodCombo.addItem("Tissue-cut bridge suppression", "tissue_cut")
+        self.headMaskMethodCombo.addItem("Tissue-cut (no closing)", "tissue_cut_noclose")
+        self.headMaskMethodCombo.addItem("Outside-air distance", "outside_air")
+        self.headMaskMethodCombo.setCurrentIndex(3)
+        self.headMaskMethodCombo.setToolTip(
+            "Choose head-mask construction method. Use tissue-cut (no closing) to benchmark speed/point-count impact."
+        )
+        form.addRow("Head mask method", self.headMaskMethodCombo)
+
+        self.headMaskMetalDilateSpin = qt.QDoubleSpinBox()
+        self.headMaskMetalDilateSpin.setRange(0.0, 5.0)
+        self.headMaskMetalDilateSpin.setDecimals(2)
+        self.headMaskMetalDilateSpin.setValue(1.0)
+        self.headMaskMetalDilateSpin.setSingleStep(0.25)
+        self.headMaskMetalDilateSpin.setSuffix(" mm")
+        self.headMaskMetalDilateSpin.setToolTip(
+            "Only for tissue-cut method: dilate metal before subtraction to break external wire bridges."
+        )
+        form.addRow("Metal bridge dilate", self.headMaskMetalDilateSpin)
 
         self.minMetalDepthSpin = qt.QDoubleSpinBox()
         self.minMetalDepthSpin.setRange(0.0, 100.0)
@@ -225,15 +248,18 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.showMasksCheck.setChecked(True)
         form.addRow(self.showMasksCheck)
 
-        self.showInMaskPointsCheck = qt.QCheckBox("Show in-mask candidate points (red)")
+        self.showInMaskPointsCheck = qt.QCheckBox("Show in-mask candidate voxels (red)")
         self.showInMaskPointsCheck.setChecked(True)
         self.showInMaskPointsCheck.setToolTip(
-            "Show the metal points kept after depth/head gating (sampled for responsiveness)."
+            "Show the metal voxels kept after depth/head gating as a red overlay."
         )
         self.maxInMaskPointsSpin = qt.QSpinBox()
         self.maxInMaskPointsSpin.setRange(500, 30000)
         self.maxInMaskPointsSpin.setValue(2500)
         self.maxInMaskPointsSpin.setSingleStep(500)
+        self.maxInMaskPointsSpin.setToolTip(
+            "Displayed red candidates are hard-capped internally to keep Slicer responsive."
+        )
         inMaskRow = qt.QHBoxLayout()
         inMaskRow.addWidget(self.showInMaskPointsCheck)
         inMaskRow.addWidget(qt.QLabel("Max shown"))
@@ -255,9 +281,6 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.previewMasksButton = qt.QPushButton("Preview Masks")
         self.previewMasksButton.clicked.connect(self.onPreviewMasksClicked)
         detectRow.addWidget(self.previewMasksButton)
-        self.showDepthCurveButton = qt.QPushButton("Show Depth Curve")
-        self.showDepthCurveButton.clicked.connect(self.onShowDepthCurveClicked)
-        detectRow.addWidget(self.showDepthCurveButton)
         self.detectButton = qt.QPushButton("Detect Trajectories")
         self.detectButton.clicked.connect(self.onDetectClicked)
         detectRow.addWidget(self.detectButton)
@@ -266,15 +289,6 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         detectRow.addWidget(self.resetViewsButton)
         detectRow.addStretch(1)
         form.addRow(detectRow)
-
-        self.depthCurveSection = ctk.ctkCollapsibleButton()
-        self.depthCurveSection.text = "Depth Curve"
-        self.depthCurveSection.collapsed = False
-        self.layout.addWidget(self.depthCurveSection)
-        depthLayout = qt.QVBoxLayout(self.depthCurveSection)
-        self.depthPlotWidget = None
-        self.depthPlotViewNode = None
-        self._setupDepthPlotWidget(depthLayout)
 
         self.trajectorySection = ctk.ctkCollapsibleButton()
         self.trajectorySection.text = "Detected Trajectories"
@@ -341,6 +355,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.autoMetalThresholdButton.clicked.connect(self.onAutoSuggestMetalThresholdClicked)
         self.headMaskThresholdSpin.valueChanged.connect(self._onHeadThresholdSpinChanged)
         self.headMaskThresholdSlider.valueChanged.connect(self._onHeadThresholdSliderChanged)
+        self.headMaskMethodCombo.currentIndexChanged.connect(self._onHeadMaskMethodChanged)
         self.previewHeadMaskButton.clicked.connect(self.onPreviewHeadMaskClicked)
         self.resetHeadMaskButton.clicked.connect(self.onResetHeadMaskPreviewClicked)
 
@@ -348,46 +363,29 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
         self._loadElectrodeLibrary()
+        self._onHeadMaskMethodChanged(self.headMaskMethodCombo.currentIndex)
 
     def log(self, msg):
         """Append status message to UI and console."""
         self.statusText.appendPlainText(msg)
         print(msg)
 
-    def _setupDepthPlotWidget(self, parent_layout):
-        """Create an embedded MRML plot widget for depth curves."""
-        try:
-            if hasattr(slicer, "qMRMLPlotWidget"):
-                plot_widget = slicer.qMRMLPlotWidget()
-            else:
-                import qSlicerPlotsModuleWidgetsPythonQt as plots_widgets
-
-                plot_widget = plots_widgets.qMRMLPlotWidget()
-            plot_widget.setMRMLScene(slicer.mrmlScene)
-            plot_widget.setMinimumHeight(180)
-            view_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLPlotViewNode", "ShankDetectDepthPlotView")
-            if hasattr(plot_widget, "setMRMLPlotViewNode"):
-                plot_widget.setMRMLPlotViewNode(view_node)
-            elif hasattr(plot_widget, "setMRMLViewNode"):
-                plot_widget.setMRMLViewNode(view_node)
-            self.depthPlotWidget = plot_widget
-            self.depthPlotViewNode = view_node
-            parent_layout.addWidget(plot_widget)
-        except Exception:
-            self.depthPlotWidget = qt.QLabel("Embedded plot view unavailable in this Slicer build.")
-            self.depthPlotWidget.setWordWrap(True)
-            parent_layout.addWidget(self.depthPlotWidget)
-            self.depthPlotViewNode = None
-
-    def _showDepthChart(self, chart_node):
-        """Display chart in embedded plot widget when available."""
-        if chart_node is None or self.depthPlotViewNode is None:
-            return False
-        try:
-            self.depthPlotViewNode.SetPlotChartNodeID(chart_node.GetID())
-            return True
-        except Exception:
-            return False
+    def _cleanupLegacyDepthPlotNodes(self):
+        """Remove legacy depth-curve plot nodes from older module versions."""
+        legacy_prefixes = (
+            "ShankDetectDepthPlotView",
+            "_DepthCurveTable",
+            "_DepthCurveChart",
+            "_DepthCurveAll",
+            "_DepthCurveKept",
+        )
+        to_remove = []
+        for node in slicer.util.getNodes("*").values():
+            name = str(node.GetName() or "")
+            if any(name == p or name.endswith(p) for p in legacy_prefixes):
+                to_remove.append(node)
+        for node in to_remove:
+            slicer.mrmlScene.RemoveNode(node)
 
     def _syncThresholdWidgets(self, spin, slider, value):
         """Set linked spin/slider value without recursive signal loops."""
@@ -424,6 +422,29 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
     def _onHeadThresholdSliderChanged(self, value):
         """Sync head-threshold spin to slider value."""
         self._syncThresholdWidgets(self.headMaskThresholdSpin, self.headMaskThresholdSlider, value)
+        self._headPreviewPass = 0
+        self._headPreviewKey = None
+        self._scheduleHeadPreview()
+
+    def _currentHeadMaskMethod(self):
+        """Return normalized head-mask method from UI combo."""
+        data = None
+        try:
+            data_attr = self.headMaskMethodCombo.currentData
+            data = data_attr() if callable(data_attr) else data_attr
+        except Exception:
+            data = None
+        method = str(data).strip().lower() if data else "legacy"
+        if method not in ("legacy", "tissue_cut", "tissue_cut_noclose", "outside_air"):
+            method = "outside_air"
+        return method
+
+    def _onHeadMaskMethodChanged(self, _index):
+        """Toggle method-specific controls and invalidate cached preview state."""
+        method = self._currentHeadMaskMethod()
+        is_tissue_cut = str(method) in ("tissue_cut", "tissue_cut_noclose")
+        self.headMaskMetalDilateSpin.setEnabled(is_tissue_cut)
+        self.headMaskCloseSpin.setEnabled(str(method) not in ("tissue_cut_noclose", "outside_air"))
         self._headPreviewPass = 0
         self._headPreviewKey = None
         self._scheduleHeadPreview()
@@ -489,6 +510,9 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 str(volume_node.GetID()),
                 round(float(self.headMaskThresholdSpin.value), 2),
                 round(float(self.headMaskCloseSpin.value), 2),
+                self._currentHeadMaskMethod(),
+                round(float(self.headMaskMetalDilateSpin.value), 2),
+                round(float(self.thresholdSpin.value), 2),
             )
             if key == self._headPreviewKey:
                 self._headPreviewPass += 1
@@ -504,6 +528,9 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 threshold_hu=float(self.headMaskThresholdSpin.value),
                 close_mm=close_mm,
                 aggressive_cleanup=bool(self.aggressiveHeadCleanupCheck.checked),
+                method=self._currentHeadMaskMethod(),
+                metal_threshold_hu=float(self.thresholdSpin.value),
+                metal_dilate_mm=float(self.headMaskMetalDilateSpin.value),
             )
             metal_mask = np.asarray(arr_kji >= float(self.thresholdSpin.value), dtype=np.uint8)
             self.logic.show_metal_and_head_masks(
@@ -817,6 +844,8 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
             "use_head_mask": bool(self.useHeadMaskCheck.checked),
             "head_mask_threshold_hu": float(self.headMaskThresholdSpin.value),
             "head_mask_close_mm": float(self.headMaskCloseSpin.value),
+            "head_mask_method": self._currentHeadMaskMethod(),
+            "head_mask_metal_dilate_mm": float(self.headMaskMetalDilateSpin.value),
             "min_metal_depth_mm": float(self.minMetalDepthSpin.value),
             "max_metal_depth_mm": float(self.maxMetalDepthSpin.value),
             "head_mask_aggressive_cleanup": bool(self.aggressiveHeadCleanupCheck.checked),
@@ -847,124 +876,23 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         self.log(
             f"[mask] displayed mask overlay (head + metal); "
             f"mask={mask_type}, in-mask={mask_kept}/{candidate_count}, "
-            f"inside_method={inside_method}, metal_in_head={metal_in_head}, depth_kept={depth_kept}, "
+            f"inside_method={inside_method}, method={result.get('profile_flags', {}).get('head_mask_method', 'legacy')}, "
+            f"metal_in_head={metal_in_head}, depth_kept={depth_kept}, "
             f"voxels(metal={metal_vox}, gating={gating_vox})"
         )
 
     def _displayInMaskPointsFromResult(self, volume_node, result, max_points=6000):
-        """Render sampled in-mask candidate points as red fiducials for QC."""
-        points_ras = result.get("in_mask_points_ras")
-        if points_ras is None:
+        """Render in-mask candidate voxels as red overlay for QC."""
+        in_mask_ijk_kji = result.get("in_mask_ijk_kji")
+        if in_mask_ijk_kji is None:
             self.logic.clear_in_mask_points_node(volume_node)
             return
         shown, total = self.logic.show_in_mask_points_node(
             volume_node=volume_node,
-            points_ras=points_ras,
+            in_mask_ijk_kji=in_mask_ijk_kji,
             max_points=max_points,
         )
-        self.log(f"[mask] in-mask candidate points shown: {shown}/{total}")
-
-    def onShowDepthCurveClicked(self):
-        """Show depth survival curve from last preview/detect result."""
-        volume_node = self.ctSelector.currentNode()
-        if volume_node is None:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Shank Detect", "Select a CT volume first.")
-            return
-        if self._lastMaskResult is None:
-            qt.QMessageBox.information(
-                slicer.util.mainWindow(),
-                "Shank Detect",
-                "Run Preview Masks or Detect Trajectories first to compute depth values.",
-            )
-            return
-        self._showDepthCurveFromResult(volume_node, self._lastMaskResult)
-
-    def _showDepthCurveFromResult(self, volume_node, result):
-        """Plot survival curve N(depth >= t) for head-gated metal depths."""
-        depths_all = np.asarray(result.get("metal_depth_all_mm"), dtype=float).reshape(-1)
-        if depths_all.size == 0:
-            self.log("[depth] no depth values available for curve")
-            return
-        depths_kept = np.asarray(result.get("metal_depth_values_mm"), dtype=float).reshape(-1)
-        depths_all = depths_all[np.isfinite(depths_all)]
-        depths_kept = depths_kept[np.isfinite(depths_kept)]
-        if depths_all.size == 0:
-            self.log("[depth] no finite depth values available")
-            return
-
-        max_depth = float(max(1.0, np.percentile(depths_all, 99.5)))
-        t = np.linspace(0.0, max_depth, 201)
-        s_all = np.sort(depths_all)
-        y_all = s_all.size - np.searchsorted(s_all, t, side="left")
-        if depths_kept.size > 0:
-            s_kept = np.sort(depths_kept)
-            y_kept = s_kept.size - np.searchsorted(s_kept, t, side="left")
-        else:
-            y_kept = np.zeros_like(y_all)
-
-        base = volume_node.GetName()
-        table_name = f"{base}_DepthCurveTable"
-        chart_name = f"{base}_DepthCurveChart"
-        all_name = f"{base}_DepthCurveAll"
-        kept_name = f"{base}_DepthCurveKept"
-
-        def _get_or_create(class_name, node_name):
-            try:
-                node = slicer.util.getNode(node_name)
-                if node is not None and node.IsA(class_name):
-                    return node
-            except Exception:
-                pass
-            return slicer.mrmlScene.AddNewNodeByClass(class_name, node_name)
-
-        table_node = _get_or_create("vtkMRMLTableNode", table_name)
-        table = table_node.GetTable()
-        table.Initialize()
-
-        x_col = vtk.vtkFloatArray()
-        x_col.SetName("DepthMm")
-        all_col = vtk.vtkFloatArray()
-        all_col.SetName("N_ge_t_all")
-        kept_col = vtk.vtkFloatArray()
-        kept_col.SetName("N_ge_t_kept")
-        table.AddColumn(x_col)
-        table.AddColumn(all_col)
-        table.AddColumn(kept_col)
-        table.SetNumberOfRows(int(t.size))
-        for i in range(int(t.size)):
-            table.SetValue(i, 0, float(t[i]))
-            table.SetValue(i, 1, float(y_all[i]))
-            table.SetValue(i, 2, float(y_kept[i]))
-
-        all_series = _get_or_create("vtkMRMLPlotSeriesNode", all_name)
-        all_series.SetAndObserveTableNodeID(table_node.GetID())
-        all_series.SetXColumnName("DepthMm")
-        all_series.SetYColumnName("N_ge_t_all")
-        all_series.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeLine)
-        all_series.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
-        all_series.SetColor(0.6, 0.6, 0.6)
-
-        kept_series = _get_or_create("vtkMRMLPlotSeriesNode", kept_name)
-        kept_series.SetAndObserveTableNodeID(table_node.GetID())
-        kept_series.SetXColumnName("DepthMm")
-        kept_series.SetYColumnName("N_ge_t_kept")
-        kept_series.SetPlotType(slicer.vtkMRMLPlotSeriesNode.PlotTypeLine)
-        kept_series.SetMarkerStyle(slicer.vtkMRMLPlotSeriesNode.MarkerStyleNone)
-        kept_series.SetColor(1.0, 0.2, 0.2)
-
-        chart = _get_or_create("vtkMRMLPlotChartNode", chart_name)
-        chart.RemoveAllPlotSeriesNodeIDs()
-        chart.AddAndObservePlotSeriesNodeID(all_series.GetID())
-        chart.AddAndObservePlotSeriesNodeID(kept_series.GetID())
-        chart.SetTitle(f"{base}: Depth Survival Curve")
-        chart.SetXAxisTitle("Depth from head surface (mm)")
-        chart.SetYAxisTitle("N(depth >= t)")
-
-        if self._showDepthChart(chart):
-            self.log(f"[depth] curve shown in module: total={depths_all.size}, kept={depths_kept.size}")
-        else:
-            slicer.modules.plots.logic().ShowChartInLayout(chart)
-            self.log(f"[depth] curve shown in plot layout: total={depths_all.size}, kept={depths_kept.size}")
+        self.log(f"[mask] in-mask candidate voxels shown: {shown}/{total}")
 
     def onPreviewMasksClicked(self):
         """Compute and show raw head-distance mask construction without trajectory fitting."""
@@ -983,6 +911,8 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 head_mask_threshold_hu=settings["head_mask_threshold_hu"],
                 head_mask_aggressive_cleanup=settings["head_mask_aggressive_cleanup"],
                 head_mask_close_mm=settings["head_mask_close_mm"],
+                head_mask_method=settings["head_mask_method"],
+                head_mask_metal_dilate_mm=settings["head_mask_metal_dilate_mm"],
                 min_metal_depth_mm=settings["min_metal_depth_mm"],
                 max_metal_depth_mm=settings["max_metal_depth_mm"],
             )
@@ -1027,7 +957,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 f"gating={bool(flags.get('used_precomputed_gating_mask', False))} "
                 f"distance={bool(flags.get('used_precomputed_distance_map', False))}"
             )
-        self.log("[depth] preview complete; click 'Show Depth Curve' to plot.")
+        self.log("[depth] preview complete")
 
     def onDetectClicked(self):
         """Detect CT shank trajectories and populate editable table."""
@@ -1063,6 +993,9 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
             return
 
         settings = self._collectDetectionSettings()
+        self.log("[detect] running...")
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        slicer.app.processEvents()
 
         exclude_segments = [
             {"start_ras": row["start_ras"], "end_ras": row["end_ras"]}
@@ -1087,6 +1020,8 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 head_mask_threshold_hu=settings["head_mask_threshold_hu"],
                 head_mask_aggressive_cleanup=settings["head_mask_aggressive_cleanup"],
                 head_mask_close_mm=settings["head_mask_close_mm"],
+                head_mask_method=settings["head_mask_method"],
+                head_mask_metal_dilate_mm=settings["head_mask_metal_dilate_mm"],
                 min_metal_depth_mm=settings["min_metal_depth_mm"],
                 max_metal_depth_mm=settings["max_metal_depth_mm"],
                 models_by_id=self.modelsById if settings["use_model_score"] else None,
@@ -1096,6 +1031,9 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
             self.log(f"[detect] failed: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Shank Detect", str(exc))
             return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+            slicer.app.processEvents()
 
         detected = result.get("lines", [])
         candidate_count = int(result.get("candidate_count", 0))
@@ -1156,7 +1094,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 f"gating={bool(flags.get('used_precomputed_gating_mask', False))} "
                 f"distance={bool(flags.get('used_precomputed_distance_map', False))}"
             )
-        self.log("[depth] detect complete; click 'Show Depth Curve' to plot.")
+        self.log("[depth] detect complete")
 
         existing_names = [row["name"] for row in locked]
         midline_x = 0.0
@@ -1302,19 +1240,36 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         # Cache expensive head-mask + distance-map computations by volume/settings.
         self._head_distance_cache = OrderedDict()
         self._max_head_cache_entries = 4
+        # Bump when head-mask/distance algorithms change to invalidate stale cache payloads.
+        self._head_cache_schema_version = 5
 
-    def _head_cache_key(self, volume_node, head_mask_threshold_hu, head_mask_close_mm, head_mask_aggressive_cleanup):
+    def _head_cache_key(
+        self,
+        volume_node,
+        head_mask_threshold_hu,
+        head_mask_close_mm,
+        head_mask_aggressive_cleanup,
+        head_mask_method,
+        metal_threshold_hu,
+        head_mask_metal_dilate_mm,
+    ):
         """Build a stable cache key for head-mask-dependent computations."""
         image_data = volume_node.GetImageData()
         dims = tuple(int(x) for x in image_data.GetDimensions()) if image_data is not None else (0, 0, 0)
         spacing = tuple(round(float(s), 6) for s in volume_node.GetSpacing())
         return (
+            int(self._head_cache_schema_version),
             str(volume_node.GetID()),
             dims,
             spacing,
             round(float(head_mask_threshold_hu), 2),
-            round(float(head_mask_close_mm), 2),
+            round(float(head_mask_close_mm), 2) if str(head_mask_method or "legacy") != "tissue_cut_noclose" else 0.0,
             bool(head_mask_aggressive_cleanup),
+            str(head_mask_method or "legacy"),
+            round(float(metal_threshold_hu), 2)
+            if str(head_mask_method or "legacy") in ("tissue_cut", "tissue_cut_noclose")
+            else 0.0,
+            round(float(head_mask_metal_dilate_mm), 2),
         )
 
     def _get_head_distance_cache(
@@ -1324,6 +1279,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         head_mask_threshold_hu,
         head_mask_close_mm,
         head_mask_aggressive_cleanup,
+        head_mask_method,
+        metal_threshold_hu,
+        head_mask_metal_dilate_mm,
     ):
         """Return cached head gating mask + distance map, computing them if needed.
 
@@ -1336,6 +1294,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             head_mask_threshold_hu=head_mask_threshold_hu,
             head_mask_close_mm=head_mask_close_mm,
             head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+            head_mask_method=head_mask_method,
+            metal_threshold_hu=metal_threshold_hu,
+            head_mask_metal_dilate_mm=head_mask_metal_dilate_mm,
         )
         cached = self._head_distance_cache.get(key)
         if cached is not None:
@@ -1343,17 +1304,35 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             return cached, True
 
         self._ensure_masking_api()
-        gating_mask = shank_masking.build_head_mask_kji(
-            arr_kji=arr_kji,
-            spacing_xyz=volume_node.GetSpacing(),
-            threshold_hu=head_mask_threshold_hu,
-            close_mm=head_mask_close_mm,
-            aggressive_cleanup=head_mask_aggressive_cleanup,
-        )
-        distance_map = shank_masking.compute_head_distance_map_kji(
-            gating_mask,
-            spacing_xyz=volume_node.GetSpacing(),
-        )
+        method = str(head_mask_method or "legacy").strip().lower()
+        if method == "tissue_cut_noclose":
+            gating_mask, distance_surface_mask = shank_masking.build_tissue_cut_distance_and_gating_masks_kji(
+                arr_kji=arr_kji,
+                spacing_xyz=volume_node.GetSpacing(),
+                threshold_hu=head_mask_threshold_hu,
+                metal_threshold_hu=metal_threshold_hu,
+                metal_dilate_mm=head_mask_metal_dilate_mm,
+                aggressive_cleanup=head_mask_aggressive_cleanup,
+            )
+            distance_map = shank_masking.compute_head_distance_map_kji(
+                distance_surface_mask,
+                spacing_xyz=volume_node.GetSpacing(),
+            )
+        else:
+            gating_mask = shank_masking.build_head_mask_kji(
+                arr_kji=arr_kji,
+                spacing_xyz=volume_node.GetSpacing(),
+                threshold_hu=head_mask_threshold_hu,
+                close_mm=head_mask_close_mm,
+                aggressive_cleanup=head_mask_aggressive_cleanup,
+                method=method,
+                metal_threshold_hu=metal_threshold_hu,
+                metal_dilate_mm=head_mask_metal_dilate_mm,
+            )
+            distance_map = shank_masking.compute_head_distance_map_kji(
+                gating_mask,
+                spacing_xyz=volume_node.GetSpacing(),
+            )
         cached = {
             "gating_mask_kji": np.asarray(gating_mask, dtype=np.uint8),
             "head_distance_map_kji": np.asarray(distance_map, dtype=np.float32),
@@ -1376,15 +1355,28 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
 
             shank_masking = _masking
 
-        has_api = hasattr(shank_masking, "build_preview_masks") and hasattr(shank_masking, "compute_head_distance_map_kji")
+        has_api = (
+            hasattr(shank_masking, "build_preview_masks")
+            and hasattr(shank_masking, "compute_head_distance_map_kji")
+            and hasattr(shank_masking, "build_head_mask_kji")
+            and hasattr(shank_masking, "build_tissue_cut_distance_and_gating_masks_kji")
+        )
         has_precompute_args = False
+        has_method_args = False
         if has_api:
             try:
                 params = inspect.signature(shank_masking.build_preview_masks).parameters
                 has_precompute_args = "precomputed_gating_mask_kji" in params and "precomputed_head_distance_map_kji" in params
+                head_params = inspect.signature(shank_masking.build_head_mask_kji).parameters
+                has_method_args = (
+                    "method" in head_params
+                    and "metal_threshold_hu" in head_params
+                    and "metal_dilate_mm" in head_params
+                )
             except Exception:
                 has_precompute_args = False
-        if not has_api or not has_precompute_args:
+                has_method_args = False
+        if not has_api or not has_precompute_args or not has_method_args:
             module_path = getattr(shank_masking, "__file__", "<unknown>")
             raise RuntimeError(
                 "Loaded shank_core.masking is stale and missing required APIs "
@@ -1411,13 +1403,16 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
 
         has_api = hasattr(shank_pipeline, "run_detection")
         has_precompute_args = False
+        has_method_args = False
         if has_api:
             try:
                 params = inspect.signature(shank_pipeline.run_detection).parameters
                 has_precompute_args = "precomputed_gating_mask_kji" in params and "precomputed_head_distance_map_kji" in params
+                has_method_args = "head_mask_method" in params and "head_mask_metal_dilate_mm" in params
             except Exception:
                 has_precompute_args = False
-        if not has_api or not has_precompute_args:
+                has_method_args = False
+        if not has_api or not has_precompute_args or not has_method_args:
             module_path = getattr(shank_pipeline, "__file__", "<unknown>")
             raise RuntimeError(
                 "Loaded shank_core.pipeline is stale and missing run_detection "
@@ -1461,6 +1456,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         threshold_hu=-300.0,
         close_mm=2.0,
         aggressive_cleanup=True,
+        method="legacy",
+        metal_threshold_hu=1800.0,
+        metal_dilate_mm=1.0,
     ):
         """Build largest-component head mask in KJI index order."""
         self._ensure_masking_api()
@@ -1470,6 +1468,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             threshold_hu=threshold_hu,
             close_mm=close_mm,
             aggressive_cleanup=aggressive_cleanup,
+            method=method,
+            metal_threshold_hu=metal_threshold_hu,
+            metal_dilate_mm=metal_dilate_mm,
         )
 
     def suggest_metal_threshold_hu(
@@ -1566,68 +1567,102 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         }
 
     def clear_in_mask_points_node(self, volume_node):
-        """Remove the in-mask point preview node for a volume if present."""
+        """Remove in-mask overlay/legacy point preview nodes for a volume if present."""
         if volume_node is None:
             return
-        node_name = f"{volume_node.GetName()}_InMaskPoints"
-        try:
-            node = slicer.util.getNode(node_name)
-        except Exception:
-            node = None
-        if node is not None:
-            slicer.mrmlScene.RemoveNode(node)
+        for node_name in (f"{volume_node.GetName()}_InMaskPoints", f"{volume_node.GetName()}_InMaskOverlay"):
+            try:
+                node = slicer.util.getNode(node_name)
+            except Exception:
+                node = None
+            if node is not None:
+                slicer.mrmlScene.RemoveNode(node)
 
-    def show_in_mask_points_node(self, volume_node, points_ras, max_points=6000):
-        """Show sampled gated candidate points as a red fiducial cloud.
-
-        Returns
-        -------
-        (shown_count, total_count)
-        """
-        if volume_node is None:
-            return (0, 0)
-        if points_ras is None:
-            self.clear_in_mask_points_node(volume_node)
-            return (0, 0)
-
-        pts = np.asarray(points_ras, dtype=float).reshape(-1, 3)
-        total = int(pts.shape[0])
-        if total == 0:
-            self.clear_in_mask_points_node(volume_node)
-            return (0, 0)
-
-        max_points = max(100, int(max_points))
-        if total > max_points:
-            rng = np.random.default_rng(0)
-            pick = rng.choice(total, size=max_points, replace=False)
-            pts = pts[pick]
-
-        node_name = f"{volume_node.GetName()}_InMaskPoints"
+    def _get_or_create_inmask_color_node(self):
+        """Return a compact color table for red in-mask voxel overlay."""
+        node_name = "ShankDetectInMaskColors"
         try:
             node = slicer.util.getNode(node_name)
         except Exception:
             node = None
         if node is None:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", node_name)
-            node.CreateDefaultDisplayNodes()
-        else:
-            node.SetName(node_name)
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", node_name)
+            node.SetTypeToUser()
+            node.SetNumberOfColors(2)
+            node.SetColor(0, "Background", 0.0, 0.0, 0.0, 0.0)
+            node.SetColor(1, "InMask", 1.0, 0.0, 0.0, 1.0)
+            node.HideFromEditorsOff()
+        return node
 
-        node.RemoveAllControlPoints()
-        for p in pts:
-            node.AddControlPoint(vtk.vtkVector3d(float(p[0]), float(p[1]), float(p[2])))
+    def show_in_mask_points_node(self, volume_node, in_mask_ijk_kji, max_points=6000):
+        """Show in-mask candidate voxels as a red overlay labelmap.
 
+        Returns
+        -------
+        (shown_voxels, total_candidates)
+        """
+        if volume_node is None:
+            return (0, 0)
+        if in_mask_ijk_kji is None:
+            self.clear_in_mask_points_node(volume_node)
+            return (0, 0)
+
+        idx = np.asarray(in_mask_ijk_kji, dtype=int).reshape(-1, 3)
+        total = int(idx.shape[0])
+        if total == 0:
+            self.clear_in_mask_points_node(volume_node)
+            return (0, 0)
+
+        arr_shape = tuple(int(s) for s in slicer.util.arrayFromVolume(volume_node).shape)
+        mask = np.zeros(arr_shape, dtype=np.uint8)
+
+        # Keep compatibility with existing "Max shown" UI by optional subsampling.
+        max_points = max(100, int(max_points))
+        use_idx = idx
+        if total > max_points:
+            rng = np.random.default_rng(0)
+            pick = rng.choice(total, size=max_points, replace=False)
+            use_idx = idx[pick]
+
+        valid = (
+            (use_idx[:, 0] >= 0)
+            & (use_idx[:, 1] >= 0)
+            & (use_idx[:, 2] >= 0)
+            & (use_idx[:, 0] < arr_shape[0])
+            & (use_idx[:, 1] < arr_shape[1])
+            & (use_idx[:, 2] < arr_shape[2])
+        )
+        use_idx = use_idx[valid]
+        if use_idx.size == 0:
+            self.clear_in_mask_points_node(volume_node)
+            return (0, total)
+        mask[use_idx[:, 0], use_idx[:, 1], use_idx[:, 2]] = 1
+
+        if sitk is not None:
+            # Make selected voxels easier to see in slice views.
+            img = sitk.GetImageFromArray(mask)
+            img = sitk.BinaryDilate(img, [1, 1, 0])
+            mask = sitk.GetArrayFromImage(img).astype(np.uint8)
+
+        node = self._update_labelmap_from_mask(
+            reference_volume_node=volume_node,
+            node_name=f"{volume_node.GetName()}_InMaskOverlay",
+            mask_kji=mask,
+        )
         display = node.GetDisplayNode()
         if display:
-            display.SetGlyphTypeFromString("Sphere3D")
-            display.SetGlyphScale(2.0)
-            display.SetTextScale(0.0)
-            display.SetColor(1.0, 0.0, 0.0)
-            display.SetSelectedColor(1.0, 0.25, 0.25)
-            if hasattr(display, "SetPointLabelsVisibility"):
-                display.SetPointLabelsVisibility(False)
+            color = self._get_or_create_inmask_color_node()
+            display.SetAndObserveColorNodeID(color.GetID())
+            display.SetVisibility(True)
 
-        return (int(pts.shape[0]), total)
+        slicer.util.setSliceViewerLayers(
+            background=volume_node,
+            foreground=None,
+            foregroundOpacity=0.0,
+            label=node,
+            labelOpacity=0.85,
+        )
+        return (int(np.count_nonzero(mask)), total)
 
     def _ras_to_ijk_float(self, volume_node, ras_xyz):
         """Convert one RAS point to continuous IJK coordinates."""
@@ -1644,9 +1679,11 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         threshold,
         use_head_mask=False,
         build_head_mask=True,
-        head_mask_threshold_hu=-300.0,
+        head_mask_threshold_hu=-500.0,
         head_mask_aggressive_cleanup=True,
         head_mask_close_mm=2.0,
+        head_mask_method="outside_air",
+        head_mask_metal_dilate_mm=1.0,
         min_metal_depth_mm=5.0,
         max_metal_depth_mm=220.0,
     ):
@@ -1663,6 +1700,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
                 head_mask_threshold_hu=head_mask_threshold_hu,
                 head_mask_close_mm=head_mask_close_mm,
                 head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+                head_mask_method=head_mask_method,
+                metal_threshold_hu=threshold,
+                head_mask_metal_dilate_mm=head_mask_metal_dilate_mm,
             )
             precomputed_gating_mask_kji = cached["gating_mask_kji"]
             precomputed_head_distance_map_kji = cached["head_distance_map_kji"]
@@ -1675,6 +1715,8 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             head_mask_threshold_hu=head_mask_threshold_hu,
             head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
             head_mask_close_mm=head_mask_close_mm,
+            head_mask_method=head_mask_method,
+            head_mask_metal_dilate_mm=head_mask_metal_dilate_mm,
             min_metal_depth_mm=min_metal_depth_mm,
             max_metal_depth_mm=max_metal_depth_mm,
             precomputed_gating_mask_kji=precomputed_gating_mask_kji,
@@ -1719,9 +1761,11 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         exclude_radius_mm=2.0,
         use_head_mask=False,
         build_head_mask=False,
-        head_mask_threshold_hu=-300.0,
+        head_mask_threshold_hu=-500.0,
         head_mask_aggressive_cleanup=True,
         head_mask_close_mm=2.0,
+        head_mask_method="outside_air",
+        head_mask_metal_dilate_mm=1.0,
         min_metal_depth_mm=5.0,
         max_metal_depth_mm=220.0,
         models_by_id=None,
@@ -1746,6 +1790,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
                 head_mask_threshold_hu=head_mask_threshold_hu,
                 head_mask_close_mm=head_mask_close_mm,
                 head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
+                head_mask_method=head_mask_method,
+                metal_threshold_hu=threshold,
+                head_mask_metal_dilate_mm=head_mask_metal_dilate_mm,
             )
             precomputed_gating_mask_kji = cached["gating_mask_kji"]
             precomputed_head_distance_map_kji = cached["head_distance_map_kji"]
@@ -1771,6 +1818,8 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
             head_mask_threshold_hu=head_mask_threshold_hu,
             head_mask_aggressive_cleanup=head_mask_aggressive_cleanup,
             head_mask_close_mm=head_mask_close_mm,
+            head_mask_method=head_mask_method,
+            head_mask_metal_dilate_mm=head_mask_metal_dilate_mm,
             min_metal_depth_mm=min_metal_depth_mm,
             max_metal_depth_mm=max_metal_depth_mm,
             models_by_id=models_by_id,
@@ -1808,8 +1857,8 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         node.AddControlPoint(vtk.vtkVector3d(*end_ras))
         display = node.GetDisplayNode()
         if display:
-            display.SetColor(1.0, 0.2, 0.2)
-            display.SetSelectedColor(1.0, 0.4, 0.4)
+            display.SetColor(1.0, 1.0, 0.0)
+            display.SetSelectedColor(1.0, 0.85, 0.2)
             display.SetLineThickness(0.5)
             display.SetPointLabelsVisibility(True)
             # Keep control-point labels (e.g., R02-1/R02-2) but hide auto length text.
@@ -1935,6 +1984,9 @@ class ShankDetectLogic(ScriptedLoadableModuleLogic):
         lm = slicer.app.layoutManager()
         if lm is None:
             raise RuntimeError("Slicer layout manager is not available")
+        layout_node = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
+        if layout_node is not None:
+            layout_node.SetViewArrangement(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
 
         config = [
             ("Red", "Axial"),
