@@ -235,10 +235,22 @@ Workflow:
 4. Set `THOMAS output dir` to the THOMAS subject folder that contains `left/` and `right/`.
 5. Click `Load THOMAS Thalamus Masks`.
 6. Keep `Apply THOMAS->ROSA transform` enabled to align segmentations to ROSA space.
+7. Optional one-click burn workflow in the same panel:
+   - optionally set `Nav MRI DICOM dir` and click `Import DICOM MRI`
+     (this registers imported DICOM MRI to selected ROSA base and hardens it)
+   - set `Burn input MRI`
+   - choose `Nucleus side` (`Left`, `Right`, `Both`) and `Nucleus` (for example `CM`)
+   - set burn fill value and output volume name
+   - click `Register + Burn Nucleus`
+8. Optional one-click DICOM export:
+   - set `DICOM export dir` and `DICOM series description`
+   - click `Register + Burn + Export DICOM` to write classic slice-wise DICOM files
 
 Notes:
 - Loader scans only `left/` and `right/` mask files and skips helper/cropped/resampled/full outputs.
 - THOMAS MRI registration is rigid (`BRAINSFit`) and should be reviewed in slice views before downstream export.
+- `Register + Burn Nucleus` can auto-run rigid registration from `THOMAS MRI` to `Burn input MRI`
+  before creating a burned scalar volume.
 
 ## Burn THOMAS Segments Into DICOM (ROSA Navigation)
 
@@ -258,6 +270,15 @@ ROSA imports DICOM. If you need a navigation MRI with thalamus labels burned in:
    - in `Data`/Subject Hierarchy, right-click output volume
    - `Export to DICOM...` as a new series (do not overwrite original MRI)
 7. Re-import exported DICOM in Slicer and verify alignment/intensity before sending to ROSA.
+
+Module shortcut:
+- `Register + Burn Nucleus` creates the burned scalar volume directly from selected
+  THOMAS nucleus and side, without manual Segment Editor steps.
+- `Auto-register THOMAS MRI -> Burn input` is an advanced fallback and is off by default
+  when Burn input MRI is already aligned to ROSA.
+- `Register + Burn + Export DICOM` additionally exports the burned result to a classic
+  DICOM scalar volume series (one file per slice) under the selected export directory.
+- DICOM export remains the same final step via Subject Hierarchy (`Export to DICOM...`).
 
 Important:
 - `Mask volume` applies to the currently selected segment. To burn multiple structures, combine segments first or run per segment.

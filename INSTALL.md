@@ -61,12 +61,18 @@ If you want a ROSA-importable DICOM with THOMAS labels burned into MRI:
 1. Load the original MRI DICOM series in Slicer.
 2. Register THOMAS MRI -> ROSA base in `ROSA Helper`.
 3. Load THOMAS masks from the THOMAS output folder (`left/` and `right/`).
-4. In `Segment Editor -> Mask volume`, burn selected segment(s) into a new scalar volume.
-5. In Subject Hierarchy, right-click the new volume and `Export to DICOM...` as a new series.
+4. Use the THOMAS panel burn workflow:
+   - optional `Nav MRI DICOM dir` -> `Import DICOM MRI` (auto-registers imported MRI to ROSA base)
+   - choose `Burn input MRI`, side (`Left/Right/Both`), and nucleus (for example `CM`)
+   - click `Register + Burn Nucleus` to create output scalar volume
+5. For one-click export, set `DICOM export dir` + series description and click
+   `Register + Burn + Export DICOM`.
+6. Manual fallback: in Subject Hierarchy, right-click the burned volume and
+   `Export to DICOM...` as a new series.
 
 Notes:
 - Use the DICOM-based MRI as `Input Volume` for best metadata compatibility.
-- `Mask volume` uses the currently selected segment only; combine segments first if needed.
+- Manual fallback remains available with `Segment Editor -> Mask volume`.
 
 ## Troubleshooting
 

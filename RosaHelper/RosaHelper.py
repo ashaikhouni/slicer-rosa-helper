@@ -82,6 +82,9 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
         self.thomasToRosaTransformNodeID = None
+        self.thomasDicomToRosaTransformNodeID = None
+        self.thomasImportedDicomNodeID = None
+        self.thomasSegmentationNodeIDs = []
         self.modelsById = {}
         self.modelIds = []
 
@@ -175,6 +178,9 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
         self.thomasToRosaTransformNodeID = None
+        self.thomasDicomToRosaTransformNodeID = None
+        self.thomasImportedDicomNodeID = None
+        self.thomasSegmentationNodeIDs = []
         self._populate_contact_table(self.loadedTrajectories)
         self._populate_trajectory_selector(self.loadedTrajectories)
         self._populate_autofit_trajectory_selector(self.loadedTrajectories)
@@ -182,6 +188,8 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self._set_autofit_buttons_enabled(False)
         self._preselect_freesurfer_reference_volume()
         self._preselect_thomas_reference_volume()
+        self._preselect_thomas_burn_volume()
+        self._refresh_thomas_nucleus_combo()
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
             f"created {summary['trajectory_count']} trajectories"
@@ -614,7 +622,13 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
                 by_side[side].append(full)
         return by_side, skipped
 
-    def load_thomas_thalamus_masks(self, thomas_dir, logger=None):
+    def load_thomas_thalamus_masks(
+        self,
+        thomas_dir,
+        logger=None,
+        replace_existing=True,
+        node_name_prefix="THOMAS_",
+    ):
         """Load THOMAS left/right structure masks into segmentation nodes."""
         if not hasattr(slicer.modules, "segmentations"):
             raise RuntimeError("Segmentations module is not available in this Slicer install.")
@@ -637,10 +651,11 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             paths = by_side.get(side, [])
             if not paths:
                 continue
-            seg_name = f"THOMAS_{side.capitalize()}_Structures"
-            existing = self._find_node_by_name(seg_name, "vtkMRMLSegmentationNode")
-            if existing is not None:
-                slicer.mrmlScene.RemoveNode(existing)
+            seg_name = f"{node_name_prefix}{side.capitalize()}_Structures"
+            if replace_existing:
+                existing = self._find_node_by_name(seg_name, "vtkMRMLSegmentationNode")
+                if existing is not None:
+                    slicer.mrmlScene.RemoveNode(existing)
             seg_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", seg_name)
             seg_node.CreateDefaultDisplayNodes()
             self._style_thomas_segmentation(seg_node, side)
@@ -683,6 +698,361 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             "missing_mask_paths": [],
             "skipped_mask_paths": skipped,
         }
+
+    def load_dicom_scalar_volume_from_directory(self, dicom_dir, logger=None):
+        """Load one scalar DICOM series from a directory.
+
+        The directory is expected to contain a single series (or a sub-tree where one
+        series dominates). The highest-confidence scalar loadable is selected.
+        """
+        root = os.path.abspath(dicom_dir)
+        if not os.path.isdir(root):
+            raise ValueError(f"DICOM directory not found: {dicom_dir}")
+
+        files = []
+        for walk_root, _dirs, names in os.walk(root):
+            for name in names:
+                if name.startswith("."):
+                    continue
+                path = os.path.join(walk_root, name)
+                if os.path.isfile(path):
+                    files.append(path)
+        files.sort()
+        if not files:
+            raise ValueError(f"No files found under DICOM directory: {dicom_dir}")
+
+        node = None
+        try:
+            from DICOMScalarVolumePlugin import DICOMScalarVolumePluginClass
+
+            plugin = DICOMScalarVolumePluginClass()
+            loadables = plugin.examine([files]) or []
+            if loadables:
+                loadables.sort(
+                    key=lambda l: (float(getattr(l, "confidence", 0.0)), len(getattr(l, "files", []) or [])),
+                    reverse=True,
+                )
+                chosen = loadables[0]
+                chosen.selected = True
+                if logger:
+                    logger(
+                        f"[thomas] DICOM candidate: '{getattr(chosen, 'name', 'series')}' "
+                        f"confidence={float(getattr(chosen, 'confidence', 0.0)):.2f} "
+                        f"files={len(getattr(chosen, 'files', []) or [])}"
+                    )
+                before_ids = {n.GetID() for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")}
+                loaded = plugin.load(chosen)
+                if hasattr(loaded, "GetID"):
+                    node = loaded
+                else:
+                    after_nodes = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                    for after_node in after_nodes:
+                        if after_node.GetID() not in before_ids:
+                            node = after_node
+                            break
+        except Exception as exc:
+            if logger:
+                logger(f"[thomas] DICOM plugin import/examine failed, fallback to direct load: {exc}")
+
+        if node is None:
+            # Fallback: try loading files directly until one succeeds.
+            for path in files:
+                try:
+                    result = slicer.util.loadVolume(path, returnNode=True)
+                    if isinstance(result, tuple):
+                        ok, candidate = result
+                        if ok and candidate is not None:
+                            node = candidate
+                            break
+                    elif result is not None:
+                        node = result
+                        break
+                except Exception:
+                    continue
+
+        if node is None:
+            raise RuntimeError(
+                "Failed to load DICOM scalar volume from directory. "
+                "Select a single-series folder and try again."
+            )
+
+        if logger:
+            logger(f"[thomas] loaded DICOM MRI: {node.GetName()}")
+        return node
+
+    def export_scalar_volume_to_dicom_series(
+        self,
+        volume_node,
+        reference_volume_node,
+        export_dir,
+        series_description,
+        modality="MR",
+        logger=None,
+    ):
+        """Export scalar volume as classic DICOM series (one file per slice).
+
+        Parameters
+        ----------
+        volume_node: vtkMRMLScalarVolumeNode
+            Volume to export.
+        reference_volume_node: vtkMRMLScalarVolumeNode
+            Reference DICOM volume used to inherit patient/study context.
+        export_dir: str
+            Destination directory.
+        series_description: str
+            DICOM SeriesDescription.
+        modality: str
+            DICOM modality tag (default `MR`).
+        """
+        if volume_node is None:
+            raise ValueError("Volume node is required for DICOM export.")
+        if reference_volume_node is None:
+            raise ValueError("Reference volume node is required for DICOM export.")
+
+        out_root = os.path.abspath(export_dir)
+        os.makedirs(out_root, exist_ok=True)
+
+        sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        if sh_node is None:
+            raise RuntimeError("Subject hierarchy is unavailable.")
+
+        # Ensure output node is placed under the same study/patient as reference.
+        self.place_node_under_same_study(volume_node, reference_volume_node, logger=logger)
+
+        volume_item = sh_node.GetItemByDataNode(volume_node)
+        reference_item = sh_node.GetItemByDataNode(reference_volume_node)
+        if volume_item == 0:
+            raise RuntimeError("Output volume is not in subject hierarchy.")
+        if reference_item == 0:
+            raise RuntimeError("Reference volume is not in subject hierarchy.")
+
+        reference_study_item = sh_node.GetItemParent(reference_item)
+        reference_patient_item = sh_node.GetItemParent(reference_study_item) if reference_study_item else 0
+        if reference_study_item:
+            sh_node.SetItemParent(volume_item, reference_study_item)
+
+        from DICOMScalarVolumePlugin import DICOMScalarVolumePluginClass
+
+        plugin = DICOMScalarVolumePluginClass()
+        exportables = plugin.examineForExport(volume_item) or []
+        if not exportables:
+            raise RuntimeError("DICOM scalar volume export is unavailable for selected output volume.")
+        exportable = exportables[0]
+        exportable.directory = out_root
+        exportable.setTag("SeriesDescription", series_description or "THOMAS_BURNED")
+        if modality:
+            exportable.setTag("Modality", modality)
+
+        constants = slicer.vtkMRMLSubjectHierarchyConstants
+        patient_tags = [
+            constants.GetDICOMPatientNameTagName,
+            constants.GetDICOMPatientIDTagName,
+            constants.GetDICOMPatientBirthDateTagName,
+            constants.GetDICOMPatientSexTagName,
+            constants.GetDICOMPatientCommentsTagName,
+        ]
+        study_tags = [
+            constants.GetDICOMStudyIDTagName,
+            constants.GetDICOMStudyDateTagName,
+            constants.GetDICOMStudyTimeTagName,
+            constants.GetDICOMStudyDescriptionTagName,
+        ]
+        for getter in patient_tags:
+            tag_name = getter()
+            value = sh_node.GetItemAttribute(reference_patient_item, tag_name) if reference_patient_item else ""
+            if value:
+                exportable.setTag(tag_name, value)
+        for getter in study_tags:
+            tag_name = getter()
+            value = sh_node.GetItemAttribute(reference_study_item, tag_name) if reference_study_item else ""
+            if value:
+                exportable.setTag(tag_name, value)
+
+        if logger:
+            logger(
+                f"[thomas] DICOM export start: volume={volume_node.GetName()} "
+                f"series='{exportable.tag('SeriesDescription')}' out={out_root}"
+            )
+        err = plugin.export([exportable])
+        if err:
+            raise RuntimeError(err)
+
+        series_dir = os.path.join(out_root, f"ScalarVolume_{int(volume_item)}")
+        if logger:
+            logger(f"[thomas] DICOM export wrote series directory: {series_dir}")
+        return series_dir
+
+    def place_node_under_same_study(self, node, reference_node, logger=None):
+        """Place node under the same subject-hierarchy study item as reference node."""
+        if node is None or reference_node is None:
+            return False
+        sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        if sh_node is None:
+            return False
+        node_item = sh_node.GetItemByDataNode(node)
+        ref_item = sh_node.GetItemByDataNode(reference_node)
+        if node_item == 0 or ref_item == 0:
+            return False
+        ref_study = sh_node.GetItemParent(ref_item)
+        if not ref_study:
+            return False
+        sh_node.SetItemParent(node_item, ref_study)
+        if logger:
+            logger(
+                f"[thomas] moved {node.GetName()} under study of {reference_node.GetName()}"
+            )
+        return True
+
+    def _thomas_nucleus_from_segment_name(self, name):
+        """Extract normalized nucleus token from segment name (for example LEFT_CM -> CM)."""
+        text = (name or "").strip().upper()
+        if text.startswith("LEFT_"):
+            return text[5:]
+        if text.startswith("RIGHT_"):
+            return text[6:]
+        return text
+
+    def _thomas_side_from_segment_name(self, name, node_name=""):
+        """Infer side label from segment and node names."""
+        segment_text = (name or "").upper()
+        node_text = (node_name or "").upper()
+        if segment_text.startswith("LEFT_") or node_text.startswith("THOMAS_LEFT"):
+            return "left"
+        if segment_text.startswith("RIGHT_") or node_text.startswith("THOMAS_RIGHT"):
+            return "right"
+        return "unknown"
+
+    def collect_thomas_nuclei(self, segmentation_nodes):
+        """Return sorted unique nucleus names present in THOMAS segmentations."""
+        nuclei = set()
+        for seg_node in segmentation_nodes or []:
+            if seg_node is None:
+                continue
+            segmentation = seg_node.GetSegmentation()
+            if segmentation is None:
+                continue
+            for i in range(segmentation.GetNumberOfSegments()):
+                seg_id = segmentation.GetNthSegmentID(i)
+                segment = segmentation.GetSegment(seg_id)
+                if segment is None:
+                    continue
+                nucleus = self._thomas_nucleus_from_segment_name(segment.GetName())
+                if nucleus:
+                    nuclei.add(nucleus)
+        return sorted(nuclei)
+
+    def burn_thomas_nucleus_to_volume(
+        self,
+        segmentation_nodes,
+        input_volume_node,
+        nucleus,
+        side="Both",
+        fill_value=1200.0,
+        output_name="THOMAS_Burned_MRI",
+        logger=None,
+    ):
+        """Burn selected THOMAS nucleus voxels into a cloned scalar volume.
+
+        Parameters
+        ----------
+        segmentation_nodes: list[vtkMRMLSegmentationNode]
+            Loaded THOMAS segmentation nodes (left/right).
+        input_volume_node: vtkMRMLScalarVolumeNode
+            Destination MRI volume whose intensities are modified at selected voxels.
+        nucleus: str
+            Target nucleus token (for example `CM`, `THALAMUS`, `VLPD`).
+        side: str
+            `Left`, `Right`, or `Both`.
+        fill_value: float
+            Scalar value written at selected voxels.
+        output_name: str
+            Name of cloned output volume.
+        """
+        if np is None:
+            raise RuntimeError("NumPy is required for burn workflow.")
+        if input_volume_node is None:
+            raise ValueError("Input volume node is required.")
+        nucleus_token = (nucleus or "").strip().upper()
+        if not nucleus_token:
+            raise ValueError("Nucleus name is required.")
+
+        side_text = (side or "Both").strip().lower()
+        if side_text not in ("left", "right", "both"):
+            raise ValueError("Side must be Left, Right, or Both.")
+        target_sides = {"left", "right"} if side_text == "both" else {side_text}
+
+        selected_segments = []
+        for seg_node in segmentation_nodes or []:
+            if seg_node is None:
+                continue
+            segmentation = seg_node.GetSegmentation()
+            if segmentation is None:
+                continue
+            node_name = seg_node.GetName() or ""
+            for i in range(segmentation.GetNumberOfSegments()):
+                seg_id = segmentation.GetNthSegmentID(i)
+                segment = segmentation.GetSegment(seg_id)
+                if segment is None:
+                    continue
+                seg_name = segment.GetName() or ""
+                seg_side = self._thomas_side_from_segment_name(seg_name, node_name=node_name)
+                seg_nucleus = self._thomas_nucleus_from_segment_name(seg_name)
+                if seg_side in target_sides and seg_nucleus == nucleus_token:
+                    selected_segments.append((seg_node, seg_id, seg_name))
+
+        if not selected_segments:
+            available = ", ".join(self.collect_thomas_nuclei(segmentation_nodes))
+            raise ValueError(
+                f"No THOMAS segments matched nucleus '{nucleus_token}' and side '{side}'. "
+                f"Available nuclei: {available or 'none'}"
+            )
+
+        volumes_logic = slicer.modules.volumes.logic()
+        if volumes_logic is None:
+            raise RuntimeError("Volumes logic is unavailable.")
+        out_volume = volumes_logic.CloneVolume(slicer.mrmlScene, input_volume_node, output_name)
+        if out_volume is None:
+            raise RuntimeError("Failed to create output burn volume.")
+
+        seg_logic = slicer.modules.segmentations.logic()
+        if seg_logic is None:
+            raise RuntimeError("Segmentations logic is unavailable.")
+
+        out_arr = slicer.util.arrayFromVolume(out_volume)
+        fill_cast = np.asarray([fill_value], dtype=out_arr.dtype)[0]
+        total_voxels = 0
+
+        for seg_node, seg_id, seg_name in selected_segments:
+            labelmap_node = slicer.mrmlScene.AddNewNodeByClass(
+                "vtkMRMLLabelMapVolumeNode",
+                f"__tmp_{seg_node.GetName()}_{seg_id}",
+            )
+            ids = vtk.vtkStringArray()
+            ids.InsertNextValue(seg_id)
+            ok = seg_logic.ExportSegmentsToLabelmapNode(
+                seg_node,
+                ids,
+                labelmap_node,
+                input_volume_node,
+            )
+            if not ok:
+                slicer.mrmlScene.RemoveNode(labelmap_node)
+                raise RuntimeError(f"Failed exporting segment '{seg_name}' to labelmap.")
+            label_arr = slicer.util.arrayFromVolume(labelmap_node)
+            mask = label_arr > 0
+            voxels = int(mask.sum())
+            if voxels > 0:
+                out_arr[mask] = fill_cast
+                total_voxels += voxels
+            slicer.mrmlScene.RemoveNode(labelmap_node)
+
+        slicer.util.arrayFromVolumeModified(out_volume)
+        if logger:
+            logger(
+                f"[thomas] burned nucleus {nucleus_token} ({side}) using {len(selected_segments)} segment(s), "
+                f"voxels={total_voxels}, fill={float(fill_cast)} -> {out_volume.GetName()}"
+            )
+        return out_volume
 
     def _add_trajectories(self, trajectories, logger=None, show_planned=False):
         """Create editable trajectory lines and hidden planned backups."""

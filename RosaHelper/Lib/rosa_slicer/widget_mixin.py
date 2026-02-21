@@ -251,6 +251,17 @@ class RosaHelperWidgetMixin:
         self.thomasRegisterButton.clicked.connect(self.onRegisterThomasMRIToRosaClicked)
         th_layout.addRow(self.thomasRegisterButton)
 
+        self.thomasDicomDirSelector = ctk.ctkPathLineEdit()
+        self.thomasDicomDirSelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.thomasDicomDirSelector.setToolTip(
+            "Optional: DICOM series directory for navigation MRI import (single series folder preferred)."
+        )
+        th_layout.addRow("Nav MRI DICOM dir", self.thomasDicomDirSelector)
+
+        self.thomasImportDicomButton = qt.QPushButton("Import DICOM MRI")
+        self.thomasImportDicomButton.clicked.connect(self.onImportThomasDicomClicked)
+        th_layout.addRow(self.thomasImportDicomButton)
+
         self.thomasMaskDirSelector = ctk.ctkPathLineEdit()
         self.thomasMaskDirSelector.filters = ctk.ctkPathLineEdit.Dirs
         self.thomasMaskDirSelector.setToolTip(
@@ -269,6 +280,71 @@ class RosaHelperWidgetMixin:
         self.thomasLoadMasksButton = qt.QPushButton("Load THOMAS Thalamus Masks")
         self.thomasLoadMasksButton.clicked.connect(self.onLoadThomasMasksClicked)
         th_layout.addRow(self.thomasLoadMasksButton)
+
+        self.thomasBurnInputSelector = slicer.qMRMLNodeComboBox()
+        self.thomasBurnInputSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.thomasBurnInputSelector.noneEnabled = True
+        self.thomasBurnInputSelector.addEnabled = False
+        self.thomasBurnInputSelector.removeEnabled = False
+        self.thomasBurnInputSelector.setMRMLScene(slicer.mrmlScene)
+        self.thomasBurnInputSelector.setToolTip(
+            "MRI volume to burn selected THOMAS nucleus into (typically DICOM-loaded navigation MRI)."
+        )
+        th_layout.addRow("Burn input MRI", self.thomasBurnInputSelector)
+
+        self.thomasBurnAutoRegisterCheck = qt.QCheckBox("Auto-register THOMAS MRI -> Burn input")
+        self.thomasBurnAutoRegisterCheck.setChecked(False)
+        self.thomasBurnAutoRegisterCheck.setToolTip(
+            "Advanced fallback. Enable only when Burn input MRI is not already aligned to ROSA base."
+        )
+        th_layout.addRow(self.thomasBurnAutoRegisterCheck)
+
+        self.thomasBurnSideCombo = qt.QComboBox()
+        self.thomasBurnSideCombo.addItems(["Left", "Right", "Both"])
+        self.thomasBurnSideCombo.setCurrentText("Both")
+        th_layout.addRow("Nucleus side", self.thomasBurnSideCombo)
+
+        nucleus_row = qt.QHBoxLayout()
+        self.thomasBurnNucleusCombo = qt.QComboBox()
+        self.thomasBurnNucleusCombo.setEditable(True)
+        self.thomasBurnNucleusCombo.addItem("CM")
+        self.thomasBurnNucleusCombo.setCurrentText("CM")
+        nucleus_row.addWidget(self.thomasBurnNucleusCombo)
+        self.thomasRefreshNucleiButton = qt.QPushButton("Refresh")
+        self.thomasRefreshNucleiButton.clicked.connect(self.onRefreshThomasNucleiClicked)
+        nucleus_row.addWidget(self.thomasRefreshNucleiButton)
+        th_layout.addRow("Nucleus", nucleus_row)
+
+        self.thomasBurnFillValueSpin = qt.QDoubleSpinBox()
+        self.thomasBurnFillValueSpin.setRange(-32768.0, 32767.0)
+        self.thomasBurnFillValueSpin.setDecimals(1)
+        self.thomasBurnFillValueSpin.setValue(1200.0)
+        self.thomasBurnFillValueSpin.setSingleStep(50.0)
+        self.thomasBurnFillValueSpin.setSuffix(" HU")
+        th_layout.addRow("Burn fill value", self.thomasBurnFillValueSpin)
+
+        self.thomasBurnOutputNameEdit = qt.QLineEdit("THOMAS_Burned_MRI")
+        self.thomasBurnOutputNameEdit.setToolTip("Name for the generated burned scalar volume.")
+        th_layout.addRow("Output volume name", self.thomasBurnOutputNameEdit)
+
+        self.thomasBurnButton = qt.QPushButton("Register + Burn Nucleus")
+        self.thomasBurnButton.clicked.connect(self.onBurnThomasNucleusClicked)
+        th_layout.addRow(self.thomasBurnButton)
+
+        self.thomasDicomExportDirSelector = ctk.ctkPathLineEdit()
+        self.thomasDicomExportDirSelector.filters = ctk.ctkPathLineEdit.Dirs
+        self.thomasDicomExportDirSelector.setToolTip(
+            "Output directory for exported burned DICOM series (one file per slice)."
+        )
+        th_layout.addRow("DICOM export dir", self.thomasDicomExportDirSelector)
+
+        self.thomasDicomSeriesDescriptionEdit = qt.QLineEdit("THOMAS_BURNED")
+        self.thomasDicomSeriesDescriptionEdit.setToolTip("SeriesDescription tag for exported burned series.")
+        th_layout.addRow("DICOM series description", self.thomasDicomSeriesDescriptionEdit)
+
+        self.thomasBurnExportButton = qt.QPushButton("Register + Burn + Export DICOM")
+        self.thomasBurnExportButton.clicked.connect(self.onBurnAndExportThomasDicomClicked)
+        th_layout.addRow(self.thomasBurnExportButton)
 
     def _build_qc_ui(self):
         """Create QC table that updates automatically after contact generation."""
@@ -1064,6 +1140,49 @@ class RosaHelperWidgetMixin:
             first_name = sorted(self.loadedVolumeNodeIDs.keys())[0]
             self.thomasFixedSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[first_name])
 
+    def _preselect_thomas_burn_volume(self):
+        """Default burn input selector to ROSA reference volume when available."""
+        if self.referenceVolumeName and self.referenceVolumeName in self.loadedVolumeNodeIDs:
+            node_id = self.loadedVolumeNodeIDs[self.referenceVolumeName]
+            self.thomasBurnInputSelector.setCurrentNodeID(node_id)
+            return
+        if self.loadedVolumeNodeIDs:
+            first_name = sorted(self.loadedVolumeNodeIDs.keys())[0]
+            self.thomasBurnInputSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[first_name])
+
+    def _loaded_thomas_segmentation_nodes(self):
+        """Return currently tracked THOMAS segmentation nodes present in scene."""
+        nodes = []
+        for node_id in getattr(self, "thomasSegmentationNodeIDs", []) or []:
+            node = slicer.mrmlScene.GetNodeByID(node_id)
+            if node is not None:
+                nodes.append(node)
+        if nodes:
+            return nodes
+        # Fallback by name for scenes loaded before tracking IDs.
+        for side in ("Left", "Right"):
+            node = self.logic._find_node_by_name(f"THOMAS_{side}_Structures", "vtkMRMLSegmentationNode")
+            if node is not None:
+                nodes.append(node)
+        return nodes
+
+    def _refresh_thomas_nucleus_combo(self):
+        """Populate nucleus picker from currently loaded THOMAS segments."""
+        nuclei = self.logic.collect_thomas_nuclei(self._loaded_thomas_segmentation_nodes())
+        current = self._widget_text(self.thomasBurnNucleusCombo).strip()
+        self.thomasBurnNucleusCombo.clear()
+        if nuclei:
+            for nucleus in nuclei:
+                self.thomasBurnNucleusCombo.addItem(nucleus)
+            if current and current in nuclei:
+                self.thomasBurnNucleusCombo.setCurrentText(current)
+            else:
+                default = "CM" if "CM" in nuclei else nuclei[0]
+                self.thomasBurnNucleusCombo.setCurrentText(default)
+            return
+        self.thomasBurnNucleusCombo.addItem("CM")
+        self.thomasBurnNucleusCombo.setCurrentText(current or "CM")
+
     def _get_or_create_fs_transform_node(self):
         """Return existing or newly created linear transform for FS->ROSA mapping."""
         name = self.fsTransformNameEdit.text.strip() or "FS_to_ROSA"
@@ -1075,6 +1194,24 @@ class RosaHelperWidgetMixin:
     def _get_or_create_thomas_transform_node(self):
         """Return existing or newly created linear transform for THOMAS->ROSA mapping."""
         name = self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA"
+        node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
+        return node
+
+    def _get_or_create_thomas_dicom_transform_node(self):
+        """Return linear transform node for imported DICOM MRI -> ROSA base."""
+        base = self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA"
+        name = f"{base}_DICOM_to_ROSA"
+        node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
+        return node
+
+    def _get_or_create_thomas_burn_transform_node(self):
+        """Return dedicated linear transform node for THOMAS->burn-input mapping."""
+        base = self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA"
+        name = f"{base}_for_burn"
         node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
         if node is None:
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
@@ -1254,6 +1391,68 @@ class RosaHelperWidgetMixin:
         self.thomasToRosaTransformNodeID = transform_node.GetID()
         self.log(f"[thomas] registration done: transform={transform_node.GetName()}")
 
+    def onImportThomasDicomClicked(self):
+        """Import a DICOM scalar volume from selected directory for burn workflow."""
+        dicom_dir = self.thomasDicomDirSelector.currentPath
+        if not dicom_dir:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select a DICOM series directory first.",
+            )
+            return
+        try:
+            volume_node = self.logic.load_dicom_scalar_volume_from_directory(
+                dicom_dir=dicom_dir,
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[thomas] DICOM import error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        fixed_node = self.thomasFixedSelector.currentNode()
+        if fixed_node is not None and fixed_node.GetID() != volume_node.GetID():
+            transform_node = self._get_or_create_thomas_dicom_transform_node()
+            init_mode = self._widget_text(self.thomasInitModeCombo) or "useGeometryAlign"
+            self.log(
+                f"[thomas] DICOM registration start: moving={volume_node.GetName()} -> "
+                f"fixed={fixed_node.GetName()} (init={init_mode})"
+            )
+            try:
+                self.logic.run_brainsfit_rigid_registration(
+                    fixed_volume_node=fixed_node,
+                    moving_volume_node=volume_node,
+                    output_transform_node=transform_node,
+                    initialize_mode=init_mode,
+                    logger=self.log,
+                )
+            except Exception as exc:
+                self.log(f"[thomas] DICOM registration error: {exc}")
+                qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+                return
+            self.logic.apply_transform_to_nodes(
+                nodes=[volume_node],
+                transform_node=transform_node,
+                harden=True,
+            )
+            self.thomasDicomToRosaTransformNodeID = transform_node.GetID()
+            self.log(
+                f"[thomas] DICOM registration done: {volume_node.GetName()} aligned to {fixed_node.GetName()}"
+            )
+        else:
+            self.log("[thomas] DICOM registration skipped (no ROSA base selected or same node)")
+
+        if volume_node is not None:
+            self.thomasBurnInputSelector.setCurrentNode(volume_node)
+            self.thomasImportedDicomNodeID = volume_node.GetID()
+            self.log(f"[thomas] DICOM MRI ready: {volume_node.GetName()}")
+
+    def onRefreshThomasNucleiClicked(self):
+        """Refresh available nucleus list from loaded THOMAS segmentation nodes."""
+        self._refresh_thomas_nucleus_combo()
+        self.log("[thomas] nucleus list refreshed")
+
     def onLoadThomasMasksClicked(self):
         """Load THOMAS thalamus masks and optionally map them to ROSA space."""
         thomas_dir = self.thomasMaskDirSelector.currentPath
@@ -1324,3 +1523,220 @@ class RosaHelperWidgetMixin:
         self.log(f"[thomas] loaded {len(loaded_nodes)} THOMAS segmentation nodes")
         for path in loaded_paths:
             self.log(f"[thomas] loaded: {path}")
+        self.thomasSegmentationNodeIDs = [node.GetID() for node in loaded_nodes]
+        self._refresh_thomas_nucleus_combo()
+
+    def onBurnThomasNucleusClicked(self):
+        """Run optional registration and burn selected THOMAS nucleus into MRI volume."""
+        burn_input_node = self.thomasBurnInputSelector.currentNode()
+        moving_node = self.thomasMovingSelector.currentNode()
+        if burn_input_node is None:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select Burn input MRI volume.",
+            )
+            return None
+        if moving_node is None:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select THOMAS MRI volume (moving image).",
+            )
+            return None
+
+        seg_nodes = self._loaded_thomas_segmentation_nodes()
+        burn_seg_nodes = list(seg_nodes)
+        temp_seg_nodes = []
+        temp_volume_nodes = []
+        burn_moving_node = moving_node
+        burn_input_for_burn = burn_input_node
+
+        # Burn workflow may be run in scenes where users already parented volumes
+        # under transforms. Use temporary hardened copies so original nodes are untouched.
+        volumes_logic = slicer.modules.volumes.logic()
+        transform_logic = slicer.vtkSlicerTransformLogic()
+        if volumes_logic is None:
+                qt.QMessageBox.critical(
+                    slicer.util.mainWindow(),
+                    "ROSA Helper",
+                    "Volumes logic is unavailable.",
+                )
+                return None
+        if moving_node.GetTransformNodeID():
+            burn_moving_node = volumes_logic.CloneVolume(
+                slicer.mrmlScene,
+                moving_node,
+                "__THOMAS_BURN_MOVING",
+            )
+            temp_volume_nodes.append(burn_moving_node)
+            transform_logic.hardenTransform(burn_moving_node)
+            self.log(f"[thomas] using hardened temp moving volume: {burn_moving_node.GetName()}")
+        if burn_input_node.GetTransformNodeID():
+            burn_input_for_burn = volumes_logic.CloneVolume(
+                slicer.mrmlScene,
+                burn_input_node,
+                "__THOMAS_BURN_FIXED",
+            )
+            temp_volume_nodes.append(burn_input_for_burn)
+            transform_logic.hardenTransform(burn_input_for_burn)
+            self.log(f"[thomas] using hardened temp fixed volume: {burn_input_for_burn.GetName()}")
+
+        # Optional re-registration directly to burn input volume for a one-click workflow.
+        if bool(self.thomasBurnAutoRegisterCheck.checked):
+            thomas_dir = self.thomasMaskDirSelector.currentPath
+            if not thomas_dir:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "ROSA Helper",
+                    "Set THOMAS output dir to run auto-register burn workflow.",
+                )
+                return None
+
+            # Use temporary raw THOMAS segmentations for burn registration only.
+            # This prevents visible scene THOMAS nodes from being moved/overwritten.
+            for node in slicer.util.getNodesByClass("vtkMRMLSegmentationNode"):
+                name = node.GetName() or ""
+                if name.startswith("__THOMAS_BURN_"):
+                    slicer.mrmlScene.RemoveNode(node)
+            try:
+                refreshed = self.logic.load_thomas_thalamus_masks(
+                    thomas_dir=thomas_dir,
+                    logger=self.log,
+                    replace_existing=False,
+                    node_name_prefix="__THOMAS_BURN_",
+                )
+                burn_seg_nodes = refreshed.get("loaded_nodes", [])
+                temp_seg_nodes = list(burn_seg_nodes)
+                self.log(
+                    f"[thomas] burn workflow loaded temporary raw masks: "
+                    f"{len(burn_seg_nodes)} segmentation nodes"
+                )
+            except Exception as exc:
+                self.log(f"[thomas] burn mask load failed: {exc}")
+                qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+                return None
+            if not burn_seg_nodes:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "ROSA Helper",
+                    "No THOMAS masks available for burn workflow.",
+                )
+                return None
+
+            transform_node = self._get_or_create_thomas_burn_transform_node()
+            init_mode = self._widget_text(self.thomasInitModeCombo) or "useGeometryAlign"
+            self.log(
+                f"[thomas] burn registration start: moving={burn_moving_node.GetName()} -> "
+                f"fixed={burn_input_for_burn.GetName()} (init={init_mode})"
+            )
+            try:
+                self.logic.run_brainsfit_rigid_registration(
+                    fixed_volume_node=burn_input_for_burn,
+                    moving_volume_node=burn_moving_node,
+                    output_transform_node=transform_node,
+                    initialize_mode=init_mode,
+                    logger=self.log,
+                )
+            except Exception as exc:
+                self.log(f"[thomas] burn registration error: {exc}")
+                qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+                return None
+            # Harden on temporary nodes to guarantee downstream labelmap export uses the
+            # registered geometry even if parent transforms are ignored by export code paths.
+            self.logic.apply_transform_to_nodes(nodes=burn_seg_nodes, transform_node=transform_node, harden=True)
+            self.log(
+                f"[thomas] applied burn transform {transform_node.GetName()} "
+                f"to {len(burn_seg_nodes)} temporary segmentation nodes (hardened)"
+            )
+        elif not burn_seg_nodes:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Load THOMAS masks first.",
+            )
+            return None
+
+        side = (self._widget_text(self.thomasBurnSideCombo) or "Both").strip()
+        nucleus = (self._widget_text(self.thomasBurnNucleusCombo) or "").strip()
+        fill_value = self._widget_value(self.thomasBurnFillValueSpin)
+        output_name = self.thomasBurnOutputNameEdit.text.strip() or "THOMAS_Burned_MRI"
+
+        out_volume = None
+        try:
+            out_volume = self.logic.burn_thomas_nucleus_to_volume(
+                segmentation_nodes=burn_seg_nodes,
+                input_volume_node=burn_input_for_burn,
+                nucleus=nucleus,
+                side=side,
+                fill_value=fill_value,
+                output_name=output_name,
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[thomas] burn failed: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return None
+        finally:
+            for node in temp_seg_nodes:
+                if node is not None and node.GetScene() is not None:
+                    slicer.mrmlScene.RemoveNode(node)
+            for node in temp_volume_nodes:
+                if node is not None and node.GetScene() is not None:
+                    slicer.mrmlScene.RemoveNode(node)
+
+        self.logic.place_node_under_same_study(out_volume, burn_input_node, logger=self.log)
+        self.logic.show_volume_in_all_slice_views(out_volume)
+        self.log(f"[thomas] burn complete: {out_volume.GetName()}")
+        return out_volume
+
+    def onBurnAndExportThomasDicomClicked(self):
+        """Run burn workflow then export the created volume as classic DICOM series."""
+        reference_volume = None
+        if getattr(self, "thomasImportedDicomNodeID", None):
+            reference_volume = slicer.mrmlScene.GetNodeByID(self.thomasImportedDicomNodeID)
+        if reference_volume is None:
+            reference_volume = self.thomasBurnInputSelector.currentNode()
+        if reference_volume is None:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select Burn input MRI volume first.",
+            )
+            return
+
+        out_volume = self.onBurnThomasNucleusClicked()
+        if out_volume is None:
+            return
+
+        export_dir = (self.thomasDicomExportDirSelector.currentPath or "").strip()
+        if not export_dir:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select DICOM export directory first.",
+            )
+            return
+
+        series_description = (self.thomasDicomSeriesDescriptionEdit.text or "").strip()
+        if not series_description:
+            nucleus = (self._widget_text(self.thomasBurnNucleusCombo) or "NUCLEUS").strip().upper()
+            side = (self._widget_text(self.thomasBurnSideCombo) or "Both").strip().upper()
+            series_description = f"THOMAS_{nucleus}_{side}_BURNED"
+            self.thomasDicomSeriesDescriptionEdit.setText(series_description)
+
+        try:
+            series_dir = self.logic.export_scalar_volume_to_dicom_series(
+                volume_node=out_volume,
+                reference_volume_node=reference_volume,
+                export_dir=export_dir,
+                series_description=series_description,
+                modality="MR",
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[thomas] DICOM export failed: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        self.log(f"[thomas] DICOM export complete: {series_dir}")
