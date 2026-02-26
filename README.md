@@ -17,6 +17,7 @@ It supports:
 - recalculating contacts/models from edited trajectory entry/target points without creating duplicate nodes
 - V1 postop CT auto-fit workflow (detect candidates, fit selected/all, apply fit)
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
+- profile-based exports (contacts/trajectories/volumes/atlas/QC/full bundle) with manifest output
 - loading FreeSurfer volumetric parcellations (`aparc+aseg`, `aparc.a2009s+aseg`, `aparc.DKTatlas+aseg`, `aseg`, `wmparc`)
 - loading THOMAS thalamic nuclei masks and optional burn-to-DICOM workflow
 - assigning each contact to atlas labels (THOMAS / FreeSurfer / WM) with nearest-voxel and centroid-distance metrics
@@ -30,6 +31,20 @@ This extension also includes `Shank Detect` for CT-only workflows (no `.ros` req
 - row selection auto-aligns Red slice along the selected trajectory
 
 Existing workflows remain valid. New atlas and burn features are additive.
+
+## Shared Workflow Contract (MRML)
+
+This refactor introduces a shared `vtkMRMLScriptedModuleNode` named `RosaWorkflow`.
+Modules publish and consume scene artifacts through fixed node-reference roles
+(`BaseVolume`, `PostopCT`, `WorkingTrajectoryLines`, `ContactFiducials`, atlas
+roles, assignment/QC tables, transform roles) instead of Python-only widget
+state.
+
+Key behavior:
+- node reuse policy for volumes is based on `source_path + space_name`
+- managed workflow nodes carry `Rosa.*` provenance attributes
+- image and transform registries are persisted as MRML table nodes
+- Shank Detect publishes trajectories/contacts/assignments into the same contract
 
 ## ROS File Structure (What We Read)
 
@@ -94,6 +109,8 @@ markups.
    - contacts/models are regenerated from the fitted trajectories
    - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
 8. Click `Export Aligned NIfTI + Coordinates/QC`.
+   - choose `Export coordinate frame` (or leave empty to use base/reference)
+   - choose an `Export profile` (`full_bundle` by default)
    - if atlas assignment was run, export also includes atlas-label CSV
 9. Optional: open `Atlas Contact Labeling (V1)`:
    - click `Refresh Atlas Sources`
@@ -128,15 +145,19 @@ Output default folder:
 - `<case>/RosaHelper_Export/`
 
 Output files:
-- One `.nii.gz` per loaded/aligned volume
-- `<prefix>_aligned_world_coords.txt` with contact coordinates and labels
-- `<prefix>_planned_trajectory_points.csv` with planned entry/target points
-- `<prefix>_qc_metrics.csv` with per-trajectory QC metrics
-- `<prefix>_atlas_assignment.csv` with per-contact atlas assignment (when available)
+- profile-dependent output set (see `Export profile`)
+- `<prefix>_aligned_world_coords.txt`
+- `<prefix>_planned_trajectory_points.csv`
+- `<prefix>_final_trajectory_points.csv`
+- `<prefix>_qc_metrics.csv`
+- `<prefix>_atlas_assignment.csv`
+- `<prefix>_manifest.json`
+- one `.nii.gz` per loaded/aligned volume when profile includes volumes
 
 Coordinate columns in export:
-- `x_ras,y_ras,z_ras`: Slicer world RAS (matches exported NIfTI scene)
-- `x_lps,y_lps,z_lps`: corresponding LPS values
+- primary XYZ is in selected export frame (`x_frame_ras,y_frame_ras,z_frame_ras`)
+- world-space XYZ is also included (`x_world_ras,y_world_ras,z_world_ras`)
+- LPS XYZ is included for auditability (`x_lps,y_lps,z_lps`)
 
 QC CSV columns:
 - `trajectory`

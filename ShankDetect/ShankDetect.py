@@ -31,9 +31,13 @@ from slicer.ScriptedLoadableModule import (
 )
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
-SIBLING_ROSA_LIB = os.path.join(os.path.dirname(MODULE_DIR), "RosaHelper", "Lib")
-LOCAL_LIB = os.path.join(MODULE_DIR, "Lib")
-for path in [LOCAL_LIB, SIBLING_ROSA_LIB]:
+PATH_CANDIDATES = [
+    os.path.join(MODULE_DIR, "Lib"),  # source tree
+    os.path.join(MODULE_DIR, "ShankDetect", "Lib"),  # packaged extension layout
+    os.path.join(os.path.dirname(MODULE_DIR), "RosaHelper", "Lib"),  # source sibling module
+    os.path.join(MODULE_DIR, "RosaHelper", "Lib"),  # packaged sibling module
+]
+for path in PATH_CANDIDATES:
     if os.path.isdir(path) and path not in sys.path:
         sys.path.insert(0, path)
 
@@ -45,6 +49,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
+from rosa_slicer.workflow import WorkflowPublisher, WorkflowState
 from shank_core import masking as shank_masking
 from shank_core import pipeline as shank_pipeline
 
@@ -71,6 +76,9 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         super().setup()
 
         self.logic = ShankDetectLogic()
+        self.workflowState = WorkflowState()
+        self.workflowPublisher = WorkflowPublisher(self.workflowState)
+        self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
         self.modelsById = {}
         self.modelIds = []
         self._updatingTable = False
@@ -677,6 +685,63 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
                 rows.append(info)
         return rows
 
+    def _publish_working_trajectories_to_workflow(self, rows):
+        """Publish current table trajectory line nodes as workflow working trajectories."""
+        nodes = []
+        for row in rows or []:
+            node = slicer.mrmlScene.GetNodeByID(row.get("node_id", ""))
+            if node is not None:
+                nodes.append(node)
+        self.workflowPublisher.publish_nodes(
+            role="WorkingTrajectoryLines",
+            nodes=nodes,
+            source="shankdetect",
+            space_name="ROSA_BASE",
+            workflow_node=self.workflowNode,
+        )
+
+    def _publish_assignments_table_to_workflow(self, rows):
+        """Publish trajectory-model assignments as a workflow table node."""
+        columns = [
+            "trajectory",
+            "model_id",
+            "tip_at",
+            "tip_shift_mm",
+            "trajectory_length_mm",
+            "electrode_length_mm",
+            "source",
+        ]
+        table_node = None
+        for node in slicer.util.getNodesByClass("vtkMRMLTableNode"):
+            if node.GetName() == "ShankDetect_ElectrodeAssignments":
+                table_node = node
+                break
+        if table_node is None:
+            table_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", "ShankDetect_ElectrodeAssignments")
+        table = table_node.GetTable()
+        while table.GetNumberOfColumns() > 0:
+            table.RemoveColumn(0)
+        for col_name in columns:
+            arr = vtk.vtkStringArray()
+            arr.SetName(col_name)
+            table.AddColumn(arr)
+        for _ in rows:
+            table.InsertNextBlankRow()
+        for r, row in enumerate(rows):
+            for c, name in enumerate(columns):
+                table.SetValue(r, c, str(row.get(name, "")))
+        table.Modified()
+        table_node.Modified()
+        self.workflowState.set_single_role("ElectrodeAssignmentTable", table_node, workflow_node=self.workflowNode)
+        self.workflowState.tag_node(
+            table_node,
+            role="ElectrodeAssignmentTable",
+            source="shankdetect",
+            space="ROSA_BASE",
+            signature=table_node.GetID(),
+            workflow_node=self.workflowNode,
+        )
+
     def _nextSiteAwareNames(self, lines, existing_names, midline_x_ras=0.0):
         """Assign side-aware names (R##/L##) using a midline X in RAS."""
         used = set(existing_names)
@@ -965,6 +1030,15 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         if volume_node is None:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Shank Detect", "Select a CT volume first.")
             return
+        self.workflowPublisher.register_volume(
+            volume_node=volume_node,
+            source_type="import",
+            source_path="",
+            space_name="ROSA_BASE",
+            role="AdditionalCTVolumes",
+            is_default_postop=True,
+            workflow_node=self.workflowNode,
+        )
 
         rows = self._collectTrajectoriesFromTable()
         locked = [row for row in rows if row.get("locked")]
@@ -1157,6 +1231,7 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
         combined.extend(new_rows)
         combined = sorted(combined, key=lambda r: r["name"])
         self._populateTrajectoryTable(combined)
+        self._publish_working_trajectories_to_workflow(combined)
 
         if use_exact and len(combined) != int(self.exactCountSpin.value):
             self.log(
@@ -1229,6 +1304,30 @@ class ShankDetectWidget(ScriptedLoadableModuleWidget):
 
         prefix = self.contactPrefixEdit.text.strip() or "CTShankContacts"
         nodes = self.logic.create_contacts_fiducials_nodes_by_trajectory(contacts, node_prefix=prefix)
+        self.workflowPublisher.publish_nodes(
+            role="ContactFiducials",
+            nodes=list(nodes.values()),
+            source="shankdetect",
+            space_name="ROSA_BASE",
+            workflow_node=self.workflowNode,
+        )
+        assignment_rows_for_table = []
+        for row in rows:
+            model_id = row.get("model_id", "")
+            if not model_id:
+                continue
+            assignment_rows_for_table.append(
+                {
+                    "trajectory": row.get("name", ""),
+                    "model_id": model_id,
+                    "tip_at": "target",
+                    "tip_shift_mm": 0.0,
+                    "trajectory_length_mm": float(row.get("length_mm", 0.0)),
+                    "electrode_length_mm": float(self._modelLengthMm(model_id)),
+                    "source": "shankdetect",
+                }
+            )
+        self._publish_assignments_table_to_workflow(assignment_rows_for_table)
         self.log(f"[contacts] generated {len(contacts)} contact points across {len(nodes)} nodes")
 
 

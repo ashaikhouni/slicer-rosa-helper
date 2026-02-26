@@ -18,6 +18,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
+from rosa_slicer.workflow.export_profiles import get_export_profile, profile_names
 
 
 class RosaHelperWidgetMixin:
@@ -89,6 +90,26 @@ class RosaHelperWidgetMixin:
         self.bundleExportDirEdit = qt.QLineEdit()
         self.bundleExportDirEdit.setPlaceholderText("Optional (defaults to <case>/RosaHelper_Export)")
         contact_layout.addRow("Aligned export folder", self.bundleExportDirEdit)
+
+        self.exportFrameSelector = slicer.qMRMLNodeComboBox()
+        self.exportFrameSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.exportFrameSelector.noneEnabled = True
+        self.exportFrameSelector.addEnabled = False
+        self.exportFrameSelector.removeEnabled = False
+        self.exportFrameSelector.setMRMLScene(slicer.mrmlScene)
+        self.exportFrameSelector.setToolTip(
+            "Contact XYZ export frame. If empty, defaults to ROSA base/reference volume."
+        )
+        contact_layout.addRow("Export coordinate frame", self.exportFrameSelector)
+
+        self.exportProfileCombo = qt.QComboBox()
+        for name in profile_names():
+            self.exportProfileCombo.addItem(name)
+        default_idx = self.exportProfileCombo.findText("full_bundle")
+        if default_idx >= 0:
+            self.exportProfileCombo.setCurrentIndex(default_idx)
+        self.exportProfileCombo.setToolTip("Controls which artifact types are written to export output.")
+        contact_layout.addRow("Export profile", self.exportProfileCombo)
 
         self.exportBundleButton = qt.QPushButton("Export Aligned NIfTI + Coordinates/QC")
         self.exportBundleButton.clicked.connect(self.onExportAlignedBundleClicked)
@@ -739,7 +760,7 @@ class RosaHelperWidgetMixin:
         self.generateContactsButton.setEnabled(enabled)
         self.updateContactsButton.setEnabled(enabled)
         self.applyModelAllButton.setEnabled(enabled)
-        self.exportBundleButton.setEnabled(False)
+        self.exportBundleButton.setEnabled(bool(self.loadedVolumeNodeIDs))
         if trajectories:
             self.log(f"[contacts] ready for {len(trajectories)} trajectories")
             self.log(f"[contacts] auto-assigned models for {auto_assigned}/{len(trajectories)}")
@@ -836,6 +857,13 @@ class RosaHelperWidgetMixin:
 
         self.lastGeneratedContacts = contacts
         self.lastAtlasAssignmentRows = []
+        assignment_rows = list(assignments.get("assignments", []))
+        for row in assignment_rows:
+            traj_name = row.get("trajectory", "")
+            traj = traj_map.get(traj_name)
+            row["trajectory_length_mm"] = 0.0 if traj is None else self._trajectory_length_mm(traj)
+            row["electrode_length_mm"] = self._electrode_length_mm(row.get("model_id", ""))
+            row["source"] = "contacts"
         self.exportBundleButton.setEnabled(True)
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(nodes)} electrode nodes"
@@ -843,6 +871,13 @@ class RosaHelperWidgetMixin:
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
         self._refresh_qc_metrics()
+        self.logic.publish_contacts_outputs(
+            contact_nodes_by_traj=nodes,
+            model_nodes_by_traj=model_nodes,
+            assignment_rows=assignment_rows,
+            qc_rows=self.lastQCMetricsRows,
+            workflow_node=getattr(self, "workflowNode", None),
+        )
         if self.lastQCMetricsRows:
             self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
 
@@ -954,6 +989,16 @@ class RosaHelperWidgetMixin:
         self.autoFitCandidatesLPS = points_lps
         self.autoFitResults = {}
         self.autoFitCandidateVolumeNodeID = volume_node.GetID()
+        if hasattr(self.logic, "workflow_publish"):
+            self.logic.workflow_publish.register_volume(
+                volume_node=volume_node,
+                source_type="import",
+                source_path="",
+                space_name="ROSA_BASE",
+                role="AdditionalCTVolumes",
+                is_default_postop=True,
+                workflow_node=getattr(self, "workflowNode", None),
+            )
         count = int(points_lps.shape[0]) if hasattr(points_lps, "shape") else len(points_lps)
         self._set_autofit_buttons_enabled(count > 0)
         self.log(f"[autofit] detected {count} candidate points at threshold {threshold:.1f}")
@@ -1113,18 +1158,36 @@ class RosaHelperWidgetMixin:
 
     def onExportAlignedBundleClicked(self):
         """Export aligned volumes as NIfTI and contact coordinates in same frame."""
-        if not self.lastGeneratedContacts:
-            qt.QMessageBox.warning(
-                slicer.util.mainWindow(),
-                "ROSA Helper",
-                "Generate contacts first.",
-            )
+        selected_profile_name = self._widget_text(self.exportProfileCombo).strip() or "full_bundle"
+        profile, resolved_profile_name = get_export_profile(selected_profile_name)
+        if not any(bool(v) for v in profile.values()):
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "ROSA Helper", "Selected export profile is empty.")
             return
-        if not self.loadedVolumeNodeIDs:
+        if profile.get("include_volumes", False) and not self.loadedVolumeNodeIDs:
             qt.QMessageBox.warning(
                 slicer.util.mainWindow(),
                 "ROSA Helper",
                 "No loaded volumes available to export.",
+            )
+            return
+        needs_contacts = bool(
+            profile.get("include_contacts", False)
+            or profile.get("include_qc", False)
+            or profile.get("include_atlas", False)
+        )
+        if needs_contacts and not self.lastGeneratedContacts:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "This export profile requires generated contacts.",
+            )
+            return
+        needs_trajectories = bool(profile.get("include_planned", False) or profile.get("include_final", False))
+        if needs_trajectories and not self.loadedTrajectories:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "This export profile requires loaded trajectories.",
             )
             return
 
@@ -1143,6 +1206,7 @@ class RosaHelperWidgetMixin:
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
         self._refresh_qc_metrics()
         planned_map = self._collect_planned_trajectory_map()
+        final_map = self._build_trajectory_map_with_scene_overrides()
         try:
             result = self.logic.export_aligned_bundle(
                 volume_node_ids=self.loadedVolumeNodeIDs,
@@ -1150,8 +1214,11 @@ class RosaHelperWidgetMixin:
                 out_dir=out_dir,
                 node_prefix=node_prefix,
                 planned_trajectories=planned_map,
+                final_trajectories=final_map,
                 qc_rows=self.lastQCMetricsRows,
                 atlas_rows=self.lastAtlasAssignmentRows,
+                output_frame_node=self.exportFrameSelector.currentNode(),
+                export_profile=resolved_profile_name,
             )
         except Exception as exc:
             self.log(f"[bundle] export warning: {exc}")
@@ -1162,6 +1229,7 @@ class RosaHelperWidgetMixin:
             f"[bundle] exported {result['volume_count']} NIfTI volumes "
             f"and coordinate/QC files to {result['out_dir']}"
         )
+        self.log(f"[bundle] manifest: {result.get('manifest_path', '')}")
         if self.lastAtlasAssignmentRows:
             self.log(f"[bundle] atlas assignment CSV: {result.get('atlas_assignment_path', '')}")
 
@@ -1416,6 +1484,16 @@ class RosaHelperWidgetMixin:
             return
 
         self.fsToRosaTransformNodeID = transform_node.GetID()
+        if hasattr(self.logic, "workflow_publish"):
+            self.logic.workflow_publish.register_transform(
+                transform_node=transform_node,
+                from_space="FS_NATIVE",
+                to_space="ROSA_BASE",
+                transform_type="linear",
+                status="active",
+                role="FSToBaseTransform",
+                workflow_node=getattr(self, "workflowNode", None),
+            )
         self.log(f"[fs] registration done: transform={transform_node.GetName()}")
 
     def onRefreshFSParcellationClicked(self):
@@ -1500,6 +1578,10 @@ class RosaHelperWidgetMixin:
             return
 
         self.lastAtlasAssignmentRows = rows
+        self.logic.publish_atlas_assignment_rows(
+            atlas_rows=rows,
+            workflow_node=getattr(self, "workflowNode", None),
+        )
         self.log(f"[atlas] assigned {len(rows)} contacts")
 
     def onLoadFSParcellationsClicked(self):
@@ -1580,6 +1662,19 @@ class RosaHelperWidgetMixin:
 
         self.fsParcellationVolumeNodeIDs = [node.GetID() for node in loaded_nodes]
         self.fsParcellationSegNodeIDs = [node.GetID() for node in loaded_seg_nodes]
+        if hasattr(self.logic, "workflow_publish"):
+            wf = getattr(self, "workflowNode", None)
+            for node, path in zip(loaded_nodes, loaded_paths):
+                name = (node.GetName() or "").lower()
+                role = "WMParcellationVolumes" if "wmparc" in name else "FSParcellationVolumes"
+                self.logic.workflow_publish.register_volume(
+                    volume_node=node,
+                    source_type="freesurfer",
+                    source_path=path,
+                    space_name="ROSA_BASE" if apply_transform else "FS_NATIVE",
+                    role=role,
+                    workflow_node=wf,
+                )
         self.log(f"[fs] loaded {len(loaded_nodes)} parcellation volumes")
         if loaded_seg_nodes:
             self.log(f"[fs] created {len(loaded_seg_nodes)} parcellation 3D segmentation nodes")
@@ -1711,6 +1806,16 @@ class RosaHelperWidgetMixin:
             return
 
         self.thomasToRosaTransformNodeID = transform_node.GetID()
+        if hasattr(self.logic, "workflow_publish"):
+            self.logic.workflow_publish.register_transform(
+                transform_node=transform_node,
+                from_space="THOMAS_NATIVE",
+                to_space="ROSA_BASE",
+                transform_type="linear",
+                status="active",
+                role="THOMASToBaseTransform",
+                workflow_node=getattr(self, "workflowNode", None),
+            )
         self.log(f"[thomas] registration done: transform={transform_node.GetName()}")
 
     def onImportThomasDicomClicked(self):
@@ -1768,6 +1873,15 @@ class RosaHelperWidgetMixin:
         if volume_node is not None:
             self.thomasBurnInputSelector.setCurrentNode(volume_node)
             self.thomasImportedDicomNodeID = volume_node.GetID()
+            if hasattr(self.logic, "workflow_publish"):
+                self.logic.workflow_publish.register_volume(
+                    volume_node=volume_node,
+                    source_type="dicom",
+                    source_path=dicom_dir,
+                    space_name="ROSA_BASE",
+                    role="AdditionalMRIVolumes",
+                    workflow_node=getattr(self, "workflowNode", None),
+                )
             self.log(f"[thomas] DICOM MRI ready: {volume_node.GetName()}")
 
     def onRefreshThomasNucleiClicked(self):
@@ -1846,6 +1960,14 @@ class RosaHelperWidgetMixin:
         for path in loaded_paths:
             self.log(f"[thomas] loaded: {path}")
         self.thomasSegmentationNodeIDs = [node.GetID() for node in loaded_nodes]
+        if hasattr(self.logic, "workflow_publish"):
+            self.logic.workflow_publish.publish_nodes(
+                role="THOMASSegmentations",
+                nodes=loaded_nodes,
+                source="thomas",
+                space_name="ROSA_BASE" if apply_transform else "THOMAS_NATIVE",
+                workflow_node=getattr(self, "workflowNode", None),
+            )
         self._refresh_thomas_nucleus_combo()
         self._refresh_atlas_source_options()
 
@@ -2010,6 +2132,17 @@ class RosaHelperWidgetMixin:
 
         self.logic.place_node_under_same_study(out_volume, burn_input_node, logger=self.log)
         self.logic.show_volume_in_all_slice_views(out_volume)
+        if hasattr(self.logic, "workflow_publish"):
+            self.logic.workflow_publish.register_volume(
+                volume_node=out_volume,
+                source_type="derived",
+                source_path="",
+                space_name="ROSA_BASE",
+                role="DerivedVolumes",
+                is_derived=True,
+                derived_from_node_id=burn_input_node.GetID() if burn_input_node is not None else "",
+                workflow_node=getattr(self, "workflowNode", None),
+            )
         self.log(f"[thomas] burn complete: {out_volume.GetName()}")
         return out_volume
 
