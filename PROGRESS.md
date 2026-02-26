@@ -1,45 +1,52 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-26 18:00:09Z
-- **Current phase**: Phase 2 (planned next) — `CommonLib` extraction and import rewiring
-- **Last stable pushed commit**: `8f4337b`
+- **Timestamp (UTC)**: 2026-02-26 18:14:00Z
+- **Current phase**: Phase 3 (next) — `ExportCenter` module extraction
+- **Last stable pushed commit**: `8f4337b` (pre-push baseline)
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Modified: `README.md`
-  - Modified: `RosaHelper/Lib/rosa_slicer/widget_mixin.py`
-  - Modified: `RosaHelper/RosaHelper.py`
-  - Modified: `ShankDetect/ShankDetect.py`
-  - Untracked: `RosaHelper/Lib/rosa_slicer/workflow/`
+  - Ahead of `origin/main` by local phase commits pending push.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
-- **Status**: Implemented locally, smoke-tested by user
-- **Date closed**: Pending checkpoint commit for local follow-up changes
-- **Commit range (stable pushed baseline)**: `63ba15c..8f4337b`
+- **Status**: Closed
+- **Date closed**: 2026-02-26
+- **Commit range**: `8f4337b..3b854f3`
 - **Acceptance checks passed**:
   - User reported end-to-end workflows running correctly in Slicer.
   - Export manifest generation verified and profile semantics validated.
   - Frame-based coordinate outputs and CSV schemas validated on sample case.
 
-## Active Phase
 ### Phase 2 — `CommonLib` Extraction and Import Rewiring
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-02-26
+- **Commit range**: `3b854f3..474ffbc`
+- **Acceptance checks passed**:
+  - Added extension-level `CommonLib/rosa_core` and `CommonLib/rosa_workflow`.
+  - Rewired `RosaHelper` and `ShankDetect` to shared import paths.
+  - Added one-release compatibility bridge at `RosaHelper/Lib/rosa_slicer/workflow/*`.
+  - Updated CMake to install `CommonLib` at extension scope.
+  - User smoke-test logs confirm:
+    - contacts generate/update + QC + bundle export with manifest
+    - ShankDetect detect/view-align/contact generation
+    - no runtime import regressions observed.
+
+## Active Phase
+### Phase 3 — `ExportCenter` Module Extraction
 - **Objective**:
-  - Consolidate shared `rosa_core` and workflow contract code into extension-level `CommonLib`.
-  - Remove cross-module import coupling between `RosaHelper` and `ShankDetect`.
+  - Extract export workflow into dedicated module using shared workflow contract and profile system.
 - **In scope**:
-  - New shared library layout and package installs.
-  - Import rewiring in existing modules.
-  - One-release compatibility bridge for old import paths.
-  - No functional/algorithm behavior changes.
+  - New `ExportCenter` module shell + UI.
+  - Reuse existing `export_aligned_bundle` behavior via shared service layer.
+  - Profile-driven output selection and manifest generation.
 - **Out of scope**:
-  - New feature development.
-  - Module extraction (`ExportCenter`, `CT Fit`, etc.) in this phase.
+  - Contact generation/CT fit logic changes.
+  - Atlas sampling algorithm changes.
 - **Exit criteria**:
-  - Both `RosaHelper` and `ShankDetect` load and run with shared imports from `CommonLib`.
-  - No module directly imports code from another module’s `Lib`.
-  - Compatibility bridge stubs exist and pass smoke tests.
-  - Phase 2 checkpoint committed and pushed.
+  - Export can be run from `ExportCenter` without `RosaHelper` UI dependency.
+  - Existing exports remain backward compatible in content/schema.
+  - Smoke tests pass for ROSA + ShankDetect-originated scene data.
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -54,6 +61,7 @@
 - **D-002**: Progress updates occur at **end of each phase**, not each commit.
 - **D-003**: Prior master plan remains authoritative; phase decomposition is execution structure.
 - **D-004**: Next implementation target locked to **Phase 2 only** (no simultaneous module split).
+- **D-005**: Phase 2 validated locally before push; advance implementation target to Phase 3.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
