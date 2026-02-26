@@ -17,6 +17,9 @@ It supports:
 - recalculating contacts/models from edited trajectory entry/target points without creating duplicate nodes
 - V1 postop CT auto-fit workflow (detect candidates, fit selected/all, apply fit)
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
+- loading FreeSurfer volumetric parcellations (`aparc+aseg`, `aparc.a2009s+aseg`, `aparc.DKTatlas+aseg`, `aseg`, `wmparc`)
+- loading THOMAS thalamic nuclei masks and optional burn-to-DICOM workflow
+- assigning each contact to atlas labels (THOMAS / FreeSurfer / WM) with nearest-voxel and centroid-distance metrics
 
 This extension also includes `Shank Detect` for CT-only workflows (no `.ros` required):
 - threshold-based shank trajectory detection from postop CT artifact
@@ -25,6 +28,8 @@ This extension also includes `Shank Detect` for CT-only workflows (no `.ros` req
 - side-aware default naming (`R##` / `L##`) with editable names
 - per-trajectory electrode assignment and contact generation
 - row selection auto-aligns Red slice along the selected trajectory
+
+Existing workflows remain valid. New atlas and burn features are additive.
 
 ## ROS File Structure (What We Read)
 
@@ -89,6 +94,12 @@ markups.
    - contacts/models are regenerated from the fitted trajectories
    - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
 8. Click `Export Aligned NIfTI + Coordinates/QC`.
+   - if atlas assignment was run, export also includes atlas-label CSV
+9. Optional: open `Atlas Contact Labeling (V1)`:
+   - click `Refresh Atlas Sources`
+   - choose FreeSurfer / THOMAS / WM sources
+   - click `Assign Contacts to Atlas`
+   - export again to write/update atlas assignment CSV
 
 ## Quick Start (Shank Detect)
 
@@ -121,6 +132,7 @@ Output files:
 - `<prefix>_aligned_world_coords.txt` with contact coordinates and labels
 - `<prefix>_planned_trajectory_points.csv` with planned entry/target points
 - `<prefix>_qc_metrics.csv` with per-trajectory QC metrics
+- `<prefix>_atlas_assignment.csv` with per-contact atlas assignment (when available)
 
 Coordinate columns in export:
 - `x_ras,y_ras,z_ras`: Slicer world RAS (matches exported NIfTI scene)
@@ -180,6 +192,40 @@ Metrics are computed per trajectory by comparing:
 - planned contact centers (from selected model + planned line)
 - final contact centers (manual or auto-fit result)
 
+## Atlas Contact Labeling (V1)
+
+`Atlas Contact Labeling (V1)` assigns each generated contact to nearest atlas voxels.
+
+Inputs:
+- FreeSurfer volumetric atlas (`FSVOL_*`, for example `FSVOL_aparc+aseg`)
+- optional THOMAS segmentation atlas
+- optional white-matter atlas (`FSVOL_wmparc`)
+
+Workflow:
+1. Generate contacts first.
+2. Load FS parcellation volume(s) and optional THOMAS segmentations.
+3. Open `Atlas Contact Labeling (V1)` and click `Refresh Atlas Sources`.
+4. Select sources from dropdowns and click `Assign Contacts to Atlas`.
+5. Export bundle to write `<prefix>_atlas_assignment.csv`.
+
+CSV includes:
+- per-atlas labels and distances (`thomas_*`, `freesurfer_*`, `wm_*`)
+- `closest_*` columns:
+  - nearest structure across all selected atlas sources
+  - includes source atlas and both nearest-voxel / centroid distances
+- `primary_*` columns:
+  - final assignment used by workflow
+  - with `Prefer THOMAS when available` enabled: uses THOMAS if present, otherwise closest overall
+  - with it disabled: equals `closest_*`
+
+Primary assignment rule:
+- chooses the closest voxel match across selected atlas sources
+- if `Prefer THOMAS when available` is enabled, THOMAS assignment is used whenever a THOMAS label is present
+
+THOMAS labeling behavior:
+- generic whole-thalamus segments are excluded from nearest-label assignment when nuclei are available
+- this keeps labels specific to nuclei (for example `CM`, `MD-Pf`) instead of collapsing to `LEFT_THALAMUS` / `RIGHT_THALAMUS`
+
 ## FreeSurfer Integration (V1)
 
 `FreeSurfer Integration (V1)` supports aligning a recon-all MRI/surfaces to the
@@ -202,6 +248,16 @@ Workflow:
    `Load FreeSurfer Surfaces`.
 7. Keep `Apply FS->ROSA transform` enabled to bring surfaces into ROSA space.
    Optionally harden surface transforms.
+8. Optional volumetric atlas loading from `mri/`:
+   - click `Refresh` next to `Parcellation volume`
+   - choose one entry (`aparc+aseg.mgz`, `aparc.a2009s+aseg.mgz`, `aparc.DKTatlas+aseg.mgz`, `aseg.mgz`, `wmparc.mgz`) or `all available`
+   - click `Load Parcellation Volumes`
+   - keep `Apply FS->ROSA transform to parcellations` enabled for ROSA-space alignment
+   - keep `Apply LUT to parcellation volumes` enabled for atlas colorized slice display
+   - enable `Create 3D geometry from parcellations` to generate closed-surface segmentation nodes in 3D
+9. To use parcellations for contact labeling:
+   - load at least one `FSVOL_*` atlas volume
+   - then run `Atlas Contact Labeling (V1)` assignment
 
 Notes:
 - BRAINSFit is expected to be available in standard Slicer installs.
@@ -215,6 +271,10 @@ Notes:
 - If direct `.pial/.white/.inflated` loading fails, ROSA Helper attempts fallback conversion
   through `mris_convert` (FreeSurfer) and loads the converted VTK surface.
 - `mris_convert` fallback may require a valid FreeSurfer license.
+- Parcellation volumes are loaded from `mri/` as scalar label volumes named `FSVOL_*`.
+- Hardening parcellation transforms is optional and off by default to avoid unintended
+  interpolation of label values.
+- The same LUT selector is reused for surface annotations and parcellation volume coloring.
 
 Quick checklist:
 - The MRI selected in `FreeSurfer MRI` must be the same scan used to build recon-all surfaces.
@@ -245,6 +305,8 @@ Workflow:
 8. Optional one-click DICOM export:
    - set `DICOM export dir` and `DICOM series description`
    - click `Register + Burn + Export DICOM` to write classic slice-wise DICOM files
+9. Optional atlas labeling integration:
+   - after THOMAS masks are loaded, they appear in `Atlas Contact Labeling (V1)` as a source
 
 Notes:
 - Loader scans only `left/` and `right/` mask files and skips helper/cropped/resampled/full outputs.

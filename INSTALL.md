@@ -47,6 +47,18 @@ pip install antspyx
 4. Optional: use `Trajectory Slice View` to align Red/Yellow/Green along one trajectory.
 5. Click `Export Aligned NIfTI + Coordinates`.
 
+Optional FreeSurfer volumetric atlas load:
+- In `FreeSurfer Integration (V1)`, select FreeSurfer subject dir, refresh parcellation list,
+  and load `aparc*+aseg` / `aseg` / `wmparc` volumes.
+- Keep `Apply FS->ROSA transform to parcellations` enabled when you need ROSA-space labels.
+- Keep `Apply LUT to parcellation volumes` enabled for colorized atlas view in slices.
+- Optional: enable `Create 3D geometry from parcellations` for 3D closed-surface display.
+
+Optional contact-to-atlas labeling:
+- Open `Atlas Contact Labeling (V1)`.
+- Select FreeSurfer / THOMAS / WM atlas sources and click `Assign Contacts to Atlas`.
+- Export bundle to include `<prefix>_atlas_assignment.csv`.
+
 Default export folder:
 - `<case>/RosaHelper_Export`
 

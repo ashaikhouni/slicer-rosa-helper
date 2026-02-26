@@ -172,7 +172,49 @@ class RosaHelperWidgetMixin:
         self.fsSubjectDirSelector.setToolTip(
             "FreeSurfer subject directory (contains surf/) or direct surf/ directory"
         )
+        if hasattr(self.fsSubjectDirSelector, "currentPathChanged"):
+            self.fsSubjectDirSelector.currentPathChanged.connect(
+                lambda _p: self._refresh_fs_parcellation_combo()
+            )
         fs_layout.addRow("FreeSurfer subject", self.fsSubjectDirSelector)
+
+        fs_parc_row = qt.QHBoxLayout()
+        self.fsParcellationCombo = qt.QComboBox()
+        self.fsParcellationCombo.addItem("all available")
+        fs_parc_row.addWidget(self.fsParcellationCombo)
+        self.fsRefreshParcellationButton = qt.QPushButton("Refresh")
+        self.fsRefreshParcellationButton.clicked.connect(self.onRefreshFSParcellationClicked)
+        fs_parc_row.addWidget(self.fsRefreshParcellationButton)
+        fs_layout.addRow("Parcellation volume", fs_parc_row)
+
+        self.fsApplyTransformVolumesCheck = qt.QCheckBox("Apply FS->ROSA transform to parcellations")
+        self.fsApplyTransformVolumesCheck.setChecked(True)
+        fs_layout.addRow(self.fsApplyTransformVolumesCheck)
+
+        self.fsHardenVolumeCheck = qt.QCheckBox("Harden parcellation transforms")
+        self.fsHardenVolumeCheck.setChecked(False)
+        self.fsHardenVolumeCheck.setToolTip(
+            "Leave off to preserve integer label values. Enable only when a hardened copy is required."
+        )
+        fs_layout.addRow(self.fsHardenVolumeCheck)
+
+        self.fsLoadParcellationButton = qt.QPushButton("Load Parcellation Volumes")
+        self.fsLoadParcellationButton.clicked.connect(self.onLoadFSParcellationsClicked)
+        fs_layout.addRow(self.fsLoadParcellationButton)
+
+        self.fsApplyParcellationLUTCheck = qt.QCheckBox("Apply LUT to parcellation volumes")
+        self.fsApplyParcellationLUTCheck.setChecked(True)
+        self.fsApplyParcellationLUTCheck.setToolTip(
+            "Use FreeSurferLabels or selected LUT for aparc/aseg volume colorization in slice views."
+        )
+        fs_layout.addRow(self.fsApplyParcellationLUTCheck)
+
+        self.fsCreateParcellation3DCheck = qt.QCheckBox("Create 3D geometry from parcellations")
+        self.fsCreateParcellation3DCheck.setChecked(False)
+        self.fsCreateParcellation3DCheck.setToolTip(
+            "Create segmentation closed-surface nodes from loaded parcellation volumes for 3D display."
+        )
+        fs_layout.addRow(self.fsCreateParcellation3DCheck)
 
         self.fsSurfaceSetCombo = qt.QComboBox()
         self.fsSurfaceSetCombo.addItems(["pial", "white", "pial+white", "inflated"])
@@ -345,6 +387,39 @@ class RosaHelperWidgetMixin:
         self.thomasBurnExportButton = qt.QPushButton("Register + Burn + Export DICOM")
         self.thomasBurnExportButton.clicked.connect(self.onBurnAndExportThomasDicomClicked)
         th_layout.addRow(self.thomasBurnExportButton)
+
+    def _build_atlas_labeling_ui(self):
+        """Create contact-to-atlas labeling controls."""
+        self.atlasLabelSection = ctk.ctkCollapsibleButton()
+        self.atlasLabelSection.text = "Atlas Contact Labeling (V1)"
+        self.atlasLabelSection.collapsed = True
+        self.layout.addWidget(self.atlasLabelSection)
+
+        form = qt.QFormLayout(self.atlasLabelSection)
+
+        self.atlasFSVolumeCombo = qt.QComboBox()
+        self.atlasFSVolumeCombo.addItem("(none)")
+        form.addRow("FreeSurfer atlas", self.atlasFSVolumeCombo)
+
+        self.atlasThomasCombo = qt.QComboBox()
+        self.atlasThomasCombo.addItem("(none)")
+        form.addRow("Thalamus atlas", self.atlasThomasCombo)
+
+        self.atlasWMVolumeCombo = qt.QComboBox()
+        self.atlasWMVolumeCombo.addItem("(none)")
+        form.addRow("White matter atlas", self.atlasWMVolumeCombo)
+
+        self.atlasPreferThomasCheck = qt.QCheckBox("Prefer THOMAS when available")
+        self.atlasPreferThomasCheck.setChecked(True)
+        form.addRow(self.atlasPreferThomasCheck)
+
+        self.atlasRefreshButton = qt.QPushButton("Refresh Atlas Sources")
+        self.atlasRefreshButton.clicked.connect(self.onRefreshAtlasSourcesClicked)
+        form.addRow(self.atlasRefreshButton)
+
+        self.atlasAssignButton = qt.QPushButton("Assign Contacts to Atlas")
+        self.atlasAssignButton.clicked.connect(self.onAssignContactsToAtlasClicked)
+        form.addRow(self.atlasAssignButton)
 
     def _build_qc_ui(self):
         """Create QC table that updates automatically after contact generation."""
@@ -760,6 +835,7 @@ class RosaHelperWidgetMixin:
             )
 
         self.lastGeneratedContacts = contacts
+        self.lastAtlasAssignmentRows = []
         self.exportBundleButton.setEnabled(True)
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(nodes)} electrode nodes"
@@ -1075,6 +1151,7 @@ class RosaHelperWidgetMixin:
                 node_prefix=node_prefix,
                 planned_trajectories=planned_map,
                 qc_rows=self.lastQCMetricsRows,
+                atlas_rows=self.lastAtlasAssignmentRows,
             )
         except Exception as exc:
             self.log(f"[bundle] export warning: {exc}")
@@ -1085,6 +1162,8 @@ class RosaHelperWidgetMixin:
             f"[bundle] exported {result['volume_count']} NIfTI volumes "
             f"and coordinate/QC files to {result['out_dir']}"
         )
+        if self.lastAtlasAssignmentRows:
+            self.log(f"[bundle] atlas assignment CSV: {result.get('atlas_assignment_path', '')}")
 
     def onAlignSliceClicked(self):
         """Align selected slice view to selected trajectory."""
@@ -1129,6 +1208,75 @@ class RosaHelperWidgetMixin:
         if self.loadedVolumeNodeIDs:
             first_name = sorted(self.loadedVolumeNodeIDs.keys())[0]
             self.fsFixedSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[first_name])
+
+    def _refresh_fs_parcellation_combo(self):
+        """Refresh FS parcellation dropdown from selected subject directory."""
+        subject_dir = self.fsSubjectDirSelector.currentPath
+        current = self._widget_text(self.fsParcellationCombo).strip()
+        self.fsParcellationCombo.clear()
+        self.fsParcellationCombo.addItem("all available")
+        if not subject_dir:
+            return
+        try:
+            listing = self.logic.list_freesurfer_parcellation_candidates(subject_dir)
+        except Exception as exc:
+            self.log(f"[fs] parcellation scan error: {exc}")
+            return
+        available = listing.get("available", [])
+        for item in available:
+            name = item.get("name")
+            if name:
+                self.fsParcellationCombo.addItem(name)
+        if current and self.fsParcellationCombo.findText(current) >= 0:
+            self.fsParcellationCombo.setCurrentText(current)
+
+    def _refresh_atlas_source_options(self):
+        """Refresh atlas source dropdowns from currently loaded FS/THOMAS nodes."""
+        fs_current = self._widget_text(self.atlasFSVolumeCombo).strip() if hasattr(self, "atlasFSVolumeCombo") else ""
+        wm_current = self._widget_text(self.atlasWMVolumeCombo).strip() if hasattr(self, "atlasWMVolumeCombo") else ""
+        th_current = self._widget_text(self.atlasThomasCombo).strip() if hasattr(self, "atlasThomasCombo") else ""
+
+        if hasattr(self, "atlasFSVolumeCombo"):
+            self.atlasFSVolumeCombo.clear()
+            self.atlasFSVolumeCombo.addItem("(none)")
+        if hasattr(self, "atlasWMVolumeCombo"):
+            self.atlasWMVolumeCombo.clear()
+            self.atlasWMVolumeCombo.addItem("(none)")
+        if hasattr(self, "atlasThomasCombo"):
+            self.atlasThomasCombo.clear()
+            self.atlasThomasCombo.addItem("(none)")
+
+        fs_nodes = []
+        for node_id in getattr(self, "fsParcellationVolumeNodeIDs", []) or []:
+            node = slicer.mrmlScene.GetNodeByID(node_id)
+            if node is not None:
+                fs_nodes.append(node)
+        if not fs_nodes:
+            for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+                name = node.GetName() or ""
+                if name.startswith("FSVOL_"):
+                    fs_nodes.append(node)
+
+        for node in fs_nodes:
+            name = node.GetName() or ""
+            self.atlasFSVolumeCombo.addItem(name, node.GetID())
+            lower = name.lower()
+            if "wmparc" in lower:
+                self.atlasWMVolumeCombo.addItem(name, node.GetID())
+
+        thomas_nodes = self._loaded_thomas_segmentation_nodes()
+        if thomas_nodes:
+            self.atlasThomasCombo.addItem("All loaded THOMAS", "__ALL__")
+            for node in thomas_nodes:
+                self.atlasThomasCombo.addItem(node.GetName() or "THOMAS", node.GetID())
+
+        # restore selection where possible
+        if fs_current and self.atlasFSVolumeCombo.findText(fs_current) >= 0:
+            self.atlasFSVolumeCombo.setCurrentText(fs_current)
+        if wm_current and self.atlasWMVolumeCombo.findText(wm_current) >= 0:
+            self.atlasWMVolumeCombo.setCurrentText(wm_current)
+        if th_current and self.atlasThomasCombo.findText(th_current) >= 0:
+            self.atlasThomasCombo.setCurrentText(th_current)
 
     def _preselect_thomas_reference_volume(self):
         """Default THOMAS fixed volume selector to loaded ROSA reference volume."""
@@ -1269,6 +1417,180 @@ class RosaHelperWidgetMixin:
 
         self.fsToRosaTransformNodeID = transform_node.GetID()
         self.log(f"[fs] registration done: transform={transform_node.GetName()}")
+
+    def onRefreshFSParcellationClicked(self):
+        """Refresh detected FS parcellation options from selected subject directory."""
+        self._refresh_fs_parcellation_combo()
+        self.log("[fs] parcellation options refreshed")
+
+    def onRefreshAtlasSourcesClicked(self):
+        """Refresh atlas-source dropdowns from current scene nodes."""
+        self._refresh_atlas_source_options()
+        self.log("[atlas] source options refreshed")
+
+    def _atlas_selected_volume_node(self, combo):
+        """Return selected scalar volume node from atlas combo."""
+        if combo is None:
+            return None
+        text = (self._widget_text(combo) or "").strip()
+        if text == "(none)" or not text:
+            return None
+        data = combo.currentData if hasattr(combo, "currentData") else None
+        node_id = data() if callable(data) else data
+        if node_id:
+            node = slicer.mrmlScene.GetNodeByID(str(node_id))
+            if node is not None:
+                return node
+        return self.logic._find_node_by_name(text, "vtkMRMLScalarVolumeNode")
+
+    def _atlas_selected_thomas_nodes(self):
+        """Return selected THOMAS segmentation nodes for atlas assignment."""
+        combo = self.atlasThomasCombo
+        if combo is None:
+            return []
+        text = (self._widget_text(combo) or "").strip()
+        if text == "(none)" or not text:
+            return []
+        data = combo.currentData if hasattr(combo, "currentData") else None
+        selected = data() if callable(data) else data
+        if selected == "__ALL__":
+            return self._loaded_thomas_segmentation_nodes()
+        if selected:
+            node = slicer.mrmlScene.GetNodeByID(str(selected))
+            return [node] if node is not None else []
+        node = self.logic._find_node_by_name(text, "vtkMRMLSegmentationNode")
+        return [node] if node is not None else []
+
+    def onAssignContactsToAtlasClicked(self):
+        """Assign generated contacts to selected atlas sources and store rows for export."""
+        if not self.lastGeneratedContacts:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Generate contacts first.",
+            )
+            return
+
+        fs_node = self._atlas_selected_volume_node(self.atlasFSVolumeCombo)
+        wm_node = self._atlas_selected_volume_node(self.atlasWMVolumeCombo)
+        th_nodes = self._atlas_selected_thomas_nodes()
+        if fs_node is None and wm_node is None and not th_nodes:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select at least one atlas source (FreeSurfer, THOMAS, or WM).",
+            )
+            return
+
+        reference_node = self.fsFixedSelector.currentNode()
+        if reference_node is None and self.referenceVolumeName in self.loadedVolumeNodeIDs:
+            reference_node = slicer.mrmlScene.GetNodeByID(self.loadedVolumeNodeIDs[self.referenceVolumeName])
+        try:
+            rows = self.logic.assign_contacts_to_atlases(
+                contacts=self.lastGeneratedContacts,
+                freesurfer_volume_node=fs_node,
+                thomas_segmentation_nodes=th_nodes,
+                wm_volume_node=wm_node,
+                reference_volume_node=reference_node,
+                prefer_thomas=bool(self.atlasPreferThomasCheck.checked),
+            )
+        except Exception as exc:
+            self.log(f"[atlas] assignment error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        self.lastAtlasAssignmentRows = rows
+        self.log(f"[atlas] assigned {len(rows)} contacts")
+
+    def onLoadFSParcellationsClicked(self):
+        """Load selected FreeSurfer parcellation volume(s) from recon-all mri/."""
+        subject_dir = self.fsSubjectDirSelector.currentPath
+        if not subject_dir:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select FreeSurfer subject directory.",
+            )
+            return
+
+        selected = (self._widget_text(self.fsParcellationCombo) or "").strip()
+        selected_names = None if selected == "all available" else [selected]
+        create_3d = bool(self.fsCreateParcellation3DCheck.checked)
+        apply_lut = bool(self.fsApplyParcellationLUTCheck.checked)
+        lut_path = self.fsLUTPathSelector.currentPath.strip() if self.fsLUTPathSelector.currentPath else ""
+
+        apply_transform = bool(self.fsApplyTransformVolumesCheck.checked)
+        transform_node = None
+        if apply_transform:
+            if self.fsToRosaTransformNodeID:
+                transform_node = slicer.mrmlScene.GetNodeByID(self.fsToRosaTransformNodeID)
+            if transform_node is None:
+                name = self.fsTransformNameEdit.text.strip() or "FS_to_ROSA"
+                transform_node = self.logic._find_node_by_name(name, "vtkMRMLLinearTransformNode")
+            if transform_node is None:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "ROSA Helper",
+                    "FS->ROSA transform is not available. Run registration first or disable transform application.",
+                )
+                return
+
+        try:
+            result = self.logic.load_freesurfer_parcellation_volumes(
+                subject_dir=subject_dir,
+                selected_names=selected_names,
+                color_lut_path=lut_path or None,
+                apply_color_table=apply_lut,
+                create_3d_geometry=create_3d,
+                logger=self.log,
+            )
+        except Exception as exc:
+            self.log(f"[fs] parcellation load error: {exc}")
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
+            return
+
+        loaded_nodes = result.get("loaded_nodes", [])
+        loaded_paths = result.get("loaded_paths", [])
+        loaded_seg_nodes = result.get("loaded_segmentation_nodes", [])
+        missing_paths = result.get("missing_paths", [])
+        failed_paths = result.get("failed_paths", [])
+        available = result.get("available_names", [])
+        if apply_transform and transform_node is not None and (loaded_nodes or loaded_seg_nodes):
+            targets = list(loaded_nodes) + list(loaded_seg_nodes)
+            self.logic.apply_transform_to_nodes(
+                nodes=targets,
+                transform_node=transform_node,
+                harden=bool(self.fsHardenVolumeCheck.checked),
+            )
+            self.log(
+                f"[fs] applied transform {transform_node.GetName()} to "
+                f"{len(loaded_nodes)} parcellation volumes and {len(loaded_seg_nodes)} 3D segmentations"
+            )
+
+        if available:
+            self.log(f"[fs] available parcellations: {', '.join(available)}")
+        if missing_paths:
+            self.log(f"[fs] missing parcellation files: {len(missing_paths)}")
+            for path in missing_paths:
+                self.log(f"[fs] missing: {path}")
+        if failed_paths:
+            self.log(f"[fs] failed parcellation files: {len(failed_paths)}")
+            for path in failed_paths:
+                self.log(f"[fs] failed: {path}")
+
+        self.fsParcellationVolumeNodeIDs = [node.GetID() for node in loaded_nodes]
+        self.fsParcellationSegNodeIDs = [node.GetID() for node in loaded_seg_nodes]
+        self.log(f"[fs] loaded {len(loaded_nodes)} parcellation volumes")
+        if loaded_seg_nodes:
+            self.log(f"[fs] created {len(loaded_seg_nodes)} parcellation 3D segmentation nodes")
+
+        # Keep anatomy visualization stable: loading parcellation volumes can switch
+        # slice background away from the ROSA base/fixed MRI.
+        fixed_node = self.fsFixedSelector.currentNode()
+        if fixed_node is not None:
+            self.logic.show_volume_in_all_slice_views(fixed_node)
+            self.log(f"[fs] restored background volume: {fixed_node.GetName()}")
+        self._refresh_atlas_source_options()
 
     def onLoadFSSurfacesClicked(self):
         """Load FreeSurfer surfaces and optionally apply FS->ROSA transform."""
@@ -1525,6 +1847,7 @@ class RosaHelperWidgetMixin:
             self.log(f"[thomas] loaded: {path}")
         self.thomasSegmentationNodeIDs = [node.GetID() for node in loaded_nodes]
         self._refresh_thomas_nucleus_combo()
+        self._refresh_atlas_source_options()
 
     def onBurnThomasNucleusClicked(self):
         """Run optional registration and burn selected THOMAS nucleus into MRI volume."""

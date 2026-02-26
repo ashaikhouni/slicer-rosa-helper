@@ -113,6 +113,23 @@ class FreeSurferService:
             return surf_dir
         raise ValueError(f"No surf/ directory found under: {subject_dir}")
 
+    def _resolve_freesurfer_mri_dir(self, subject_dir):
+        """Resolve FreeSurfer mri directory from subject root, surf/, label/, or mri/ path."""
+        root = os.path.abspath(subject_dir)
+        if not os.path.isdir(root):
+            raise ValueError(f"FreeSurfer path not found: {subject_dir}")
+        base = os.path.basename(root)
+        if base == "mri":
+            return root
+        if base in ("surf", "label"):
+            mri_dir = os.path.join(os.path.dirname(root), "mri")
+            if os.path.isdir(mri_dir):
+                return mri_dir
+        mri_dir = os.path.join(root, "mri")
+        if os.path.isdir(mri_dir):
+            return mri_dir
+        raise ValueError(f"No mri/ directory found under: {subject_dir}")
+
     def _resolve_freesurfer_label_dir(self, subject_dir):
         """Resolve FreeSurfer label directory from subject root, surf/, or label/ path."""
         root = os.path.abspath(subject_dir)
@@ -128,6 +145,213 @@ class FreeSurferService:
         if os.path.isdir(label_dir):
             return label_dir
         return None
+
+    def _load_parcellation_volume_node(self, path):
+        """Load one FreeSurfer parcellation volume as labelmap when possible."""
+        try:
+            result = slicer.util.loadLabelVolume(path, returnNode=True)
+            if isinstance(result, tuple):
+                ok, node = result
+                if ok and node is not None:
+                    return node
+            elif result is not None:
+                return result
+        except Exception:
+            pass
+
+        # Fallback to scalar load if labelmap import path is unavailable.
+        try:
+            result = slicer.util.loadVolume(path, returnNode=True)
+            if isinstance(result, tuple):
+                ok, node = result
+                return node if ok else None
+            return result
+        except Exception:
+            return None
+
+    def _style_freesurfer_volume(self, node, source_path):
+        """Apply minimal display defaults for loaded FreeSurfer parcellation volume."""
+        if node is None:
+            return
+        node.CreateDefaultDisplayNodes()
+        display = node.GetDisplayNode()
+        if display is None:
+            return
+        if hasattr(display, "SetInterpolate"):
+            display.SetInterpolate(False)
+        name = os.path.basename(source_path).lower()
+        if "aparc" in name or "aseg" in name or "wmparc" in name:
+            if hasattr(display, "SetAutoWindowLevel"):
+                display.SetAutoWindowLevel(False)
+            if hasattr(display, "SetWindow"):
+                display.SetWindow(400.0)
+            if hasattr(display, "SetLevel"):
+                display.SetLevel(200.0)
+
+    def _apply_color_table_to_volume(self, volume_node, color_node):
+        """Assign color table node to a loaded parcellation volume display."""
+        if volume_node is None or color_node is None:
+            return False
+        display = volume_node.GetDisplayNode()
+        if display is None:
+            volume_node.CreateDefaultDisplayNodes()
+            display = volume_node.GetDisplayNode()
+        if display is None:
+            return False
+        if hasattr(display, "SetAndObserveColorNodeID"):
+            display.SetAndObserveColorNodeID(color_node.GetID())
+        # For scalar volumes, force direct label-range coloring when possible.
+        if hasattr(display, "SetAutoWindowLevel"):
+            display.SetAutoWindowLevel(False)
+        if hasattr(display, "SetWindow"):
+            display.SetWindow(512.0)
+        if hasattr(display, "SetLevel"):
+            display.SetLevel(256.0)
+        return True
+
+    def _create_segmentation_from_parcellation_volume(self, volume_node, output_name=None):
+        """Create a segmentation node from one parcellation label volume."""
+        if volume_node is None:
+            return None
+        if not hasattr(slicer.modules, "segmentations"):
+            return None
+        seg_logic = slicer.modules.segmentations.logic()
+        if seg_logic is None:
+            return None
+
+        name = output_name or f"{volume_node.GetName()}_Seg"
+        existing = self._find_node_by_name(name, "vtkMRMLSegmentationNode")
+        if existing is not None:
+            slicer.mrmlScene.RemoveNode(existing)
+        seg_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", name)
+        seg_node.CreateDefaultDisplayNodes()
+
+        label_node = volume_node
+        temp_label = None
+        if not volume_node.IsA("vtkMRMLLabelMapVolumeNode"):
+            volumes_logic = slicer.modules.volumes.logic()
+            if volumes_logic is None:
+                slicer.mrmlScene.RemoveNode(seg_node)
+                return None
+            temp_label = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", f"__tmp_{name}")
+            volumes_logic.CreateLabelVolumeFromVolume(slicer.mrmlScene, temp_label, volume_node)
+            label_node = temp_label
+
+        try:
+            ok = seg_logic.ImportLabelmapToSegmentationNode(label_node, seg_node)
+            if not ok:
+                slicer.mrmlScene.RemoveNode(seg_node)
+                seg_node = None
+            elif seg_node is not None:
+                seg_node.CreateClosedSurfaceRepresentation()
+                display = seg_node.GetDisplayNode()
+                if display is not None:
+                    if hasattr(display, "SetVisibility2D"):
+                        display.SetVisibility2D(False)
+                    if hasattr(display, "SetVisibility3D"):
+                        display.SetVisibility3D(True)
+                    if hasattr(display, "SetOpacity3D"):
+                        display.SetOpacity3D(0.35)
+        finally:
+            if temp_label is not None and temp_label.GetScene() is not None:
+                slicer.mrmlScene.RemoveNode(temp_label)
+        return seg_node
+
+    def freesurfer_parcellation_candidates(self, subject_dir):
+        """Return known FreeSurfer parcellation volumes present under mri/."""
+        mri_dir = self._resolve_freesurfer_mri_dir(subject_dir)
+        known = [
+            "aparc+aseg.mgz",
+            "aparc.a2009s+aseg.mgz",
+            "aparc.DKTatlas+aseg.mgz",
+            "aseg.mgz",
+            "wmparc.mgz",
+        ]
+        available = []
+        for name in known:
+            path = os.path.join(mri_dir, name)
+            if os.path.isfile(path):
+                available.append({"name": name, "path": path})
+        return {
+            "mri_dir": mri_dir,
+            "available": available,
+            "known": known,
+        }
+
+    def load_freesurfer_parcellation_volumes(
+        self,
+        subject_dir,
+        selected_names=None,
+        color_lut_path=None,
+        apply_color_table=True,
+        create_3d_geometry=False,
+        logger=None,
+    ):
+        """Load FreeSurfer parcellation volumes from `mri/`.
+
+        Parameters
+        ----------
+        selected_names: list[str] | None
+            Filenames to load. If empty/None, load all detected candidates.
+        """
+
+        def log(msg):
+            if logger:
+                logger(msg)
+
+        listing = self.freesurfer_parcellation_candidates(subject_dir)
+        available_map = {item["name"]: item["path"] for item in listing["available"]}
+        if selected_names:
+            target = list(dict.fromkeys([str(name).strip() for name in selected_names if str(name).strip()]))
+        else:
+            target = list(available_map.keys())
+
+        loaded_nodes = []
+        loaded_segmentation_nodes = []
+        loaded_paths = []
+        missing_paths = []
+        failed_paths = []
+        color_node = None
+        if bool(apply_color_table):
+            color_node = self._preferred_annotation_color_node(color_lut_path=color_lut_path, logger=logger)
+            if color_node is None:
+                log("[fs] no color table found for parcellation volumes; using default grayscale display")
+        for name in target:
+            path = available_map.get(name)
+            if not path:
+                missing_paths.append(os.path.join(listing["mri_dir"], name))
+                continue
+            node = self._load_parcellation_volume_node(path)
+            if node is None:
+                failed_paths.append(path)
+                continue
+            node_name = os.path.splitext(os.path.basename(path))[0]
+            node.SetName(f"FSVOL_{node_name}")
+            self._style_freesurfer_volume(node, path)
+            if color_node is not None and bool(apply_color_table):
+                self._apply_color_table_to_volume(node, color_node)
+            loaded_nodes.append(node)
+            loaded_paths.append(path)
+            log(f"[fs] loaded parcellation volume: {path}")
+            if bool(create_3d_geometry):
+                seg_node = self._create_segmentation_from_parcellation_volume(
+                    node,
+                    output_name=f"{node.GetName()}_Seg",
+                )
+                if seg_node is not None:
+                    loaded_segmentation_nodes.append(seg_node)
+                    log(f"[fs] created 3D segmentation: {seg_node.GetName()}")
+
+        return {
+            "mri_dir": listing["mri_dir"],
+            "available_names": list(available_map.keys()),
+            "loaded_nodes": loaded_nodes,
+            "loaded_segmentation_nodes": loaded_segmentation_nodes,
+            "loaded_paths": loaded_paths,
+            "missing_paths": missing_paths,
+            "failed_paths": failed_paths,
+            "color_node_name": color_node.GetName() if color_node is not None else "",
+        }
 
     def _surface_filenames_for_set(self, surface_set):
         """Return expected FreeSurfer surface file names for one preset."""

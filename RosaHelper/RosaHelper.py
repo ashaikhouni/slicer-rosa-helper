@@ -10,6 +10,7 @@ It focuses on scene operations:
 
 import os
 import sys
+import csv
 import math
 import importlib
 import hashlib
@@ -41,13 +42,17 @@ from rosa_core import (
     resolve_analyze_volume,
     resolve_reference_index,
 )
-from rosa_slicer.freesurfer_service import FreeSurferService
-from rosa_slicer.trajectory_scene import TrajectorySceneService
+from rosa_slicer import freesurfer_service as _freesurfer_service_mod
+from rosa_slicer import trajectory_scene as _trajectory_scene_mod
 from rosa_slicer import widget_mixin as _widget_mixin_mod
 
 # Hot-reload helper submodule so Widget mixin updates are picked up without full app restart.
 _widget_mixin_mod = importlib.reload(_widget_mixin_mod)
+_freesurfer_service_mod = importlib.reload(_freesurfer_service_mod)
+_trajectory_scene_mod = importlib.reload(_trajectory_scene_mod)
 RosaHelperWidgetMixin = _widget_mixin_mod.RosaHelperWidgetMixin
+FreeSurferService = _freesurfer_service_mod.FreeSurferService
+TrajectorySceneService = _trajectory_scene_mod.TrajectorySceneService
 
 
 class RosaHelper(ScriptedLoadableModule):
@@ -75,12 +80,15 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        self.lastAtlasAssignmentRows = []
         self.loadedVolumeNodeIDs = {}
         self.referenceVolumeName = None
         self.autoFitCandidatesLPS = []
         self.autoFitResults = {}
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
+        self.fsParcellationVolumeNodeIDs = []
+        self.fsParcellationSegNodeIDs = []
         self.thomasToRosaTransformNodeID = None
         self.thomasDicomToRosaTransformNodeID = None
         self.thomasImportedDicomNodeID = None
@@ -131,6 +139,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self._build_contact_ui()
         self._build_freesurfer_ui()
         self._build_thomas_ui()
+        self._build_atlas_labeling_ui()
         self._build_qc_ui()
         self._build_trajectory_view_ui()
         self._build_autofit_ui()
@@ -171,12 +180,15 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        self.lastAtlasAssignmentRows = []
         self.loadedVolumeNodeIDs = summary.get("loaded_volume_node_ids", {})
         self.referenceVolumeName = summary.get("reference_volume")
         self.autoFitCandidatesLPS = []
         self.autoFitResults = {}
         self.autoFitCandidateVolumeNodeID = None
         self.fsToRosaTransformNodeID = None
+        self.fsParcellationVolumeNodeIDs = []
+        self.fsParcellationSegNodeIDs = []
         self.thomasToRosaTransformNodeID = None
         self.thomasDicomToRosaTransformNodeID = None
         self.thomasImportedDicomNodeID = None
@@ -187,9 +199,11 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self._refresh_qc_metrics()
         self._set_autofit_buttons_enabled(False)
         self._preselect_freesurfer_reference_volume()
+        self._refresh_fs_parcellation_combo()
         self._preselect_thomas_reference_volume()
         self._preselect_thomas_burn_volume()
         self._refresh_thomas_nucleus_combo()
+        self._refresh_atlas_source_options()
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
             f"created {summary['trajectory_count']} trajectories"
@@ -455,6 +469,29 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             surface_set=surface_set,
             annotation_name=annotation_name,
             color_lut_path=color_lut_path,
+            logger=logger,
+        )
+
+    def list_freesurfer_parcellation_candidates(self, subject_dir):
+        """Return detected FreeSurfer parcellation files under mri/."""
+        return self.fs_service.freesurfer_parcellation_candidates(subject_dir)
+
+    def load_freesurfer_parcellation_volumes(
+        self,
+        subject_dir,
+        selected_names=None,
+        color_lut_path=None,
+        apply_color_table=True,
+        create_3d_geometry=False,
+        logger=None,
+    ):
+        """Load selected FreeSurfer parcellation volumes from recon-all mri/."""
+        return self.fs_service.load_freesurfer_parcellation_volumes(
+            subject_dir=subject_dir,
+            selected_names=selected_names,
+            color_lut_path=color_lut_path,
+            apply_color_table=apply_color_table,
+            create_3d_geometry=create_3d_geometry,
             logger=logger,
         )
 
@@ -1294,6 +1331,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         node_prefix="ROSA_Contacts",
         planned_trajectories=None,
         qc_rows=None,
+        atlas_rows=None,
     ):
         """Export aligned scene volumes, coordinates, planned trajectories, and QC metrics."""
         os.makedirs(out_dir, exist_ok=True)
@@ -1387,6 +1425,76 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
                     )
                 )
 
+        atlas_path = os.path.join(out_dir, f"{node_prefix}_atlas_assignment.csv")
+        with open(atlas_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "trajectory",
+                    "contact_label",
+                    "contact_index",
+                    "x_ras",
+                    "y_ras",
+                    "z_ras",
+                    "closest_source",
+                    "closest_label",
+                    "closest_label_value",
+                    "closest_distance_to_voxel_mm",
+                    "closest_distance_to_centroid_mm",
+                    "primary_source",
+                    "primary_label",
+                    "primary_label_value",
+                    "primary_distance_to_voxel_mm",
+                    "primary_distance_to_centroid_mm",
+                    "thomas_label",
+                    "thomas_label_value",
+                    "thomas_distance_to_voxel_mm",
+                    "thomas_distance_to_centroid_mm",
+                    "freesurfer_label",
+                    "freesurfer_label_value",
+                    "freesurfer_distance_to_voxel_mm",
+                    "freesurfer_distance_to_centroid_mm",
+                    "wm_label",
+                    "wm_label_value",
+                    "wm_distance_to_voxel_mm",
+                    "wm_distance_to_centroid_mm",
+                ]
+            )
+            for row in atlas_rows or []:
+                p_ras = row.get("contact_ras", [0.0, 0.0, 0.0])
+                writer.writerow(
+                    [
+                        str(row.get("trajectory", "")),
+                        str(row.get("contact_label", "")),
+                        int(row.get("contact_index", 0)),
+                        float(p_ras[0]),
+                        float(p_ras[1]),
+                        float(p_ras[2]),
+                        str(row.get("closest_source", "")),
+                        str(row.get("closest_label", "")),
+                        int(row.get("closest_label_value", 0)),
+                        float(row.get("closest_distance_to_voxel_mm", 0.0)),
+                        float(row.get("closest_distance_to_centroid_mm", 0.0)),
+                        str(row.get("primary_source", "")),
+                        str(row.get("primary_label", "")),
+                        int(row.get("primary_label_value", 0)),
+                        float(row.get("primary_distance_to_voxel_mm", 0.0)),
+                        float(row.get("primary_distance_to_centroid_mm", 0.0)),
+                        str(row.get("thomas_label", "")),
+                        int(row.get("thomas_label_value", 0)),
+                        float(row.get("thomas_distance_to_voxel_mm", 0.0)),
+                        float(row.get("thomas_distance_to_centroid_mm", 0.0)),
+                        str(row.get("freesurfer_label", "")),
+                        int(row.get("freesurfer_label_value", 0)),
+                        float(row.get("freesurfer_distance_to_voxel_mm", 0.0)),
+                        float(row.get("freesurfer_distance_to_centroid_mm", 0.0)),
+                        str(row.get("wm_label", "")),
+                        int(row.get("wm_label_value", 0)),
+                        float(row.get("wm_distance_to_voxel_mm", 0.0)),
+                        float(row.get("wm_distance_to_centroid_mm", 0.0)),
+                    ]
+                )
+
         return {
             "out_dir": out_dir,
             "volume_count": len(saved_paths),
@@ -1394,7 +1502,333 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             "coordinates_path": coord_path,
             "planned_trajectories_path": planned_path,
             "qc_metrics_path": qc_path,
+            "atlas_assignment_path": atlas_path,
         }
+
+    def _vtk_matrix_to_numpy_4x4(self, vtk_matrix):
+        """Return 4x4 NumPy matrix copied from vtkMatrix4x4."""
+        out = np.eye(4, dtype=float)
+        for r in range(4):
+            for c in range(4):
+                out[r, c] = float(vtk_matrix.GetElement(r, c))
+        return out
+
+    def _volume_ijk_to_world_matrix(self, volume_node):
+        """Return IJK->world-RAS 4x4 matrix, including linear parent transform if present."""
+        ijk_to_ras_vtk = vtk.vtkMatrix4x4()
+        volume_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
+        ijk_to_world = self._vtk_matrix_to_numpy_4x4(ijk_to_ras_vtk)
+
+        parent = volume_node.GetParentTransformNode()
+        if parent is None:
+            return ijk_to_world
+        parent_to_world_vtk = vtk.vtkMatrix4x4()
+        if not parent.GetMatrixTransformToWorld(parent_to_world_vtk):
+            return ijk_to_world
+        parent_to_world = self._vtk_matrix_to_numpy_4x4(parent_to_world_vtk)
+        return parent_to_world @ ijk_to_world
+
+    def _volume_label_lookup_name(self, volume_node, label_value):
+        """Resolve label name via display color node when available."""
+        if volume_node is None:
+            return ""
+        display = volume_node.GetDisplayNode()
+        if display is None:
+            return ""
+        color_node = display.GetColorNode()
+        if color_node is None:
+            return ""
+        try:
+            name = color_node.GetColorName(int(label_value))
+        except Exception:
+            name = ""
+        if not name:
+            return ""
+        return str(name)
+
+    def _build_volume_label_index(self, volume_node):
+        """Build point-locator index for non-zero voxels in a label volume."""
+        if np is None:
+            raise RuntimeError("NumPy is required for atlas assignment.")
+        if volume_node is None:
+            return None
+        arr = slicer.util.arrayFromVolume(volume_node)  # KJI
+        idx = np.argwhere(arr > 0)
+        if idx.size == 0:
+            return None
+
+        labels = arr[idx[:, 0], idx[:, 1], idx[:, 2]].astype(np.int32)
+        ijk_h = np.ones((idx.shape[0], 4), dtype=float)
+        ijk_h[:, 0] = idx[:, 2].astype(float)
+        ijk_h[:, 1] = idx[:, 1].astype(float)
+        ijk_h[:, 2] = idx[:, 0].astype(float)
+
+        ijk_to_world = self._volume_ijk_to_world_matrix(volume_node)
+        ras = ijk_h @ ijk_to_world.T
+        ras = ras[:, :3]
+
+        points = vtk.vtkPoints()
+        points.SetNumberOfPoints(int(ras.shape[0]))
+        for i in range(int(ras.shape[0])):
+            points.SetPoint(i, float(ras[i, 0]), float(ras[i, 1]), float(ras[i, 2]))
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(points)
+        locator = vtk.vtkPointLocator()
+        locator.SetDataSet(poly)
+        locator.BuildLocator()
+
+        centroids = {}
+        label_values = np.unique(labels)
+        for label_value in label_values:
+            mask = labels == int(label_value)
+            xyz = ras[mask]
+            if xyz.size == 0:
+                continue
+            centroids[int(label_value)] = xyz.mean(axis=0)
+
+        label_names = {}
+        for value in label_values:
+            name = self._volume_label_lookup_name(volume_node, int(value))
+            label_names[int(value)] = name or f"Label_{int(value)}"
+
+        return {
+            "locator": locator,
+            "points": points,
+            "labels": labels,
+            "centroids": centroids,
+            "label_names": label_names,
+        }
+
+    def _build_segmentation_label_index(
+        self,
+        segmentation_nodes,
+        reference_volume_node,
+        skip_generic_thalamus=True,
+    ):
+        """Build point-locator index from segmentation voxels for nearest-segment lookup.
+
+        For THOMAS, generic whole-thalamus masks can overlap all nuclei and dominate
+        nearest-neighbor lookup. By default we skip those segments so contacts map to
+        specific nuclei; fallback to full set if nothing remains.
+        """
+        if np is None:
+            raise RuntimeError("NumPy is required for atlas assignment.")
+        if not segmentation_nodes:
+            return None
+        if reference_volume_node is None:
+            raise ValueError("Reference volume node is required for segmentation atlas indexing.")
+        if not hasattr(slicer.modules, "segmentations"):
+            return None
+        seg_logic = slicer.modules.segmentations.logic()
+        if seg_logic is None:
+            return None
+
+        all_points = []
+        all_labels = []
+        label_names = {}
+        label_value = 1
+        for seg_node in segmentation_nodes:
+            if seg_node is None:
+                continue
+            segmentation = seg_node.GetSegmentation()
+            if segmentation is None:
+                continue
+            for i in range(segmentation.GetNumberOfSegments()):
+                seg_id = segmentation.GetNthSegmentID(i)
+                segment = segmentation.GetSegment(seg_id)
+                if segment is None:
+                    continue
+                seg_name = segment.GetName() or ""
+                if skip_generic_thalamus:
+                    nucleus = self._thomas_nucleus_from_segment_name(seg_name)
+                    if nucleus == "THALAMUS":
+                        continue
+                label_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "__tmp_atlas_seg")
+                ids = vtk.vtkStringArray()
+                ids.InsertNextValue(seg_id)
+                ok = seg_logic.ExportSegmentsToLabelmapNode(seg_node, ids, label_node, reference_volume_node)
+                if not ok:
+                    slicer.mrmlScene.RemoveNode(label_node)
+                    continue
+                arr = slicer.util.arrayFromVolume(label_node)
+                idx = np.argwhere(arr > 0)
+                if idx.size == 0:
+                    slicer.mrmlScene.RemoveNode(label_node)
+                    continue
+                ijk_h = np.ones((idx.shape[0], 4), dtype=float)
+                ijk_h[:, 0] = idx[:, 2].astype(float)
+                ijk_h[:, 1] = idx[:, 1].astype(float)
+                ijk_h[:, 2] = idx[:, 0].astype(float)
+                ijk_to_ras_vtk = vtk.vtkMatrix4x4()
+                label_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
+                ijk_to_ras = self._vtk_matrix_to_numpy_4x4(ijk_to_ras_vtk)
+                ras = ijk_h @ ijk_to_ras.T
+                ras = ras[:, :3]
+                all_points.append(ras)
+                all_labels.append(np.full((ras.shape[0],), int(label_value), dtype=np.int32))
+                label_names[int(label_value)] = seg_name or f"Segment_{label_value}"
+                label_value += 1
+                slicer.mrmlScene.RemoveNode(label_node)
+
+        if not all_points:
+            # Fallback when only generic masks are available.
+            if skip_generic_thalamus:
+                return self._build_segmentation_label_index(
+                    segmentation_nodes=segmentation_nodes,
+                    reference_volume_node=reference_volume_node,
+                    skip_generic_thalamus=False,
+                )
+            return None
+
+        ras_all = np.vstack(all_points)
+        labels_all = np.concatenate(all_labels)
+
+        points = vtk.vtkPoints()
+        points.SetNumberOfPoints(int(ras_all.shape[0]))
+        for i in range(int(ras_all.shape[0])):
+            points.SetPoint(i, float(ras_all[i, 0]), float(ras_all[i, 1]), float(ras_all[i, 2]))
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(points)
+        locator = vtk.vtkPointLocator()
+        locator.SetDataSet(poly)
+        locator.BuildLocator()
+
+        centroids = {}
+        for value in np.unique(labels_all):
+            xyz = ras_all[labels_all == int(value)]
+            if xyz.size == 0:
+                continue
+            centroids[int(value)] = xyz.mean(axis=0)
+
+        return {
+            "locator": locator,
+            "points": points,
+            "labels": labels_all,
+            "centroids": centroids,
+            "label_names": label_names,
+        }
+
+    def _query_label_index(self, index_cache, point_ras):
+        """Return nearest label match info from precomputed index cache."""
+        if not index_cache:
+            return {
+                "label": "",
+                "label_value": 0,
+                "distance_to_voxel_mm": 0.0,
+                "distance_to_centroid_mm": 0.0,
+            }
+        locator = index_cache["locator"]
+        point_id = int(locator.FindClosestPoint(float(point_ras[0]), float(point_ras[1]), float(point_ras[2])))
+        nearest = [0.0, 0.0, 0.0]
+        index_cache["points"].GetPoint(point_id, nearest)
+        dx = float(point_ras[0]) - float(nearest[0])
+        dy = float(point_ras[1]) - float(nearest[1])
+        dz = float(point_ras[2]) - float(nearest[2])
+        dv = math.sqrt(dx * dx + dy * dy + dz * dz)
+
+        label_value = int(index_cache["labels"][point_id])
+        label_name = index_cache["label_names"].get(label_value, f"Label_{label_value}")
+        centroid = index_cache["centroids"].get(label_value)
+        if centroid is None:
+            dc = 0.0
+        else:
+            cx = float(point_ras[0]) - float(centroid[0])
+            cy = float(point_ras[1]) - float(centroid[1])
+            cz = float(point_ras[2]) - float(centroid[2])
+            dc = math.sqrt(cx * cx + cy * cy + cz * cz)
+
+        return {
+            "label": label_name,
+            "label_value": label_value,
+            "distance_to_voxel_mm": float(dv),
+            "distance_to_centroid_mm": float(dc),
+        }
+
+    def assign_contacts_to_atlases(
+        self,
+        contacts,
+        freesurfer_volume_node=None,
+        thomas_segmentation_nodes=None,
+        wm_volume_node=None,
+        reference_volume_node=None,
+        prefer_thomas=True,
+    ):
+        """Assign each contact to nearest voxel label in selected atlas sources.
+
+        Returns a list of rows suitable for CSV export.
+        """
+        if np is None:
+            raise RuntimeError("NumPy is required for atlas assignment.")
+
+        fs_idx = self._build_volume_label_index(freesurfer_volume_node) if freesurfer_volume_node else None
+        wm_idx = self._build_volume_label_index(wm_volume_node) if wm_volume_node else None
+        th_idx = None
+        if thomas_segmentation_nodes:
+            th_idx = self._build_segmentation_label_index(thomas_segmentation_nodes, reference_volume_node)
+
+        rows = []
+        for contact in contacts or []:
+            point_ras = lps_to_ras_point(contact.get("position_lps", [0.0, 0.0, 0.0]))
+            th = self._query_label_index(th_idx, point_ras) if th_idx else None
+            fs = self._query_label_index(fs_idx, point_ras) if fs_idx else None
+            wm = self._query_label_index(wm_idx, point_ras) if wm_idx else None
+
+            choices = []
+            if fs is not None and fs.get("label"):
+                choices.append(("freesurfer", fs))
+            if th is not None and th.get("label"):
+                choices.append(("thomas", th))
+            if wm is not None and wm.get("label"):
+                choices.append(("wm", wm))
+
+            closest_source = ""
+            closest = {"label": "", "label_value": 0, "distance_to_voxel_mm": 0.0, "distance_to_centroid_mm": 0.0}
+            if choices:
+                closest_source, closest = min(
+                    choices,
+                    key=lambda item: float(item[1].get("distance_to_voxel_mm", float("inf"))),
+                )
+
+            primary_source = ""
+            primary = {"label": "", "label_value": 0, "distance_to_voxel_mm": 0.0, "distance_to_centroid_mm": 0.0}
+            if prefer_thomas and th is not None and th.get("label"):
+                primary_source, primary = "thomas", th
+            else:
+                primary_source, primary = closest_source, closest
+
+            rows.append(
+                {
+                    "trajectory": contact.get("trajectory", ""),
+                    "contact_label": contact.get("label", ""),
+                    "contact_index": int(contact.get("index", 0)),
+                    "contact_ras": [float(point_ras[0]), float(point_ras[1]), float(point_ras[2])],
+                    "closest_source": closest_source,
+                    "closest_label": closest.get("label", ""),
+                    "closest_label_value": int(closest.get("label_value", 0)),
+                    "closest_distance_to_voxel_mm": float(closest.get("distance_to_voxel_mm", 0.0)),
+                    "closest_distance_to_centroid_mm": float(closest.get("distance_to_centroid_mm", 0.0)),
+                    "primary_source": primary_source,
+                    "primary_label": primary.get("label", ""),
+                    "primary_label_value": int(primary.get("label_value", 0)),
+                    "primary_distance_to_voxel_mm": float(primary.get("distance_to_voxel_mm", 0.0)),
+                    "primary_distance_to_centroid_mm": float(primary.get("distance_to_centroid_mm", 0.0)),
+                    "thomas_label": "" if th is None else th.get("label", ""),
+                    "thomas_label_value": 0 if th is None else int(th.get("label_value", 0)),
+                    "thomas_distance_to_voxel_mm": 0.0 if th is None else float(th.get("distance_to_voxel_mm", 0.0)),
+                    "thomas_distance_to_centroid_mm": 0.0 if th is None else float(th.get("distance_to_centroid_mm", 0.0)),
+                    "freesurfer_label": "" if fs is None else fs.get("label", ""),
+                    "freesurfer_label_value": 0 if fs is None else int(fs.get("label_value", 0)),
+                    "freesurfer_distance_to_voxel_mm": 0.0 if fs is None else float(fs.get("distance_to_voxel_mm", 0.0)),
+                    "freesurfer_distance_to_centroid_mm": 0.0 if fs is None else float(fs.get("distance_to_centroid_mm", 0.0)),
+                    "wm_label": "" if wm is None else wm.get("label", ""),
+                    "wm_label_value": 0 if wm is None else int(wm.get("label_value", 0)),
+                    "wm_distance_to_voxel_mm": 0.0 if wm is None else float(wm.get("distance_to_voxel_mm", 0.0)),
+                    "wm_distance_to_centroid_mm": 0.0 if wm is None else float(wm.get("distance_to_centroid_mm", 0.0)),
+                }
+            )
+
+        rows.sort(key=lambda r: (str(r.get("trajectory", "")), int(r.get("contact_index", 0))))
+        return rows
 
     def _vsub(self, a, b):
         """Return vector subtraction `a - b`."""
