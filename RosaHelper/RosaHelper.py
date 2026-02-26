@@ -50,8 +50,9 @@ from rosa_core import (
     resolve_analyze_volume,
     resolve_reference_index,
 )
+from rosa_scene import electrode_scene as _electrode_scene_mod
+from rosa_scene import trajectory_scene as _trajectory_scene_mod
 from rosa_slicer import freesurfer_service as _freesurfer_service_mod
-from rosa_slicer import trajectory_scene as _trajectory_scene_mod
 from rosa_slicer import widget_mixin as _widget_mixin_mod
 from rosa_workflow import export_bundle as _export_bundle_mod
 from rosa_workflow import workflow_state as _workflow_state_mod
@@ -61,12 +62,14 @@ from rosa_workflow import workflow_publish as _workflow_publish_mod
 _widget_mixin_mod = importlib.reload(_widget_mixin_mod)
 _freesurfer_service_mod = importlib.reload(_freesurfer_service_mod)
 _trajectory_scene_mod = importlib.reload(_trajectory_scene_mod)
+_electrode_scene_mod = importlib.reload(_electrode_scene_mod)
 _export_bundle_mod = importlib.reload(_export_bundle_mod)
 _workflow_state_mod = importlib.reload(_workflow_state_mod)
 _workflow_publish_mod = importlib.reload(_workflow_publish_mod)
 RosaHelperWidgetMixin = _widget_mixin_mod.RosaHelperWidgetMixin
 FreeSurferService = _freesurfer_service_mod.FreeSurferService
 TrajectorySceneService = _trajectory_scene_mod.TrajectorySceneService
+ElectrodeSceneService = _electrode_scene_mod.ElectrodeSceneService
 WorkflowState = _workflow_state_mod.WorkflowState
 WorkflowPublisher = _workflow_publish_mod.WorkflowPublisher
 export_aligned_bundle_service = _export_bundle_mod.export_aligned_bundle
@@ -303,10 +306,14 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         """Initialize service delegates used by Slicer-specific workflows."""
         super().__init__()
-        self.fs_service = FreeSurferService(module_dir=MODULE_DIR)
-        self.trajectory_scene = TrajectorySceneService()
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
+        self.fs_service = FreeSurferService(module_dir=MODULE_DIR)
+        self.trajectory_scene = TrajectorySceneService()
+        self.electrode_scene = ElectrodeSceneService(
+            workflow_state=self.workflow_state,
+            workflow_publish=self.workflow_publish,
+        )
 
     def load_case(
         self,

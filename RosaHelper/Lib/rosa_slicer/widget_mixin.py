@@ -841,14 +841,14 @@ class RosaHelperWidgetMixin:
             raise ValueError(str(exc))
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
-        nodes = self.logic.create_contacts_fiducials_nodes_by_trajectory(
+        nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(
             contacts,
             node_prefix=node_prefix,
         )
 
         model_nodes = {}
         if self.createModelsCheck.checked:
-            model_nodes = self.logic.create_electrode_models_by_trajectory(
+            model_nodes = self.logic.electrode_scene.create_electrode_models_by_trajectory(
                 contacts=contacts,
                 trajectories_by_name=traj_map,
                 models_by_id=self.modelsById,
@@ -871,7 +871,7 @@ class RosaHelperWidgetMixin:
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
         self._refresh_qc_metrics()
-        self.logic.publish_contacts_outputs(
+        self.logic.electrode_scene.publish_contacts_outputs(
             contact_nodes_by_traj=nodes,
             model_nodes_by_traj=model_nodes,
             assignment_rows=assignment_rows,
@@ -1252,7 +1252,12 @@ class RosaHelperWidgetMixin:
         mode = self._widget_text(self.sliceModeSelector) or "long"
 
         try:
-            self.logic.align_slice_to_trajectory(start_ras, end_ras, slice_view=slice_view, mode=mode)
+            self.logic.electrode_scene.align_slice_to_trajectory(
+                start_ras,
+                end_ras,
+                slice_view=slice_view,
+                mode=mode,
+            )
         except Exception as exc:
             self.log(f"[slice] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "ROSA Helper", str(exc))
@@ -1262,7 +1267,7 @@ class RosaHelperWidgetMixin:
 
     def onShowPlannedToggled(self, checked):
         """Toggle visibility of stored planned trajectory lines."""
-        self.logic.set_planned_trajectory_visibility(bool(checked))
+        self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
 
     def _preselect_freesurfer_reference_volume(self):
         """Default FS fixed volume selector to loaded ROSA reference volume."""
