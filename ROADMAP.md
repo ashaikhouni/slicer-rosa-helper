@@ -52,7 +52,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 2** (`CommonLib` extraction and import rewiring).
+- **Current phase target**: **Phase 4** (`Contacts & Trajectory View` module extraction).
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

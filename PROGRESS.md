@@ -1,8 +1,8 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-26 18:14:00Z
-- **Current phase**: Phase 3 (next) — `ExportCenter` module extraction
+- **Timestamp (UTC)**: 2026-02-26 21:26:57Z
+- **Current phase**: Phase 4 (next) — `Contacts & Trajectory View` module extraction
 - **Last stable pushed commit**: `8f4337b` (pre-push baseline)
 - **Working branch**: `main`
 - **Open worktree state**:
@@ -32,21 +32,32 @@
     - ShankDetect detect/view-align/contact generation
     - no runtime import regressions observed.
 
-## Active Phase
 ### Phase 3 — `ExportCenter` Module Extraction
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-02-26
+- **Commit range**: `7675dc1..211146c`
+- **Acceptance checks passed**:
+  - Added dedicated `ExportCenter` module wired to shared workflow contract.
+  - Export logic moved into shared `CommonLib/rosa_workflow/export_bundle.py` service.
+  - `RosaHelper` export path now delegates to shared service via compatibility bridge.
+  - `contacts_only` profile validated from `ExportCenter` with correct manifest + outputs.
+  - Output directory default behavior changed to explicit/manual selection (no forced case default).
+
+## Active Phase
+### Phase 4 — `Contacts & Trajectory View` Module Extraction
 - **Objective**:
-  - Extract export workflow into dedicated module using shared workflow contract and profile system.
+  - Extract contact generation and trajectory-aligned view workflows into a dedicated module.
 - **In scope**:
-  - New `ExportCenter` module shell + UI.
-  - Reuse existing `export_aligned_bundle` behavior via shared service layer.
-  - Profile-driven output selection and manifest generation.
+  - New module for contact generation/update and trajectory view alignment controls.
+  - Publish generated markups/models/tables through shared workflow roles.
+  - Keep behavior parity with existing `RosaHelper` controls during transition.
 - **Out of scope**:
-  - Contact generation/CT fit logic changes.
-  - Atlas sampling algorithm changes.
+  - CT auto-fit algorithm changes.
+  - Atlas assignment or burn workflow changes.
 - **Exit criteria**:
-  - Export can be run from `ExportCenter` without `RosaHelper` UI dependency.
-  - Existing exports remain backward compatible in content/schema.
-  - Smoke tests pass for ROSA + ShankDetect-originated scene data.
+  - Contact generation/update runs from new module without `RosaHelper` UI dependency.
+  - Trajectory slice-view alignment runs from new module and matches existing behavior.
+  - Generated contacts/models/QC remain consumable by `ExportCenter` and Atlas workflows.
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -62,6 +73,7 @@
 - **D-003**: Prior master plan remains authoritative; phase decomposition is execution structure.
 - **D-004**: Next implementation target locked to **Phase 2 only** (no simultaneous module split).
 - **D-005**: Phase 2 validated locally before push; advance implementation target to Phase 3.
+- **D-006**: Phase 3 validated locally before push; advance implementation target to Phase 4.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
