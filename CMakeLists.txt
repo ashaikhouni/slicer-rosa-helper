@@ -16,6 +16,7 @@ include(${Slicer_USE_FILE})
 
 add_subdirectory(RosaHelper)
 add_subdirectory(ShankDetect)
+add_subdirectory(ExportCenter)
 
 # Install extension-level shared Python libraries used by multiple modules.
 install(

@@ -88,7 +88,7 @@ class RosaHelperWidgetMixin:
         contact_layout.addRow(self.updateContactsButton)
 
         self.bundleExportDirEdit = qt.QLineEdit()
-        self.bundleExportDirEdit.setPlaceholderText("Optional (defaults to <case>/RosaHelper_Export)")
+        self.bundleExportDirEdit.setPlaceholderText("Required (no automatic default path)")
         contact_layout.addRow("Aligned export folder", self.bundleExportDirEdit)
 
         self.exportFrameSelector = slicer.qMRMLNodeComboBox()
@@ -1191,17 +1191,14 @@ class RosaHelperWidgetMixin:
             )
             return
 
-        case_dir = self.caseDirSelector.currentPath
         out_dir = self.bundleExportDirEdit.text.strip()
         if not out_dir:
-            if not case_dir:
-                qt.QMessageBox.warning(
-                    slicer.util.mainWindow(),
-                    "ROSA Helper",
-                    "Case folder is not set.",
-                )
-                return
-            out_dir = os.path.join(case_dir, "RosaHelper_Export")
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "ROSA Helper",
+                "Select an output folder for aligned export.",
+            )
+            return
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
         self._refresh_qc_metrics()

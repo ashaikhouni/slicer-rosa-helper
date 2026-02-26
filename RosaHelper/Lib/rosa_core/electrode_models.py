@@ -16,9 +16,17 @@ _REQUIRED_MODEL_KEYS = {
 
 
 def default_electrode_library_path():
-    """Return default bundled DIXI D08 electrode library path."""
+    """Return canonical bundled electrode model library path."""
     here = Path(__file__).resolve()
-    return here.parents[2] / "Resources" / "electrodes" / "dixi_d08_electrodes.json"
+    filename = "electrode_models.json"
+    candidates = [
+        here.parents[1] / "resources" / "electrodes" / filename,  # CommonLib/rosa_core -> CommonLib/resources
+        here.parents[3] / "CommonLib" / "resources" / "electrodes" / filename,  # legacy module-local copy
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
 
 
 def load_electrode_library(path=None):

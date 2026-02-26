@@ -23,6 +23,10 @@ from .export_profiles import (
     merge_export_profile,
     profile_names,
 )
+from .export_bundle import (
+    collect_export_inputs_from_workflow,
+    export_aligned_bundle,
+)
 
 __all__ = [
     "WorkflowState",
@@ -39,4 +43,6 @@ __all__ = [
     "get_export_profile",
     "merge_export_profile",
     "profile_names",
+    "collect_export_inputs_from_workflow",
+    "export_aligned_bundle",
 ]

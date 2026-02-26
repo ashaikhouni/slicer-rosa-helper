@@ -31,6 +31,13 @@ Use this checklist after each refactor step to confirm behavior remains unchange
   - `*_planned_trajectory_points.csv`
   - `*_qc_metrics.csv`
 
+## 5b) Export Center
+- Open `Export Center`
+- Click `Refresh Workflow Inputs`
+- Run export with `full_bundle` profile and confirm manifest + expected files are written
+- Run export with `contacts_only` profile and confirm only contact file + manifest are populated
+- Confirm selected export frame is reflected in manifest and coordinate columns
+
 ## 6) FreeSurfer Integration
 - Add recon-all MRI to scene via Slicer `Add Data`
 - Register FS MRI -> ROSA

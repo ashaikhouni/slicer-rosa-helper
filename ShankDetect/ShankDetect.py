@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import inspect
+import importlib
 from collections import OrderedDict
 
 try:
@@ -40,6 +41,9 @@ PATH_CANDIDATES = [
 for path in PATH_CANDIDATES:
     if os.path.isdir(path) and path not in sys.path:
         sys.path.insert(0, path)
+
+import rosa_core as _rosa_core_mod
+_rosa_core_mod = importlib.reload(_rosa_core_mod)
 
 from rosa_core import (
     generate_contacts,

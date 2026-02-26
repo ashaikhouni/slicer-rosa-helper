@@ -10,8 +10,6 @@ It focuses on scene operations:
 
 import os
 import sys
-import csv
-import json
 import math
 import importlib
 import hashlib
@@ -38,6 +36,9 @@ for _lib_dir in LIB_CANDIDATES:
     if os.path.isdir(_lib_dir) and _lib_dir not in sys.path:
         sys.path.insert(0, _lib_dir)
 
+import rosa_core as _rosa_core_mod
+_rosa_core_mod = importlib.reload(_rosa_core_mod)
+
 from rosa_core import (
     build_effective_matrices,
     choose_reference_volume,
@@ -52,7 +53,7 @@ from rosa_core import (
 from rosa_slicer import freesurfer_service as _freesurfer_service_mod
 from rosa_slicer import trajectory_scene as _trajectory_scene_mod
 from rosa_slicer import widget_mixin as _widget_mixin_mod
-from rosa_workflow import export_profiles as _export_profiles_mod
+from rosa_workflow import export_bundle as _export_bundle_mod
 from rosa_workflow import workflow_state as _workflow_state_mod
 from rosa_workflow import workflow_publish as _workflow_publish_mod
 
@@ -60,7 +61,7 @@ from rosa_workflow import workflow_publish as _workflow_publish_mod
 _widget_mixin_mod = importlib.reload(_widget_mixin_mod)
 _freesurfer_service_mod = importlib.reload(_freesurfer_service_mod)
 _trajectory_scene_mod = importlib.reload(_trajectory_scene_mod)
-_export_profiles_mod = importlib.reload(_export_profiles_mod)
+_export_bundle_mod = importlib.reload(_export_bundle_mod)
 _workflow_state_mod = importlib.reload(_workflow_state_mod)
 _workflow_publish_mod = importlib.reload(_workflow_publish_mod)
 RosaHelperWidgetMixin = _widget_mixin_mod.RosaHelperWidgetMixin
@@ -68,7 +69,7 @@ FreeSurferService = _freesurfer_service_mod.FreeSurferService
 TrajectorySceneService = _trajectory_scene_mod.TrajectorySceneService
 WorkflowState = _workflow_state_mod.WorkflowState
 WorkflowPublisher = _workflow_publish_mod.WorkflowPublisher
-get_export_profile = _export_profiles_mod.get_export_profile
+export_aligned_bundle_service = _export_bundle_mod.export_aligned_bundle
 
 
 class RosaHelper(ScriptedLoadableModule):
@@ -1705,308 +1706,19 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         output_frame_node=None,
         export_profile="full_bundle",
     ):
-        """Export aligned scene outputs with explicit coordinate-frame declaration."""
-        os.makedirs(out_dir, exist_ok=True)
-        profile, resolved_profile_name = get_export_profile(export_profile)
-        include_volumes = bool(profile.get("include_volumes", True))
-        include_contacts = bool(profile.get("include_contacts", True))
-        include_planned = bool(profile.get("include_planned", True))
-        include_final = bool(profile.get("include_final", True))
-        include_qc = bool(profile.get("include_qc", True))
-        include_atlas = bool(profile.get("include_atlas", True))
-
-        saved_paths = []
-        if include_volumes:
-            for volume_name in sorted(volume_node_ids.keys()):
-                node_id = volume_node_ids[volume_name]
-                node = slicer.mrmlScene.GetNodeByID(node_id)
-                if node is None:
-                    continue
-                filename = f"{self._safe_filename(volume_name)}.nii.gz"
-                out_path = os.path.join(out_dir, filename)
-                ok = slicer.util.saveNode(node, out_path)
-                if not ok:
-                    raise RuntimeError(f"Failed to save volume '{volume_name}' to {out_path}")
-                saved_paths.append(out_path)
-
-        frame_node = output_frame_node
-        if frame_node is None and volume_node_ids:
-            # Stable fallback: first volume in sorted order.
-            first_name = sorted(volume_node_ids.keys())[0]
-            frame_node = slicer.mrmlScene.GetNodeByID(volume_node_ids[first_name])
-        frame_name = frame_node.GetName() if frame_node is not None else "WORLD_RAS"
-        world_to_frame = self._world_to_node_ras_matrix(frame_node) if frame_node is not None else np.eye(4)
-
-        def _to_frame_ras(point_world_ras):
-            p = np.array([float(point_world_ras[0]), float(point_world_ras[1]), float(point_world_ras[2]), 1.0])
-            out = world_to_frame @ p
-            return [float(out[0]), float(out[1]), float(out[2])]
-
-        coord_path = ""
-        if include_contacts:
-            coord_path = os.path.join(out_dir, f"{node_prefix}_aligned_world_coords.txt")
-            lines = []
-            lines.append("# ROSA Helper aligned export")
-            lines.append(f"# coordinate_frame_node: {frame_name}")
-            lines.append("# coordinate_system: FRAME_RAS (x_frame_ras,y_frame_ras,z_frame_ras)")
-            lines.append("# alternate_columns: WORLD_RAS + LPS")
-            lines.append(
-                "# columns: trajectory,label,index,x_frame_ras,y_frame_ras,z_frame_ras,"
-                "x_world_ras,y_world_ras,z_world_ras,x_lps,y_lps,z_lps,model_id"
-            )
-
-        def _sort_key(c):
-            """Sort contacts by trajectory then by ascending index."""
-            return (str(c.get("trajectory", "")), int(c.get("index", 0)))
-
-        if include_contacts:
-            for contact in sorted(contacts, key=_sort_key):
-                p_lps = contact["position_lps"]
-                p_world_ras = lps_to_ras_point(p_lps)
-                p_frame_ras = _to_frame_ras(p_world_ras)
-                lines.append(
-                    "{traj},{label},{idx},{x_frame:.6f},{y_frame:.6f},{z_frame:.6f},"
-                    "{x_world:.6f},{y_world:.6f},{z_world:.6f},"
-                    "{x_lps:.6f},{y_lps:.6f},{z_lps:.6f},{model}".format(
-                        traj=contact.get("trajectory", ""),
-                        label=contact.get("label", ""),
-                        idx=int(contact.get("index", 0)),
-                        x_frame=float(p_frame_ras[0]),
-                        y_frame=float(p_frame_ras[1]),
-                        z_frame=float(p_frame_ras[2]),
-                        x_world=float(p_world_ras[0]),
-                        y_world=float(p_world_ras[1]),
-                        z_world=float(p_world_ras[2]),
-                        x_lps=float(p_lps[0]),
-                        y_lps=float(p_lps[1]),
-                        z_lps=float(p_lps[2]),
-                        model=contact.get("model_id", ""),
-                    )
-                )
-            with open(coord_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
-
-        planned_path = ""
-        planned_rows = []
-        planned_map = planned_trajectories or {}
-        if include_planned:
-            planned_path = os.path.join(out_dir, f"{node_prefix}_planned_trajectory_points.csv")
-            for traj_name in sorted(planned_map.keys()):
-                traj = planned_map[traj_name]
-                for point_type, p_lps in (("entry", traj["start"]), ("target", traj["end"])):
-                    p_world_ras = lps_to_ras_point(p_lps)
-                    p_frame_ras = _to_frame_ras(p_world_ras)
-                    planned_rows.append(
-                        "{traj},{ptype},{x_frame:.6f},{y_frame:.6f},{z_frame:.6f},"
-                        "{x_world:.6f},{y_world:.6f},{z_world:.6f},"
-                        "{x_lps:.6f},{y_lps:.6f},{z_lps:.6f}".format(
-                            traj=str(traj_name),
-                            ptype=point_type,
-                            x_frame=float(p_frame_ras[0]),
-                            y_frame=float(p_frame_ras[1]),
-                            z_frame=float(p_frame_ras[2]),
-                            x_world=float(p_world_ras[0]),
-                            y_world=float(p_world_ras[1]),
-                            z_world=float(p_world_ras[2]),
-                            x_lps=float(p_lps[0]),
-                            y_lps=float(p_lps[1]),
-                            z_lps=float(p_lps[2]),
-                        )
-                    )
-            with open(planned_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "trajectory,point_type,x_frame_ras,y_frame_ras,z_frame_ras,"
-                    "x_world_ras,y_world_ras,z_world_ras,x_lps,y_lps,z_lps\n"
-                )
-                if planned_rows:
-                    f.write("\n".join(planned_rows) + "\n")
-
-        final_path = ""
-        final_rows = []
-        final_map = final_trajectories or {}
-        if include_final:
-            final_path = os.path.join(out_dir, f"{node_prefix}_final_trajectory_points.csv")
-            for traj_name in sorted(final_map.keys()):
-                traj = final_map[traj_name]
-                for point_type, p_lps in (("entry", traj["start"]), ("target", traj["end"])):
-                    p_world_ras = lps_to_ras_point(p_lps)
-                    p_frame_ras = _to_frame_ras(p_world_ras)
-                    final_rows.append(
-                        "{traj},{ptype},{x_frame:.6f},{y_frame:.6f},{z_frame:.6f},"
-                        "{x_world:.6f},{y_world:.6f},{z_world:.6f},{x_lps:.6f},{y_lps:.6f},{z_lps:.6f}".format(
-                            traj=str(traj_name),
-                            ptype=point_type,
-                            x_frame=float(p_frame_ras[0]),
-                            y_frame=float(p_frame_ras[1]),
-                            z_frame=float(p_frame_ras[2]),
-                            x_world=float(p_world_ras[0]),
-                            y_world=float(p_world_ras[1]),
-                            z_world=float(p_world_ras[2]),
-                            x_lps=float(p_lps[0]),
-                            y_lps=float(p_lps[1]),
-                            z_lps=float(p_lps[2]),
-                        )
-                    )
-            with open(final_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "trajectory,point_type,x_frame_ras,y_frame_ras,z_frame_ras,"
-                    "x_world_ras,y_world_ras,z_world_ras,x_lps,y_lps,z_lps\n"
-                )
-                if final_rows:
-                    f.write("\n".join(final_rows) + "\n")
-
-        qc_path = ""
-        if include_qc:
-            qc_path = os.path.join(out_dir, f"{node_prefix}_qc_metrics.csv")
-            with open(qc_path, "w", encoding="utf-8") as f:
-                f.write(
-                    "trajectory,entry_radial_mm,target_radial_mm,mean_contact_radial_mm,"
-                    "max_contact_radial_mm,rms_contact_radial_mm,angle_deg,matched_contacts\n"
-                )
-                for row in qc_rows or []:
-                    f.write(
-                        "{trajectory},{entry:.6f},{target:.6f},{mean:.6f},{maxv:.6f},{rms:.6f},{angle:.6f},{matched}\n".format(
-                            trajectory=str(row.get("trajectory", "")),
-                            entry=float(row.get("entry_radial_mm", 0.0)),
-                            target=float(row.get("target_radial_mm", 0.0)),
-                            mean=float(row.get("mean_contact_radial_mm", 0.0)),
-                            maxv=float(row.get("max_contact_radial_mm", 0.0)),
-                            rms=float(row.get("rms_contact_radial_mm", 0.0)),
-                            angle=float(row.get("angle_deg", 0.0)),
-                            matched=int(row.get("matched_contacts", 0)),
-                        )
-                    )
-
-        atlas_path = ""
-        if include_atlas:
-            atlas_path = os.path.join(out_dir, f"{node_prefix}_atlas_assignment.csv")
-            with open(atlas_path, "w", encoding="utf-8", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(
-                    [
-                        "trajectory",
-                        "contact_label",
-                        "contact_index",
-                        "x_ras",
-                        "y_ras",
-                        "z_ras",
-                        "x_world_ras",
-                        "y_world_ras",
-                        "z_world_ras",
-                        "closest_source",
-                        "closest_label",
-                        "closest_label_value",
-                        "closest_distance_to_voxel_mm",
-                        "closest_distance_to_centroid_mm",
-                        "primary_source",
-                        "primary_label",
-                        "primary_label_value",
-                        "primary_distance_to_voxel_mm",
-                        "primary_distance_to_centroid_mm",
-                        "thomas_label",
-                        "thomas_label_value",
-                        "thomas_distance_to_voxel_mm",
-                        "thomas_distance_to_centroid_mm",
-                        "freesurfer_label",
-                        "freesurfer_label_value",
-                        "freesurfer_distance_to_voxel_mm",
-                        "freesurfer_distance_to_centroid_mm",
-                        "wm_label",
-                        "wm_label_value",
-                        "wm_distance_to_voxel_mm",
-                        "wm_distance_to_centroid_mm",
-                        "thomas_native_x_ras",
-                        "thomas_native_y_ras",
-                        "thomas_native_z_ras",
-                        "freesurfer_native_x_ras",
-                        "freesurfer_native_y_ras",
-                        "freesurfer_native_z_ras",
-                        "wm_native_x_ras",
-                        "wm_native_y_ras",
-                        "wm_native_z_ras",
-                    ]
-                )
-                for row in atlas_rows or []:
-                    p_world_ras = row.get("contact_ras", [0.0, 0.0, 0.0])
-                    p_frame_ras = _to_frame_ras(p_world_ras)
-                    th_native = row.get("thomas_native_ras", [0.0, 0.0, 0.0])
-                    fs_native = row.get("freesurfer_native_ras", [0.0, 0.0, 0.0])
-                    wm_native = row.get("wm_native_ras", [0.0, 0.0, 0.0])
-                    writer.writerow(
-                        [
-                            str(row.get("trajectory", "")),
-                            str(row.get("contact_label", "")),
-                            int(row.get("contact_index", 0)),
-                            float(p_frame_ras[0]),
-                            float(p_frame_ras[1]),
-                            float(p_frame_ras[2]),
-                            float(p_world_ras[0]),
-                            float(p_world_ras[1]),
-                            float(p_world_ras[2]),
-                            str(row.get("closest_source", "")),
-                            str(row.get("closest_label", "")),
-                            int(row.get("closest_label_value", 0)),
-                            float(row.get("closest_distance_to_voxel_mm", 0.0)),
-                            float(row.get("closest_distance_to_centroid_mm", 0.0)),
-                            str(row.get("primary_source", "")),
-                            str(row.get("primary_label", "")),
-                            int(row.get("primary_label_value", 0)),
-                            float(row.get("primary_distance_to_voxel_mm", 0.0)),
-                            float(row.get("primary_distance_to_centroid_mm", 0.0)),
-                            str(row.get("thomas_label", "")),
-                            int(row.get("thomas_label_value", 0)),
-                            float(row.get("thomas_distance_to_voxel_mm", 0.0)),
-                            float(row.get("thomas_distance_to_centroid_mm", 0.0)),
-                            str(row.get("freesurfer_label", "")),
-                            int(row.get("freesurfer_label_value", 0)),
-                            float(row.get("freesurfer_distance_to_voxel_mm", 0.0)),
-                            float(row.get("freesurfer_distance_to_centroid_mm", 0.0)),
-                            str(row.get("wm_label", "")),
-                            int(row.get("wm_label_value", 0)),
-                            float(row.get("wm_distance_to_voxel_mm", 0.0)),
-                            float(row.get("wm_distance_to_centroid_mm", 0.0)),
-                            float(th_native[0]),
-                            float(th_native[1]),
-                            float(th_native[2]),
-                            float(fs_native[0]),
-                            float(fs_native[1]),
-                            float(fs_native[2]),
-                            float(wm_native[0]),
-                            float(wm_native[1]),
-                            float(wm_native[2]),
-                        ]
-                    )
-
-        manifest_path = os.path.join(out_dir, f"{node_prefix}_manifest.json")
-        manifest = {
-            "schema_version": "1.0",
-            "export_profile": resolved_profile_name,
-            "profile_options": profile,
-            "output_frame_node": frame_name,
-            "files": {
-                "volumes": saved_paths,
-                "contacts": coord_path,
-                "planned_trajectories": planned_path,
-                "final_trajectories": final_path,
-                "qc_metrics": qc_path,
-                "atlas_assignments": atlas_path,
-            },
-        }
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2, sort_keys=True)
-
-        return {
-            "out_dir": out_dir,
-            "volume_count": len(saved_paths),
-            "volume_paths": saved_paths,
-            "coordinates_path": coord_path,
-            "planned_trajectories_path": planned_path,
-            "final_trajectories_path": final_path,
-            "qc_metrics_path": qc_path,
-            "atlas_assignment_path": atlas_path,
-            "manifest_path": manifest_path,
-            "output_frame_node": frame_name,
-        }
+        """Export aligned scene outputs through shared workflow export service."""
+        return export_aligned_bundle_service(
+            volume_node_ids=volume_node_ids,
+            contacts=contacts,
+            out_dir=out_dir,
+            node_prefix=node_prefix,
+            planned_trajectories=planned_trajectories,
+            final_trajectories=final_trajectories,
+            qc_rows=qc_rows,
+            atlas_rows=atlas_rows,
+            output_frame_node=output_frame_node,
+            export_profile=export_profile,
+        )
 
     def _vtk_matrix_to_numpy_4x4(self, vtk_matrix):
         """Return 4x4 NumPy matrix copied from vtkMatrix4x4."""

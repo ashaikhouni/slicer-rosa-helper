@@ -30,6 +30,11 @@ This extension also includes `Shank Detect` for CT-only workflows (no `.ros` req
 - per-trajectory electrode assignment and contact generation
 - row selection auto-aligns Red slice along the selected trajectory
 
+This extension also includes `Export Center`:
+- exports workflow artifacts directly from shared `RosaWorkflow` scene roles
+- supports profile-driven outputs (`contacts_only`, `trajectories_only`, `registered_volumes_only`, `atlas_only`, `qc_only`, `full_bundle`)
+- supports explicit export-frame volume selection
+
 Existing workflows remain valid. New atlas and burn features are additive.
 
 ## Shared Workflow Contract (MRML)
@@ -140,6 +145,20 @@ Use this when you only have a CT with electrode artifact and no ROSA `.ros` meta
 9. Assign electrode model per row (or use `Apply model to all`).
 10. Click `Generate Contacts`.
 11. Optional: click `Reset Ax/Cor/Sag` to restore standard slice orientations.
+
+## Quick Start (Export Center)
+
+Use this when you want to export from the shared workflow scene without relying on `ROSA Helper` UI state.
+
+1. Run upstream workflow steps first (ROSA load and/or ShankDetect + contacts).
+2. Open module `Export Center`.
+3. Click `Refresh Workflow Inputs`.
+4. Select:
+   - output directory
+   - filename prefix
+   - export profile
+   - optional export coordinate frame volume
+5. Click `Export Bundle`.
 
 Output default folder:
 - `<case>/RosaHelper_Export/`
@@ -385,13 +404,13 @@ Important:
 - `RosaHelper/Lib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
 - `RosaHelper/Lib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation
 - `RosaHelper/Lib/rosa_slicer/`: Slicer scene/services + widget mixins (`freesurfer_service.py`, `trajectory_scene.py`, `widget_mixin.py`)
-- `RosaHelper/Resources/electrodes/dixi_d08_electrodes.json`: bundled electrode model library (AM/BM/CM)
+- `CommonLib/resources/electrodes/electrode_models.json`: shared bundled electrode model library (editable by users)
 - `RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
 - `tools/`: CLI wrappers for offline conversion/export
 
 ## Electrode Model Library
 
-The bundled DIXI D08 electrode library stores per-model geometry needed for
+The bundled electrode model library (`CommonLib/resources/electrodes/electrode_models.json`) stores per-model geometry needed for
 contact placement:
 - model id and type (`AM`, `BM`, `CM`)
 - number of contacts and grouping
