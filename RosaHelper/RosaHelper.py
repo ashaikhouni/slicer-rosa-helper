@@ -29,6 +29,8 @@ from slicer.ScriptedLoadableModule import (
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_CANDIDATES = [
+    os.path.join(os.path.dirname(MODULE_DIR), "CommonLib"),  # source tree shared libs
+    os.path.join(MODULE_DIR, "CommonLib"),  # packaged extension shared libs
     os.path.join(MODULE_DIR, "Lib"),  # source tree
     os.path.join(MODULE_DIR, "RosaHelper", "Lib"),  # packaged extension layout
 ]
@@ -50,9 +52,9 @@ from rosa_core import (
 from rosa_slicer import freesurfer_service as _freesurfer_service_mod
 from rosa_slicer import trajectory_scene as _trajectory_scene_mod
 from rosa_slicer import widget_mixin as _widget_mixin_mod
-from rosa_slicer.workflow import export_profiles as _export_profiles_mod
-from rosa_slicer.workflow import workflow_state as _workflow_state_mod
-from rosa_slicer.workflow import workflow_publish as _workflow_publish_mod
+from rosa_workflow import export_profiles as _export_profiles_mod
+from rosa_workflow import workflow_state as _workflow_state_mod
+from rosa_workflow import workflow_publish as _workflow_publish_mod
 
 # Hot-reload helper submodule so Widget mixin updates are picked up without full app restart.
 _widget_mixin_mod = importlib.reload(_widget_mixin_mod)

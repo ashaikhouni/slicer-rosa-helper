@@ -17,5 +17,12 @@ include(${Slicer_USE_FILE})
 add_subdirectory(RosaHelper)
 add_subdirectory(ShankDetect)
 
+# Install extension-level shared Python libraries used by multiple modules.
+install(
+  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/CommonLib/
+  DESTINATION ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}/CommonLib
+  COMPONENT Runtime
+)
+
 include(${Slicer_EXTENSION_GENERATE_CONFIG})
 include(${Slicer_EXTENSION_CPACK})

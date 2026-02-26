@@ -1,42 +1,7 @@
-"""Shared MRML workflow contract helpers for ROSA modules.
+"""Compatibility bridge for legacy `rosa_slicer.workflow` imports.
 
-This package provides a strict scene-level contract so multiple Slicer modules
-can interoperate without relying on Python widget state.
+Canonical implementation now lives in extension-level `rosa_workflow`.
 """
 
-from .workflow_state import WorkflowState
-from .workflow_publish import (
-    WorkflowPublisher,
-    publish_artifact,
-    register_volume,
-    set_default_role,
-)
-from .workflow_registry import (
-    IMAGE_REGISTRY_COLUMNS,
-    TRANSFORM_REGISTRY_COLUMNS,
-)
-from .workflow_resolve import resolve_module_inputs, resolve_or_create_workflow
-from .export_profiles import (
-    EXPORT_PROFILES,
-    export_profile,
-    get_export_profile,
-    merge_export_profile,
-    profile_names,
-)
+from rosa_workflow import *  # noqa: F401,F403
 
-__all__ = [
-    "WorkflowState",
-    "WorkflowPublisher",
-    "register_volume",
-    "set_default_role",
-    "publish_artifact",
-    "IMAGE_REGISTRY_COLUMNS",
-    "TRANSFORM_REGISTRY_COLUMNS",
-    "resolve_module_inputs",
-    "resolve_or_create_workflow",
-    "EXPORT_PROFILES",
-    "export_profile",
-    "get_export_profile",
-    "merge_export_profile",
-    "profile_names",
-]

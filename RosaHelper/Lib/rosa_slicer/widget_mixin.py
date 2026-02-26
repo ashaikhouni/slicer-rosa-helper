@@ -18,7 +18,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_slicer.workflow.export_profiles import get_export_profile, profile_names
+from rosa_workflow.export_profiles import get_export_profile, profile_names
 
 
 class RosaHelperWidgetMixin:

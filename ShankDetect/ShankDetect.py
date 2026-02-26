@@ -32,10 +32,10 @@ from slicer.ScriptedLoadableModule import (
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 PATH_CANDIDATES = [
+    os.path.join(os.path.dirname(MODULE_DIR), "CommonLib"),  # source tree shared libs
+    os.path.join(MODULE_DIR, "CommonLib"),  # packaged extension shared libs
     os.path.join(MODULE_DIR, "Lib"),  # source tree
     os.path.join(MODULE_DIR, "ShankDetect", "Lib"),  # packaged extension layout
-    os.path.join(os.path.dirname(MODULE_DIR), "RosaHelper", "Lib"),  # source sibling module
-    os.path.join(MODULE_DIR, "RosaHelper", "Lib"),  # packaged sibling module
 ]
 for path in PATH_CANDIDATES:
     if os.path.isdir(path) and path not in sys.path:
@@ -49,7 +49,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_slicer.workflow import WorkflowPublisher, WorkflowState
+from rosa_workflow import WorkflowPublisher, WorkflowState
 from shank_core import masking as shank_masking
 from shank_core import pipeline as shank_pipeline
 
