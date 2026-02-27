@@ -20,9 +20,7 @@ It supports:
 - V1 postop CT auto-fit workflow (detect candidates, fit selected/all, apply fit)
 - exporting aligned NIfTI volumes and contact coordinates together for external tools
 - profile-based exports (contacts/trajectories/volumes/atlas/QC/full bundle) with manifest output
-- loading FreeSurfer volumetric parcellations (`aparc+aseg`, `aparc.a2009s+aseg`, `aparc.DKTatlas+aseg`, `aseg`, `wmparc`)
-- loading THOMAS thalamic nuclei masks and optional burn-to-DICOM workflow
-- assigning each contact to atlas labels (THOMAS / FreeSurfer / WM) with nearest-voxel and centroid-distance metrics
+- publishing shared workflow roles consumed by dedicated atlas/burn modules
 
 This extension also includes `Shank Detect` for CT-only workflows (no `.ros` required):
 - threshold-based shank trajectory detection from postop CT artifact
@@ -36,6 +34,11 @@ This extension also includes `Export Center`:
 - exports workflow artifacts directly from shared `RosaWorkflow` scene roles
 - supports profile-driven outputs (`contacts_only`, `trajectories_only`, `registered_volumes_only`, `atlas_only`, `qc_only`, `full_bundle`)
 - supports explicit export-frame volume selection
+
+This extension also includes atlas/burn modules:
+- `Atlas Sources` for FreeSurfer + THOMAS registration/loading and role publishing
+- `Atlas Labeling` for contact-to-atlas assignment (FreeSurfer/THOMAS/WM)
+- `Navigation Burn` for THOMAS nucleus burn and DICOM export
 
 Existing workflows remain valid. New atlas and burn features are additive.
 
@@ -123,11 +126,10 @@ markups.
    - choose `Export coordinate frame` (or leave empty to use base/reference)
    - choose an `Export profile` (`full_bundle` by default)
    - if atlas assignment was run, export also includes atlas-label CSV
-9. Optional: open `Atlas Contact Labeling (V1)`:
-   - click `Refresh Atlas Sources`
-   - choose FreeSurfer / THOMAS / WM sources
-   - click `Assign Contacts to Atlas`
-   - export again to write/update atlas assignment CSV
+9. Optional atlas workflow:
+   - use `Atlas Sources` to load/register FreeSurfer and/or THOMAS assets
+   - use `Atlas Labeling` to assign contacts to atlas labels
+   - export again from `Export Center` to write/update atlas assignment CSV
 
 ## Quick Start (Shank Detect)
 
@@ -236,9 +238,27 @@ Metrics are computed per trajectory by comparing:
 - planned contact centers (from selected model + planned line)
 - final contact centers (manual or auto-fit result)
 
-## Atlas Contact Labeling (V1)
+## Quick Start (Atlas Sources)
 
-`Atlas Contact Labeling (V1)` assigns each generated contact to nearest atlas voxels.
+Use this module to load/register atlas assets into shared `RosaWorkflow` roles.
+
+1. Open module `Atlas Sources`.
+2. Click `Refresh Workflow Inputs`.
+3. In `FreeSurfer` tab:
+   - select ROSA base volume + FreeSurfer MRI
+   - you can either choose an MRI already in scene (dropdown) or load one from file (`Load MRI Into Scene`)
+   - run `Register FS MRI -> ROSA` (optional but recommended)
+   - select subject directory and load parcellation volume(s)
+   - optional: publish an already loaded atlas volume via `Use existing atlas volume`
+4. In `THOMAS` tab:
+   - select ROSA base volume + THOMAS MRI
+   - run `Register THOMAS MRI -> ROSA` (optional but recommended)
+   - load THOMAS output masks
+5. Check `Registry` tab for published image/transform rows.
+
+## Quick Start (Atlas Labeling)
+
+`Atlas Labeling` assigns each generated contact to nearest atlas voxels.
 
 Inputs:
 - FreeSurfer volumetric atlas (`FSVOL_*`, for example `FSVOL_aparc+aseg`)
@@ -247,10 +267,10 @@ Inputs:
 
 Workflow:
 1. Generate contacts first.
-2. Load FS parcellation volume(s) and optional THOMAS segmentations.
-3. Open `Atlas Contact Labeling (V1)` and click `Refresh Atlas Sources`.
+2. Load FS parcellation volume(s) and optional THOMAS segmentations in `Atlas Sources`.
+3. Open `Atlas Labeling` and click `Refresh Atlas Sources`.
 4. Select sources from dropdowns and click `Assign Contacts to Atlas`.
-5. Export bundle to write `<prefix>_atlas_assignment.csv`.
+5. Export bundle from `Export Center` to write `<prefix>_atlas_assignment.csv`.
 
 CSV includes:
 - per-atlas labels and distances (`thomas_*`, `freesurfer_*`, `wm_*`)
@@ -270,16 +290,32 @@ THOMAS labeling behavior:
 - generic whole-thalamus segments are excluded from nearest-label assignment when nuclei are available
 - this keeps labels specific to nuclei (for example `CM`, `MD-Pf`) instead of collapsing to `LEFT_THALAMUS` / `RIGHT_THALAMUS`
 
-## FreeSurfer Integration (V1)
+## Quick Start (Navigation Burn)
 
-`FreeSurfer Integration (V1)` supports aligning a recon-all MRI/surfaces to the
+Use this module to burn THOMAS nuclei into MRI and export a DICOM series.
+
+1. Open module `Navigation Burn`.
+2. Click `Refresh Workflow Inputs`.
+3. In `Burn Volume` tab:
+   - optional: set `Nav MRI DICOM dir` and click `Import DICOM MRI` (imports + aligns to BaseVolume)
+   - choose burn input MRI
+   - set side/nucleus/fill value
+   - click `Run Burn` (or `Run Burn + Export DICOM`)
+4. In `DICOM Export` tab:
+   - choose volume to export and reference DICOM volume
+   - set export directory and series description
+   - click `Export Selected Volume to DICOM`
+
+## FreeSurfer Integration (Atlas Sources)
+
+`Atlas Sources` supports aligning a recon-all MRI/parcellations to the
 ROSA base frame in the same Slicer scene.
 
 Workflow:
 1. Load ROSA case (ROSA base/reference volume is auto-selected when available).
 2. Add the exact MRI volume used for `recon-all` to the Slicer scene using Slicer's standard
    `Add Data` workflow (not through ROSA Helper). This is the moving image.
-3. In `FreeSurfer Integration (V1)`:
+3. In `Atlas Sources` (FreeSurfer tab):
    - set `ROSA base volume` (fixed) and `FreeSurfer MRI` (moving)
    - click `Register FS MRI -> ROSA` (BRAINSFit rigid registration)
 4. Set FreeSurfer subject path:
@@ -301,7 +337,7 @@ Workflow:
    - enable `Create 3D geometry from parcellations` to generate closed-surface segmentation nodes in 3D
 9. To use parcellations for contact labeling:
    - load at least one `FSVOL_*` atlas volume
-   - then run `Atlas Contact Labeling (V1)` assignment
+   - then run `Atlas Labeling` assignment
 
 Notes:
 - BRAINSFit is expected to be available in standard Slicer installs.
@@ -325,38 +361,32 @@ Quick checklist:
 - Registration (`Register FS MRI -> ROSA`) should be run before loading surfaces.
 - The folder selected in `FreeSurfer subject` must contain `surf/` (and `label/` for `.annot` overlays).
 
-## THOMAS Integration (V1)
+## THOMAS Integration (Atlas Sources + Navigation Burn)
 
-`THOMAS Thalamus Integration (V1)` supports loading THOMAS left/right structure
+`Atlas Sources` + `Navigation Burn` support loading THOMAS left/right structure
 masks and bringing them into ROSA base space.
 
 Workflow:
 1. Load ROSA case in `ROSA Helper`.
 2. Add the MRI used to generate THOMAS (via Slicer's standard `Add Data`).
-3. In `THOMAS Thalamus Integration (V1)`:
+3. In `Atlas Sources` (THOMAS tab):
    - set `ROSA base volume` (fixed) and `THOMAS MRI` (moving)
    - click `Register THOMAS MRI -> ROSA`
 4. Set `THOMAS output dir` to the THOMAS subject folder that contains `left/` and `right/`.
 5. Click `Load THOMAS Thalamus Masks`.
 6. Keep `Apply THOMAS->ROSA transform` enabled to align segmentations to ROSA space.
-7. Optional one-click burn workflow in the same panel:
-   - optionally set `Nav MRI DICOM dir` and click `Import DICOM MRI`
-     (this registers imported DICOM MRI to selected ROSA base and hardens it)
-   - set `Burn input MRI`
+7. Optional burn workflow in `Navigation Burn`:
+   - choose `Burn input MRI`
    - choose `Nucleus side` (`Left`, `Right`, `Both`) and `Nucleus` (for example `CM`)
    - set burn fill value and output volume name
-   - click `Register + Burn Nucleus`
-8. Optional one-click DICOM export:
-   - set `DICOM export dir` and `DICOM series description`
-   - click `Register + Burn + Export DICOM` to write classic slice-wise DICOM files
-9. Optional atlas labeling integration:
-   - after THOMAS masks are loaded, they appear in `Atlas Contact Labeling (V1)` as a source
+   - click `Run Burn` or `Run Burn + Export DICOM`
+8. Optional atlas labeling integration:
+   - after THOMAS masks are loaded, they appear in `Atlas Labeling` as a source
 
 Notes:
 - Loader scans only `left/` and `right/` mask files and skips helper/cropped/resampled/full outputs.
 - THOMAS MRI registration is rigid (`BRAINSFit`) and should be reviewed in slice views before downstream export.
-- `Register + Burn Nucleus` can auto-run rigid registration from `THOMAS MRI` to `Burn input MRI`
-  before creating a burned scalar volume.
+- `Navigation Burn` expects THOMAS segmentations to already be loaded/aligned via `Atlas Sources`.
 
 ## Burn THOMAS Segments Into DICOM (ROSA Navigation)
 
@@ -378,11 +408,9 @@ ROSA imports DICOM. If you need a navigation MRI with thalamus labels burned in:
 7. Re-import exported DICOM in Slicer and verify alignment/intensity before sending to ROSA.
 
 Module shortcut:
-- `Register + Burn Nucleus` creates the burned scalar volume directly from selected
+- `Run Burn` creates the burned scalar volume directly from selected
   THOMAS nucleus and side, without manual Segment Editor steps.
-- `Auto-register THOMAS MRI -> Burn input` is an advanced fallback and is off by default
-  when Burn input MRI is already aligned to ROSA.
-- `Register + Burn + Export DICOM` additionally exports the burned result to a classic
+- `Run Burn + Export DICOM` additionally exports the burned result to a classic
   DICOM scalar volume series (one file per slice) under the selected export directory.
 - DICOM export remains the same final step via Subject Hierarchy (`Export to DICOM...`).
 
@@ -395,19 +423,27 @@ Important:
 1. Clone or download this repository.
 2. In Slicer, open `Settings -> Modules`.
 3. Add this path to `Additional module paths`:
-   - `<repo>/RosaHelper`
+   - `<repo>/`
 4. Restart Slicer.
-5. Open module `ROSA Helper` (category `ROSA`).
-6. Open module `Shank Detect` (category `ROSA`) for CT-only shank detection.
+5. Open modules in category `ROSA`:
+   - `ROSA Helper`, `Contacts & Trajectory View`, `Postop CT Localization`
+   - `Atlas Sources`, `Atlas Labeling`, `Navigation Burn`
+   - `Export Center`, `Shank Detect`
 
 ## Repository Layout
 
-- `RosaHelper/`: Slicer scripted module
-- `ShankDetect/`: Slicer scripted module for CT-only trajectory detection and contact generation
-- `RosaHelper/Lib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
-- `RosaHelper/Lib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
-- `RosaHelper/Lib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation
-- `RosaHelper/Lib/rosa_slicer/`: Slicer scene/services + widget mixins (`freesurfer_service.py`, `trajectory_scene.py`, `widget_mixin.py`)
+- `RosaHelper/`: ROSA case load module
+- `ContactsTrajectoryView/`: contact generation + trajectory view module
+- `PostopCTLocalization/`: guided CT fit + de novo detection wrapper module
+- `AtlasSources/`: atlas load/registration module
+- `AtlasLabeling/`: atlas assignment module
+- `NavigationBurn/`: THOMAS burn + DICOM export module
+- `ExportCenter/`: profile-based export module
+- `ShankDetect/`: CT-only standalone trajectory detection module
+- `CommonLib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
+- `CommonLib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
+- `CommonLib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation
+- `RosaHelper/Lib/rosa_slicer/`: Slicer services + compatibility bridge during refactor
 - `CommonLib/resources/electrodes/electrode_models.json`: shared bundled electrode model library (editable by users)
 - `RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
 - `tools/`: CLI wrappers for offline conversion/export

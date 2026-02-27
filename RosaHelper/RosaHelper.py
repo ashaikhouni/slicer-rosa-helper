@@ -158,9 +158,8 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.statusText.setMaximumBlockCount(1000)
         self.layout.addWidget(self.statusText)
 
-        self._build_freesurfer_ui()
-        self._build_thomas_ui()
-        self._build_atlas_labeling_ui()
+        # Atlas/burn workflows were extracted into dedicated modules:
+        # AtlasSources, AtlasLabeling, NavigationBurn.
 
         self.layout.addStretch(1)
 
@@ -211,12 +210,6 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.thomasDicomToRosaTransformNodeID = None
         self.thomasImportedDicomNodeID = None
         self.thomasSegmentationNodeIDs = []
-        self._preselect_freesurfer_reference_volume()
-        self._refresh_fs_parcellation_combo()
-        self._preselect_thomas_reference_volume()
-        self._preselect_thomas_burn_volume()
-        self._refresh_thomas_nucleus_combo()
-        self._refresh_atlas_source_options()
         self.log(
             f"[done] loaded {summary['loaded_volumes']} volumes, "
             f"created {summary['trajectory_count']} trajectories"

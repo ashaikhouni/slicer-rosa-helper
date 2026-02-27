@@ -19,6 +19,9 @@ add_subdirectory(ShankDetect)
 add_subdirectory(ExportCenter)
 add_subdirectory(ContactsTrajectoryView)
 add_subdirectory(PostopCTLocalization)
+add_subdirectory(AtlasSources)
+add_subdirectory(AtlasLabeling)
+add_subdirectory(NavigationBurn)
 
 # Install extension-level shared Python libraries used by multiple modules.
 install(

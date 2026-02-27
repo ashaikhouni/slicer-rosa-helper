@@ -1,12 +1,12 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-27 20:46:17Z
-- **Current phase**: Phase 6 (next) — `Atlas Labeling` and `Navigation Burn` extraction
+- **Timestamp (UTC)**: 2026-02-27 23:58:00Z
+- **Current phase**: Phase 7 — `Contact Import` module extraction
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Ahead of `origin/main` by local phase commits pending push.
+  - Phase 6 closed locally and committed; pending push.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -70,38 +70,41 @@
     - De novo detection runs and publishes trajectories consumable by contact generation.
     - End-to-end interop with contacts/QC/export remains functional.
 
-## Active Phase
 ### Phase 6 — `AtlasSources`, `Atlas Labeling`, and `Navigation Burn` Module Extraction
-- **Objective**:
-  - Extract atlas source loading, labeling, and burn workflows from `RosaHelper` into dedicated modules while preserving output compatibility.
-- **In scope**:
-  - Create module-level UIs/services for:
-    - `AtlasSources`: FreeSurfer + THOMAS load/registration/publish
-    - `AtlasLabeling`: contact assignment to selected atlas sources
-    - `NavigationBurn`: burn-to-volume and DICOM export workflow
-  - Use tabbed UI where one module hosts multiple atlas workflows:
-    - `AtlasSources`: `FreeSurfer`, `THOMAS`, `Registry`
-    - `NavigationBurn`: `Burn Volume`, `DICOM Export`
-  - Reuse shared workflow roles/tables and `CommonLib` services.
-  - Preserve current atlas CSV semantics and burn output behavior.
-- **Out of scope**:
-  - New atlas algorithms or segmentation methods.
-  - ANTs/ANTsPy integration.
-- **Exit criteria**:
-  - Atlas source loading runs from `AtlasSources` without `RosaHelper` UI dependency.
-  - Atlas labeling runs from `AtlasLabeling` without `RosaHelper` UI dependency.
-  - Navigation burn runs from `NavigationBurn` and exports valid DICOM series.
-  - Outputs remain consumable by `ExportCenter`.
-  - `RosaHelper` no longer contains primary atlas/burn control surfaces.
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-02-27
+- **Commit range**: `7675dc1..(phase-6-close commit)`
+- **Acceptance checks passed**:
+  - Added dedicated `AtlasSources` module with tabbed workflows:
+    - `FreeSurfer` (register/load/publish, include existing volume publish)
+    - `THOMAS` (register/load/publish)
+    - `Registry` (image + transform visibility)
+  - Added dedicated `AtlasLabeling` module consuming workflow contacts and atlas sources.
+  - Added dedicated `NavigationBurn` module:
+    - burn THOMAS nucleus from workflow-aligned segmentations
+    - import/register nav DICOM MRI for burn/export context
+    - export burned result as DICOM series
+  - Registered new modules in extension CMake.
+  - Removed primary atlas/burn control surfaces from `RosaHelper` UI.
+  - Fixed workflow registry string normalization and base/postop flag sync.
+  - User confirmed end-to-end Phase 6 flow works.
 
-### Phase 6 Refactor Sequence
-1. Extract atlas source loading/registration into new `AtlasSources` module.
-2. Extract assignment UI/handlers into new `AtlasLabeling` module (consume published sources only).
-3. Extract burn workflow UI/handlers into new `NavigationBurn` module.
-4. Rewire all three modules to shared workflow roles/tables only.
-5. Remove primary atlas/burn panels from `RosaHelper` (keep compatibility fallbacks if needed).
-6. Smoke-test end-to-end:
-   - load -> localize -> contacts -> atlas labels -> burn -> export.
+## Active Phase
+### Phase 7 — `Contact Import` Module Extraction
+- **Objective**:
+  - Add import workflow for external contact files and publish them into shared workflow roles.
+- **In scope**:
+  - New `ContactImport` module for CSV/TSV/XLSX/POM.
+  - Coordinate frame mapping into selected target frame.
+  - Publish imported contacts to `ContactFiducials` and optional reconstructed trajectories to `WorkingTrajectoryLines`.
+  - Interop with `ContactsTrajectoryView`, `AtlasLabeling`, and `ExportCenter`.
+- **Out of scope**:
+  - New detection/fitting algorithms.
+  - Atlas source changes.
+- **Exit criteria**:
+  - Contact import works for supported formats.
+  - Imported contacts are available for atlas labeling/export without manual re-entry.
+  - Optional trajectory reconstruction is role-grouped and consumable by downstream modules.
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -125,6 +128,8 @@
 - **D-011**: Lock module split for Phase 6: `AtlasSources` + `AtlasLabeling` + `NavigationBurn`.
 - **D-012**: Lock tabbed UI policy for multi-workflow atlas modules.
 - **D-013**: Lock atlas source adapter/output contract in `ATLAS_SOURCE_CONTRACT.md` for future source additions.
+- **D-014**: Phase 6 extraction implemented as standalone modules; phase close gated on smoke validation.
+- **D-015**: Removed Navigation Burn auto-register fallback to reduce user confusion; burn assumes workflow-aligned THOMAS segmentations.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:

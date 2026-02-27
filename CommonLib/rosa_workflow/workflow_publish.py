@@ -195,7 +195,8 @@ class WorkflowPublisher:
         table = image_table.GetTable()
         target_id = node.GetID()
         for row in range(table.GetNumberOfRows()):
-            node_id = str(table.GetValue(row, 0))
+            value = table.GetValue(row, 0)
+            node_id = str(value.ToString()) if hasattr(value, "ToString") else str(value)
             if role == "BaseVolume":
                 table.SetValue(row, 6, "1" if node_id == target_id else "0")
             elif role == "PostopCT":

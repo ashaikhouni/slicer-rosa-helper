@@ -28,11 +28,24 @@ TRANSFORM_REGISTRY_COLUMNS = [
 ]
 
 
-def _normalize_text(value):
-    """Return safe string representation for table storage."""
+def _variant_text(value):
+    """Convert VTK/Python value to plain text without variant quoting."""
     if value is None:
         return ""
-    return str(value)
+    if hasattr(value, "ToString"):
+        try:
+            return str(value.ToString())
+        except Exception:
+            pass
+    text = str(value)
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
+def _normalize_text(value):
+    """Return safe string representation for table storage."""
+    return _variant_text(value)
 
 
 def _ensure_table_columns(table_node, columns):
@@ -129,6 +142,5 @@ def table_to_dict_rows(table_node):
     columns = [table.GetColumnName(i) for i in range(table.GetNumberOfColumns())]
     rows = []
     for r in range(table.GetNumberOfRows()):
-        rows.append({name: str(table.GetValue(r, c)) for c, name in enumerate(columns)})
+        rows.append({name: _variant_text(table.GetValue(r, c)) for c, name in enumerate(columns)})
     return rows
-
