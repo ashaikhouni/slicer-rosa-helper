@@ -298,6 +298,12 @@ class TrajectorySceneService:
                 folder_id = self._ensure_subject_hierarchy_folder(traj_root, folder_name)
                 group_folders[folder_name] = folder_id
             item = sh_node.GetItemByDataNode(node)
+            if not item:
+                # Some nodes may not have a hierarchy item yet at first publish.
+                try:
+                    item = sh_node.CreateItem(folder_id, node)
+                except Exception:
+                    item = sh_node.GetItemByDataNode(node)
             if item:
                 sh_node.SetItemParent(item, folder_id)
 
