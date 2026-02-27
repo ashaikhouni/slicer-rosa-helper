@@ -113,8 +113,7 @@ markups.
 7. Optional: open `Auto Align to Postop CT (V1)`:
    - select postop CT
    - `Detect Candidates`
-   - `Fit Selected` or `Fit All`
-   - `Apply Fit to Trajectories`
+   - `Fit Selected` or `Fit All` (fit is applied directly)
    - contacts/models are regenerated from the fitted trajectories
    - you can still manually edit entry/target points or electrode models afterward and click `Update From Edited Trajectories`
 8. Click `Export Aligned NIfTI + Coordinates/QC`.
@@ -212,10 +211,8 @@ Use this to initialize trajectory placement from postop CT hyperdense contacts.
 
 1. Select postop CT in `Auto Align to Postop CT (V1)`.
 2. Run `Detect Candidates`.
-3. Run `Fit Selected` or `Fit All`.
-4. Run `Apply Fit to Trajectories`.
+3. Run `Fit Selected` or `Fit All` (applies immediately).
 
-`Apply Fit to Trajectories` updates trajectory lines and regenerates contacts/models.
 After auto-fit, you can continue manual refinement:
 - change electrode model assignment
 - edit entry/target points

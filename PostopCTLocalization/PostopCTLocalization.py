@@ -180,6 +180,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.applyFitButton = qt.QPushButton("Apply Fit to Trajectories")
         self.applyFitButton.clicked.connect(self.onApplyFitClicked)
         self.applyFitButton.setEnabled(False)
+        self.applyFitButton.setVisible(False)
         fitRow.addWidget(self.applyFitButton)
         form.addRow(fitRow)
 
@@ -428,7 +429,8 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
 
         traj_map = {traj["name"]: traj for traj in self.loadedTrajectories}
         success = 0
-        preview_nodes = []
+        applied_nodes = []
+        self.logic.trajectory_scene.remove_preview_lines(node_prefix="AutoFit_")
         for name in names:
             traj = traj_map.get(name)
             if traj is None:
@@ -451,14 +453,19 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             )
             if fit.get("success"):
                 self.fitResults[name] = fit
-                preview_node = self.logic.trajectory_scene.set_preview_line(
-                    trajectory_name=name,
-                    start_lps=fit["entry_lps"],
-                    end_lps=fit["target_lps"],
-                    node_prefix="AutoFit_",
+                start_ras = lps_to_ras_point(fit["entry_lps"])
+                end_ras = lps_to_ras_point(fit["target_lps"])
+                existing = self.logic.trajectory_scene.find_line_by_group_and_name(name, "guided_fit")
+                node = self.logic.trajectory_scene.create_or_update_trajectory_line(
+                    name=name,
+                    start_ras=start_ras,
+                    end_ras=end_ras,
+                    node_id=None if existing is None else existing.GetID(),
+                    node_name=f"Guided_{name}",
+                    group="guided_fit",
+                    origin="postop_ct_guided_fit",
                 )
-                if preview_node is not None:
-                    preview_nodes.append(preview_node)
+                applied_nodes.append(node)
                 success += 1
                 self.log(
                     "[guided] {name}: angle={a:.2f} deg depth={s:.2f} mm lateral={l:.2f} mm residual={r:.2f} mm".format(
@@ -471,12 +478,30 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 )
             else:
                 self.log(f"[guided] {name}: failed ({fit.get('reason', 'unknown')})")
-        if preview_nodes:
+        if applied_nodes:
+            self.workflowPublisher.publish_nodes(
+                role="GuidedFitTrajectoryLines",
+                nodes=applied_nodes,
+                source="postop_ct_guided_fit",
+                space_name="ROSA_BASE",
+                workflow_node=self.workflowNode,
+            )
+            self.workflowPublisher.publish_nodes(
+                role="WorkingTrajectoryLines",
+                nodes=applied_nodes,
+                source="postop_ct_guided_fit",
+                space_name="ROSA_BASE",
+                workflow_node=self.workflowNode,
+            )
             self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
                 context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
-                nodes=preview_nodes,
+                nodes=applied_nodes,
             )
-        self.applyFitButton.setEnabled(bool(self.fitResults))
+            self.logic.trajectory_scene.show_only_groups(["guided_fit"])
+            self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
+            self.onRefreshClicked()
+
+        self.applyFitButton.setEnabled(False)
         self.log(f"[guided] fitted {success}/{len(names)} trajectories")
 
     def onFitSelectedClicked(self):
@@ -506,50 +531,11 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
 
     def onApplyFitClicked(self):
-        if not self.fitResults:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "No fit results to apply.")
-            return
-        applied_nodes = []
-        for name, fit in self.fitResults.items():
-            start_ras = lps_to_ras_point(fit["entry_lps"])
-            end_ras = lps_to_ras_point(fit["target_lps"])
-            existing = self.logic.trajectory_scene.find_line_by_group_and_name(name, "guided_fit")
-            node = self.logic.trajectory_scene.create_or_update_trajectory_line(
-                name=name,
-                start_ras=start_ras,
-                end_ras=end_ras,
-                node_id=None if existing is None else existing.GetID(),
-                node_name=f"Guided_{name}",
-                group="guided_fit",
-                origin="postop_ct_guided_fit",
-            )
-            applied_nodes.append(node)
-
-        self.logic.trajectory_scene.remove_preview_lines(node_prefix="AutoFit_")
-        self.fitResults = {}
-        self.applyFitButton.setEnabled(False)
-        if applied_nodes:
-            self.workflowPublisher.publish_nodes(
-                role="GuidedFitTrajectoryLines",
-                nodes=applied_nodes,
-                source="postop_ct_guided_fit",
-                space_name="ROSA_BASE",
-                workflow_node=self.workflowNode,
-            )
-            self.workflowPublisher.publish_nodes(
-                role="WorkingTrajectoryLines",
-                nodes=applied_nodes,
-                source="postop_ct_guided_fit",
-                space_name="ROSA_BASE",
-                workflow_node=self.workflowNode,
-            )
-            self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
-                context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
-                nodes=applied_nodes,
-            )
-            self.logic.trajectory_scene.show_only_groups(["guided_fit"])
-        self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
-        self.onRefreshClicked()
+        qt.QMessageBox.information(
+            slicer.util.mainWindow(),
+            "Postop CT Localization",
+            "Guided fit is now applied directly when you click 'Fit Selected' or 'Fit All'.",
+        )
 
     def onDeNovoDetectClicked(self):
         volume_node = self.ctSelector.currentNode()
