@@ -16,7 +16,7 @@ Execution status is tracked separately in `PROGRESS.md`.
 2. **Phase 2**: `CommonLib` extraction and import rewiring.
 3. **Phase 3**: `ExportCenter` module extraction.
 4. **Phase 4**: `Contacts & Trajectory View` module extraction.
-5. **Phase 5**: `CT Fit` module extraction.
+5. **Phase 5**: `Postop CT Localization` module extraction (Guided Fit + De Novo Detect).
 6. **Phase 6**: `Atlas Labeling` and `Navigation Burn` module extraction.
 7. **Phase 7**: `Contact Import` module extraction.
 8. **Phase 8**: Compatibility bridge removal and cleanup release.
@@ -35,7 +35,9 @@ Execution status is tracked separately in `PROGRESS.md`.
 - **Phase 4**
   - Contact generation + trajectory-view workflow moved into dedicated module.
 - **Phase 5**
-  - Postop CT fit workflow moved into dedicated module.
+  - Guided postop CT fit workflow moved into dedicated module.
+  - De novo CT shank detection workflow is surfaced under the same module UX.
+  - Shared outputs publish to `WorkingTrajectoryLines` and interoperate with contacts/QC/export.
 - **Phase 6**
   - Atlas labeling and burn workflows separated cleanly and interoperate through MRML contract.
 - **Phase 7**
@@ -52,7 +54,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 4** (`Contacts & Trajectory View` module extraction).
+- **Current phase target**: **Phase 6** (`Atlas Labeling` and `Navigation Burn` extraction).
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

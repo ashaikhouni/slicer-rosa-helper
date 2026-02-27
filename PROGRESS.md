@@ -1,9 +1,9 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-26 21:26:57Z
-- **Current phase**: Phase 4 (next) — `Contacts & Trajectory View` module extraction
-- **Last stable pushed commit**: `8f4337b` (pre-push baseline)
+- **Timestamp (UTC)**: 2026-02-27 18:03:01Z
+- **Current phase**: Phase 6 (next) — `Atlas Labeling` and `Navigation Burn` extraction
+- **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
   - Ahead of `origin/main` by local phase commits pending push.
@@ -43,21 +43,59 @@
   - `contacts_only` profile validated from `ExportCenter` with correct manifest + outputs.
   - Output directory default behavior changed to explicit/manual selection (no forced case default).
 
-## Active Phase
 ### Phase 4 — `Contacts & Trajectory View` Module Extraction
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-02-27
+- **Commit range**: `70c4966..e2a7b2f`
+- **Acceptance checks passed**:
+  - Added dedicated `ContactsTrajectoryView` module for contact generation/update, QC, and trajectory slice alignment.
+  - Moved contact/model/trajectory scene operations into shared `CommonLib/rosa_scene` services.
+  - Rewired `RosaHelper` contact/trajectory handlers to shared services and reduced duplicated logic.
+  - Made `Contacts & Trajectory View` the primary UI by removing legacy contact/trajectory panels from `RosaHelper`.
+  - Verified atlas labeling still works in `RosaHelper` by recovering contacts from workflow `ContactFiducials` when needed.
+
+### Phase 5 — `Postop CT Localization` Module Extraction
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-02-27
+- **Commit range**: `e2a7b2f..(phase-close commit)`
+- **Acceptance checks passed**:
+  - Added dedicated `PostopCTLocalization` module with unified UX:
+    - Guided Fit (planned trajectory refinement on CT)
+    - De Novo Detect (CT-only trajectory detection wrapper over `shank_core.pipeline`)
+  - Added shared trajectory scene helpers in `CommonLib/rosa_scene/trajectory_scene.py` for create/update/collect operations.
+  - Registered `PostopCTLocalization` in extension root CMake.
+  - Published both guided-fit and de-novo outputs to workflow `WorkingTrajectoryLines` role.
+  - User smoke-test logs confirm:
+    - Guided fit candidates/fit/apply workflow runs.
+    - De novo detection runs and publishes trajectories consumable by contact generation.
+    - End-to-end interop with contacts/QC/export remains functional.
+
+## Active Phase
+### Phase 6 — `Atlas Labeling` and `Navigation Burn` Module Extraction
 - **Objective**:
-  - Extract contact generation and trajectory-aligned view workflows into a dedicated module.
+  - Extract atlas labeling and burn workflows from `RosaHelper` into dedicated modules while preserving output compatibility.
 - **In scope**:
-  - New module for contact generation/update and trajectory view alignment controls.
-  - Publish generated markups/models/tables through shared workflow roles.
-  - Keep behavior parity with existing `RosaHelper` controls during transition.
+  - Create module-level UIs/services for:
+    - FreeSurfer/THOMAS loading + labeling assignment
+    - burn-to-volume and DICOM export workflow
+  - Reuse shared workflow roles/tables and `CommonLib` services.
+  - Preserve current atlas CSV semantics and burn output behavior.
 - **Out of scope**:
-  - CT auto-fit algorithm changes.
-  - Atlas assignment or burn workflow changes.
+  - New atlas algorithms or segmentation methods.
+  - ANTs/ANTsPy integration.
 - **Exit criteria**:
-  - Contact generation/update runs from new module without `RosaHelper` UI dependency.
-  - Trajectory slice-view alignment runs from new module and matches existing behavior.
-  - Generated contacts/models/QC remain consumable by `ExportCenter` and Atlas workflows.
+  - Atlas labeling runs from dedicated module without `RosaHelper` UI dependency.
+  - Navigation burn runs from dedicated module and exports valid DICOM series.
+  - Outputs remain consumable by `ExportCenter`.
+  - `RosaHelper` no longer contains primary atlas/burn control surfaces.
+
+### Phase 6 Refactor Sequence
+1. Extract atlas loading/assignment UI and handlers into new `AtlasLabeling` module.
+2. Extract burn workflow UI/handlers into new `NavigationBurn` module.
+3. Rewire both modules to shared workflow roles/tables only.
+4. Remove primary atlas/burn panels from `RosaHelper` (keep compatibility fallbacks if needed).
+5. Smoke-test end-to-end:
+   - load -> localize -> contacts -> atlas labels -> burn -> export.
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -74,6 +112,9 @@
 - **D-004**: Next implementation target locked to **Phase 2 only** (no simultaneous module split).
 - **D-005**: Phase 2 validated locally before push; advance implementation target to Phase 3.
 - **D-006**: Phase 3 validated locally before push; advance implementation target to Phase 4.
+- **D-007**: Phase 4 validated locally before push; advance implementation target to Phase 5.
+- **D-008**: Keep two CT localization engines, but consolidate UX into one module (`Postop CT Localization`).
+- **D-009**: Phase 5 closed with unified postop localization module; advance implementation target to Phase 6.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:

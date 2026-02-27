@@ -86,3 +86,49 @@ class TrajectorySceneService:
             if node_name in expected:
                 slicer.mrmlScene.RemoveNode(node)
 
+    def create_or_update_trajectory_line(self, name, start_ras, end_ras, node_id=None):
+        """Create or update one working trajectory line node."""
+        node = None
+        if node_id:
+            node = slicer.mrmlScene.GetNodeByID(node_id)
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", name)
+            node.CreateDefaultDisplayNodes()
+        else:
+            node.SetName(name)
+
+        node.RemoveAllControlPoints()
+        node.AddControlPoint(vtk.vtkVector3d(*start_ras))
+        node.AddControlPoint(vtk.vtkVector3d(*end_ras))
+        display = node.GetDisplayNode()
+        if display:
+            display.SetColor(1.0, 1.0, 0.0)
+            display.SetSelectedColor(1.0, 0.85, 0.2)
+            display.SetLineThickness(0.5)
+            if hasattr(display, "SetPropertiesLabelVisibility"):
+                display.SetPropertiesLabelVisibility(False)
+        return node
+
+    def collect_working_trajectory_rows(self):
+        """Return in-scene editable line markups as sorted row dictionaries."""
+        rows = []
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            name = (node.GetName() or "").strip()
+            if not name or name.startswith("Plan_") or name.lower().startswith("autofit_"):
+                continue
+            if node.GetNumberOfControlPoints() < 2:
+                continue
+            p0 = [0.0, 0.0, 0.0]
+            p1 = [0.0, 0.0, 0.0]
+            node.GetNthControlPointPositionWorld(0, p0)
+            node.GetNthControlPointPositionWorld(1, p1)
+            rows.append(
+                {
+                    "name": name,
+                    "node_id": node.GetID(),
+                    "start_ras": [float(p0[0]), float(p0[1]), float(p0[2])],
+                    "end_ras": [float(p1[0]), float(p1[1]), float(p1[2])],
+                }
+            )
+        rows.sort(key=lambda item: item["name"])
+        return rows

@@ -18,6 +18,7 @@ add_subdirectory(RosaHelper)
 add_subdirectory(ShankDetect)
 add_subdirectory(ExportCenter)
 add_subdirectory(ContactsTrajectoryView)
+add_subdirectory(PostopCTLocalization)
 
 # Install extension-level shared Python libraries used by multiple modules.
 install(
