@@ -169,8 +169,6 @@ class TrajectorySceneService:
         keep = {self._normalize_group(g) for g in (groups or [])}
         for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
             group = self.infer_group_from_node(node)
-            if group == "autofit_preview":
-                continue
             display = node.GetDisplayNode()
             if display:
                 display.SetVisibility(group in keep)
@@ -249,6 +247,7 @@ class TrajectorySceneService:
         node.AddControlPoint(vtk.vtkVector3d(*end_ras))
         self.set_trajectory_metadata(node, trajectory_name=trajectory_name, group="autofit_preview", origin="preview")
         self._apply_group_display(node, "autofit_preview")
+        return node
 
     def remove_preview_lines(self, trajectory_names=None, node_prefix="AutoFit_"):
         """Remove preview line markups from scene."""

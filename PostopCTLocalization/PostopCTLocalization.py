@@ -428,6 +428,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
 
         traj_map = {traj["name"]: traj for traj in self.loadedTrajectories}
         success = 0
+        preview_nodes = []
         for name in names:
             traj = traj_map.get(name)
             if traj is None:
@@ -450,12 +451,14 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             )
             if fit.get("success"):
                 self.fitResults[name] = fit
-                self.logic.trajectory_scene.set_preview_line(
+                preview_node = self.logic.trajectory_scene.set_preview_line(
                     trajectory_name=name,
                     start_lps=fit["entry_lps"],
                     end_lps=fit["target_lps"],
                     node_prefix="AutoFit_",
                 )
+                if preview_node is not None:
+                    preview_nodes.append(preview_node)
                 success += 1
                 self.log(
                     "[guided] {name}: angle={a:.2f} deg depth={s:.2f} mm lateral={l:.2f} mm residual={r:.2f} mm".format(
@@ -468,6 +471,11 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 )
             else:
                 self.log(f"[guided] {name}: failed ({fit.get('reason', 'unknown')})")
+        if preview_nodes:
+            self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+                context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
+                nodes=preview_nodes,
+            )
         self.applyFitButton.setEnabled(bool(self.fitResults))
         self.log(f"[guided] fitted {success}/{len(names)} trajectories")
 
