@@ -10,6 +10,11 @@ Execution status is tracked separately in `PROGRESS.md`.
 - Shared libraries: move reusable code into extension-level `CommonLib`.
 - Interop model: modules exchange state via MRML roles/registry tables, not Python widget memory.
 - Export model: coordinates are emitted in a user-selected output frame, while atlas semantics come from atlas-native sampling.
+- Atlas responsibility split (locked):
+  - `AtlasSources`: FreeSurfer + THOMAS loading/registration/publish only
+  - `AtlasLabeling`: contact-to-atlas assignment only
+  - `NavigationBurn`: THOMAS burn + DICOM export only
+- UI policy (locked): use tabs for multi-workflow modules (for example `AtlasSources` FreeSurfer/THOMAS/Registry tabs).
 - Trajectory ownership model:
   - trajectories are grouped by producer (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
   - each module updates/replaces only its own trajectory group
@@ -21,7 +26,7 @@ Execution status is tracked separately in `PROGRESS.md`.
 3. **Phase 3**: `ExportCenter` module extraction.
 4. **Phase 4**: `Contacts & Trajectory View` module extraction.
 5. **Phase 5**: `Postop CT Localization` module extraction (Guided Fit + De Novo Detect).
-6. **Phase 6**: `Atlas Labeling` and `Navigation Burn` module extraction.
+6. **Phase 6**: `AtlasSources`, `Atlas Labeling`, and `Navigation Burn` module extraction.
 7. **Phase 7**: `Contact Import` module extraction.
 8. **Phase 8**: Compatibility bridge removal and cleanup release.
 
@@ -43,7 +48,10 @@ Execution status is tracked separately in `PROGRESS.md`.
   - De novo CT shank detection workflow is surfaced under the same module UX.
   - Shared outputs publish to `WorkingTrajectoryLines` and interoperate with contacts/QC/export.
 - **Phase 6**
-  - Atlas labeling and burn workflows separated cleanly and interoperate through MRML contract.
+  - Atlas source loading is extracted into dedicated `AtlasSources` module.
+  - Atlas labeling is extracted into dedicated `AtlasLabeling` module.
+  - Burn workflow is extracted into dedicated `NavigationBurn` module.
+  - All three interoperate through shared MRML roles/tables without cross-widget state.
 - **Phase 7**
   - Contact import from CSV/TSV/XLSX/POM implemented and published to shared roles.
 - **Phase 8**
@@ -58,7 +66,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 6** (`Atlas Labeling` and `Navigation Burn` extraction).
+- **Current phase target**: **Phase 6** (`AtlasSources`, `Atlas Labeling`, and `Navigation Burn` extraction).
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

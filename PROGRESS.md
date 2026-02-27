@@ -1,7 +1,7 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-27 18:03:01Z
+- **Timestamp (UTC)**: 2026-02-27 20:05:51Z
 - **Current phase**: Phase 6 (next) — `Atlas Labeling` and `Navigation Burn` extraction
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
@@ -71,30 +71,36 @@
     - End-to-end interop with contacts/QC/export remains functional.
 
 ## Active Phase
-### Phase 6 — `Atlas Labeling` and `Navigation Burn` Module Extraction
+### Phase 6 — `AtlasSources`, `Atlas Labeling`, and `Navigation Burn` Module Extraction
 - **Objective**:
-  - Extract atlas labeling and burn workflows from `RosaHelper` into dedicated modules while preserving output compatibility.
+  - Extract atlas source loading, labeling, and burn workflows from `RosaHelper` into dedicated modules while preserving output compatibility.
 - **In scope**:
   - Create module-level UIs/services for:
-    - FreeSurfer/THOMAS loading + labeling assignment
-    - burn-to-volume and DICOM export workflow
+    - `AtlasSources`: FreeSurfer + THOMAS load/registration/publish
+    - `AtlasLabeling`: contact assignment to selected atlas sources
+    - `NavigationBurn`: burn-to-volume and DICOM export workflow
+  - Use tabbed UI where one module hosts multiple atlas workflows:
+    - `AtlasSources`: `FreeSurfer`, `THOMAS`, `Registry`
+    - `NavigationBurn`: `Burn Volume`, `DICOM Export`
   - Reuse shared workflow roles/tables and `CommonLib` services.
   - Preserve current atlas CSV semantics and burn output behavior.
 - **Out of scope**:
   - New atlas algorithms or segmentation methods.
   - ANTs/ANTsPy integration.
 - **Exit criteria**:
-  - Atlas labeling runs from dedicated module without `RosaHelper` UI dependency.
-  - Navigation burn runs from dedicated module and exports valid DICOM series.
+  - Atlas source loading runs from `AtlasSources` without `RosaHelper` UI dependency.
+  - Atlas labeling runs from `AtlasLabeling` without `RosaHelper` UI dependency.
+  - Navigation burn runs from `NavigationBurn` and exports valid DICOM series.
   - Outputs remain consumable by `ExportCenter`.
   - `RosaHelper` no longer contains primary atlas/burn control surfaces.
 
 ### Phase 6 Refactor Sequence
-1. Extract atlas loading/assignment UI and handlers into new `AtlasLabeling` module.
-2. Extract burn workflow UI/handlers into new `NavigationBurn` module.
-3. Rewire both modules to shared workflow roles/tables only.
-4. Remove primary atlas/burn panels from `RosaHelper` (keep compatibility fallbacks if needed).
-5. Smoke-test end-to-end:
+1. Extract atlas source loading/registration into new `AtlasSources` module.
+2. Extract assignment UI/handlers into new `AtlasLabeling` module (consume published sources only).
+3. Extract burn workflow UI/handlers into new `NavigationBurn` module.
+4. Rewire all three modules to shared workflow roles/tables only.
+5. Remove primary atlas/burn panels from `RosaHelper` (keep compatibility fallbacks if needed).
+6. Smoke-test end-to-end:
    - load -> localize -> contacts -> atlas labels -> burn -> export.
 
 ## Open Issues / Decisions
@@ -115,6 +121,9 @@
 - **D-007**: Phase 4 validated locally before push; advance implementation target to Phase 5.
 - **D-008**: Keep two CT localization engines, but consolidate UX into one module (`Postop CT Localization`).
 - **D-009**: Phase 5 closed with unified postop localization module; advance implementation target to Phase 6.
+- **D-010**: Atlas workflows are split by responsibility, not by atlas type.
+- **D-011**: Lock module split for Phase 6: `AtlasSources` + `AtlasLabeling` + `NavigationBurn`.
+- **D-012**: Lock tabbed UI policy for multi-workflow atlas modules.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
