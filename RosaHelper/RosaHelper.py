@@ -158,14 +158,9 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.statusText.setMaximumBlockCount(1000)
         self.layout.addWidget(self.statusText)
 
-        self._build_contact_ui()
         self._build_freesurfer_ui()
         self._build_thomas_ui()
         self._build_atlas_labeling_ui()
-        self._build_qc_ui()
-        self._build_trajectory_view_ui()
-        self._build_autofit_ui()
-        self._load_electrode_library()
 
         self.layout.addStretch(1)
 
@@ -190,7 +185,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
                 invert=self.invertCheck.checked,
                 harden=self.hardenCheck.checked,
                 load_trajectories=self.markupsCheck.checked,
-                show_planned=self.showPlannedCheck.checked,
+                show_planned=False,
                 logger=self.log,
             )
         except Exception as exc:
@@ -216,14 +211,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
         self.thomasDicomToRosaTransformNodeID = None
         self.thomasImportedDicomNodeID = None
         self.thomasSegmentationNodeIDs = []
-        self._populate_contact_table(self.loadedTrajectories)
-        self._populate_trajectory_selector(self.loadedTrajectories)
-        self._populate_autofit_trajectory_selector(self.loadedTrajectories)
-        self._refresh_qc_metrics()
-        self._set_autofit_buttons_enabled(False)
         self._preselect_freesurfer_reference_volume()
-        if self.referenceVolumeName and self.referenceVolumeName in self.loadedVolumeNodeIDs:
-            self.exportFrameSelector.setCurrentNodeID(self.loadedVolumeNodeIDs[self.referenceVolumeName])
         self._refresh_fs_parcellation_combo()
         self._preselect_thomas_reference_volume()
         self._preselect_thomas_burn_volume()

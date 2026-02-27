@@ -1543,11 +1543,14 @@ class RosaHelperWidgetMixin:
 
     def onAssignContactsToAtlasClicked(self):
         """Assign generated contacts to selected atlas sources and store rows for export."""
-        if not self.lastGeneratedContacts:
+        contacts = list(self.lastGeneratedContacts or [])
+        if not contacts:
+            contacts = self._recover_contacts_from_workflow_nodes()
+        if not contacts:
             qt.QMessageBox.warning(
                 slicer.util.mainWindow(),
                 "ROSA Helper",
-                "Generate contacts first.",
+                "No contacts found. Generate contacts in Contacts & Trajectory View first.",
             )
             return
 
@@ -1567,7 +1570,7 @@ class RosaHelperWidgetMixin:
             reference_node = slicer.mrmlScene.GetNodeByID(self.loadedVolumeNodeIDs[self.referenceVolumeName])
         try:
             rows = self.logic.assign_contacts_to_atlases(
-                contacts=self.lastGeneratedContacts,
+                contacts=contacts,
                 freesurfer_volume_node=fs_node,
                 thomas_segmentation_nodes=th_nodes,
                 wm_volume_node=wm_node,
@@ -1585,6 +1588,45 @@ class RosaHelperWidgetMixin:
             workflow_node=getattr(self, "workflowNode", None),
         )
         self.log(f"[atlas] assigned {len(rows)} contacts")
+
+    def _recover_contacts_from_workflow_nodes(self):
+        """Rebuild minimal contact rows from workflow ContactFiducials nodes."""
+        workflow_node = getattr(self, "workflowNode", None)
+        if workflow_node is None:
+            workflow_node = self.logic.workflow_state.resolve_or_create_workflow_node()
+            self.workflowNode = workflow_node
+        contact_nodes = self.logic.workflow_state.role_nodes("ContactFiducials", workflow_node=workflow_node)
+        recovered = []
+        for node in contact_nodes:
+            if node is None:
+                continue
+            traj_name = (node.GetAttribute("Rosa.TrajectoryName") or "").strip()
+            if not traj_name:
+                node_name = node.GetName() or ""
+                if node_name.startswith("ROSA_Contacts_"):
+                    traj_name = node_name[len("ROSA_Contacts_") :]
+                elif "_" in node_name:
+                    traj_name = node_name.split("_", 2)[-1]
+                else:
+                    traj_name = node_name or "UNK"
+            for i in range(node.GetNumberOfControlPoints()):
+                p_ras = [0.0, 0.0, 0.0]
+                node.GetNthControlPointPositionWorld(i, p_ras)
+                p_lps = lps_to_ras_point(p_ras)  # sign flip is symmetric (RAS<->LPS)
+                label = node.GetNthControlPointLabel(i) or f"{traj_name}{i + 1}"
+                recovered.append(
+                    {
+                        "trajectory": traj_name,
+                        "index": i + 1,
+                        "label": label,
+                        "position_lps": p_lps,
+                    }
+                )
+        recovered.sort(key=lambda c: (str(c.get("trajectory", "")), int(c.get("index", 0))))
+        if recovered:
+            self.lastGeneratedContacts = recovered
+            self.log(f"[atlas] recovered {len(recovered)} contacts from workflow nodes")
+        return recovered
 
     def onLoadFSParcellationsClicked(self):
         """Load selected FreeSurfer parcellation volume(s) from recon-all mri/."""

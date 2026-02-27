@@ -51,10 +51,12 @@ class ElectrodeSceneService:
         nodes = {}
         for traj_name in sorted(by_traj.keys()):
             node_name = f"{node_prefix}_{traj_name}"
-            nodes[traj_name] = self.create_contacts_fiducials_node(
+            node = self.create_contacts_fiducials_node(
                 by_traj[traj_name],
                 node_name=node_name,
             )
+            node.SetAttribute("Rosa.TrajectoryName", str(traj_name))
+            nodes[traj_name] = node
         return nodes
 
     def create_or_update_table_node(self, node_name, columns, rows):
@@ -446,4 +448,3 @@ class ElectrodeSceneService:
             display = node.GetDisplayNode()
             if display:
                 display.SetVisibility(bool(visible))
-
