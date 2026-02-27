@@ -539,6 +539,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
                 nodes=applied_nodes,
             )
+            self.logic.trajectory_scene.show_only_groups(["guided_fit"])
         self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
         self.onRefreshClicked()
 
@@ -603,6 +604,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             role="DeNovoTrajectoryLines",
             source="postop_ct_denovo",
         )
+        self.logic.trajectory_scene.show_only_groups(["de_novo"])
         self.log(
             f"[denovo] candidates={int(result.get('candidate_count', 0))}, "
             f"in-mask={int(result.get('head_mask_kept_count', 0))}, "

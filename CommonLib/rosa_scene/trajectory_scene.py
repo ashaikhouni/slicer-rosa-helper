@@ -20,8 +20,8 @@ TRAJECTORY_GROUP_CONFIG = {
         "role": "ImportedTrajectoryLines",
         "folder": "ImportedROSA",
         "prefix": "",
-        "display_color": (1.0, 1.0, 0.0),
-        "selected_color": (1.0, 0.85, 0.2),
+        "display_color": (0.15, 0.65, 1.0),
+        "selected_color": (0.35, 0.8, 1.0),
         "line_thickness": 0.5,
         "locked": False,
         "point_labels": True,
@@ -30,8 +30,8 @@ TRAJECTORY_GROUP_CONFIG = {
         "role": "ManualTrajectoryLines",
         "folder": "Manual",
         "prefix": "",
-        "display_color": (1.0, 1.0, 0.0),
-        "selected_color": (1.0, 0.85, 0.2),
+        "display_color": (1.0, 0.95, 0.1),
+        "selected_color": (1.0, 0.9, 0.3),
         "line_thickness": 0.5,
         "locked": False,
         "point_labels": True,
@@ -40,8 +40,8 @@ TRAJECTORY_GROUP_CONFIG = {
         "role": "GuidedFitTrajectoryLines",
         "folder": "GuidedFit",
         "prefix": "Guided_",
-        "display_color": (0.2, 0.8, 1.0),
-        "selected_color": (0.2, 0.8, 1.0),
+        "display_color": (0.95, 0.35, 0.8),
+        "selected_color": (1.0, 0.55, 0.9),
         "line_thickness": 0.6,
         "locked": False,
         "point_labels": True,
@@ -50,8 +50,8 @@ TRAJECTORY_GROUP_CONFIG = {
         "role": "DeNovoTrajectoryLines",
         "folder": "DeNovo",
         "prefix": "DeNovo_",
-        "display_color": (1.0, 0.75, 0.15),
-        "selected_color": (1.0, 0.9, 0.3),
+        "display_color": (0.2, 0.95, 0.45),
+        "selected_color": (0.45, 1.0, 0.6),
         "line_thickness": 0.55,
         "locked": False,
         "point_labels": True,
@@ -148,10 +148,32 @@ class TrajectorySceneService:
         display.SetColor(float(color[0]), float(color[1]), float(color[2]))
         display.SetSelectedColor(float(sel_color[0]), float(sel_color[1]), float(sel_color[2]))
         display.SetLineThickness(float(cfg.get("line_thickness", 0.5)))
+        display.SetVisibility(True)
         if hasattr(display, "SetPointLabelsVisibility"):
             display.SetPointLabelsVisibility(bool(cfg.get("point_labels", True)))
         if hasattr(display, "SetPropertiesLabelVisibility"):
             display.SetPropertiesLabelVisibility(False)
+
+    def set_group_visibility(self, group, visible):
+        """Set visibility for all trajectories in one group."""
+        grp = self._normalize_group(group)
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            if self.infer_group_from_node(node) != grp:
+                continue
+            display = node.GetDisplayNode()
+            if display:
+                display.SetVisibility(bool(visible))
+
+    def show_only_groups(self, groups):
+        """Hide all trajectory groups except the provided one(s)."""
+        keep = {self._normalize_group(g) for g in (groups or [])}
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            group = self.infer_group_from_node(node)
+            if group == "autofit_preview":
+                continue
+            display = node.GetDisplayNode()
+            if display:
+                display.SetVisibility(group in keep)
 
     def set_trajectory_metadata(self, node, trajectory_name, group, origin=""):
         """Stamp standard trajectory metadata on one line node."""

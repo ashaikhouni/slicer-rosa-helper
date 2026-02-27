@@ -299,6 +299,7 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
             context_id=self.logic.workflow_state.context_id(workflow_node=wf),
             nodes=(imported_nodes + planned_nodes),
         )
+        self.logic.trajectory_scene.show_only_groups(["imported_rosa"])
 
 
 

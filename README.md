@@ -10,6 +10,7 @@ It supports:
 - composing transform chains using `[IMAGERY_3DREF]`
 - loading trajectories as line markups
 - grouping trajectories by origin (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
+- applying distinct colors per trajectory group and auto-hiding non-active groups when new grouped trajectories are generated
 - selecting electrode models per trajectory (DIXI AM/BM/CM library)
 - auto-suggesting an electrode model from trajectory length (closest within 5 mm)
 - generating contact fiducials per electrode (one node per trajectory)
