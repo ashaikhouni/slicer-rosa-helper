@@ -289,19 +289,49 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             return
         self.log(f"[electrodes] loaded {len(self.modelIds)} models")
 
+    @staticmethod
+    def _clean_table_text(value, default=""):
+        """Normalize MRML table text cells that may include wrapped quotes."""
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            text = text[1:-1].strip()
+        return text or default
+
+    @classmethod
+    def _safe_float(cls, value, default=0.0):
+        """Parse numeric table cells robustly (e.g., '\"0.0\"')."""
+        if value is None:
+            return float(default)
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = cls._clean_table_text(value, default="")
+        if not text:
+            return float(default)
+        try:
+            return float(text)
+        except Exception:
+            try:
+                return float(text.strip(" \"'"))
+            except Exception:
+                return float(default)
+
     def _assignment_map_from_workflow(self):
         amap = {}
         table = self.workflowNode.GetNodeReference("ElectrodeAssignmentTable")
         for row in table_to_dict_rows(table):
-            traj = (row.get("trajectory") or "").strip()
-            model_id = (row.get("model_id") or "").strip()
+            traj = self._clean_table_text(row.get("trajectory"), default="")
+            model_id = self._clean_table_text(row.get("model_id"), default="")
             if not traj or not model_id:
                 continue
             amap[traj] = {
                 "trajectory": traj,
                 "model_id": model_id,
-                "tip_at": (row.get("tip_at") or "target").strip() or "target",
-                "tip_shift_mm": float(row.get("tip_shift_mm") or 0.0),
+                "tip_at": self._clean_table_text(row.get("tip_at"), default="target"),
+                "tip_shift_mm": self._safe_float(row.get("tip_shift_mm"), default=0.0),
                 "xyz_offset_mm": [0.0, 0.0, 0.0],
             }
         return amap
@@ -526,6 +556,16 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             qt.QApplication.restoreOverrideCursor()
             slicer.app.processEvents()
 
+        try:
+            self.logic.show_metal_and_head_masks(
+                volume_node=volume_node,
+                metal_mask_kji=result.get("metal_mask_kji"),
+                head_mask_kji=result.get("gating_mask_kji"),
+            )
+            self.log("[denovo] displayed head/metal mask overlay")
+        except Exception as exc:
+            self.log(f"[denovo] mask display warning: {exc}")
+
         lines = result.get("lines", [])
         if not lines:
             self.log("[denovo] no trajectories detected")
@@ -568,6 +608,70 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             role="AdditionalCTVolumes",
             is_default_postop=True,
             workflow_node=workflow_node,
+        )
+
+    def _get_or_create_labelmap_node(self, node_name):
+        node = None
+        try:
+            node = slicer.util.getNode(node_name)
+        except Exception:
+            node = None
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", node_name)
+            node.CreateDefaultDisplayNodes()
+        return node
+
+    def _update_labelmap_from_mask(self, reference_volume_node, node_name, mask_kji):
+        if mask_kji is None:
+            return None
+        node = self._get_or_create_labelmap_node(node_name)
+        arr = np.asarray(mask_kji, dtype=np.uint8)
+        slicer.util.updateVolumeFromArray(node, arr)
+        m = vtk.vtkMatrix4x4()
+        reference_volume_node.GetIJKToRASMatrix(m)
+        node.SetIJKToRASMatrix(m)
+        display = node.GetDisplayNode()
+        if display:
+            try:
+                color = slicer.util.getNode("GenericAnatomyColors")
+                display.SetAndObserveColorNodeID(color.GetID())
+            except Exception:
+                pass
+            display.SetVisibility(True)
+        return node
+
+    def show_metal_and_head_masks(self, volume_node, metal_mask_kji=None, head_mask_kji=None):
+        if metal_mask_kji is None:
+            raise ValueError("metal_mask_kji is required for mask visualization")
+
+        metal_bool = np.asarray(metal_mask_kji, dtype=bool)
+        self._update_labelmap_from_mask(
+            reference_volume_node=volume_node,
+            node_name=f"{volume_node.GetName()}_MetalMask",
+            mask_kji=metal_mask_kji,
+        )
+        if head_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_HeadMask",
+                mask_kji=head_mask_kji,
+            )
+
+        combo = np.zeros_like(np.asarray(metal_mask_kji, dtype=np.uint8), dtype=np.uint8)
+        if head_mask_kji is not None:
+            combo[np.asarray(head_mask_kji, dtype=bool)] = 1
+        combo[metal_bool] = 2
+        combo_node = self._update_labelmap_from_mask(
+            reference_volume_node=volume_node,
+            node_name=f"{volume_node.GetName()}_MaskOverlay",
+            mask_kji=combo,
+        )
+        slicer.util.setSliceViewerLayers(
+            background=volume_node,
+            foreground=None,
+            foregroundOpacity=0.0,
+            label=combo_node,
+            labelOpacity=0.55,
         )
 
     def _vtk_matrix_to_numpy(self, vtk_matrix4x4):
@@ -793,4 +897,3 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             space_name="ROSA_BASE",
             workflow_node=workflow_node,
         )
-
