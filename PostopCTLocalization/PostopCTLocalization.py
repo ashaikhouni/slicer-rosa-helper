@@ -339,7 +339,9 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
     def _populate_guided_trajectory_selector(self):
         self.guidedTrajectorySelector.clear()
         for traj in self.loadedTrajectories:
-            self.guidedTrajectorySelector.addItem(traj["name"])
+            group = str(traj.get("group", "") or "working")
+            label = f"[{group}] {traj['name']}"
+            self.guidedTrajectorySelector.addItem(label, traj["name"])
 
     def _refresh_summary(self):
         self.summaryLabel.setText(
@@ -470,7 +472,11 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.log(f"[guided] fitted {success}/{len(names)} trajectories")
 
     def onFitSelectedClicked(self):
-        name = self.guidedTrajectorySelector.currentText.strip()
+        data = self.guidedTrajectorySelector.currentData
+        name = data() if callable(data) else data
+        name = str(name or "").strip()
+        if not name:
+            name = self.guidedTrajectorySelector.currentText.strip()
         if not name:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a trajectory.")
             return

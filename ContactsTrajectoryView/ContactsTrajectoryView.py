@@ -363,7 +363,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _populate_trajectory_selector(self, trajectories):
         self.trajectorySelector.clear()
         for traj in trajectories:
-            self.trajectorySelector.addItem(traj["name"])
+            group = str(traj.get("group", "") or "unknown")
+            label = f"[{group}] {traj['name']}"
+            self.trajectorySelector.addItem(label, traj["name"])
         self.alignSliceButton.setEnabled(bool(trajectories))
 
     def _collect_assignments(self):
@@ -588,7 +590,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
 
     def onAlignSliceClicked(self):
-        traj_name = self._widget_text(self.trajectorySelector).strip()
+        data = self.trajectorySelector.currentData
+        traj_name = data() if callable(data) else data
+        traj_name = str(traj_name or "").strip()
+        if not traj_name:
+            traj_name = self._widget_text(self.trajectorySelector).strip()
         if not traj_name:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Contacts & Trajectory View", "No trajectory selected.")
             return
