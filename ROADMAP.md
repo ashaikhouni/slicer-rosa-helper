@@ -10,6 +10,10 @@ Execution status is tracked separately in `PROGRESS.md`.
 - Shared libraries: move reusable code into extension-level `CommonLib`.
 - Interop model: modules exchange state via MRML roles/registry tables, not Python widget memory.
 - Export model: coordinates are emitted in a user-selected output frame, while atlas semantics come from atlas-native sampling.
+- Trajectory ownership model:
+  - trajectories are grouped by producer (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
+  - each module updates/replaces only its own trajectory group
+  - contact generation can target a selected trajectory group source
 
 ## Phase Map (Locked Boundaries)
 1. **Phase 1**: Shared MRML workflow contract integration in existing modules.

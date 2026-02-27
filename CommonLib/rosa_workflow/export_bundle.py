@@ -202,7 +202,9 @@ def _collect_trajectory_map_from_nodes(nodes, strip_plan_prefix=False):
             continue
         if int(node.GetNumberOfControlPoints()) < 2:
             continue
-        name = str(node.GetName() or "").strip()
+        name = str(node.GetAttribute("Rosa.TrajectoryName") or "").strip()
+        if not name:
+            name = str(node.GetName() or "").strip()
         if strip_plan_prefix and name.startswith("Plan_"):
             name = name[5:]
         if not name:

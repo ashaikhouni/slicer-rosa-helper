@@ -9,6 +9,7 @@ It supports:
 - applying `TRdicomRdisplay` transforms
 - composing transform chains using `[IMAGERY_3DREF]`
 - loading trajectories as line markups
+- grouping trajectories by origin (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
 - selecting electrode models per trajectory (DIXI AM/BM/CM library)
 - auto-suggesting an electrode model from trajectory length (closest within 5 mm)
 - generating contact fiducials per electrode (one node per trajectory)
@@ -50,6 +51,7 @@ Key behavior:
 - managed workflow nodes carry `Rosa.*` provenance attributes
 - image and transform registries are persisted as MRML table nodes
 - Shank Detect publishes trajectories/contacts/assignments into the same contract
+- trajectory lines are role-grouped by producer so modules can edit/replace only their own outputs
 
 ## ROS File Structure (What We Read)
 
@@ -99,8 +101,9 @@ markups.
 3. Set case folder (`<case>/` containing `.ros` and `DICOM/`).
 4. Click `Load ROSA case`.
 5. Open `V1 Contact Labels`:
-   - verify auto-selected electrode models
-   - adjust model/tip options as needed
+  - choose `Trajectory source` (for example `Working (active)`, `Imported ROSA`, `Guided Fit`, `De Novo`, `Manual`)
+  - verify auto-selected electrode models
+  - adjust model/tip options as needed
    - click `Generate Contact Fiducials`
    - keep `Create electrode models` enabled to also create 3D model nodes
    - after moving trajectory line control points, click `Update From Edited Trajectories`

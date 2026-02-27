@@ -32,6 +32,15 @@ from rosa_core import (
 from rosa_scene import ElectrodeSceneService, TrajectorySceneService
 from rosa_workflow import WorkflowPublisher, WorkflowState
 
+TRAJECTORY_SOURCE_OPTIONS = [
+    ("working", "Working (active)"),
+    ("imported_rosa", "Imported ROSA"),
+    ("manual", "Manual (scene)"),
+    ("guided_fit", "Guided Fit"),
+    ("de_novo", "De Novo"),
+    ("planned_rosa", "Planned ROSA"),
+]
+
 
 class ContactsTrajectoryView(ScriptedLoadableModule):
     """Slicer module metadata for contact + trajectory workflows."""
@@ -82,6 +91,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.summaryLabel = qt.QLabel("Workflow not scanned yet.")
         self.summaryLabel.wordWrap = True
         top_form.addRow("Workflow summary", self.summaryLabel)
+
+        self.trajectorySourceCombo = qt.QComboBox()
+        for key, label in TRAJECTORY_SOURCE_OPTIONS:
+            self.trajectorySourceCombo.addItem(label, key)
+        self.trajectorySourceCombo.currentIndexChanged.connect(self.onTrajectorySourceChanged)
+        top_form.addRow("Trajectory source", self.trajectorySourceCombo)
 
         self._build_contact_ui()
         self._build_qc_ui()
@@ -375,7 +390,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         return {"schema_version": "1.0", "assignments": rows}
 
     def _build_trajectory_map_with_scene_overrides(self):
-        return self.logic.trajectory_scene.build_trajectory_map_with_scene_overrides(self.loadedTrajectories)
+        out = {}
+        for traj in self.loadedTrajectories:
+            node = slicer.mrmlScene.GetNodeByID(traj.get("node_id", ""))
+            scene_traj = self.logic.trajectory_scene.trajectory_from_line_node(traj.get("name", ""), node)
+            out[traj["name"]] = scene_traj if scene_traj is not None else traj
+        return out
 
     def _compute_qc_rows(self):
         if not self.lastGeneratedContacts:
@@ -427,8 +447,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_summary(self):
         planned = self.logic.collect_planned_trajectory_map(workflow_node=self.workflowNode)
+        source_key = self.trajectorySourceCombo.currentData
+        source_key = source_key() if callable(source_key) else source_key
         summary = (
-            f"working trajectories={len(self.loadedTrajectories)}, "
+            f"source={source_key or 'working'}, "
+            f"loaded trajectories={len(self.loadedTrajectories)}, "
             f"planned trajectories={len(planned)}, "
             f"contacts={len(self.lastGeneratedContacts)}"
         )
@@ -436,7 +459,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
-        self.loadedTrajectories = self.logic.collect_working_trajectories(workflow_node=self.workflowNode)
+        source_key = self._selected_source_key()
+        self.loadedTrajectories = self.logic.collect_trajectories_by_source(
+            source_key=source_key,
+            workflow_node=self.workflowNode,
+        )
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
@@ -444,6 +471,15 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._populate_trajectory_selector(self.loadedTrajectories)
         self._refresh_qc_metrics()
         self._refresh_summary()
+        self.log(f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)}")
+
+    def _selected_source_key(self):
+        data = self.trajectorySourceCombo.currentData
+        value = data() if callable(data) else data
+        return str(value or "working")
+
+    def onTrajectorySourceChanged(self, _idx):
+        self.onRefreshClicked()
 
     def onApplyModelAllClicked(self):
         model_id = self._widget_text(self.defaultModelCombo).strip()
@@ -603,27 +639,82 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             workflow_publish=self.workflow_publish,
         )
 
-    def collect_working_trajectories(self, workflow_node=None):
-        """Return working trajectories from workflow role, falling back to in-scene lines."""
+    def _collect_trajectories_from_role(self, role, workflow_node=None):
+        """Return trajectories from one workflow role."""
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         trajectories = []
-        role_nodes = self.workflow_state.role_nodes("WorkingTrajectoryLines", workflow_node=wf)
+        role_nodes = self.workflow_state.role_nodes(role, workflow_node=wf)
         for node in role_nodes:
-            traj = self.trajectory_scene.trajectory_from_line_node(node.GetName(), node)
+            traj = self.trajectory_scene.trajectory_from_line_node("", node)
             if traj is not None:
                 trajectories.append(traj)
-
-        if not trajectories:
-            for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
-                name = node.GetName() or ""
-                if not name or name.startswith("Plan_") or name.lower().startswith("autofit_"):
-                    continue
-                traj = self.trajectory_scene.trajectory_from_line_node(name, node)
-                if traj is not None:
-                    trajectories.append(traj)
-
         trajectories.sort(key=lambda item: item.get("name", ""))
         return trajectories
+
+    def collect_trajectories_by_source(self, source_key="working", workflow_node=None):
+        """Return trajectories for one selected source group."""
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        source = str(source_key or "working").strip().lower()
+
+        if source == "working":
+            trajectories = self._collect_trajectories_from_role("WorkingTrajectoryLines", workflow_node=wf)
+            if trajectories:
+                return trajectories
+            rows = self.trajectory_scene.collect_working_trajectory_rows(
+                groups=["imported_rosa", "manual", "guided_fit", "de_novo"]
+            )
+            fallback = []
+            for row in rows:
+                node = slicer.mrmlScene.GetNodeByID(row["node_id"])
+                if node is None:
+                    continue
+                traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)
+                if traj is not None:
+                    fallback.append(traj)
+            fallback.sort(key=lambda item: item.get("name", ""))
+            return fallback
+
+        if source == "imported_rosa":
+            return self._collect_trajectories_from_role("ImportedTrajectoryLines", workflow_node=wf)
+        if source == "guided_fit":
+            return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
+        if source == "de_novo":
+            return self._collect_trajectories_from_role("DeNovoTrajectoryLines", workflow_node=wf)
+        if source == "planned_rosa":
+            return self._collect_trajectories_from_role("PlannedTrajectoryLines", workflow_node=wf)
+        if source == "manual":
+            rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["manual"])
+            nodes = []
+            trajectories = []
+            for row in rows:
+                node = slicer.mrmlScene.GetNodeByID(row["node_id"])
+                if node is None:
+                    continue
+                self.trajectory_scene.set_trajectory_metadata(
+                    node=node,
+                    trajectory_name=row["name"],
+                    group="manual",
+                    origin=node.GetAttribute("Rosa.TrajectoryOrigin") or "manual",
+                )
+                nodes.append(node)
+                traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)
+                if traj is not None:
+                    trajectories.append(traj)
+            self.workflow_publish.publish_nodes(
+                role="ManualTrajectoryLines",
+                nodes=nodes,
+                source="manual",
+                space_name="ROSA_BASE",
+                workflow_node=wf,
+            )
+            self.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+                context_id=self.workflow_state.context_id(workflow_node=wf),
+                nodes=nodes,
+            )
+            trajectories.sort(key=lambda item: item.get("name", ""))
+            return trajectories
+
+        return []
 
     def collect_planned_trajectory_map(self, workflow_node=None):
         """Return planned trajectories from role if available, else from Plan_* line nodes."""
@@ -631,9 +722,7 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
         planned = {}
         role_nodes = self.workflow_state.role_nodes("PlannedTrajectoryLines", workflow_node=wf)
         for node in role_nodes:
-            name = node.GetName() or ""
-            if name.startswith("Plan_"):
-                name = name[len("Plan_") :]
+            name = self.trajectory_scene.logical_name_from_node(node) or (node.GetName() or "")
             traj = self.trajectory_scene.trajectory_from_line_node(name, node)
             if traj is not None:
                 planned[name] = traj

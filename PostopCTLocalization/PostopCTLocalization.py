@@ -497,13 +497,18 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             return
         applied_nodes = []
         for name, fit in self.fitResults.items():
-            node = self.logic.trajectory_scene.find_line_markup_node(name)
-            if node is None or node.GetNumberOfControlPoints() < 2:
-                continue
             start_ras = lps_to_ras_point(fit["entry_lps"])
             end_ras = lps_to_ras_point(fit["target_lps"])
-            node.SetNthControlPointPositionWorld(0, start_ras[0], start_ras[1], start_ras[2])
-            node.SetNthControlPointPositionWorld(1, end_ras[0], end_ras[1], end_ras[2])
+            existing = self.logic.trajectory_scene.find_line_by_group_and_name(name, "guided_fit")
+            node = self.logic.trajectory_scene.create_or_update_trajectory_line(
+                name=name,
+                start_ras=start_ras,
+                end_ras=end_ras,
+                node_id=None if existing is None else existing.GetID(),
+                node_name=f"Guided_{name}",
+                group="guided_fit",
+                origin="postop_ct_guided_fit",
+            )
             applied_nodes.append(node)
 
         self.logic.trajectory_scene.remove_preview_lines(node_prefix="AutoFit_")
@@ -511,11 +516,22 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.applyFitButton.setEnabled(False)
         if applied_nodes:
             self.workflowPublisher.publish_nodes(
+                role="GuidedFitTrajectoryLines",
+                nodes=applied_nodes,
+                source="postop_ct_guided_fit",
+                space_name="ROSA_BASE",
+                workflow_node=self.workflowNode,
+            )
+            self.workflowPublisher.publish_nodes(
                 role="WorkingTrajectoryLines",
                 nodes=applied_nodes,
                 source="postop_ct_guided_fit",
                 space_name="ROSA_BASE",
                 workflow_node=self.workflowNode,
+            )
+            self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+                context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
+                nodes=applied_nodes,
             )
         self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
         self.onRefreshClicked()
@@ -575,7 +591,12 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             lines=lines,
             replace_existing=bool(self.deNovoReplaceCheck.checked),
         )
-        self.logic.publish_working_rows(rows, workflow_node=self.workflowNode)
+        self.logic.publish_working_rows(
+            rows,
+            workflow_node=self.workflowNode,
+            role="DeNovoTrajectoryLines",
+            source="postop_ct_denovo",
+        )
         self.log(
             f"[denovo] candidates={int(result.get('candidate_count', 0))}, "
             f"in-mask={int(result.get('head_mask_kept_count', 0))}, "
@@ -746,11 +767,13 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         trajectories = []
         for node in self.workflow_state.role_nodes("WorkingTrajectoryLines", workflow_node=wf):
-            traj = self.trajectory_scene.trajectory_from_line_node(node.GetName(), node)
+            traj = self.trajectory_scene.trajectory_from_line_node("", node)
             if traj is not None:
                 trajectories.append(traj)
         if not trajectories:
-            for row in self.trajectory_scene.collect_working_trajectory_rows():
+            for row in self.trajectory_scene.collect_working_trajectory_rows(
+                groups=["imported_rosa", "manual", "guided_fit", "de_novo"]
+            ):
                 node = slicer.mrmlScene.GetNodeByID(row["node_id"])
                 traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)
                 if traj is not None:
@@ -854,7 +877,7 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         return names
 
     def upsert_detected_lines(self, lines, replace_existing=True):
-        existing_rows = self.trajectory_scene.collect_working_trajectory_rows()
+        existing_rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["de_novo"])
         if bool(replace_existing):
             for row in existing_rows:
                 node = slicer.mrmlScene.GetNodeByID(row["node_id"])
@@ -867,16 +890,22 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         new_rows = list(existing_rows)
         for i, line in enumerate(lines):
             name = names[i]
+            node_name = self.trajectory_scene.build_node_name(name, "de_novo")
             node = self.trajectory_scene.create_or_update_trajectory_line(
                 name=name,
                 start_ras=line["start_ras"],
                 end_ras=line["end_ras"],
                 node_id=None,
+                group="de_novo",
+                origin="postop_ct_denovo",
+                node_name=node_name,
             )
             new_rows.append(
                 {
                     "name": name,
+                    "node_name": node.GetName() or node_name,
                     "node_id": node.GetID(),
+                    "group": "de_novo",
                     "start_ras": [float(line["start_ras"][0]), float(line["start_ras"][1]), float(line["start_ras"][2])],
                     "end_ras": [float(line["end_ras"][0]), float(line["end_ras"][1]), float(line["end_ras"][2])],
                 }
@@ -884,16 +913,29 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         new_rows.sort(key=lambda r: r["name"])
         return new_rows
 
-    def publish_working_rows(self, rows, workflow_node=None):
+    def publish_working_rows(self, rows, workflow_node=None, role="WorkingTrajectoryLines", source="postop_ct_localization"):
         nodes = []
         for row in rows:
             node = slicer.mrmlScene.GetNodeByID(row.get("node_id", ""))
             if node is not None:
                 nodes.append(node)
+        if role and role != "WorkingTrajectoryLines":
+            self.workflow_publish.publish_nodes(
+                role=role,
+                nodes=nodes,
+                source=source,
+                space_name="ROSA_BASE",
+                workflow_node=workflow_node,
+            )
         self.workflow_publish.publish_nodes(
             role="WorkingTrajectoryLines",
             nodes=nodes,
-            source="postop_ct_localization",
+            source=source,
             space_name="ROSA_BASE",
             workflow_node=workflow_node,
+        )
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        self.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+            context_id=self.workflow_state.context_id(workflow_node=wf),
+            nodes=nodes,
         )

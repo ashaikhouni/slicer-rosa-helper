@@ -258,21 +258,32 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
                 self.logic.workflow_publish.set_default_base_volume(ros_nodes[0], workflow_node=wf)
 
         planned_nodes = []
-        working_nodes = []
+        imported_nodes = []
         for traj in self.loadedTrajectories or []:
             name = traj.get("name", "")
             if not name:
                 continue
-            node = self.logic._find_node_by_name(name, "vtkMRMLMarkupsLineNode")
+            node = self.logic.trajectory_scene.find_line_by_group_and_name(name, "imported_rosa")
+            if node is None:
+                node = self.logic._find_node_by_name(name, "vtkMRMLMarkupsLineNode")
             if node is not None:
-                working_nodes.append(node)
-            plan_node = self.logic._find_node_by_name(f"Plan_{name}", "vtkMRMLMarkupsLineNode")
+                imported_nodes.append(node)
+            plan_node = self.logic.trajectory_scene.find_line_by_group_and_name(name, "planned_rosa")
+            if plan_node is None:
+                plan_node = self.logic._find_node_by_name(f"Plan_{name}", "vtkMRMLMarkupsLineNode")
             if plan_node is not None:
                 planned_nodes.append(plan_node)
 
         self.logic.workflow_publish.publish_nodes(
             role="WorkingTrajectoryLines",
-            nodes=working_nodes,
+            nodes=imported_nodes,
+            source="rosa",
+            space_name="ROSA_BASE",
+            workflow_node=wf,
+        )
+        self.logic.workflow_publish.publish_nodes(
+            role="ImportedTrajectoryLines",
+            nodes=imported_nodes,
             source="rosa",
             space_name="ROSA_BASE",
             workflow_node=wf,
@@ -283,6 +294,10 @@ class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
             source="rosa",
             space_name="ROSA_BASE",
             workflow_node=wf,
+        )
+        self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+            context_id=self.logic.workflow_state.context_id(workflow_node=wf),
+            nodes=(imported_nodes + planned_nodes),
         )
 
 
@@ -1184,34 +1199,27 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             start_ras = lps_to_ras_point(traj["start"])
             end_ras = lps_to_ras_point(traj["end"])
             # Editable working trajectory.
-            node = self._find_node_by_name(traj["name"], "vtkMRMLMarkupsLineNode")
-            if node is None:
-                node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", traj["name"])
-            node.RemoveAllControlPoints()
-            node.AddControlPoint(vtk.vtkVector3d(*start_ras))
-            node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-            node.SetNthControlPointLabel(0, f"{traj['name']}_start")
-            node.SetNthControlPointLabel(1, f"{traj['name']}_end")
+            node = self.trajectory_scene.create_or_update_trajectory_line(
+                name=traj["name"],
+                start_ras=start_ras,
+                end_ras=end_ras,
+                node_name=traj["name"],
+                group="imported_rosa",
+                origin="rosa",
+            )
 
             # Immutable planned backup trajectory.
-            plan_name = f"Plan_{traj['name']}"
-            plan_node = self._find_node_by_name(plan_name, "vtkMRMLMarkupsLineNode")
-            if plan_node is None:
-                plan_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", plan_name)
-            plan_node.RemoveAllControlPoints()
-            plan_node.AddControlPoint(vtk.vtkVector3d(*start_ras))
-            plan_node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-            plan_node.SetNthControlPointLabel(0, f"{traj['name']}_plan_start")
-            plan_node.SetNthControlPointLabel(1, f"{traj['name']}_plan_end")
-            plan_node.SetLocked(True)
+            plan_node = self.trajectory_scene.create_or_update_trajectory_line(
+                name=traj["name"],
+                start_ras=start_ras,
+                end_ras=end_ras,
+                node_name=f"Plan_{traj['name']}",
+                group="planned_rosa",
+                origin="rosa",
+            )
             plan_display = plan_node.GetDisplayNode()
             if plan_display:
                 plan_display.SetVisibility(bool(show_planned))
-                plan_display.SetColor(0.65, 0.65, 0.65)
-                plan_display.SetSelectedColor(0.65, 0.65, 0.65)
-                plan_display.SetLineThickness(0.35)
-                if hasattr(plan_display, "SetPointLabelsVisibility"):
-                    plan_display.SetPointLabelsVisibility(False)
 
         if logger:
             logger(f"[markups] created {len(trajectories)} line trajectories")

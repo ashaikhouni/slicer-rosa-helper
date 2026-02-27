@@ -443,7 +443,8 @@ class ElectrodeSceneService:
         """Show or hide all planned backup trajectory lines."""
         for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
             name = node.GetName() or ""
-            if not name.startswith("Plan_"):
+            group = (node.GetAttribute("Rosa.TrajectoryGroup") or "").strip().lower()
+            if group != "planned_rosa" and not name.startswith("Plan_"):
                 continue
             display = node.GetDisplayNode()
             if display:
