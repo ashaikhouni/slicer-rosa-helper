@@ -39,6 +39,9 @@ This extension also includes `Export Center`:
 
 Existing workflows remain valid. New atlas and burn features are additive.
 
+Atlas integrations must follow the adapter/output contract documented in:
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/ATLAS_SOURCE_CONTRACT.md`
+
 ## Shared Workflow Contract (MRML)
 
 This refactor introduces a shared `vtkMRMLScriptedModuleNode` named `RosaWorkflow`.

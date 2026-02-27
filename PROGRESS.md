@@ -1,7 +1,7 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-27 20:05:51Z
+- **Timestamp (UTC)**: 2026-02-27 20:46:17Z
 - **Current phase**: Phase 6 (next) — `Atlas Labeling` and `Navigation Burn` extraction
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
@@ -124,6 +124,7 @@
 - **D-010**: Atlas workflows are split by responsibility, not by atlas type.
 - **D-011**: Lock module split for Phase 6: `AtlasSources` + `AtlasLabeling` + `NavigationBurn`.
 - **D-012**: Lock tabbed UI policy for multi-workflow atlas modules.
+- **D-013**: Lock atlas source adapter/output contract in `ATLAS_SOURCE_CONTRACT.md` for future source additions.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
