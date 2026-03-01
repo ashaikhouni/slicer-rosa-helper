@@ -74,6 +74,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        self._syncingSourceCombo = False
 
         top_form = qt.QFormLayout()
         self.layout.addLayout(top_form)
@@ -111,6 +112,53 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
         self._load_electrode_library()
         self.onRefreshClicked()
+
+    def enter(self):
+        """Refresh module state when entering this module."""
+        self.onRefreshClicked()
+
+    def _workflow_active_source(self):
+        if self.workflowNode is None:
+            return ""
+        return str(self.workflowNode.GetParameter("ActiveTrajectorySource") or "").strip().lower()
+
+    def _set_workflow_active_source(self, source_key):
+        if self.workflowNode is None:
+            return
+        key = str(source_key or "").strip().lower()
+        self.workflowNode.SetParameter("ActiveTrajectorySource", key)
+
+    def _sync_source_combo_from_workflow(self):
+        key = self._workflow_active_source()
+        if not key:
+            return
+        idx = self.trajectorySourceCombo.findData(key)
+        if idx < 0 or idx == self.trajectorySourceCombo.currentIndex:
+            return
+        self._syncingSourceCombo = True
+        try:
+            self.trajectorySourceCombo.setCurrentIndex(idx)
+        finally:
+            self._syncingSourceCombo = False
+
+    def _role_has_nodes(self, role):
+        return len(self.workflowState.role_nodes(role, workflow_node=self.workflowNode)) > 0
+
+    def _default_source_when_unset(self):
+        # Preferred startup source is imported ROSA if available.
+        if self._role_has_nodes("ImportedTrajectoryLines"):
+            return "imported_rosa"
+        if self._role_has_nodes("GuidedFitTrajectoryLines"):
+            return "guided_fit"
+        if self._role_has_nodes("DeNovoTrajectoryLines"):
+            return "de_novo"
+        if self._role_has_nodes("ImportedExternalTrajectoryLines"):
+            return "imported_external"
+        if self._role_has_nodes("PlannedTrajectoryLines"):
+            return "planned_rosa"
+        if self._role_has_nodes("WorkingTrajectoryLines"):
+            return "working"
+        return "working"
 
     def log(self, message):
         """Append one message line to module log."""
@@ -460,8 +508,30 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         self.summaryLabel.setText(summary)
 
+    def _apply_source_visibility(self, source_key):
+        key = str(source_key or "working").strip().lower()
+        group_map = {
+            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"],
+            "imported_rosa": ["imported_rosa"],
+            "imported_external": ["imported_external"],
+            "manual": ["manual"],
+            "guided_fit": ["guided_fit"],
+            "de_novo": ["de_novo"],
+            "planned_rosa": ["planned_rosa"],
+        }
+        groups = group_map.get(key, group_map["working"])
+        self.logic.trajectory_scene.show_only_groups(groups)
+        # Planned visibility remains user-controlled except when planned source is selected directly.
+        if key == "planned_rosa":
+            self.logic.electrode_scene.set_planned_trajectory_visibility(True)
+        else:
+            self.logic.electrode_scene.set_planned_trajectory_visibility(bool(self.showPlannedCheck.checked))
+
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
+        if not self._workflow_active_source():
+            self._set_workflow_active_source(self._default_source_when_unset())
+        self._sync_source_combo_from_workflow()
         source_key = self._selected_source_key()
         self.loadedTrajectories = self.logic.collect_trajectories_by_source(
             source_key=source_key,
@@ -472,6 +542,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastQCMetricsRows = []
         self._populate_contact_table(self.loadedTrajectories)
         self._populate_trajectory_selector(self.loadedTrajectories)
+        self._apply_source_visibility(source_key)
         self._refresh_qc_metrics()
         self._refresh_summary()
         self.log(f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)}")
@@ -482,6 +553,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         return str(value or "working")
 
     def onTrajectorySourceChanged(self, _idx):
+        if self._syncingSourceCombo:
+            return
+        self._set_workflow_active_source(self._selected_source_key())
         self.onRefreshClicked()
 
     def onApplyModelAllClicked(self):

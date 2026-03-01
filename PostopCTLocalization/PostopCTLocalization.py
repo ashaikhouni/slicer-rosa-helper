@@ -43,6 +43,16 @@ from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 from shank_core import pipeline as shank_pipeline
 
+GUIDED_SOURCE_OPTIONS = [
+    ("working", "Working (active)"),
+    ("imported_rosa", "Imported ROSA"),
+    ("imported_external", "Imported External"),
+    ("manual", "Manual (scene)"),
+    ("guided_fit", "Guided Fit"),
+    ("de_novo", "De Novo"),
+    ("planned_rosa", "Planned ROSA"),
+]
+
 
 class PostopCTLocalization(ScriptedLoadableModule):
     """Slicer metadata for unified postop CT localization module."""
@@ -75,6 +85,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.assignmentMap = {}
         self.candidatesLPS = np.empty((0, 3), dtype=float) if np is not None else []
         self.fitResults = {}
+        self._syncingGuidedSourceCombo = False
 
         form = qt.QFormLayout()
         self.layout.addLayout(form)
@@ -128,6 +139,12 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         tab = qt.QWidget()
         self.modeTabs.addTab(tab, "Guided Fit")
         form = qt.QFormLayout(tab)
+
+        self.guidedSourceCombo = qt.QComboBox()
+        for key, label in GUIDED_SOURCE_OPTIONS:
+            self.guidedSourceCombo.addItem(label, key)
+        self.guidedSourceCombo.currentIndexChanged.connect(self.onGuidedSourceChanged)
+        form.addRow("Trajectory source", self.guidedSourceCombo)
 
         self.guidedThresholdSpin = qt.QDoubleSpinBox()
         self.guidedThresholdSpin.setRange(300.0, 4000.0)
@@ -344,6 +361,70 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             label = f"[{group}] {traj['name']}"
             self.guidedTrajectorySelector.addItem(label, traj["name"])
 
+    def _selected_guided_source_key(self):
+        data = self.guidedSourceCombo.currentData
+        value = data() if callable(data) else data
+        return str(value or "working")
+
+    def _workflow_active_source(self):
+        if self.workflowNode is None:
+            return ""
+        return str(self.workflowNode.GetParameter("ActiveTrajectorySource") or "").strip().lower()
+
+    def _set_workflow_active_source(self, source_key):
+        if self.workflowNode is None:
+            return
+        self.workflowNode.SetParameter("ActiveTrajectorySource", str(source_key or "").strip().lower())
+
+    def _set_guided_source_combo(self, source_key):
+        idx = self.guidedSourceCombo.findData(str(source_key or "").strip().lower())
+        if idx < 0 or idx == self.guidedSourceCombo.currentIndex:
+            return
+        self._syncingGuidedSourceCombo = True
+        try:
+            self.guidedSourceCombo.setCurrentIndex(idx)
+        finally:
+            self._syncingGuidedSourceCombo = False
+
+    def _sync_guided_source_from_workflow(self):
+        key = self._workflow_active_source()
+        if not key:
+            return
+        self._set_guided_source_combo(key)
+
+    def _role_has_nodes(self, role):
+        return len(self.workflowState.role_nodes(role, workflow_node=self.workflowNode)) > 0
+
+    def _default_source_when_unset(self):
+        # Preferred startup source is imported ROSA if available.
+        if self._role_has_nodes("ImportedTrajectoryLines"):
+            return "imported_rosa"
+        if self._role_has_nodes("GuidedFitTrajectoryLines"):
+            return "guided_fit"
+        if self._role_has_nodes("DeNovoTrajectoryLines"):
+            return "de_novo"
+        if self._role_has_nodes("ImportedExternalTrajectoryLines"):
+            return "imported_external"
+        if self._role_has_nodes("PlannedTrajectoryLines"):
+            return "planned_rosa"
+        if self._role_has_nodes("WorkingTrajectoryLines"):
+            return "working"
+        return "working"
+
+    def _apply_guided_source_visibility(self, source_key):
+        key = str(source_key or "working").strip().lower()
+        group_map = {
+            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"],
+            "imported_rosa": ["imported_rosa"],
+            "imported_external": ["imported_external"],
+            "manual": ["manual"],
+            "guided_fit": ["guided_fit"],
+            "de_novo": ["de_novo"],
+            "planned_rosa": ["planned_rosa"],
+        }
+        groups = group_map.get(key, group_map["working"])
+        self.logic.trajectory_scene.show_only_groups(groups)
+
     def _refresh_summary(self):
         self.summaryLabel.setText(
             f"working trajectories={len(self.loadedTrajectories)}, "
@@ -353,13 +434,28 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
-        self.loadedTrajectories = self.logic.collect_working_trajectories(workflow_node=self.workflowNode)
+        if not self._workflow_active_source():
+            self._set_workflow_active_source(self._default_source_when_unset())
+        self._sync_guided_source_from_workflow()
+        source_key = self._selected_guided_source_key()
+        self.loadedTrajectories = self.logic.collect_trajectories_by_source(
+            source_key=source_key,
+            workflow_node=self.workflowNode,
+        )
         self.assignmentMap = self._assignment_map_from_workflow()
         self._populate_guided_trajectory_selector()
+        self._apply_guided_source_visibility(source_key)
         self._refresh_summary()
         self.log(
-            f"[refresh] trajectories={len(self.loadedTrajectories)} assignments={len(self.assignmentMap)}"
+            f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)} "
+            f"assignments={len(self.assignmentMap)}"
         )
+
+    def onGuidedSourceChanged(self, _idx):
+        if self._syncingGuidedSourceCombo:
+            return
+        self._set_workflow_active_source(self._selected_guided_source_key())
+        self.onRefreshClicked()
 
     def onResetViewsClicked(self):
         try:
@@ -498,7 +594,13 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 nodes=applied_nodes,
             )
             self.logic.trajectory_scene.show_only_groups(["guided_fit"])
+            self._set_workflow_active_source("guided_fit")
+            self._set_guided_source_combo("guided_fit")
             self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
+            self.log(
+                "[contacts] guided trajectories updated. Use module 'Contacts & Trajectory View' "
+                "with source 'Guided Fit' to generate contacts and QC."
+            )
             self.onRefreshClicked()
 
         self.applyFitButton.setEnabled(False)
@@ -599,10 +701,16 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             source="postop_ct_denovo",
         )
         self.logic.trajectory_scene.show_only_groups(["de_novo"])
+        self._set_workflow_active_source("de_novo")
+        self._set_guided_source_combo("de_novo")
         self.log(
             f"[denovo] candidates={int(result.get('candidate_count', 0))}, "
             f"in-mask={int(result.get('head_mask_kept_count', 0))}, "
             f"new_lines={len(lines)}, total_rows={len(rows)}"
+        )
+        self.log(
+            "[contacts] trajectories updated. Use module 'Contacts & Trajectory View' "
+            "with source 'Guided Fit' or 'De Novo' to generate contacts and QC."
         )
         self.onRefreshClicked()
 
@@ -766,22 +874,86 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
                 logic.FitSliceToAll()
 
     def collect_working_trajectories(self, workflow_node=None):
+        return self.collect_trajectories_by_source(
+            source_key="working",
+            workflow_node=workflow_node,
+        )
+
+    def _collect_trajectories_from_role(self, role, workflow_node=None):
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         trajectories = []
-        for node in self.workflow_state.role_nodes("WorkingTrajectoryLines", workflow_node=wf):
+        for node in self.workflow_state.role_nodes(role, workflow_node=wf):
             traj = self.trajectory_scene.trajectory_from_line_node("", node)
             if traj is not None:
                 trajectories.append(traj)
-        if not trajectories:
-            for row in self.trajectory_scene.collect_working_trajectory_rows(
+        trajectories.sort(key=lambda item: item.get("name", ""))
+        return trajectories
+
+    def collect_trajectories_by_source(self, source_key="working", workflow_node=None):
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        source = str(source_key or "working").strip().lower()
+
+        if source == "working":
+            trajectories = self._collect_trajectories_from_role("WorkingTrajectoryLines", workflow_node=wf)
+            if trajectories:
+                return trajectories
+            rows = self.trajectory_scene.collect_working_trajectory_rows(
                 groups=["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"]
-            ):
+            )
+            fallback = []
+            for row in rows:
                 node = slicer.mrmlScene.GetNodeByID(row["node_id"])
+                if node is None:
+                    continue
+                traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)
+                if traj is not None:
+                    fallback.append(traj)
+            fallback.sort(key=lambda item: item.get("name", ""))
+            return fallback
+
+        role_map = {
+            "imported_rosa": "ImportedTrajectoryLines",
+            "imported_external": "ImportedExternalTrajectoryLines",
+            "guided_fit": "GuidedFitTrajectoryLines",
+            "de_novo": "DeNovoTrajectoryLines",
+            "planned_rosa": "PlannedTrajectoryLines",
+        }
+        if source in role_map:
+            return self._collect_trajectories_from_role(role_map[source], workflow_node=wf)
+
+        if source == "manual":
+            rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["manual"])
+            nodes = []
+            trajectories = []
+            for row in rows:
+                node = slicer.mrmlScene.GetNodeByID(row["node_id"])
+                if node is None:
+                    continue
+                self.trajectory_scene.set_trajectory_metadata(
+                    node=node,
+                    trajectory_name=row["name"],
+                    group="manual",
+                    origin=node.GetAttribute("Rosa.TrajectoryOrigin") or "manual",
+                )
+                nodes.append(node)
                 traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)
                 if traj is not None:
                     trajectories.append(traj)
-        trajectories.sort(key=lambda t: t.get("name", ""))
-        return trajectories
+            self.workflow_publish.publish_nodes(
+                role="ManualTrajectoryLines",
+                nodes=nodes,
+                source="manual",
+                space_name="ROSA_BASE",
+                workflow_node=wf,
+            )
+            self.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+                context_id=self.workflow_state.context_id(workflow_node=wf),
+                nodes=nodes,
+            )
+            trajectories.sort(key=lambda item: item.get("name", ""))
+            return trajectories
+
+        return []
 
     def _ijk_kji_to_ras_points(self, volume_node, ijk_kji):
         ijk = np.zeros_like(ijk_kji, dtype=float)
