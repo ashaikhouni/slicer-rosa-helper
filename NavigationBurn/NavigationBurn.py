@@ -1,4 +1,7 @@
-"""Navigation burn module for THOMAS nucleus burn + DICOM export."""
+"""Navigation burn module for THOMAS nucleus burn + DICOM export.
+
+Last updated: 2026-03-01
+"""
 
 import os
 import sys
@@ -34,8 +37,8 @@ from rosa_scene import (
 class NavigationBurn(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Navigation Burn"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "03 Navigation Burn"
+        self.parent.categories = ["ROSA.03 Atlas"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = "Burn THOMAS nucleus into MRI and export DICOM for navigation."

@@ -1,4 +1,7 @@
-"""Atlas source loading module (FreeSurfer + THOMAS + registry view)."""
+"""Atlas source loading module (FreeSurfer + THOMAS + registry view).
+
+Last updated: 2026-03-01
+"""
 
 import os
 import sys
@@ -35,8 +38,8 @@ from rosa_scene import (
 class AtlasSources(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Atlas Sources"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "01 Atlas Sources"
+        self.parent.categories = ["ROSA.03 Atlas"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = "Load/register FreeSurfer and THOMAS atlas sources into RosaWorkflow."

@@ -3,6 +3,8 @@
 Modes:
 - Guided Fit: refine planned trajectories on postop CT.
 - De Novo Detect: detect trajectories directly from CT artifact.
+
+Last updated: 2026-03-01
 """
 
 import os
@@ -57,8 +59,8 @@ class PostopCTLocalization(ScriptedLoadableModule):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Postop CT Localization"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "01 Postop CT Localization"
+        self.parent.categories = ["ROSA.02 Localization"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = (

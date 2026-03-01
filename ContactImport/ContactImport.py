@@ -1,4 +1,7 @@
-"""Import external contacts/trajectories into shared RosaWorkflow roles."""
+"""Import external contacts/trajectories into shared RosaWorkflow roles.
+
+Last updated: 2026-03-01
+"""
 
 import csv
 import os
@@ -31,8 +34,8 @@ from rosa_workflow import WorkflowPublisher, WorkflowState
 class ContactImport(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Contact Import"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "02 Contact Import"
+        self.parent.categories = ["ROSA.01 Setup"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = "Import contacts or trajectories from external files (CSV/TSV/XLSX/POM)."

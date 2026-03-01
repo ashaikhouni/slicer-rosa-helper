@@ -1,4 +1,7 @@
-"""Atlas labeling module consuming shared workflow contacts and atlas sources."""
+"""Atlas labeling module consuming shared workflow contacts and atlas sources.
+
+Last updated: 2026-03-01
+"""
 
 import os
 import sys
@@ -27,8 +30,8 @@ from rosa_scene import AtlasAssignmentService, AtlasUtils
 class AtlasLabeling(ScriptedLoadableModule):
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Atlas Labeling"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "02 Atlas Labeling"
+        self.parent.categories = ["ROSA.03 Atlas"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = "Assign generated contacts to FreeSurfer/THOMAS/WM atlases."

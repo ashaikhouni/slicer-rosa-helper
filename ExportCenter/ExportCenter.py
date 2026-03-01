@@ -1,4 +1,7 @@
-"""3D Slicer module for workflow-based export bundle generation."""
+"""3D Slicer module for workflow-based export bundle generation.
+
+Last updated: 2026-03-01
+"""
 
 import os
 import sys
@@ -29,8 +32,8 @@ class ExportCenter(ScriptedLoadableModule):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Export Center"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "01 Export Center"
+        self.parent.categories = ["ROSA.04 Export"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = (

@@ -1,4 +1,7 @@
-"""3D Slicer module for contact generation and trajectory-oriented viewing."""
+"""3D Slicer module for contact generation and trajectory-oriented viewing.
+
+Last updated: 2026-03-01
+"""
 
 import os
 import sys
@@ -48,8 +51,8 @@ class ContactsTrajectoryView(ScriptedLoadableModule):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.parent.title = "Contacts & Trajectory View"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "02 Contacts & Trajectory View"
+        self.parent.categories = ["ROSA.02 Localization"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = (
@@ -185,9 +188,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         form = qt.QFormLayout(section)
 
         self.contactTable = qt.QTableWidget()
-        self.contactTable.setColumnCount(6)
+        self.contactTable.setColumnCount(7)
         self.contactTable.setHorizontalHeaderLabels(
             [
+                "Use",
                 "Trajectory",
                 "Traj Length (mm)",
                 "Electrode Model",
@@ -198,10 +202,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         self.contactTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.Stretch)
-        self.contactTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.ResizeToContents)
+        self.contactTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
+        self.contactTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.Stretch)
         self.contactTable.horizontalHeader().setSectionResizeMode(4, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(5, qt.QHeaderView.ResizeToContents)
+        self.contactTable.horizontalHeader().setSectionResizeMode(6, qt.QHeaderView.ResizeToContents)
         self.contactTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
         form.addRow(self.contactTable)
 
@@ -328,6 +333,15 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         spin.setSuffix(" mm")
         return spin
 
+    def _build_use_checkbox(self):
+        check = qt.QCheckBox()
+        check.setChecked(True)
+        return check
+
+    def _row_is_selected(self, row):
+        check = self.contactTable.cellWidget(row, 0)
+        return bool(check and check.checked)
+
     def _electrode_length_mm(self, model_id):
         model = self.modelsById.get(model_id, {})
         return electrode_length_mm(model)
@@ -343,12 +357,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
 
     def _update_electrode_length_cell(self, row):
-        model_combo = self.contactTable.cellWidget(row, 2)
+        model_combo = self.contactTable.cellWidget(row, 3)
         model_id = widget_current_text(model_combo).strip()
         length_text = ""
         if model_id:
             length_text = f"{self._electrode_length_mm(model_id):.2f}"
-        self._set_readonly_text_item(row, 3, length_text)
+        self._set_readonly_text_item(row, 4, length_text)
 
     def _load_electrode_library(self):
         try:
@@ -371,8 +385,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         auto_assigned = 0
         for row, traj in enumerate(trajectories):
             self.contactTable.insertRow(row)
-            self._set_readonly_text_item(row, 0, traj["name"])
-            self._set_readonly_text_item(row, 1, f"{trajectory_length_mm(traj):.2f}")
+            self.contactTable.setCellWidget(row, 0, self._build_use_checkbox())
+            self._set_readonly_text_item(row, 1, traj["name"])
+            self._set_readonly_text_item(row, 2, f"{trajectory_length_mm(traj):.2f}")
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
@@ -387,11 +402,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 if idx >= 0:
                     model_combo.setCurrentIndex(idx)
                     auto_assigned += 1
-            self.contactTable.setCellWidget(row, 2, model_combo)
-            self._set_readonly_text_item(row, 3, "")
+            self.contactTable.setCellWidget(row, 3, model_combo)
+            self._set_readonly_text_item(row, 4, "")
             self._update_electrode_length_cell(row)
-            self.contactTable.setCellWidget(row, 4, self._build_tip_at_combo())
-            self.contactTable.setCellWidget(row, 5, self._build_tip_shift_spinbox())
+            self.contactTable.setCellWidget(row, 5, self._build_tip_at_combo())
+            self.contactTable.setCellWidget(row, 6, self._build_tip_shift_spinbox())
 
         enabled = bool(trajectories) and bool(self.modelsById)
         self.generateContactsButton.setEnabled(enabled)
@@ -414,12 +429,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _collect_assignments(self):
         rows = []
         for row in range(self.contactTable.rowCount):
-            traj_item = self.contactTable.item(row, 0)
+            if not self._row_is_selected(row):
+                continue
+            traj_item = self.contactTable.item(row, 1)
             if not traj_item:
                 continue
-            model_combo = self.contactTable.cellWidget(row, 2)
-            tip_at_combo = self.contactTable.cellWidget(row, 4)
-            tip_shift_spin = self.contactTable.cellWidget(row, 5)
+            model_combo = self.contactTable.cellWidget(row, 3)
+            tip_at_combo = self.contactTable.cellWidget(row, 5)
+            tip_shift_spin = self.contactTable.cellWidget(row, 6)
             model_id = widget_current_text(model_combo).strip()
             if not model_id:
                 continue
@@ -557,31 +574,35 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         if not model_id:
             return
         for row in range(self.contactTable.rowCount):
-            combo = self.contactTable.cellWidget(row, 2)
+            combo = self.contactTable.cellWidget(row, 3)
             if combo:
                 idx = combo.findText(model_id)
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
 
     def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
+        selected_rows = [row for row in range(self.contactTable.rowCount) if self._row_is_selected(row)]
+        if not selected_rows:
+            raise ValueError("Select at least one trajectory in the Use column.")
+
         assignments = self._collect_assignments()
         if not assignments["assignments"]:
             if allow_last_assignments and self.lastAssignments.get("assignments"):
                 assignments = self.lastAssignments
                 self.log(f"[contacts:{log_context}] using last non-empty assignments")
             else:
-                raise ValueError("Select at least one electrode model in the assignment table.")
+                raise ValueError("Select electrode models for the selected trajectories.")
         else:
             self.lastAssignments = assignments
 
         traj_map = self._build_trajectory_map_with_scene_overrides()
         ordered_names = []
-        for row in range(self.contactTable.rowCount):
-            item = self.contactTable.item(row, 0)
+        for row in selected_rows:
+            item = self.contactTable.item(row, 1)
             if item:
                 ordered_names.append(item.text())
-        self.loadedTrajectories = [traj_map[name] for name in ordered_names if name in traj_map]
-        contacts = generate_contacts(self.loadedTrajectories, self.modelsById, assignments)
+        selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
+        contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
         contact_nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(

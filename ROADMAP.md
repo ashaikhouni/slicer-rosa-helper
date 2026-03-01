@@ -1,75 +1,73 @@
-# ROSA Toolkit Roadmap
+# Roadmap
 
-## Summary
-This file is the canonical roadmap for the ROSA Toolkit refactor.  
-Execution status is tracked separately in `PROGRESS.md`.
+Last updated: 2026-03-01
+
+This is the canonical scope/phase plan.
+Execution status belongs in `PROGRESS.md`.
 
 ## Scope and Architecture Contract
-- Packaging: one Slicer extension containing multiple focused modules.
-- Shared contract: one `RosaWorkflow` MRML parameter node and fixed role names.
-- Shared libraries: move reusable code into extension-level `CommonLib`.
-- Interop model: modules exchange state via MRML roles/registry tables, not Python widget memory.
-- Export model: coordinates are emitted in a user-selected output frame, while atlas semantics come from atlas-native sampling.
-- Atlas responsibility split (locked):
-  - `AtlasSources`: FreeSurfer + THOMAS loading/registration/publish only
-  - `AtlasLabeling`: contact-to-atlas assignment only
-  - `NavigationBurn`: THOMAS burn + DICOM export only
-- UI policy (locked): use tabs for multi-workflow modules (for example `AtlasSources` FreeSurfer/THOMAS/Registry tabs).
-- Atlas extensibility contract (locked): new atlas integrations must follow `ATLAS_SOURCE_CONTRACT.md`.
-- Trajectory ownership model:
-  - trajectories are grouped by producer (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
-  - each module updates/replaces only its own trajectory group
-  - contact generation can target a selected trajectory group source
 
-## Phase Map (Locked Boundaries)
-1. **Phase 1**: Shared MRML workflow contract integration in existing modules.
-2. **Phase 2**: `CommonLib` extraction and import rewiring.
-3. **Phase 3**: `ExportCenter` module extraction.
-4. **Phase 4**: `Contacts & Trajectory View` module extraction.
-5. **Phase 5**: `Postop CT Localization` module extraction (Guided Fit + De Novo Detect).
-6. **Phase 6**: `AtlasSources`, `Atlas Labeling`, and `Navigation Burn` module extraction.
-7. **Phase 7**: `Contact Import` module extraction.
-8. **Phase 8**: Compatibility bridge removal and cleanup release.
+- One Slicer extension, multiple focused modules.
+- One shared workflow contract (`RosaWorkflow` MRML node + fixed roles).
+- Reusable logic lives in extension-level `CommonLib`.
+- Modules interoperate through workflow roles/tables, not widget-local memory.
+- Export supports user-selected output frame for coordinates.
+- Atlas semantics are sampled in atlas-native space.
 
-## Acceptance Criteria Per Phase
-- **Phase 1**
-  - Workflow roles/registries are published from `RosaHelper` and CT localization workflows.
-  - Export frame/profile behavior works and writes manifest.
-  - Existing ROSA + CT-only workflows continue to run.
-- **Phase 2**
-  - Shared workflow/core code is hosted in extension-level `CommonLib`.
-  - Loader/localization modules import only from shared libs (no cross-module `Lib` dependency).
-  - One-release compatibility bridge exists for old import paths.
-- **Phase 3**
-  - Export workflow moved into dedicated `ExportCenter` module with no behavior regressions.
-- **Phase 4**
-  - Contact generation + trajectory-view workflow moved into dedicated module.
-- **Phase 5**
-  - Guided postop CT fit workflow moved into dedicated module.
-  - De novo CT shank detection workflow is surfaced under the same module UX.
-  - Shared outputs publish to `WorkingTrajectoryLines` and interoperate with contacts/QC/export.
-- **Phase 6**
-  - Atlas source loading is extracted into dedicated `AtlasSources` module.
-  - Atlas labeling is extracted into dedicated `AtlasLabeling` module.
-  - Burn workflow is extracted into dedicated `NavigationBurn` module.
-  - All three interoperate through shared MRML roles/tables without cross-widget state.
-- **Phase 7**
-  - Contact import from CSV/TSV/XLSX/POM implemented and published to shared roles.
-- **Phase 8**
-  - Compatibility bridge removed.
-  - Legacy import paths and monolithic couplings retired.
+Atlas split is locked:
+- `AtlasSources`: loading/registration/publish
+- `AtlasLabeling`: contact-to-atlas assignment
+- `NavigationBurn`: THOMAS burn + DICOM export
+
+Trajectory ownership is locked:
+- grouped by producer (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
+- each module updates only its own group
+- contact generation can target selected source group
+
+## Phase Map
+
+1. Phase 1: shared MRML workflow contract integration.
+2. Phase 2: `CommonLib` extraction and import rewiring.
+3. Phase 3: `ExportCenter` extraction.
+4. Phase 4: `Contacts & Trajectory View` extraction.
+5. Phase 5: `Postop CT Localization` extraction.
+6. Phase 6: atlas module extraction (`AtlasSources`, `AtlasLabeling`, `NavigationBurn`).
+7. Phase 7: `ContactImport` extraction.
+8. Phase 8: compatibility bridge removal and cleanup release.
+
+## Acceptance Criteria by Phase
+
+Phase 1:
+- workflow roles/registries published and consumed across load/localization/export paths.
+
+Phase 2:
+- shared logic moved to `CommonLib`; modules no longer rely on module-local bridge paths.
+
+Phase 3:
+- exports run from dedicated `ExportCenter` with no behavior regressions.
+
+Phase 4:
+- contact generation/QC/trajectory viewing runs from dedicated module.
+
+Phase 5:
+- guided and de novo CT localization run from one dedicated module and publish shared outputs.
+
+Phase 6:
+- atlas loading, labeling, and burn workflows split into dedicated modules with role-based interop.
+
+Phase 7:
+- contact/trajectory file import runs from dedicated module with schema validation.
+
+Phase 8:
+- compatibility bridge removed, stale monolith leftovers cleaned, release sanity checks pass.
 
 ## Risks and Compatibility Policy
-- Main risk: regressions from import-path/layout changes during module extraction.
-- Mitigation: phase-gated smoke checks with clear rollback commits.
-- Compatibility policy:
-  - Keep old import paths via bridge for one release cycle after `CommonLib` extraction.
-  - Remove bridge only in Phase 8 after all module extractions are stable.
+
+- Main risk: regressions from refactor and import-path changes.
+- Mitigation: phase-gated smoke checks + repeatable sanity script.
+- Compatibility policy: keep bridge only for one release cycle after extraction, then remove in Phase 8.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 8** (compatibility bridge removal and cleanup release).
-- Phase boundaries are locked unless this file is explicitly updated.
 
-## Update Policy
-- Update `ROADMAP.md` only when scope, phase boundaries, or acceptance criteria change.
-- Track day-to-day execution details in `PROGRESS.md`.
+- Current target: **Phase 8**.
+- Update this file only if scope, boundaries, or acceptance criteria change.

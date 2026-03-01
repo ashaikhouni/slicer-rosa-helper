@@ -1,50 +1,62 @@
 # Refactor Regression Checklist
 
-Use this checklist after each refactor step to confirm behavior remains unchanged.
+Last updated: 2026-03-01
 
-## 1) ROSA Load
-- Load case folder with `.ros` + `DICOM/`
-- Confirm reference volume is centered and other volumes are transformed/hardened
-- Confirm trajectories and `Plan_*` lines are created
+Use this checklist after structural changes.
+
+## 1) Loader
+
+- Load ROSA case from `01 Loader`.
+- Verify base volume and additional ROSA volumes appear and align.
+- Verify trajectories are published (`Imported ROSA`, planned lines).
 
 ## 2) Contact Workflow
-- Open `V1 Contact Labels`
-- Generate contacts and electrode models
-- Edit one trajectory and run `Update From Edited Trajectories`
-- Confirm contacts/models update in place
 
-## 3) Auto-fit Workflow
-- Select postop CT and run `Detect Candidates`
-- Run `Fit Selected` and `Apply Fit to Trajectories`
-- Confirm preview `AutoFit_*` line is removed after apply
-- Confirm contacts regenerate automatically
+- Open `02 Contacts & Trajectory View`.
+- Generate contacts and models.
+- Edit one trajectory line and run `Update From Edited Trajectories`.
+- Verify contacts/models update in place.
+
+## 3) Postop CT Localization
+
+- Guided fit path:
+  - detect candidates
+  - fit selected/all
+  - verify guided-fit trajectories publish and become selectable in Contacts module
+- De novo path:
+  - run detect
+  - verify generated trajectories appear and can generate contacts
 
 ## 4) QC Metrics
-- Confirm `Trajectory QC Metrics` table populates after contact generation
-- Confirm table disables if no contacts are generated
 
-## 5) Export
-- Run `Export Aligned NIfTI + Coordinates/QC`
-- Confirm output includes:
-  - aligned NIfTI volumes
-  - `*_aligned_world_coords.txt`
-  - `*_planned_trajectory_points.csv`
-  - `*_qc_metrics.csv`
+- Verify QC table populates after contact generation.
+- Verify QC disables when planned/final prerequisites are absent.
 
-## 5b) Export Center
-- Open `Export Center`
-- Click `Refresh Workflow Inputs`
-- Run export with `full_bundle` profile and confirm manifest + expected files are written
-- Run export with `contacts_only` profile and confirm only contact file + manifest are populated
-- Confirm selected export frame is reflected in manifest and coordinate columns
+## 5) Atlas Sources + Labeling
 
-## 6) FreeSurfer Integration
-- Add recon-all MRI to scene via Slicer `Add Data`
-- Register FS MRI -> ROSA
-- Load `pial` surfaces from subject `surf/`
-- Confirm surfaces transform to ROSA frame
-- Annotation test A (nibabel): enable annotation and verify applied count > 0
-- Annotation test B (fallback): set `RosaHelper.nib = None` and verify fallback applies annotations when extension is available
+- Load/register FreeSurfer and THOMAS sources.
+- Verify image/transform registry rows are populated.
+- Run atlas labeling and verify assignment table rows are created.
 
-## 7) Final Smoke
-- Restart Slicer and run one complete load->contacts->export cycle
+## 6) Navigation Burn
+
+- Burn a THOMAS nucleus into selected MRI.
+- Verify output volume alignment.
+- Optional: export burned output as DICOM and re-import for sanity.
+
+## 7) Export Center
+
+- Run `full_bundle`; verify manifest and expected outputs.
+- Run `contacts_only`; verify only contact-centric outputs are written.
+- Verify selected export frame is reflected in coordinate columns.
+
+## 8) Sanity Script
+
+```bash
+cd <repo>
+python3 tools/phase8_sanity.py
+```
+
+Expected:
+- compile failures: 0
+- legacy bridge references only allowed in docs/tooling guards

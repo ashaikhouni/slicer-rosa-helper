@@ -5,6 +5,8 @@ This module is the case/volume loader front-end:
 - import custom MRI/CT volumes
 - set default Base/Postop roles
 - run optional rigid registration for custom imports
+
+Last updated: 2026-03-01
 """
 
 import os
@@ -42,8 +44,8 @@ class RosaHelper(ScriptedLoadableModule):
     def __init__(self, parent):
         """Initialize static module metadata shown in Slicer UI."""
         super().__init__(parent)
-        self.parent.title = "Loader"
-        self.parent.categories = ["ROSA"]
+        self.parent.title = "01 Loader"
+        self.parent.categories = ["ROSA.01 Setup"]
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = (
