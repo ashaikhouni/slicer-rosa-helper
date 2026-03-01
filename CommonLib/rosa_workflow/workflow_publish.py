@@ -30,6 +30,36 @@ class WorkflowPublisher:
     def __init__(self, workflow_state=None):
         self.state = workflow_state or WorkflowState()
 
+    def _ensure_subject_hierarchy_folder(self, parent_item_id, folder_name):
+        """Create/reuse one subject-hierarchy folder under parent."""
+        sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        if sh_node is None:
+            return 0
+        if hasattr(sh_node, "GetItemChildWithName"):
+            existing = sh_node.GetItemChildWithName(parent_item_id, folder_name)
+            if existing:
+                return existing
+        return sh_node.CreateFolderItem(parent_item_id, folder_name)
+
+    def _place_transform_in_hierarchy(self, transform_node):
+        """Place transform node under `RosaWorkflow/Transforms` folder in subject hierarchy."""
+        if transform_node is None:
+            return
+        sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        if sh_node is None:
+            return
+        scene_item = sh_node.GetSceneItemID()
+        root = self._ensure_subject_hierarchy_folder(scene_item, "RosaWorkflow")
+        transforms_root = self._ensure_subject_hierarchy_folder(root, "Transforms")
+        item = sh_node.GetItemByDataNode(transform_node)
+        if not item:
+            try:
+                item = sh_node.CreateItem(transforms_root, transform_node)
+            except Exception:
+                item = sh_node.GetItemByDataNode(transform_node)
+        if item:
+            sh_node.SetItemParent(item, transforms_root)
+
     def register_volume(
         self,
         volume_node,
@@ -135,6 +165,7 @@ class WorkflowPublisher:
         )
         if role:
             self.state.set_single_role(role, transform_node, workflow_node=wf)
+        self._place_transform_in_hierarchy(transform_node)
 
     def publish_nodes(self, role, nodes, source="", space_name="", workflow_node=None):
         """Publish multiple existing nodes under one role with provenance tags."""

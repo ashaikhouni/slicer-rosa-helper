@@ -97,12 +97,12 @@ class ElectrodeSceneService:
         contact_nodes_by_traj,
         model_nodes_by_traj,
     ):
-        """Place electrode nodes under `RosaWorkflow_<ContextId>/Electrodes/<Trajectory>/`."""
+        """Place electrode nodes under `RosaWorkflow/Electrodes/<Trajectory>/`."""
         sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
         if sh_node is None:
             return
         scene_item = sh_node.GetSceneItemID()
-        root = self._ensure_subject_hierarchy_folder(scene_item, f"RosaWorkflow_{context_id}")
+        root = self._ensure_subject_hierarchy_folder(scene_item, "RosaWorkflow")
         electrodes_root = self._ensure_subject_hierarchy_folder(root, "Electrodes")
         names = set((contact_nodes_by_traj or {}).keys()) | set((model_nodes_by_traj or {}).keys())
         for traj_name in sorted(names):

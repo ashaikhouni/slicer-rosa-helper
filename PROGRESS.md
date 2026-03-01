@@ -145,6 +145,7 @@
 - **D-014**: Phase 6 extraction implemented as standalone modules; phase close gated on smoke validation.
 - **D-015**: Removed Navigation Burn auto-register fallback to reduce user confusion; burn assumes workflow-aligned THOMAS segmentations.
 - **D-016**: Contact import contract locks `trajectory_name,index,x,y,z` as required contacts schema to avoid grouping ambiguity.
+- **D-017**: `RosaHelper` now acts as `Loader` with tabs (`ROSA Load`, `Custom Import`), and workflow transform nodes are organized under `RosaWorkflow/Transforms` while preserving native-to-base provenance.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:

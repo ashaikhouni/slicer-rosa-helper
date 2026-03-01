@@ -291,12 +291,12 @@ class TrajectorySceneService:
         return sh_node.CreateFolderItem(parent_item_id, folder_name)
 
     def place_trajectory_nodes_in_hierarchy(self, context_id, nodes):
-        """Place grouped trajectory nodes under `RosaWorkflow_<id>/Trajectories/<Group>/`."""
+        """Place grouped trajectory nodes under `RosaWorkflow/Trajectories/<Group>/`."""
         sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
         if sh_node is None:
             return
         scene_item = sh_node.GetSceneItemID()
-        root = self._ensure_subject_hierarchy_folder(scene_item, f"RosaWorkflow_{context_id}")
+        root = self._ensure_subject_hierarchy_folder(scene_item, "RosaWorkflow")
         traj_root = self._ensure_subject_hierarchy_folder(root, "Trajectories")
         group_folders = {}
         for node in nodes or []:
