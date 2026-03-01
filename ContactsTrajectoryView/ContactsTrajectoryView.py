@@ -35,6 +35,7 @@ from rosa_workflow import WorkflowPublisher, WorkflowState
 TRAJECTORY_SOURCE_OPTIONS = [
     ("working", "Working (active)"),
     ("imported_rosa", "Imported ROSA"),
+    ("imported_external", "Imported External"),
     ("manual", "Manual (scene)"),
     ("guided_fit", "Guided Fit"),
     ("de_novo", "De Novo"),
@@ -667,7 +668,7 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             if trajectories:
                 return trajectories
             rows = self.trajectory_scene.collect_working_trajectory_rows(
-                groups=["imported_rosa", "manual", "guided_fit", "de_novo"]
+                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"]
             )
             fallback = []
             for row in rows:
@@ -686,6 +687,8 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
         if source == "de_novo":
             return self._collect_trajectories_from_role("DeNovoTrajectoryLines", workflow_node=wf)
+        if source == "imported_external":
+            return self._collect_trajectories_from_role("ImportedExternalTrajectoryLines", workflow_node=wf)
         if source == "planned_rosa":
             return self._collect_trajectories_from_role("PlannedTrajectoryLines", workflow_node=wf)
         if source == "manual":

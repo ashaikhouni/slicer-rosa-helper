@@ -39,6 +39,7 @@ This extension also includes atlas/burn modules:
 - `Atlas Sources` for FreeSurfer + THOMAS registration/loading and role publishing
 - `Atlas Labeling` for contact-to-atlas assignment (FreeSurfer/THOMAS/WM)
 - `Navigation Burn` for THOMAS nucleus burn and DICOM export
+- `Contact Import` for external contact/trajectory file ingestion (CSV/TSV/XLSX/POM)
 
 Existing workflows remain valid. New atlas and burn features are additive.
 
@@ -153,6 +154,39 @@ Use this when you only have a CT with electrode artifact and no ROSA `.ros` meta
 9. Assign electrode model per row (or use `Apply model to all`).
 10. Click `Generate Contacts`.
 11. Optional: click `Reset Ax/Cor/Sag` to restore standard slice orientations.
+
+## Quick Start (Contact Import)
+
+Use this module when contacts or trajectories were localized outside this toolkit.
+
+1. Open module `Contact Import`.
+2. Select a reference volume (required):
+   - choose one from scene, or
+   - load a new volume using `Load new reference`.
+3. Set import metadata:
+   - `Coordinate system`: `RAS` or `LPS`
+   - `Coordinate type`: `world` or `voxel`
+   - `Units`: `mm` or `m`
+4. Contacts tab:
+   - load file and click `Import Contacts`
+   - required columns for CSV/TSV/XLSX: `trajectory_name,index,x,y,z`
+   - optional column: `label`
+   - `.pom` files are supported via `REMARK_LIST` + `LOCATION_LIST`
+   - each `trajectory_name` must include at least 2 contacts (single-contact groups are rejected)
+5. Trajectories tab:
+   - load file and click `Import Trajectories`
+   - required columns: `name,ex,ey,ez,tx,ty,tz`
+
+Imported trajectories are published to `ImportedExternalTrajectoryLines` and `WorkingTrajectoryLines`.
+Imported contacts are published to `ContactFiducials`.
+
+Example files are provided under:
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/contacts_example.csv`
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/contacts_example.tsv`
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/contacts_example.xlsx`
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/trajectories_example.csv`
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/trajectories_example.tsv`
+- `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib/resources/examples/contact_import/trajectories_example.xlsx`
 
 ## Quick Start (Export Center)
 
@@ -427,7 +461,7 @@ Important:
 4. Restart Slicer.
 5. Open modules in category `ROSA`:
    - `ROSA Helper`, `Contacts & Trajectory View`, `Postop CT Localization`
-   - `Atlas Sources`, `Atlas Labeling`, `Navigation Burn`
+   - `Atlas Sources`, `Atlas Labeling`, `Navigation Burn`, `Contact Import`
    - `Export Center`, `Shank Detect`
 
 ## Repository Layout
@@ -438,6 +472,7 @@ Important:
 - `AtlasSources/`: atlas load/registration module
 - `AtlasLabeling/`: atlas assignment module
 - `NavigationBurn/`: THOMAS burn + DICOM export module
+- `ContactImport/`: external contacts/trajectories import module
 - `ExportCenter/`: profile-based export module
 - `ShankDetect/`: CT-only standalone trajectory detection module
 - `CommonLib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)

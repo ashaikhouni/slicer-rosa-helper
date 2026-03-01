@@ -22,6 +22,7 @@ add_subdirectory(PostopCTLocalization)
 add_subdirectory(AtlasSources)
 add_subdirectory(AtlasLabeling)
 add_subdirectory(NavigationBurn)
+add_subdirectory(ContactImport)
 
 # Install extension-level shared Python libraries used by multiple modules.
 install(

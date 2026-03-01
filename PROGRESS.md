@@ -1,12 +1,12 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-02-27 23:58:00Z
-- **Current phase**: Phase 7 — `Contact Import` module extraction
+- **Timestamp (UTC)**: 2026-03-01 00:35:00Z
+- **Current phase**: Phase 7 — `Contact Import` module extraction (implementation in progress)
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Phase 6 closed locally and committed; pending push.
+  - Phase 7 contact/trajectory import implementation smoke-tested locally with CSV/TSV/XLSX/POM examples.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -106,6 +106,20 @@
   - Imported contacts are available for atlas labeling/export without manual re-entry.
   - Optional trajectory reconstruction is role-grouped and consumable by downstream modules.
 
+### Phase 7 Implementation Sequence
+1. [done] Add `ContactImport` module scaffold and extension registration.
+2. [done] Implement tabs for `Contacts` and `Trajectories`.
+3. [done] Enforce required reference volume (scene select or file load).
+4. [done] Implement strict schemas:
+   - contacts: `trajectory_name,index,x,y,z` (`label` optional)
+   - trajectories: `name,ex,ey,ez,tx,ty,tz`
+5. [done] Implement parsers: CSV/TSV/XLSX and POM (contacts).
+6. [done] Publish imported outputs to workflow roles.
+7. [done] Smoke-test in Slicer with example files:
+   - contacts: CSV/TSV/XLSX + POM
+   - trajectories: CSV/TSV/XLSX
+   - imported contacts auto-create grouped `ImportedExternal` trajectories for downstream modules.
+
 ## Open Issues / Decisions
 ### Blocking Items
 - None currently.
@@ -130,6 +144,7 @@
 - **D-013**: Lock atlas source adapter/output contract in `ATLAS_SOURCE_CONTRACT.md` for future source additions.
 - **D-014**: Phase 6 extraction implemented as standalone modules; phase close gated on smoke validation.
 - **D-015**: Removed Navigation Burn auto-register fallback to reduce user confusion; burn assumes workflow-aligned THOMAS segmentations.
+- **D-016**: Contact import contract locks `trajectory_name,index,x,y,z` as required contacts schema to avoid grouping ambiguity.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:

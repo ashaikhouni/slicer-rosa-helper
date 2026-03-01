@@ -774,7 +774,7 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
                 trajectories.append(traj)
         if not trajectories:
             for row in self.trajectory_scene.collect_working_trajectory_rows(
-                groups=["imported_rosa", "manual", "guided_fit", "de_novo"]
+                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"]
             ):
                 node = slicer.mrmlScene.GetNodeByID(row["node_id"])
                 traj = self.trajectory_scene.trajectory_from_line_node(row["name"], node)

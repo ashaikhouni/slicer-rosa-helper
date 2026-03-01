@@ -56,6 +56,16 @@ TRAJECTORY_GROUP_CONFIG = {
         "locked": False,
         "point_labels": True,
     },
+    "imported_external": {
+        "role": "ImportedExternalTrajectoryLines",
+        "folder": "ImportedExternal",
+        "prefix": "Ext_",
+        "display_color": (1.0, 0.65, 0.1),
+        "selected_color": (1.0, 0.8, 0.35),
+        "line_thickness": 0.55,
+        "locked": False,
+        "point_labels": True,
+    },
     "autofit_preview": {
         "role": "",
         "folder": "Preview",
@@ -102,6 +112,8 @@ class TrajectorySceneService:
             return "guided_fit"
         if name.startswith("DeNovo_"):
             return "de_novo"
+        if name.startswith("Ext_"):
+            return "imported_external"
         if name.startswith("AutoFit_"):
             return "autofit_preview"
         return DEFAULT_GROUP
