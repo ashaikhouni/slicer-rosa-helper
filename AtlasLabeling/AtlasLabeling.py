@@ -21,7 +21,7 @@ for path in PATH_CANDIDATES:
 
 from rosa_core import lps_to_ras_point
 from rosa_workflow import WorkflowState
-from rosa_scene.loader_core_bridge import get_loader_core
+from rosa_scene import AtlasCoreService
 
 
 class AtlasLabeling(ScriptedLoadableModule):
@@ -206,5 +206,5 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
 class AtlasLabelingLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = get_loader_core(MODULE_DIR)
+        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()

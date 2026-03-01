@@ -24,8 +24,6 @@ MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 PATH_CANDIDATES = [
     os.path.join(os.path.dirname(MODULE_DIR), "CommonLib"),
     os.path.join(MODULE_DIR, "CommonLib"),
-    os.path.join(os.path.dirname(MODULE_DIR), "ShankDetect", "Lib"),
-    os.path.join(MODULE_DIR, "ShankDetect", "Lib"),
 ]
 for path in PATH_CANDIDATES:
     if os.path.isdir(path) and path not in sys.path:

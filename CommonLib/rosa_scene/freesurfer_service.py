@@ -21,9 +21,9 @@ from __main__ import slicer, vtk
 class FreeSurferService:
     """Service layer for FreeSurfer integration inside Slicer."""
 
-    def __init__(self, module_dir):
+    def __init__(self, module_dir=None):
         """Store module root directory for bundled resources lookup."""
-        self.module_dir = module_dir
+        self.module_dir = module_dir or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     def _find_node_by_name(self, node_name, class_name):
         """Return first node with exact name and class, or None."""
@@ -458,10 +458,18 @@ class FreeSurferService:
         return None
 
     def _bundled_freesurfer_lut_path(self):
-        """Return path to bundled FreeSurfer LUT shipped with the module."""
-        path = os.path.join(self.module_dir, "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt")
-        if os.path.isfile(path):
-            return path
+        """Return path to bundled FreeSurfer LUT shipped with the extension."""
+        candidates = [
+            os.path.join(self.module_dir, "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            os.path.join(self.module_dir, "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            # Backward-compatible fallback during transition.
+            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "RosaHelper", "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
         return None
 
     def _load_color_table_node(self, path, logger=None):

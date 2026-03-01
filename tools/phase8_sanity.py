@@ -18,6 +18,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE_DIR = ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "workflow"
+STALE_MONOLITH_FILES = [
+    ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "widget_mixin.py",
+    ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "electrode_scene.py",
+    ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "trajectory_scene.py",
+    ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "freesurfer_service.py",
+    ROOT / "RosaHelper" / "Lib" / "rosa_slicer" / "__init__.py",
+    ROOT / "CommonLib" / "rosa_scene" / "loader_core_bridge.py",
+]
 SKIP_DIR_NAMES = {".git", "__pycache__"}
 SKIP_SUFFIXES = {".pyc"}
 
@@ -38,9 +46,13 @@ def check_bridge_removed():
     return files
 
 
+def check_stale_monolith_files_removed():
+    return [path for path in STALE_MONOLITH_FILES if path.exists()]
+
+
 def check_legacy_import_references():
     offenders = []
-    pattern = re.compile(r"rosa_slicer\.workflow")
+    pattern = re.compile(r"rosa_slicer\.workflow|loader_core_bridge")
     for path in ROOT.rglob("*"):
         if not path.is_file():
             continue
@@ -68,12 +80,16 @@ def check_py_compile():
 
 def main() -> int:
     bridge_files = check_bridge_removed()
+    stale_files = check_stale_monolith_files_removed()
     legacy_refs = check_legacy_import_references()
     compiled_count, compile_failures = check_py_compile()
 
     print(f"[phase8] python files compiled: {compiled_count}")
     print(f"[phase8] bridge files remaining: {len(bridge_files)}")
     for path in bridge_files:
+        print(f"  - {path}")
+    print(f"[phase8] stale monolith files remaining: {len(stale_files)}")
+    for path in stale_files:
         print(f"  - {path}")
     print(f"[phase8] legacy bridge references: {len(legacy_refs)}")
     for path in legacy_refs:
@@ -89,7 +105,7 @@ def main() -> int:
     }
     unexpected_legacy_refs = [p for p in legacy_refs if p not in allowed_legacy_ref_files]
 
-    if bridge_files or compile_failures or unexpected_legacy_refs:
+    if bridge_files or stale_files or compile_failures or unexpected_legacy_refs:
         return 1
     return 0
 

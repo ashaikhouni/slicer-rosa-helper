@@ -20,7 +20,7 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_workflow import WorkflowPublisher, WorkflowState
-from rosa_scene.loader_core_bridge import get_loader_core
+from rosa_scene import AtlasCoreService
 
 
 class NavigationBurn(ScriptedLoadableModule):
@@ -400,6 +400,6 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
 class NavigationBurnLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = get_loader_core(MODULE_DIR)
+        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher()

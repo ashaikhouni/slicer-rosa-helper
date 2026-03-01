@@ -1,12 +1,14 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-03-01 03:35:00Z
-- **Current phase**: Phase 8 — compatibility bridge removal and cleanup (closed, local)
+- **Timestamp (UTC)**: 2026-03-01 03:50:00Z
+- **Current phase**: Phase 8 — compatibility bridge removal and cleanup (in progress)
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Clean working tree.
+  - Removed legacy `RosaHelper` widget-mixin dependency and stale wrapper modules.
+  - Extended `tools/phase8_sanity.py` to assert stale monolith files are removed.
+  - Final cross-module interactive smoke validation still pending.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -102,30 +104,16 @@
   - Loader refactor delivered tabbed `ROSA Load` + `Custom Import` flow with base/postop role assignment.
   - Transform provenance now retained and organized under `RosaWorkflow/Transforms`.
 
-### Phase 8 — Compatibility Bridge Removal and Cleanup Release
-- **Status**: Closed (local validation complete)
-- **Date closed**: 2026-03-01
-- **Commit range**: `b3da923..a5cf12e`
-- **Acceptance checks passed**:
-  - Removed legacy compatibility bridge files under `RosaHelper/Lib/rosa_slicer/workflow/*`.
-  - All modules import workflow/core services from extension-level `CommonLib`.
-  - Added and ran cleanup guardrail script `tools/phase8_sanity.py`:
-    - bridge files remaining: `0`
-    - compile failures: `0`
-    - only allowed legacy reference in checker itself.
-  - User smoke-tested multi-module workflows in Slicer and confirmed functional behavior.
-  - Final source-sync cleanup completed:
-    - active trajectory source shared across `PostopCTLocalization` and `ContactsTrajectoryView`
-    - default source fallback prefers `imported_rosa` when available.
-
 ## Active Phase
-### Post-Phase State
+### Phase 8 — Compatibility Bridge Removal and Cleanup Release
 - **Objective**:
-  - Hold a stable cleanup baseline and prepare for next roadmap/workstream selection.
+  - Complete bridge-removal cleanup validation and release-readiness checks.
 - **In scope**:
-  - Bug fixes and release packaging/push.
+  - Confirm module behavior after source-sync changes.
+  - Final cross-module smoke + export verification.
+  - Close phase and push once validated.
 - **Out of scope**:
-  - New cross-module architecture phases (roadmap complete for phases 1-8).
+  - New feature work unrelated to Phase 8 cleanup.
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -155,8 +143,10 @@
 - **D-018**: Compatibility bridge removal started by deleting legacy `RosaHelper/Lib/rosa_slicer/workflow/*`; modules must import workflow services from `CommonLib`.
 - **D-019**: Atlas modules now use a shared Loader-core bridge helper (`rosa_scene.loader_core_bridge`) instead of duplicating per-module dynamic import code.
 - **D-020**: Added `tools/phase8_sanity.py` as a repeatable guardrail for cleanup release checks.
-- **D-021**: Phase 8 closed locally after bridge-removal sanity check + user smoke validation.
+- **D-021**: Phase 8 closure is deferred until final validation sign-off.
 - **D-022**: Active trajectory source is now shared and persisted across Postop CT and Contacts modules.
+- **D-023**: Removed `RosaHelper/Lib/rosa_slicer/widget_mixin.py` and obsolete wrapper bridges (`electrode_scene.py`, `trajectory_scene.py`) as Phase 8 cleanup.
+- **D-024**: Retired standalone `ShankDetect` module; de-novo CT detection stays in `PostopCTLocalization`, and reusable `shank_core` moved to `CommonLib/shank_core`.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:

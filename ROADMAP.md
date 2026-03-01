@@ -33,12 +33,12 @@ Execution status is tracked separately in `PROGRESS.md`.
 
 ## Acceptance Criteria Per Phase
 - **Phase 1**
-  - Workflow roles/registries are published from `RosaHelper` and `ShankDetect`.
+  - Workflow roles/registries are published from `RosaHelper` and CT localization workflows.
   - Export frame/profile behavior works and writes manifest.
-  - Existing ROSA + ShankDetect workflows continue to run.
+  - Existing ROSA + CT-only workflows continue to run.
 - **Phase 2**
   - Shared workflow/core code is hosted in extension-level `CommonLib`.
-  - `RosaHelper` and `ShankDetect` import only from shared libs (no cross-module `Lib` dependency).
+  - Loader/localization modules import only from shared libs (no cross-module `Lib` dependency).
   - One-release compatibility bridge exists for old import paths.
 - **Phase 3**
   - Export workflow moved into dedicated `ExportCenter` module with no behavior regressions.
@@ -67,8 +67,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Roadmap complete (Phases 1-8 closed locally)**.
-- Next work should start as a new roadmap/workstream document.
+- **Current phase target**: **Phase 8** (compatibility bridge removal and cleanup release).
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

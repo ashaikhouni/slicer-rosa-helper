@@ -21,7 +21,7 @@ for path in PATH_CANDIDATES:
 
 from rosa_workflow import WorkflowState, WorkflowPublisher
 from rosa_workflow.workflow_registry import table_to_dict_rows
-from rosa_scene.loader_core_bridge import get_loader_core
+from rosa_scene import AtlasCoreService
 
 
 class AtlasSources(ScriptedLoadableModule):
@@ -630,6 +630,6 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
 class AtlasSourcesLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = get_loader_core(MODULE_DIR)
+        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)

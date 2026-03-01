@@ -22,13 +22,11 @@ It supports:
 - profile-based exports (contacts/trajectories/volumes/atlas/QC/full bundle) with manifest output
 - publishing shared workflow roles consumed by dedicated atlas/burn modules
 
-This extension also includes `Shank Detect` for CT-only workflows (no `.ros` required):
+This extension also includes CT-only de novo detection under `Postop CT Localization`:
 - threshold-based shank trajectory detection from postop CT artifact
 - optional exact trajectory-count mode (otherwise up to 30 detections)
-- lock/unlock accepted trajectories across reruns
 - side-aware default naming (`R##` / `L##`) with editable names
-- per-trajectory electrode assignment and contact generation
-- row selection auto-aligns Red slice along the selected trajectory
+- publishes de novo trajectories into shared workflow roles
 
 This extension also includes `Export Center`:
 - exports workflow artifacts directly from shared `RosaWorkflow` scene roles
@@ -58,7 +56,7 @@ Key behavior:
 - node reuse policy for volumes is based on `source_path + space_name`
 - managed workflow nodes carry `Rosa.*` provenance attributes
 - image and transform registries are persisted as MRML table nodes
-- Shank Detect publishes trajectories/contacts/assignments into the same contract
+- Postop CT Localization publishes guided-fit/de-novo trajectories into the same contract
 - trajectory lines are role-grouped by producer so modules can edit/replace only their own outputs
 
 ## ROS File Structure (What We Read)
@@ -132,11 +130,11 @@ markups.
    - use `Atlas Labeling` to assign contacts to atlas labels
    - export again from `Export Center` to write/update atlas assignment CSV
 
-## Quick Start (Shank Detect)
+## Quick Start (De Novo CT Detect)
 
 Use this when you only have a CT with electrode artifact and no ROSA `.ros` metadata.
 
-1. Open module `Shank Detect`.
+1. Open module `Postop CT Localization` and switch to tab `De Novo Detect`.
 2. Select postop CT volume.
 3. Set detection parameters (threshold, inlier radius, min length, min inliers).
    - optional head-mask gating (`Use head mask filter`) to suppress external wire artifacts
@@ -192,7 +190,7 @@ Example files are provided under:
 
 Use this when you want to export from the shared workflow scene without relying on `ROSA Helper` UI state.
 
-1. Run upstream workflow steps first (ROSA load and/or ShankDetect + contacts).
+1. Run upstream workflow steps first (ROSA load and/or Postop CT Localization + contacts).
 2. Open module `Export Center`.
 3. Click `Refresh Workflow Inputs`.
 4. Select:
@@ -218,6 +216,32 @@ Output files:
 Coordinate columns in export:
 - primary XYZ is in selected export frame (`x_frame_ras,y_frame_ras,z_frame_ras`)
 - world-space XYZ is also included (`x_world_ras,y_world_ras,z_world_ras`)
+
+## Pure Python Core Tests
+
+`CommonLib/rosa_core` and `CommonLib/shank_core` are testable without Slicer imports.
+
+`rosa_core` suite covers:
+- `ros_parser`
+- `contacts`
+- `transforms`
+- `electrode_models`
+- `contact_fit`
+- `qc`
+- `exporters`
+- `assignments`
+
+`shank_core` suite covers:
+- `masking`
+- `detect` / `pipeline`
+- `io`
+
+Run tests:
+
+```bash
+/Users/ammar/miniforge3/envs/shankdetect/bin/python -m unittest discover -s /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/tests/rosa_core -p "test_*.py"
+/Users/ammar/miniforge3/envs/shankdetect/bin/python -m unittest discover -s /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/tests/shank_core -p "test_*.py"
+```
 - LPS XYZ is included for auditability (`x_lps,y_lps,z_lps`)
 
 QC CSV columns:
@@ -462,7 +486,7 @@ Important:
 5. Open modules in category `ROSA`:
    - `ROSA Helper`, `Contacts & Trajectory View`, `Postop CT Localization`
    - `Atlas Sources`, `Atlas Labeling`, `Navigation Burn`, `Contact Import`
-   - `Export Center`, `Shank Detect`
+   - `Export Center`
 
 ## Repository Layout
 
@@ -474,13 +498,12 @@ Important:
 - `NavigationBurn/`: THOMAS burn + DICOM export module
 - `ContactImport/`: external contacts/trajectories import module
 - `ExportCenter/`: profile-based export module
-- `ShankDetect/`: CT-only standalone trajectory detection module
+- `CommonLib/shank_core/`: reusable CT shank-detection core used by UI and CLI
 - `CommonLib/rosa_core/`: reusable parser/transform/export code (no Slicer dependency)
 - `CommonLib/rosa_core/assignments.py`: reusable trajectory-length/model-suggestion helpers
 - `CommonLib/rosa_core/qc.py`: reusable planned-vs-final QC metric computation
-- `RosaHelper/Lib/rosa_slicer/`: Slicer services + compatibility bridge during refactor
 - `CommonLib/resources/electrodes/electrode_models.json`: shared bundled electrode model library (editable by users)
-- `RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
+- `CommonLib/resources/freesurfer/FreeSurferColorLUT20120827.txt`: bundled FreeSurfer annotation LUT fallback
 - `tools/`: CLI wrappers for offline conversion/export
 
 ## Electrode Model Library

@@ -10,13 +10,6 @@ slicerMacroBuildScriptedModule(
   WITH_GENERIC_TESTS
 )
 
-# Install reusable core Python package with the module.
-install(
-  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Lib/
-  DESTINATION ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}/${MODULE_NAME}/Lib
-  COMPONENT Runtime
-)
-
 # Install module resources (electrode library, LUTs, icons).
 install(
   DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Resources/

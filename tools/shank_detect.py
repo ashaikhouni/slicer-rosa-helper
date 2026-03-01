@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI utilities for ShankDetect core processing.
+"""CLI utilities for CT shank-detection core processing.
 
 Phase 1 focuses on mask-iteration speed outside Slicer.
 """
@@ -12,12 +12,9 @@ import os
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LIB_DIR = os.path.join(REPO_ROOT, "ShankDetect", "Lib")
+LIB_DIR = os.path.join(REPO_ROOT, "CommonLib")
 if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
-ROSA_LIB_DIR = os.path.join(REPO_ROOT, "RosaHelper", "Lib")
-if ROSA_LIB_DIR not in sys.path:
-    sys.path.insert(0, ROSA_LIB_DIR)
 
 from shank_core.io import (  # noqa: E402
     image_ijk_ras_matrices,
@@ -285,7 +282,7 @@ def cmd_detect(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ShankDetect CLI")
+    parser = argparse.ArgumentParser(description="CT shank-detection CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_prev = sub.add_parser("preview-masks", help="Build and export raw masks from CT")

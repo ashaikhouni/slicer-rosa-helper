@@ -29,8 +29,6 @@ MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_CANDIDATES = [
     os.path.join(os.path.dirname(MODULE_DIR), "CommonLib"),  # source tree shared libs
     os.path.join(MODULE_DIR, "CommonLib"),  # packaged extension shared libs
-    os.path.join(MODULE_DIR, "Lib"),  # source tree
-    os.path.join(MODULE_DIR, "RosaHelper", "Lib"),  # packaged extension layout
 ]
 for _lib_dir in LIB_CANDIDATES:
     if os.path.isdir(_lib_dir) and _lib_dir not in sys.path:
@@ -40,36 +38,28 @@ import rosa_core as _rosa_core_mod
 _rosa_core_mod = importlib.reload(_rosa_core_mod)
 
 from rosa_core import (
-    build_effective_matrices,
-    choose_reference_volume,
-    find_ros_file,
-    invert_4x4,
-    lps_to_ras_matrix,
     lps_to_ras_point,
-    parse_ros_file,
-    resolve_analyze_volume,
-    resolve_reference_index,
 )
 from rosa_scene import electrode_scene as _electrode_scene_mod
+from rosa_scene import freesurfer_service as _freesurfer_service_mod
 from rosa_scene import trajectory_scene as _trajectory_scene_mod
-from rosa_slicer import freesurfer_service as _freesurfer_service_mod
-from rosa_slicer import widget_mixin as _widget_mixin_mod
+from rosa_scene import case_loader_service as _case_loader_service_mod
 from rosa_workflow import export_bundle as _export_bundle_mod
 from rosa_workflow import workflow_state as _workflow_state_mod
 from rosa_workflow import workflow_publish as _workflow_publish_mod
 
-# Hot-reload helper submodule so Widget mixin updates are picked up without full app restart.
-_widget_mixin_mod = importlib.reload(_widget_mixin_mod)
+# Hot-reload helper submodules for dev iteration without full app restart.
 _freesurfer_service_mod = importlib.reload(_freesurfer_service_mod)
 _trajectory_scene_mod = importlib.reload(_trajectory_scene_mod)
 _electrode_scene_mod = importlib.reload(_electrode_scene_mod)
+_case_loader_service_mod = importlib.reload(_case_loader_service_mod)
 _export_bundle_mod = importlib.reload(_export_bundle_mod)
 _workflow_state_mod = importlib.reload(_workflow_state_mod)
 _workflow_publish_mod = importlib.reload(_workflow_publish_mod)
-RosaHelperWidgetMixin = _widget_mixin_mod.RosaHelperWidgetMixin
 FreeSurferService = _freesurfer_service_mod.FreeSurferService
 TrajectorySceneService = _trajectory_scene_mod.TrajectorySceneService
 ElectrodeSceneService = _electrode_scene_mod.ElectrodeSceneService
+CaseLoaderService = _case_loader_service_mod.CaseLoaderService
 WorkflowState = _workflow_state_mod.WorkflowState
 WorkflowPublisher = _workflow_publish_mod.WorkflowPublisher
 export_aligned_bundle_service = _export_bundle_mod.export_aligned_bundle
@@ -91,7 +81,7 @@ class RosaHelper(ScriptedLoadableModule):
         )
 
 
-class RosaHelperWidget(RosaHelperWidgetMixin, ScriptedLoadableModuleWidget):
+class RosaHelperWidget(ScriptedLoadableModuleWidget):
     """Qt widget for selecting a case folder and loading it into the scene."""
 
     def setup(self):
@@ -618,6 +608,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         """Initialize service delegates used by Slicer-specific workflows."""
         super().__init__()
+        self.case_loader = CaseLoaderService()
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
         self.fs_service = FreeSurferService(module_dir=MODULE_DIR)
@@ -657,216 +648,52 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
             Optional callback used for status messages.
         """
 
-        def log(msg):
-            """Forward log messages to callback when provided."""
-            if logger:
-                logger(msg)
-            else:
-                print(msg)
-
-        case_dir = os.path.abspath(case_dir)
-        ros_path = find_ros_file(case_dir)
-        analyze_root = os.path.join(case_dir, "DICOM")
-
-        if not os.path.isdir(analyze_root):
-            raise ValueError(f"Analyze root not found: {analyze_root}")
-
-        parsed = parse_ros_file(ros_path)
-        displays = parsed["displays"]
-        trajectories = parsed["trajectories"]
-
-        if not displays:
-            raise ValueError("No TRdicomRdisplay/VOLUME entries found in ROS file")
-
-        reference_volume = choose_reference_volume(displays, preferred=reference)
-        root_index = resolve_reference_index(displays, reference_volume)
-        effective_lps = build_effective_matrices(displays, root_index=root_index)
-        if invert:
-            effective_used_lps = [invert_4x4(m) for m in effective_lps]
-        else:
-            effective_used_lps = effective_lps
-        log(f"[ros] {ros_path}")
-        log(f"[ref] {reference_volume}")
-
-        loaded_count = 0
-        loaded_volume_node_ids = {}
-        loaded_volume_source_paths = {}
-        ros_transform_records = []
-
-        for i, disp in enumerate(displays):
-            vol_name = disp["volume"]
-            img_path = resolve_analyze_volume(analyze_root, disp)
-            if not img_path:
-                log(f"[skip] missing Analyze .img for {vol_name}")
-                continue
-
-            vol_node = self._load_volume(img_path)
-            if vol_node is None:
-                log(f"[skip] failed to load {img_path}")
-                continue
-
-            loaded_count += 1
-            loaded_volume_node_ids[vol_name] = vol_node.GetID()
-            loaded_volume_source_paths[vol_name] = img_path
-            vol_node.SetName(vol_name)
-            self._center_volume(vol_node)
-            log(f"[load] {vol_name}")
-            log(f"[center] {vol_name}")
-
-            if vol_name != reference_volume:
-                matrix_ras = lps_to_ras_matrix(effective_used_lps[i])
-                tnode = self._apply_transform(vol_node, matrix_ras)
-                tnode.SetName(f"{vol_name}_to_{reference_volume}_ROSA")
-                ref_idx = disp.get("imagery_3dref", root_index)
-                log(
-                    f"[xform] {vol_name} {'inv ' if invert else ''}TRdicomRdisplay "
-                    f"(ref idx {ref_idx} -> root idx {root_index})"
-                )
-                if harden:
-                    slicer.vtkSlicerTransformLogic().hardenTransform(vol_node)
-                    vol_node.SetAndObserveTransformNodeID(None)
-                    log(f"[harden] {vol_name}")
-                # Keep transform node as provenance for native->base mapping.
-                if hasattr(tnode, "SetHideFromEditors"):
-                    tnode.SetHideFromEditors(False)
-                tnode.SetAttribute("Rosa.Managed", "1")
-                tnode.SetAttribute("Rosa.Source", "rosa")
-                tnode.SetAttribute("Rosa.Space", "ROSA_BASE")
-                tnode.SetAttribute("Rosa.NativeToBaseForNodeID", vol_node.GetID())
-                tnode.SetAttribute("Rosa.NativeToBaseForNodeName", vol_name)
-                ros_transform_records.append(
-                    {
-                        "volume_name": vol_name,
-                        "transform_node_id": tnode.GetID(),
-                        "from_space": f"{vol_name}_NATIVE",
-                        "to_space": "ROSA_BASE",
-                    }
-                )
-            else:
-                log(f"[xform] {vol_name} reference (none)")
-
-        if load_trajectories and trajectories:
-            self._add_trajectories(trajectories, logger=log, show_planned=show_planned)
-
-        return {
-            "loaded_volumes": loaded_count,
-            "loaded_volume_node_ids": loaded_volume_node_ids,
-            "loaded_volume_source_paths": loaded_volume_source_paths,
-            "reference_volume": reference_volume,
-            "trajectory_count": len(trajectories) if load_trajectories else 0,
-            "trajectories": trajectories,
-            "ros_path": ros_path,
-            "analyze_root": analyze_root,
-            "ros_transform_records": ros_transform_records,
-        }
+        return self.case_loader.load_case(
+            case_dir=case_dir,
+            reference=reference,
+            invert=invert,
+            harden=harden,
+            load_trajectories=load_trajectories,
+            show_planned=show_planned,
+            add_trajectories_fn=self._add_trajectories,
+            logger=logger,
+        )
 
     def _load_volume(self, path):
         """Load a scalar volume by path and return the MRML node."""
-        try:
-            result = slicer.util.loadVolume(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                return node if ok else None
-            return result
-        except TypeError:
-            return slicer.util.loadVolume(path)
+        return self.case_loader.load_volume(path)
 
     def _center_volume(self, volume_node):
         """Center volume origin in Slicer (equivalent to Volumes->Center Volume)."""
-        logic = slicer.modules.volumes.logic()
-        if logic and hasattr(logic, "CenterVolume"):
-            logic.CenterVolume(volume_node)
-            return
-
-        ijk_to_ras = vtk.vtkMatrix4x4()
-        volume_node.GetIJKToRASMatrix(ijk_to_ras)
-        dims = volume_node.GetImageData().GetDimensions()
-        center_ijk = [(dims[0] - 1) / 2.0, (dims[1] - 1) / 2.0, (dims[2] - 1) / 2.0, 1.0]
-        center_ras = [0.0, 0.0, 0.0, 0.0]
-        ijk_to_ras.MultiplyPoint(center_ijk, center_ras)
-        for i in range(3):
-            ijk_to_ras.SetElement(i, 3, ijk_to_ras.GetElement(i, 3) - center_ras[i])
-        volume_node.SetIJKToRASMatrix(ijk_to_ras)
+        self.case_loader.center_volume(volume_node)
 
     def _apply_transform(self, volume_node, matrix4x4):
         """Create and assign a linear transform node from a 4x4 matrix."""
-        tnode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode")
-        vtk_mat = vtk.vtkMatrix4x4()
-        for r in range(4):
-            for c in range(4):
-                vtk_mat.SetElement(r, c, matrix4x4[r][c])
-        tnode.SetMatrixTransformToParent(vtk_mat)
-        volume_node.SetAndObserveTransformNodeID(tnode.GetID())
-        return tnode
+        return self.case_loader.apply_transform(volume_node, matrix4x4)
 
     def _vtk_matrix_to_numpy(self, vtk_matrix4x4):
         """Convert vtkMatrix4x4 to a NumPy 4x4 array."""
-        out = np.eye(4, dtype=float)
-        for r in range(4):
-            for c in range(4):
-                out[r, c] = float(vtk_matrix4x4.GetElement(r, c))
-        return out
+        return self.case_loader.vtk_matrix_to_numpy(vtk_matrix4x4)
 
     def extract_threshold_candidates_lps(self, volume_node, threshold, max_points=300000):
         """Extract thresholded CT candidate points in LPS coordinates."""
-        if np is None:
-            raise RuntimeError("NumPy is required for auto-fit candidate extraction.")
-        arr = slicer.util.arrayFromVolume(volume_node)  # K, J, I
-        idx = np.argwhere(arr >= float(threshold))
-        if idx.size == 0:
-            return np.empty((0, 3), dtype=float)
-
-        if idx.shape[0] > int(max_points):
-            rng = np.random.default_rng(0)
-            keep = rng.choice(idx.shape[0], size=int(max_points), replace=False)
-            idx = idx[keep]
-
-        # Convert argwhere KJI indices to IJK homogeneous coordinates.
-        n = idx.shape[0]
-        ijk_h = np.ones((n, 4), dtype=float)
-        ijk_h[:, 0] = idx[:, 2].astype(float)  # I
-        ijk_h[:, 1] = idx[:, 1].astype(float)  # J
-        ijk_h[:, 2] = idx[:, 0].astype(float)  # K
-
-        ijk_to_ras_vtk = vtk.vtkMatrix4x4()
-        volume_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
-        ijk_to_ras = self._vtk_matrix_to_numpy(ijk_to_ras_vtk)
-        ras_h = ijk_h @ ijk_to_ras.T
-        ras = ras_h[:, :3]
-        lps = ras.copy()
-        lps[:, 0] *= -1.0
-        lps[:, 1] *= -1.0
-        return lps
+        return self.case_loader.extract_threshold_candidates_lps(
+            volume_node=volume_node,
+            threshold=threshold,
+            max_points=max_points,
+        )
 
     def show_volume_in_all_slice_views(self, volume_node):
         """Set provided volume as background in Red/Yellow/Green slice views."""
-        if volume_node is None:
-            return
-        volume_id = volume_node.GetID()
-        for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
-            composite.SetBackgroundVolumeID(volume_id)
+        self.case_loader.show_volume_in_all_slice_views(volume_node)
 
     def apply_ct_window_from_threshold(self, volume_node, threshold):
         """Apply CT window/level preset centered around the current detection threshold."""
-        if volume_node is None:
-            return
-        display = volume_node.GetDisplayNode()
-        if display is None:
-            return
-        lower = float(threshold) - 250.0
-        upper = float(threshold) + 2200.0
-        display.AutoWindowLevelOff()
-        display.SetWindow(max(upper - lower, 1.0))
-        display.SetLevel((upper + lower) * 0.5)
+        self.case_loader.apply_ct_window_from_threshold(volume_node, threshold)
 
     def reset_ct_window(self, volume_node):
         """Reset CT window/level to Slicer auto mode for selected volume."""
-        if volume_node is None:
-            return
-        display = volume_node.GetDisplayNode()
-        if display is None:
-            return
-        display.AutoWindowLevelOn()
+        self.case_loader.reset_ct_window(volume_node)
 
     def run_brainsfit_rigid_registration(
         self,
