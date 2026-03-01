@@ -1,7 +1,11 @@
 """Electrode model library loading and light validation."""
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
+
+from .types import ElectrodeLibrary, ElectrodeModel
 
 
 _REQUIRED_MODEL_KEYS = {
@@ -15,7 +19,7 @@ _REQUIRED_MODEL_KEYS = {
 }
 
 
-def default_electrode_library_path():
+def default_electrode_library_path() -> Path:
     """Return canonical bundled electrode model library path."""
     here = Path(__file__).resolve()
     filename = "electrode_models.json"
@@ -29,7 +33,7 @@ def default_electrode_library_path():
     return candidates[0]
 
 
-def load_electrode_library(path=None):
+def load_electrode_library(path: str | Path | None = None) -> ElectrodeLibrary:
     """Load electrode model library JSON and return validated dictionary."""
     lib_path = Path(path) if path else default_electrode_library_path()
     data = json.loads(lib_path.read_text(encoding="utf-8"))
@@ -37,7 +41,7 @@ def load_electrode_library(path=None):
     return data
 
 
-def validate_electrode_library(data):
+def validate_electrode_library(data: ElectrodeLibrary) -> None:
     """Validate required top-level and per-model fields.
 
     Raises
@@ -72,6 +76,6 @@ def validate_electrode_library(data):
             raise ValueError(f"Model {model_id} center offsets must be strictly increasing")
 
 
-def model_map(data):
+def model_map(data: ElectrodeLibrary) -> dict[str, ElectrodeModel]:
     """Return dictionary mapping model id to model definition."""
     return {m["id"]: m for m in data["models"]}

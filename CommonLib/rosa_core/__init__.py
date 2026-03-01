@@ -28,6 +28,22 @@ from .transforms import (
     lps_to_ras_point,
     to_itk_affine_text,
 )
+from .types import (
+    AssignmentRow,
+    AssignmentTemplate,
+    ContactFitResult,
+    ContactRecord,
+    DisplayRecord,
+    ElectrodeLibrary,
+    ElectrodeModel,
+    FCSVRow,
+    Matrix4x4,
+    Point3D,
+    QCMetricsRow,
+    RosParseResult,
+    TokenBlock,
+    TrajectoryRecord,
+)
 
 __all__ = [
     "apply_affine",
@@ -60,4 +76,18 @@ __all__ = [
     "suggest_model_id_for_trajectory",
     "to_itk_affine_text",
     "trajectory_length_mm",
+    "AssignmentRow",
+    "AssignmentTemplate",
+    "ContactFitResult",
+    "ContactRecord",
+    "DisplayRecord",
+    "ElectrodeLibrary",
+    "ElectrodeModel",
+    "FCSVRow",
+    "Matrix4x4",
+    "Point3D",
+    "QCMetricsRow",
+    "RosParseResult",
+    "TokenBlock",
+    "TrajectoryRecord",
 ]

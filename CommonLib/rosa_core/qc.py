@@ -1,29 +1,33 @@
 """QC metrics for planned vs final electrode trajectories and contacts."""
 
+from __future__ import annotations
+
 import math
 
+from .types import ContactRecord, Point3D, QCMetricsRow, TrajectoryRecord
 
-def _vsub(a, b):
+
+def _vsub(a: Point3D, b: Point3D) -> Point3D:
     """Return vector subtraction `a - b` for 3D vectors."""
     return [float(a[0]) - float(b[0]), float(a[1]) - float(b[1]), float(a[2]) - float(b[2])]
 
 
-def _vdot(a, b):
+def _vdot(a: Point3D, b: Point3D) -> float:
     """Return dot product between 3D vectors."""
     return float(a[0]) * float(b[0]) + float(a[1]) * float(b[1]) + float(a[2]) * float(b[2])
 
 
-def _vmul(v, s):
+def _vmul(v: Point3D, s: float) -> Point3D:
     """Return scalar multiplication `v * s`."""
     return [float(v[0]) * float(s), float(v[1]) * float(s), float(v[2]) * float(s)]
 
 
-def _vnorm(v):
+def _vnorm(v: Point3D) -> float:
     """Return Euclidean norm of a 3D vector."""
     return math.sqrt(_vdot(v, v))
 
 
-def _vunit(v):
+def _vunit(v: Point3D) -> Point3D:
     """Return normalized 3D vector, raising for zero-length input."""
     n = _vnorm(v)
     if n <= 1e-9:
@@ -31,7 +35,7 @@ def _vunit(v):
     return [float(v[0]) / n, float(v[1]) / n, float(v[2]) / n]
 
 
-def _radial_error_mm(delta_vec, axis_unit):
+def _radial_error_mm(delta_vec: Point3D, axis_unit: Point3D) -> float:
     """Return perpendicular component length of `delta_vec` relative to `axis_unit`."""
     axial_mm = _vdot(delta_vec, axis_unit)
     axial_vec = _vmul(axis_unit, axial_mm)
@@ -39,7 +43,7 @@ def _radial_error_mm(delta_vec, axis_unit):
     return _vnorm(radial_vec)
 
 
-def _trajectory_axis_angle_deg(planned, final):
+def _trajectory_axis_angle_deg(planned: TrajectoryRecord, final: TrajectoryRecord) -> float:
     """Return angle in degrees between planned and final trajectory axes."""
     planned_axis = _vunit(_vsub(planned["end"], planned["start"]))
     final_axis = _vunit(_vsub(final["end"], final["start"]))
@@ -47,7 +51,7 @@ def _trajectory_axis_angle_deg(planned, final):
     return math.degrees(math.acos(dot))
 
 
-def sorted_contacts_by_trajectory(contacts):
+def sorted_contacts_by_trajectory(contacts: list[ContactRecord]) -> dict[str, list[ContactRecord]]:
     """Return map `trajectory -> contacts sorted by contact index`."""
     by_traj = {}
     for contact in contacts:
@@ -61,11 +65,11 @@ def sorted_contacts_by_trajectory(contacts):
 
 
 def compute_qc_metrics(
-    planned_trajectories_by_name,
-    final_trajectories_by_name,
-    planned_contacts,
-    final_contacts,
-):
+    planned_trajectories_by_name: dict[str, TrajectoryRecord],
+    final_trajectories_by_name: dict[str, TrajectoryRecord],
+    planned_contacts: list[ContactRecord],
+    final_contacts: list[ContactRecord],
+) -> list[QCMetricsRow]:
     """Compute per-trajectory radial and angular QC metrics.
 
     Inputs are expected in ROSA/LPS coordinates.

@@ -3,41 +3,78 @@
 from __future__ import annotations
 
 import time
+from typing import Any, Callable, TypedDict
+
 import numpy as np
 
 from .detect import detect_from_preview
 from .masking import build_preview_masks
 
 
+class DetectionProfileMs(TypedDict, total=False):
+    """Profiling metrics in milliseconds for each pipeline stage."""
+
+    preview_stage: float
+    detect_stage: float
+    total: float
+    preview: dict[str, float]
+    detect: dict[str, float]
+
+
+class DetectionResult(TypedDict, total=False):
+    """High-level trajectory detection output payload."""
+
+    candidate_count: int
+    head_mask_kept_count: int
+    gating_mask_type: str
+    inside_method: str
+    metal_in_head_count: int
+    depth_kept_count: int
+    gap_reject_count: int
+    duplicate_reject_count: int
+    metal_mask_kji: np.ndarray
+    gating_mask_kji: np.ndarray
+    head_mask_kji: np.ndarray
+    head_distance_map_kji: np.ndarray
+    in_mask_ijk_kji: np.ndarray
+    profile_flags: dict[str, Any]
+    metal_depth_all_mm: np.ndarray
+    metal_depth_values_mm: np.ndarray
+    in_mask_depth_values_mm: np.ndarray
+    in_mask_points_ras: np.ndarray
+    profile_ms: DetectionProfileMs
+    lines: list[dict[str, Any]]
+
+
 def run_detection(
-    arr_kji,
-    spacing_xyz,
-    threshold,
-    ijk_kji_to_ras_fn,
-    ras_to_ijk_fn,
-    center_ras,
-    max_points=300000,
-    max_lines=30,
-    inlier_radius_mm=1.2,
-    min_length_mm=20.0,
-    min_inliers=250,
-    ransac_iterations=240,
-    exclude_segments=None,
-    exclude_radius_mm=2.0,
-    use_head_mask=False,
-    build_head_mask=False,
-    head_mask_threshold_hu=-500.0,
-    head_mask_aggressive_cleanup=True,
-    head_mask_close_mm=2.0,
-    head_mask_method="outside_air",
-    head_mask_metal_dilate_mm=1.0,
-    min_metal_depth_mm=5.0,
-    max_metal_depth_mm=220.0,
-    models_by_id=None,
-    min_model_score=None,
-    precomputed_gating_mask_kji=None,
-    precomputed_head_distance_map_kji=None,
-):
+    arr_kji: np.ndarray,
+    spacing_xyz: list[float] | tuple[float, float, float],
+    threshold: float,
+    ijk_kji_to_ras_fn: Callable[[np.ndarray | list[float]], np.ndarray | list[float]],
+    ras_to_ijk_fn: Callable[[np.ndarray | list[float]], np.ndarray | list[float]],
+    center_ras: list[float] | np.ndarray,
+    max_points: int = 300000,
+    max_lines: int = 30,
+    inlier_radius_mm: float = 1.2,
+    min_length_mm: float = 20.0,
+    min_inliers: int = 250,
+    ransac_iterations: int = 240,
+    exclude_segments: list[dict[str, Any]] | None = None,
+    exclude_radius_mm: float = 2.0,
+    use_head_mask: bool = False,
+    build_head_mask: bool = False,
+    head_mask_threshold_hu: float = -500.0,
+    head_mask_aggressive_cleanup: bool = True,
+    head_mask_close_mm: float = 2.0,
+    head_mask_method: str = "outside_air",
+    head_mask_metal_dilate_mm: float = 1.0,
+    min_metal_depth_mm: float = 5.0,
+    max_metal_depth_mm: float = 220.0,
+    models_by_id: dict[str, dict[str, Any]] | None = None,
+    min_model_score: float | None = None,
+    precomputed_gating_mask_kji: np.ndarray | None = None,
+    precomputed_head_distance_map_kji: np.ndarray | None = None,
+) -> DetectionResult:
     """Run end-to-end trajectory detection from CT array + geometry callbacks.
 
     The caller owns coordinate conversion. This keeps the core reusable across:

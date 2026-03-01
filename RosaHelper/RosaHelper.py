@@ -9,7 +9,6 @@ This module is the case/volume loader front-end:
 
 import os
 import sys
-import importlib
 from __main__ import ctk, qt, slicer
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
@@ -26,29 +25,14 @@ for _lib_dir in LIB_CANDIDATES:
     if os.path.isdir(_lib_dir) and _lib_dir not in sys.path:
         sys.path.insert(0, _lib_dir)
 
-import rosa_core as _rosa_core_mod
-_rosa_core_mod = importlib.reload(_rosa_core_mod)
-
 from rosa_core import (
     lps_to_ras_point,
 )
-from rosa_scene import freesurfer_service as _freesurfer_service_mod
-from rosa_scene import trajectory_scene as _trajectory_scene_mod
-from rosa_scene import case_loader_service as _case_loader_service_mod
-from rosa_workflow import workflow_state as _workflow_state_mod
-from rosa_workflow import workflow_publish as _workflow_publish_mod
-
-# Hot-reload helper submodules for dev iteration without full app restart.
-_freesurfer_service_mod = importlib.reload(_freesurfer_service_mod)
-_trajectory_scene_mod = importlib.reload(_trajectory_scene_mod)
-_case_loader_service_mod = importlib.reload(_case_loader_service_mod)
-_workflow_state_mod = importlib.reload(_workflow_state_mod)
-_workflow_publish_mod = importlib.reload(_workflow_publish_mod)
-FreeSurferService = _freesurfer_service_mod.FreeSurferService
-TrajectorySceneService = _trajectory_scene_mod.TrajectorySceneService
-CaseLoaderService = _case_loader_service_mod.CaseLoaderService
-WorkflowState = _workflow_state_mod.WorkflowState
-WorkflowPublisher = _workflow_publish_mod.WorkflowPublisher
+from rosa_scene.case_loader_service import CaseLoaderService
+from rosa_scene.freesurfer_service import FreeSurferService
+from rosa_scene.trajectory_scene import TrajectorySceneService
+from rosa_workflow.workflow_publish import WorkflowPublisher
+from rosa_workflow.workflow_state import WorkflowState
 
 
 class RosaHelper(ScriptedLoadableModule):

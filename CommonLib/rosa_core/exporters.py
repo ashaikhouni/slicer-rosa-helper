@@ -1,11 +1,18 @@
 """Writers for Slicer Markups JSON and FCSV outputs."""
 
+from __future__ import annotations
+
 import json
 
+from .types import FCSVRow, Matrix4x4, TrajectoryRecord
 from .transforms import apply_affine, lps_to_ras_point
 
 
-def build_markups_lines(trajectories, to_ras=True, display_to_dicom=None):
+def build_markups_lines(
+    trajectories: list[TrajectoryRecord],
+    to_ras: bool = True,
+    display_to_dicom: Matrix4x4 | None = None,
+) -> list[dict]:
     """Build Slicer line-markup objects from trajectory start/end pairs."""
     markups = []
     for traj in trajectories:
@@ -72,7 +79,7 @@ def build_markups_lines(trajectories, to_ras=True, display_to_dicom=None):
     return markups
 
 
-def build_markups_document(markups):
+def build_markups_document(markups: list[dict]) -> dict:
     """Build full Markups JSON document wrapper."""
     return {
         "@schema": "https://raw.githubusercontent.com/slicer/slicer/master/Modules/Loadable/Markups/Resources/Schema/markups-schema-v1.0.0.json",
@@ -80,13 +87,17 @@ def build_markups_document(markups):
     }
 
 
-def save_markups_json(path, markups):
+def save_markups_json(path: str, markups: list[dict]) -> None:
     """Write Markups JSON file to disk."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(build_markups_document(markups), f, indent=2)
 
 
-def build_fcsv_rows(trajectories, to_ras=True, same_label_pair=False):
+def build_fcsv_rows(
+    trajectories: list[TrajectoryRecord],
+    to_ras: bool = True,
+    same_label_pair: bool = False,
+) -> list[FCSVRow]:
     """Build point rows for Slicer FCSV from trajectory start/end pairs."""
     rows = []
     for traj in trajectories:
@@ -106,7 +117,7 @@ def build_fcsv_rows(trajectories, to_ras=True, same_label_pair=False):
     return rows
 
 
-def save_fcsv(path, rows):
+def save_fcsv(path: str, rows: list[FCSVRow]) -> None:
     """Write rows to Slicer Markups FCSV format."""
     header = [
         "# Markups fiducial file version = 4.11",

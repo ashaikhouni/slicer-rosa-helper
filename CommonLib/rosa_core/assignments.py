@@ -1,9 +1,13 @@
 """Helpers for trajectory/electrode assignment suggestions."""
 
+from __future__ import annotations
+
 import math
 
+from .types import ElectrodeModel, TrajectoryRecord
 
-def trajectory_length_mm(trajectory):
+
+def trajectory_length_mm(trajectory: TrajectoryRecord) -> float:
     """Return Euclidean distance between `start` and `end` points in mm."""
     start = trajectory["start"]
     end = trajectory["end"]
@@ -13,17 +17,17 @@ def trajectory_length_mm(trajectory):
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 
 
-def electrode_length_mm(model):
+def electrode_length_mm(model: ElectrodeModel) -> float:
     """Return exploration length (mm) from one electrode model dict."""
     return float(model.get("total_exploration_length_mm", 0.0))
 
 
 def suggest_model_id_for_trajectory(
-    trajectory,
-    models_by_id,
-    model_ids=None,
-    tolerance_mm=5.0,
-):
+    trajectory: TrajectoryRecord,
+    models_by_id: dict[str, ElectrodeModel],
+    model_ids: list[str] | None = None,
+    tolerance_mm: float = 5.0,
+) -> str:
     """Select closest electrode model within tolerance of trajectory length.
 
     Tie-breaks:

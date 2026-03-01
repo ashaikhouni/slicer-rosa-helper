@@ -1,12 +1,15 @@
 """Case-level helpers for discovering files and composing display transforms."""
 
+from __future__ import annotations
+
 import glob
 import os
 
+from .types import DisplayRecord, Matrix4x4
 from .transforms import identity_4x4, matmul_4x4
 
 
-def find_ros_file(case_dir):
+def find_ros_file(case_dir: str) -> str:
     """Return the single `.ros` file inside a case directory."""
     hits = sorted(glob.glob(os.path.join(case_dir, "*.ros")))
     if not hits:
@@ -16,7 +19,7 @@ def find_ros_file(case_dir):
     return hits[0]
 
 
-def resolve_analyze_volume(analyze_root, display):
+def resolve_analyze_volume(analyze_root: str, display: DisplayRecord) -> str | None:
     """Resolve `<volume>.img` path for a display record.
 
     Resolution strategy:
@@ -39,7 +42,7 @@ def resolve_analyze_volume(analyze_root, display):
     return hits[0] if hits else None
 
 
-def choose_reference_volume(displays, preferred=None):
+def choose_reference_volume(displays: list[DisplayRecord], preferred: str | None = None) -> str:
     """Choose the root display volume for loading.
 
     Defaults to the first display in ROS order, or `preferred` if provided.
@@ -57,7 +60,7 @@ def choose_reference_volume(displays, preferred=None):
     return displays[0]["volume"]
 
 
-def resolve_reference_index(displays, reference_volume=None):
+def resolve_reference_index(displays: list[DisplayRecord], reference_volume: str | None = None) -> int:
     """Resolve root display index from volume name."""
     if not displays:
         raise ValueError("No display volumes found in ROS file")
@@ -71,7 +74,7 @@ def resolve_reference_index(displays, reference_volume=None):
     raise ValueError(f"Reference volume '{reference_volume}' not found. Available: {available}")
 
 
-def build_effective_matrices(displays, root_index=0):
+def build_effective_matrices(displays: list[DisplayRecord], root_index: int = 0) -> list[Matrix4x4]:
     """Compose effective transforms from each display into the root frame.
 
     In ROSA, each `TRdicomRdisplay` for display `i` is interpreted as:

@@ -6,7 +6,12 @@ Conventions used in this project:
 - `lps_to_ras_*` converts DICOM LPS conventions to Slicer RAS.
 """
 
-def apply_affine(matrix4x4, point_xyz):
+from __future__ import annotations
+
+from .types import Matrix4x4, Point3D
+
+
+def apply_affine(matrix4x4: Matrix4x4, point_xyz: Point3D) -> Point3D:
     """Apply a 4x4 affine matrix to a 3D point."""
     x, y, z = point_xyz
     vec = [x, y, z, 1.0]
@@ -16,7 +21,7 @@ def apply_affine(matrix4x4, point_xyz):
     return [out[0], out[1], out[2]]
 
 
-def is_identity_4x4(matrix4x4, tol=1e-4):
+def is_identity_4x4(matrix4x4: Matrix4x4, tol: float = 1e-4) -> bool:
     """Return `True` when matrix is approximately identity."""
     for r in range(4):
         for c in range(4):
@@ -26,7 +31,7 @@ def is_identity_4x4(matrix4x4, tol=1e-4):
     return True
 
 
-def invert_4x4(matrix4x4):
+def invert_4x4(matrix4x4: Matrix4x4) -> Matrix4x4:
     """Invert a 4x4 matrix using Gauss-Jordan elimination."""
     a = [[float(matrix4x4[r][c]) for c in range(4)] for r in range(4)]
     inv = [[1.0 if r == c else 0.0 for c in range(4)] for r in range(4)]
@@ -60,12 +65,12 @@ def invert_4x4(matrix4x4):
     return inv
 
 
-def lps_to_ras_point(point_xyz):
+def lps_to_ras_point(point_xyz: Point3D) -> Point3D:
     """Convert point from LPS to RAS by flipping X and Y."""
     return [-point_xyz[0], -point_xyz[1], point_xyz[2]]
 
 
-def _matmul4(a, b):
+def _matmul4(a: Matrix4x4, b: Matrix4x4) -> Matrix4x4:
     """Multiply two 4x4 matrices."""
     out = [[0.0] * 4 for _ in range(4)]
     for i in range(4):
@@ -74,7 +79,7 @@ def _matmul4(a, b):
     return out
 
 
-def lps_to_ras_matrix(matrix4x4_lps):
+def lps_to_ras_matrix(matrix4x4_lps: Matrix4x4) -> Matrix4x4:
     """Convert a 4x4 transform matrix from LPS frame to RAS frame."""
     flip = [
         [-1.0, 0.0, 0.0, 0.0],
@@ -85,12 +90,12 @@ def lps_to_ras_matrix(matrix4x4_lps):
     return _matmul4(flip, _matmul4(matrix4x4_lps, flip))
 
 
-def matmul_4x4(a, b):
+def matmul_4x4(a: Matrix4x4, b: Matrix4x4) -> Matrix4x4:
     """Public wrapper for 4x4 matrix multiplication."""
     return _matmul4(a, b)
 
 
-def identity_4x4():
+def identity_4x4() -> Matrix4x4:
     """Return 4x4 identity matrix."""
     return [
         [1.0, 0.0, 0.0, 0.0],
@@ -100,7 +105,7 @@ def identity_4x4():
     ]
 
 
-def to_itk_affine_text(matrix4x4):
+def to_itk_affine_text(matrix4x4: Matrix4x4) -> str:
     """Serialize 4x4 affine matrix to ITK `.tfm` text format."""
     params = [
         matrix4x4[0][0],

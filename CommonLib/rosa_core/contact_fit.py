@@ -7,12 +7,16 @@ V2 strategy:
 - depth anchor from deepest valid inlier centroid near planned target
 """
 
+from __future__ import annotations
+
 import math
 
 import numpy as np
 
+from .types import ContactFitResult, Point3D
 
-def unit(v):
+
+def unit(v: np.ndarray | list[float]) -> np.ndarray:
     """Return normalized 3D vector."""
     v = np.asarray(v, dtype=float)
     n = float(np.linalg.norm(v))
@@ -21,7 +25,7 @@ def unit(v):
     return v / n
 
 
-def angle_deg(u, v):
+def angle_deg(u: np.ndarray | list[float], v: np.ndarray | list[float]) -> float:
     """Return unsigned angle in degrees between two 3D vectors."""
     u = unit(u)
     v = unit(v)
@@ -29,7 +33,11 @@ def angle_deg(u, v):
     return float(math.degrees(math.acos(dot)))
 
 
-def point_line_distance(points, line_point, line_dir):
+def point_line_distance(
+    points: np.ndarray | list[list[float]],
+    line_point: np.ndarray | list[float],
+    line_dir: np.ndarray | list[float],
+) -> np.ndarray:
     """Return perpendicular distances from Nx3 points to an infinite 3D line."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     p0 = np.asarray(line_point, dtype=float)
@@ -40,7 +48,13 @@ def point_line_distance(points, line_point, line_dir):
     return np.linalg.norm(pts - closest, axis=1)
 
 
-def filter_points_in_segment_cylinder(points, seg_start, seg_end, radius_mm, margin_mm=5.0):
+def filter_points_in_segment_cylinder(
+    points: np.ndarray | list[list[float]],
+    seg_start: np.ndarray | list[float],
+    seg_end: np.ndarray | list[float],
+    radius_mm: float,
+    margin_mm: float = 5.0,
+) -> np.ndarray:
     """Keep points near a finite line segment (with along-axis margin)."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     if pts.size == 0:
@@ -59,7 +73,7 @@ def filter_points_in_segment_cylinder(points, seg_start, seg_end, radius_mm, mar
     return pts[keep]
 
 
-def fit_axis_pca(points):
+def fit_axis_pca(points: np.ndarray | list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
     """Fit principal axis by PCA and return `(center, axis_unit)`."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     if pts.shape[0] < 3:
@@ -73,15 +87,15 @@ def fit_axis_pca(points):
 
 
 def build_slab_centroids(
-    points,
-    origin,
-    axis,
-    t_min,
-    t_max,
-    step_mm=1.0,
-    slab_half_thickness_mm=0.9,
-    min_points_per_slab=8,
-):
+    points: np.ndarray | list[list[float]],
+    origin: np.ndarray | list[float],
+    axis: np.ndarray | list[float],
+    t_min: float,
+    t_max: float,
+    step_mm: float = 1.0,
+    slab_half_thickness_mm: float = 0.9,
+    min_points_per_slab: int = 8,
+) -> tuple[np.ndarray, np.ndarray]:
     """Sample centroids of threshold points in depth slabs along a reference axis."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     if pts.size == 0:
@@ -110,12 +124,12 @@ def build_slab_centroids(
 
 
 def ransac_fit_line(
-    points,
-    max_iterations=200,
-    inlier_threshold_mm=0.9,
-    min_inliers=6,
-    rng_seed=0,
-):
+    points: np.ndarray | list[list[float]],
+    max_iterations: int = 200,
+    inlier_threshold_mm: float = 0.9,
+    min_inliers: int = 6,
+    rng_seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """Fit a 3D line with RANSAC, then refine with PCA on inliers."""
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     n = pts.shape[0]
@@ -159,7 +173,11 @@ def ransac_fit_line(
     return center, axis, best_mask, rms
 
 
-def _planned_tip_and_axis(entry, target, tip_at):
+def _planned_tip_and_axis(
+    entry: np.ndarray | Point3D,
+    target: np.ndarray | Point3D,
+    tip_at: str,
+) -> tuple[np.ndarray, np.ndarray]:
     """Return planned tip point and axis direction in LPS."""
     entry = np.asarray(entry, dtype=float)
     target = np.asarray(target, dtype=float)
@@ -174,15 +192,15 @@ def _planned_tip_and_axis(entry, target, tip_at):
 
 
 def fit_electrode_axis_and_tip(
-    candidate_points_lps,
-    planned_entry_lps,
-    planned_target_lps,
-    contact_offsets_mm,
-    tip_at="target",
-    roi_radius_mm=3.0,
-    max_angle_deg=12.0,
-    max_depth_shift_mm=20.0,
-):
+    candidate_points_lps: np.ndarray | list[list[float]],
+    planned_entry_lps: Point3D,
+    planned_target_lps: Point3D,
+    contact_offsets_mm: list[float] | np.ndarray,
+    tip_at: str = "target",
+    roi_radius_mm: float = 3.0,
+    max_angle_deg: float = 12.0,
+    max_depth_shift_mm: float = 20.0,
+) -> ContactFitResult:
     """Fit observed axis/depth from CT candidates near a planned trajectory.
 
     Returns a dictionary with `success`, fitted `entry_lps`/`target_lps`, and metrics.

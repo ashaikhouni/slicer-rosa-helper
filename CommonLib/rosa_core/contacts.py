@@ -1,11 +1,26 @@
 """Contact generation from ROSA trajectories and electrode model library."""
 
+from __future__ import annotations
+
 import json
 
+from .types import (
+    AssignmentRow,
+    AssignmentTemplate,
+    ContactRecord,
+    ElectrodeModel,
+    FCSVRow,
+    Point3D,
+    TrajectoryRecord,
+)
 from .transforms import lps_to_ras_point
 
 
-def build_assignment_template(trajectories, default_model_id="", default_tip_at="target"):
+def build_assignment_template(
+    trajectories: list[TrajectoryRecord],
+    default_model_id: str = "",
+    default_tip_at: str = "target",
+) -> AssignmentTemplate:
     """Build editable assignment template from trajectories."""
     rows = []
     for traj in trajectories:
@@ -21,13 +36,13 @@ def build_assignment_template(trajectories, default_model_id="", default_tip_at=
     return {"schema_version": "1.0", "assignments": rows}
 
 
-def save_assignment_template(path, template):
+def save_assignment_template(path: str, template: AssignmentTemplate) -> None:
     """Write assignment template JSON file."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(template, f, indent=2)
 
 
-def load_assignments(path):
+def load_assignments(path: str) -> AssignmentTemplate:
     """Load assignment JSON.
 
     Supported formats:
@@ -54,27 +69,27 @@ def load_assignments(path):
     raise ValueError("Unsupported assignments format")
 
 
-def _sub(a, b):
+def _sub(a: Point3D, b: Point3D) -> Point3D:
     """Return vector subtraction `a - b` for 3D points."""
     return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 
 
-def _add(a, b):
+def _add(a: Point3D, b: Point3D) -> Point3D:
     """Return vector addition `a + b` for 3D points."""
     return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 
 
-def _mul(v, s):
+def _mul(v: Point3D, s: float) -> Point3D:
     """Return scalar multiplication `v * s` for 3D vectors."""
     return [v[0] * s, v[1] * s, v[2] * s]
 
 
-def _norm(v):
+def _norm(v: Point3D) -> float:
     """Return Euclidean norm of a 3D vector."""
     return (v[0] ** 2 + v[1] ** 2 + v[2] ** 2) ** 0.5
 
 
-def _unit(v):
+def _unit(v: Point3D) -> Point3D:
     """Return unit-length version of `v` and validate non-zero length."""
     n = _norm(v)
     if n <= 1e-9:
@@ -82,7 +97,7 @@ def _unit(v):
     return [v[0] / n, v[1] / n, v[2] / n]
 
 
-def _tip_and_axis(trajectory, tip_at):
+def _tip_and_axis(trajectory: TrajectoryRecord, tip_at: str) -> tuple[Point3D, Point3D]:
     """Resolve tip point and forward axis from entry/target and tip anchor choice."""
     entry = trajectory["start"]
     target = trajectory["end"]
@@ -98,7 +113,11 @@ def _tip_and_axis(trajectory, tip_at):
     return tip, axis
 
 
-def generate_contacts_for_assignment(trajectory, model, assignment):
+def generate_contacts_for_assignment(
+    trajectory: TrajectoryRecord,
+    model: ElectrodeModel,
+    assignment: AssignmentRow,
+) -> list[ContactRecord]:
     """Generate contact centers for a single trajectory/model assignment.
 
     Returns contact points in ROSA/LPS coordinates.
@@ -130,7 +149,11 @@ def generate_contacts_for_assignment(trajectory, model, assignment):
     return contacts
 
 
-def generate_contacts(trajectories, models_by_id, assignments):
+def generate_contacts(
+    trajectories: list[TrajectoryRecord],
+    models_by_id: dict[str, ElectrodeModel],
+    assignments: AssignmentTemplate,
+) -> list[ContactRecord]:
     """Generate contacts for all assigned trajectories."""
     traj_map = {t["name"]: t for t in trajectories}
     out = []
@@ -153,7 +176,11 @@ def generate_contacts(trajectories, models_by_id, assignments):
     return out
 
 
-def save_contacts_rosa_json(path, contacts, metadata=None):
+def save_contacts_rosa_json(
+    path: str,
+    contacts: list[ContactRecord],
+    metadata: dict | None = None,
+) -> None:
     """Save contacts in ROSA/LPS coordinates."""
     payload = {"schema_version": "1.0", "coordinate_system": "ROSA_LPS", "contacts": contacts}
     if metadata:
@@ -162,7 +189,7 @@ def save_contacts_rosa_json(path, contacts, metadata=None):
         json.dump(payload, f, indent=2)
 
 
-def contacts_to_fcsv_rows(contacts, to_ras=True):
+def contacts_to_fcsv_rows(contacts: list[ContactRecord], to_ras: bool = True) -> list[FCSVRow]:
     """Convert contacts to FCSV row format used by exporters.save_fcsv."""
     rows = []
     for c in contacts:
@@ -172,7 +199,11 @@ def contacts_to_fcsv_rows(contacts, to_ras=True):
     return rows
 
 
-def build_contacts_markups(contacts, to_ras=True, node_name="contacts"):
+def build_contacts_markups(
+    contacts: list[ContactRecord],
+    to_ras: bool = True,
+    node_name: str = "contacts",
+) -> dict:
     """Build a Slicer Markups JSON document with one Fiducial list."""
     cps = []
     for c in contacts:
@@ -220,7 +251,12 @@ def build_contacts_markups(contacts, to_ras=True, node_name="contacts"):
     }
 
 
-def save_contacts_markups_json(path, contacts, to_ras=True, node_name="contacts"):
+def save_contacts_markups_json(
+    path: str,
+    contacts: list[ContactRecord],
+    to_ras: bool = True,
+    node_name: str = "contacts",
+) -> None:
     """Write contact points as Slicer Markups JSON file."""
     doc = build_contacts_markups(contacts, to_ras=to_ras, node_name=node_name)
     with open(path, "w", encoding="utf-8") as f:
