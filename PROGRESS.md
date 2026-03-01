@@ -119,6 +119,13 @@
   - All primary workflows pass smoke tests after bridge removal.
   - Release branch is clean, documented, and ready to push.
 
+### Phase 8 Implementation Sequence
+1. [done] Remove legacy workflow bridge files from `RosaHelper/Lib/rosa_slicer/workflow/*`.
+2. [done] Centralize remaining Loader-core dynamic import through `CommonLib/rosa_scene/loader_core_bridge.py`.
+3. [done] Add `tools/phase8_sanity.py` check for bridge removal + import/path hygiene + compile sanity.
+4. [pending] Run full cross-module interactive smoke test in Slicer (Loader, ContactsTrajectoryView, PostopCTLocalization, AtlasSources, AtlasLabeling, NavigationBurn, ContactImport, ExportCenter).
+5. [pending] Close Phase 8 and push cleanup release.
+
 ## Open Issues / Decisions
 ### Blocking Items
 - None currently.
@@ -146,6 +153,7 @@
 - **D-017**: `RosaHelper` now acts as `Loader` with tabs (`ROSA Load`, `Custom Import`), and workflow transform nodes are organized under `RosaWorkflow/Transforms` while preserving native-to-base provenance.
 - **D-018**: Compatibility bridge removal started by deleting legacy `RosaHelper/Lib/rosa_slicer/workflow/*`; modules must import workflow services from `CommonLib`.
 - **D-019**: Atlas modules now use a shared Loader-core bridge helper (`rosa_scene.loader_core_bridge`) instead of duplicating per-module dynamic import code.
+- **D-020**: Added `tools/phase8_sanity.py` as a repeatable guardrail for cleanup release checks.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
