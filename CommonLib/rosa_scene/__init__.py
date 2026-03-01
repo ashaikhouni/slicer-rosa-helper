@@ -1,7 +1,8 @@
 """Shared Slicer-scene services used by ROSA modules."""
 
 from .atlas_assignment_service import AtlasAssignmentService
-from .atlas_core_service import AtlasCoreService
+from .atlas_provider_registry import AtlasProviderRegistry
+from .atlas_provider_types import AtlasProvider, AtlasSampleResult
 from .atlas_registration_service import AtlasRegistrationService
 from .atlas_utils import AtlasUtils
 from .case_loader_service import CaseLoaderService
@@ -19,7 +20,9 @@ from .trajectory_scene import TrajectorySceneService
 
 __all__ = [
     "AtlasAssignmentService",
-    "AtlasCoreService",
+    "AtlasProvider",
+    "AtlasProviderRegistry",
+    "AtlasSampleResult",
     "AtlasRegistrationService",
     "AtlasUtils",
     "CaseLoaderService",

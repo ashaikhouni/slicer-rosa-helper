@@ -871,12 +871,6 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             if logic:
                 logic.FitSliceToAll()
 
-    def collect_working_trajectories(self, workflow_node=None):
-        return self.collect_trajectories_by_source(
-            source_key="working",
-            workflow_node=workflow_node,
-        )
-
     def _collect_trajectories_from_role(self, role, workflow_node=None):
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         trajectories = []

@@ -22,7 +22,9 @@ for path in PATH_CANDIDATES:
 from rosa_workflow import WorkflowState, WorkflowPublisher
 from rosa_workflow.workflow_registry import table_to_dict_rows
 from rosa_scene import (
-    AtlasCoreService,
+    AtlasRegistrationService,
+    AtlasUtils,
+    ThomasService,
     find_node_by_name,
     get_or_create_linear_transform,
     preselect_base_volume,
@@ -157,6 +159,49 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         self.fsLoadParcellationButton.clicked.connect(self.onLoadFSParcellationsClicked)
         form.addRow(self.fsLoadParcellationButton)
 
+        self.fsSurfaceModeCombo = qt.QComboBox()
+        self.fsSurfaceModeCombo.addItems(["None", "FS pial", "Volume-derived"])
+        form.addRow("Surface mode", self.fsSurfaceModeCombo)
+
+        self.fsSurfaceParcellationSelector = slicer.qMRMLNodeComboBox()
+        self.fsSurfaceParcellationSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.fsSurfaceParcellationSelector.noneEnabled = True
+        self.fsSurfaceParcellationSelector.addEnabled = False
+        self.fsSurfaceParcellationSelector.removeEnabled = False
+        self.fsSurfaceParcellationSelector.setMRMLScene(slicer.mrmlScene)
+        self.fsSurfaceParcellationSelector.setToolTip("Used only for Volume-derived mode.")
+        form.addRow("Surface source volume", self.fsSurfaceParcellationSelector)
+
+        self.fsSurfaceAnnotationEdit = qt.QLineEdit("aparc")
+        self.fsSurfaceAnnotationEdit.setToolTip("Used for FS pial mode (example: aparc, aparc.a2009s).")
+        form.addRow("Surface annotation", self.fsSurfaceAnnotationEdit)
+
+        self.fsSurfaceApplyTransformCheck = qt.QCheckBox("Apply FS->ROSA transform to surfaces")
+        self.fsSurfaceApplyTransformCheck.setChecked(True)
+        form.addRow(self.fsSurfaceApplyTransformCheck)
+
+        self.fsSurfaceHardenCheck = qt.QCheckBox("Harden surface transforms")
+        self.fsSurfaceHardenCheck.setChecked(True)
+        form.addRow(self.fsSurfaceHardenCheck)
+
+        self.fsSurfaceDecimateSpin = qt.QDoubleSpinBox()
+        self.fsSurfaceDecimateSpin.setRange(0.0, 0.95)
+        self.fsSurfaceDecimateSpin.setSingleStep(0.05)
+        self.fsSurfaceDecimateSpin.setDecimals(2)
+        self.fsSurfaceDecimateSpin.setValue(0.60)
+        self.fsSurfaceDecimateSpin.setSuffix(" reduction")
+        self.fsSurfaceDecimateSpin.setToolTip("Used for FS pial mode to reduce mesh density.")
+        form.addRow("Surface decimate", self.fsSurfaceDecimateSpin)
+
+        fs_surface_button_row = qt.QHBoxLayout()
+        self.fsLoadSurfaceButton = qt.QPushButton("Load/Generate Surfaces")
+        self.fsLoadSurfaceButton.clicked.connect(self.onLoadFSSurfacesClicked)
+        fs_surface_button_row.addWidget(self.fsLoadSurfaceButton)
+        self.fsClearSurfaceButton = qt.QPushButton("Clear Surfaces")
+        self.fsClearSurfaceButton.clicked.connect(self.onClearFSSurfacesClicked)
+        fs_surface_button_row.addWidget(self.fsClearSurfaceButton)
+        form.addRow(fs_surface_button_row)
+
         self.fsExistingAtlasSelector = slicer.qMRMLNodeComboBox()
         self.fsExistingAtlasSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
         self.fsExistingAtlasSelector.noneEnabled = True
@@ -250,7 +295,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         if not subject_dir:
             return
         try:
-            candidates = self.logic.core.list_freesurfer_parcellation_candidates(subject_dir)
+            candidates = self.logic.registration_service.list_freesurfer_parcellation_candidates(subject_dir)
         except Exception as exc:
             self.log(f"[fs] parcellation scan error: {exc}")
             return
@@ -291,8 +336,18 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         self._preselect_base_volume(self.fsFixedSelector)
         self._preselect_base_volume(self.thomasFixedSelector)
         self._refresh_fs_parcellation_combo()
+        self._refresh_surface_source_selector()
         self.refresh_registry_view()
         self.log("[refresh] workflow inputs refreshed")
+
+    def _refresh_surface_source_selector(self):
+        """Preselect a likely FreeSurfer parcellation volume for derived-surface mode."""
+        node = None
+        wf = self.workflowState.resolve_or_create_workflow_node()
+        fs_nodes = self.workflowState.role_nodes("FSParcellationVolumes", workflow_node=wf)
+        if fs_nodes:
+            node = fs_nodes[0]
+        self.fsSurfaceParcellationSelector.setCurrentNode(node)
 
     def refresh_registry_view(self):
         wf = self.workflowState.resolve_or_create_workflow_node()
@@ -341,7 +396,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             f"[fs] registration start: moving={moving_node.GetName()} -> fixed={fixed_node.GetName()} (init={init_mode})"
         )
         try:
-            self.logic.core.run_brainsfit_rigid_registration(
+            self.logic.registration_service.run_brainsfit_rigid_registration(
                 fixed_volume_node=fixed_node,
                 moving_volume_node=moving_node,
                 output_transform_node=transform_node,
@@ -439,7 +494,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
                     "FS->ROSA transform is not available. Run registration first or disable transform application.",
                 )
                 return
-            self.logic.core.apply_transform_to_nodes(
+            self.logic.registration_service.apply_transform_to_nodes(
                 nodes=[node],
                 transform_node=transform_node,
                 harden=bool(self.fsHardenVolumeCheck.checked),
@@ -459,7 +514,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         selected_names = None if selected == "all available" else [selected]
         lut_path = self.fsLUTPathSelector.currentPath.strip() if self.fsLUTPathSelector.currentPath else ""
         try:
-            result = self.logic.core.load_freesurfer_parcellation_volumes(
+            result = self.logic.registration_service.load_freesurfer_parcellation_volumes(
                 subject_dir=subject_dir,
                 selected_names=selected_names,
                 color_lut_path=lut_path or None,
@@ -477,7 +532,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         if bool(self.fsApplyTransformVolumesCheck.checked):
             transform_node = self._current_fs_transform_for_volumes()
             if transform_node is not None and loaded_nodes:
-                self.logic.core.apply_transform_to_nodes(
+                self.logic.registration_service.apply_transform_to_nodes(
                     nodes=loaded_nodes,
                     transform_node=transform_node,
                     harden=bool(self.fsHardenVolumeCheck.checked),
@@ -487,6 +542,110 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         for node, path in zip(loaded_nodes, loaded_paths):
             self._publish_fs_parcellation_node(node=node, source_path=path)
         self.log(f"[fs] loaded {len(loaded_nodes)} parcellation volumes")
+        self._refresh_surface_source_selector()
+        self.refresh_registry_view()
+
+    def _publish_fs_surface_nodes(self, nodes, space_name):
+        if not nodes:
+            return
+        self.workflowPublisher.publish_nodes(
+            role="FSCorticalSurfaceModels",
+            nodes=nodes,
+            source="freesurfer",
+            space_name=space_name,
+            workflow_node=self.workflowNode,
+        )
+
+    def onClearFSSurfacesClicked(self):
+        wf = self.workflowState.resolve_or_create_workflow_node()
+        nodes = self.workflowState.role_nodes("FSCorticalSurfaceModels", workflow_node=wf)
+        for node in nodes:
+            if node is not None and node.GetScene() is not None:
+                slicer.mrmlScene.RemoveNode(node)
+        self.workflowState.clear_role("FSCorticalSurfaceModels", workflow_node=wf)
+        self.log(f"[fs] cleared {len(nodes)} cortical surface node(s)")
+        self.refresh_registry_view()
+
+    def onLoadFSSurfacesClicked(self):
+        mode = (widget_current_text(self.fsSurfaceModeCombo) or "None").strip().lower()
+        if mode == "none":
+            self.log("[fs] surface mode is None; skipping")
+            return
+
+        transform_node = None
+        if bool(self.fsSurfaceApplyTransformCheck.checked):
+            transform_node = self._current_fs_transform_for_volumes()
+            if transform_node is None:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "Atlas Sources",
+                    "FS->ROSA transform not available. Register FS MRI first or disable transform application.",
+                )
+                return
+
+        loaded_nodes = []
+        if mode == "fs pial":
+            subject_dir = (self.fsSubjectDirSelector.currentPath or "").strip()
+            if not subject_dir:
+                qt.QMessageBox.warning(slicer.util.mainWindow(), "Atlas Sources", "Select FreeSurfer subject directory.")
+                return
+            annotation_name = (self.fsSurfaceAnnotationEdit.text or "").strip() or None
+            lut_path = self.fsLUTPathSelector.currentPath.strip() if self.fsLUTPathSelector.currentPath else ""
+            try:
+                result = self.logic.registration_service.load_freesurfer_surfaces(
+                    subject_dir=subject_dir,
+                    surface_set="pial",
+                    annotation_name=annotation_name,
+                    color_lut_path=lut_path or None,
+                    logger=self.log,
+                )
+            except Exception as exc:
+                self.log(f"[fs] surface load error: {exc}")
+                qt.QMessageBox.critical(slicer.util.mainWindow(), "Atlas Sources", str(exc))
+                return
+            loaded_nodes = result.get("loaded_nodes", [])
+            reduction = float(self.fsSurfaceDecimateSpin.value)
+            if loaded_nodes and reduction > 0.0:
+                self.logic.registration_service.decimate_model_nodes(loaded_nodes, reduction=reduction)
+                self.log(f"[fs] decimated {len(loaded_nodes)} pial surface model(s), reduction={reduction:.2f}")
+            for node in loaded_nodes:
+                node.SetAttribute("Rosa.SurfaceKind", "pial")
+        elif mode == "volume-derived":
+            volume_node = self.fsSurfaceParcellationSelector.currentNode()
+            if volume_node is None:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "Atlas Sources",
+                    "Select a parcellation volume for derived surface mode.",
+                )
+                return
+            try:
+                seg_node = self.logic.registration_service.create_surface_from_parcellation_volume(
+                    volume_node=volume_node,
+                    output_name=f"{volume_node.GetName()}_Surface",
+                )
+            except Exception as exc:
+                self.log(f"[fs] derived surface error: {exc}")
+                qt.QMessageBox.critical(slicer.util.mainWindow(), "Atlas Sources", str(exc))
+                return
+            if seg_node is not None:
+                loaded_nodes = [seg_node]
+                seg_node.SetAttribute("Rosa.SurfaceKind", "derived")
+        else:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "Atlas Sources", f"Unsupported surface mode: {mode}")
+            return
+
+        if transform_node is not None and loaded_nodes:
+            self.logic.registration_service.apply_transform_to_nodes(
+                nodes=loaded_nodes,
+                transform_node=transform_node,
+                harden=bool(self.fsSurfaceHardenCheck.checked),
+            )
+            self.log(f"[fs] applied transform {transform_node.GetName()} to {len(loaded_nodes)} surface node(s)")
+
+        space_name = "ROSA_BASE" if transform_node is not None else "FS_NATIVE"
+        self._publish_fs_surface_nodes(loaded_nodes, space_name=space_name)
+        self.log(f"[fs] published {len(loaded_nodes)} cortical surface node(s)")
         self.refresh_registry_view()
 
     def onRegisterThomasMRIToRosaClicked(self):
@@ -511,7 +670,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             f"[thomas] registration start: moving={moving_node.GetName()} -> fixed={fixed_node.GetName()} (init={init_mode})"
         )
         try:
-            self.logic.core.run_brainsfit_rigid_registration(
+            self.logic.registration_service.run_brainsfit_rigid_registration(
                 fixed_volume_node=fixed_node,
                 moving_volume_node=moving_node,
                 output_transform_node=transform_node,
@@ -580,7 +739,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Atlas Sources", "Select THOMAS output directory.")
             return
         try:
-            result = self.logic.core.load_thomas_thalamus_masks(
+            result = self.logic.thomas_service.load_thomas_thalamus_masks(
                 thomas_dir=thomas_dir,
                 logger=self.log,
             )
@@ -599,7 +758,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
                     "vtkMRMLLinearTransformNode",
                 )
             if transform_node is not None and loaded_nodes:
-                self.logic.core.apply_transform_to_nodes(
+                self.logic.registration_service.apply_transform_to_nodes(
                     nodes=loaded_nodes,
                     transform_node=transform_node,
                     harden=bool(self.thomasHardenCheck.checked),
@@ -619,6 +778,8 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
 class AtlasSourcesLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
+        self.utils = AtlasUtils()
+        self.registration_service = AtlasRegistrationService(module_dir=MODULE_DIR)
+        self.thomas_service = ThomasService(utils=self.utils)

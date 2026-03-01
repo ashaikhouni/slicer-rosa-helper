@@ -235,10 +235,6 @@ class WorkflowPublisher:
         table.Modified()
         image_table.Modified()
 
-    def set_default_postop_ct(self, volume_node, workflow_node=None):
-        """Set default postop CT role and update image registry flags."""
-        self.set_default_role("PostopCT", volume_node, workflow_node=workflow_node)
-
     def set_default_base_volume(self, volume_node, workflow_node=None):
         """Set default base volume role and update image registry flags."""
         self.set_default_role("BaseVolume", volume_node, workflow_node=workflow_node)

@@ -50,11 +50,15 @@ class AtlasUtils:
             return np.eye(4, dtype=float)
         return self.vtk_matrix_to_numpy_4x4(world_to_local_vtk)
 
-    def world_to_node_ras_point(self, node, point_world_ras):
-        mat = self.world_to_node_ras_matrix(node)
+    def world_to_node_ras_point_with_matrix(self, world_to_node_matrix, point_world_ras):
+        mat = np.eye(4, dtype=float) if world_to_node_matrix is None else world_to_node_matrix
         vec = np.array([float(point_world_ras[0]), float(point_world_ras[1]), float(point_world_ras[2]), 1.0])
         out = mat @ vec
         return [float(out[0]), float(out[1]), float(out[2])]
+
+    def world_to_node_ras_point(self, node, point_world_ras):
+        mat = self.world_to_node_ras_matrix(node)
+        return self.world_to_node_ras_point_with_matrix(mat, point_world_ras)
 
     def show_volume_in_all_slice_views(self, volume_node):
         if volume_node is None:

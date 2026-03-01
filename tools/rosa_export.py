@@ -10,9 +10,13 @@ import os
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-LIB_DIR = os.path.join(REPO_ROOT, "RosaHelper", "Lib")
-if LIB_DIR not in sys.path:
-    sys.path.insert(0, LIB_DIR)
+LIB_CANDIDATES = [
+    os.path.join(REPO_ROOT, "CommonLib"),
+]
+for lib_dir in LIB_CANDIDATES:
+    if os.path.isdir(lib_dir) and lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+        break
 
 from rosa_core import (  # noqa: E402
     build_assignment_template,

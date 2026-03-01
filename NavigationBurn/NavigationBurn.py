@@ -21,7 +21,10 @@ for path in PATH_CANDIDATES:
 
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_scene import (
-    AtlasCoreService,
+    AtlasRegistrationService,
+    AtlasUtils,
+    DicomIOService,
+    ThomasService,
     get_or_create_linear_transform,
     preselect_base_volume,
     widget_current_text,
@@ -173,7 +176,7 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_nucleus_combo(self):
         seg_nodes = self._workflow_segmentation_nodes()
-        nuclei = self.logic.core.collect_thomas_nuclei(seg_nodes)
+        nuclei = self.logic.thomas_service.collect_thomas_nuclei(seg_nodes)
         current = (widget_current_text(self.nucleusCombo) or "").strip()
         self.nucleusCombo.clear()
         if nuclei:
@@ -205,7 +208,7 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Navigation Burn", "Select DICOM directory first.")
             return
         try:
-            volume_node = self.logic.core.load_dicom_scalar_volume_from_directory(
+            volume_node = self.logic.dicom_service.load_dicom_scalar_volume_from_directory(
                 dicom_dir=dicom_dir,
                 logger=self.log,
             )
@@ -222,14 +225,14 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
                 f"fixed={base_node.GetName()} (init=useGeometryAlign)"
             )
             try:
-                self.logic.core.run_brainsfit_rigid_registration(
+                self.logic.registration_service.run_brainsfit_rigid_registration(
                     fixed_volume_node=base_node,
                     moving_volume_node=volume_node,
                     output_transform_node=transform_node,
                     initialize_mode="useGeometryAlign",
                     logger=self.log,
                 )
-                self.logic.core.apply_transform_to_nodes(
+                self.logic.registration_service.apply_transform_to_nodes(
                     nodes=[volume_node],
                     transform_node=transform_node,
                     harden=True,
@@ -297,7 +300,7 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
             nucleus = (widget_current_text(self.nucleusCombo) or "").strip()
             fill_value = float(self.fillSpin.value)
             output_name = self.outputNameEdit.text.strip() or "THOMAS_Burned_MRI"
-            out_volume = self.logic.core.burn_thomas_nucleus_to_volume(
+            out_volume = self.logic.thomas_service.burn_thomas_nucleus_to_volume(
                 segmentation_nodes=burn_seg_nodes,
                 input_volume_node=burn_input_for_burn,
                 nucleus=nucleus,
@@ -311,8 +314,8 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
                 if node is not None and node.GetScene() is not None:
                     slicer.mrmlScene.RemoveNode(node)
 
-        self.logic.core.place_node_under_same_study(out_volume, burn_input_node, logger=self.log)
-        self.logic.core.show_volume_in_all_slice_views(out_volume)
+        self.logic.dicom_service.place_node_under_same_study(out_volume, burn_input_node, logger=self.log)
+        self.logic.utils.show_volume_in_all_slice_views(out_volume)
         self.workflowPublisher.register_volume(
             volume_node=out_volume,
             source_type="derived",
@@ -349,7 +352,7 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
             series_description = self._series_description_default()
             self.seriesDescriptionEdit.setText(series_description)
 
-        series_dir = self.logic.core.export_scalar_volume_to_dicom_series(
+        series_dir = self.logic.dicom_service.export_scalar_volume_to_dicom_series(
             volume_node=volume_node,
             reference_volume_node=reference_volume,
             export_dir=export_dir,
@@ -389,6 +392,9 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
 class NavigationBurnLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()
-        self.workflow_publish = WorkflowPublisher()
+        self.workflow_publish = WorkflowPublisher(self.workflow_state)
+        self.utils = AtlasUtils()
+        self.registration_service = AtlasRegistrationService(module_dir=MODULE_DIR)
+        self.thomas_service = ThomasService(utils=self.utils)
+        self.dicom_service = DicomIOService()

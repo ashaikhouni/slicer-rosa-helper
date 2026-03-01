@@ -11,13 +11,6 @@ def resolve_or_create_workflow(context_hint=None):
     return WorkflowState().resolve_or_create_workflow_node(context_hint=context_hint)
 
 
-def resolve_role_nodes(role, workflow_node=None):
-    """Return role-bound nodes from workflow or empty list."""
-    state = WorkflowState()
-    wf = workflow_node or state.resolve_or_create_workflow_node()
-    return state.role_nodes(role, workflow_node=wf)
-
-
 def resolve_default_volume(modality=None, prefer_postop=False, workflow_node=None):
     """Resolve best volume node using workflow defaults then registry fallback."""
     state = WorkflowState()

@@ -337,12 +337,10 @@ CSV includes:
   - includes source atlas and both nearest-voxel / centroid distances
 - `primary_*` columns:
   - final assignment used by workflow
-  - with `Prefer THOMAS when available` enabled: uses THOMAS if present, otherwise closest overall
-  - with it disabled: equals `closest_*`
+  - currently mirrors `closest_*`
 
 Primary assignment rule:
 - chooses the closest voxel match across selected atlas sources
-- if `Prefer THOMAS when available` is enabled, THOMAS assignment is used whenever a THOMAS label is present
 
 THOMAS labeling behavior:
 - generic whole-thalamus segments are excluded from nearest-label assignment when nuclei are available
@@ -405,7 +403,7 @@ Notes:
 - `nibabel` path does not require a FreeSurfer license.
 - Annotation color table priority (same for nibabel and extension paths):
   user-selected LUT -> `FreeSurferLabels` node -> bundled LUT
-  (`RosaHelper/Resources/freesurfer/FreeSurferColorLUT20120827.txt`).
+  (`CommonLib/resources/freesurfer/FreeSurferColorLUT20120827.txt`).
 - If direct `.pial/.white/.inflated` loading fails, ROSA Helper attempts fallback conversion
   through `mris_convert` (FreeSurfer) and loads the converted VTK surface.
 - `mris_convert` fallback may require a valid FreeSurfer license.

@@ -50,6 +50,31 @@ class AtlasRegistrationService:
             logger=logger,
         )
 
+    def load_freesurfer_surfaces(
+        self,
+        subject_dir,
+        surface_set="pial",
+        annotation_name=None,
+        color_lut_path=None,
+        logger=None,
+    ):
+        return self.fs_service.load_freesurfer_surfaces(
+            subject_dir=subject_dir,
+            surface_set=surface_set,
+            annotation_name=annotation_name,
+            color_lut_path=color_lut_path,
+            logger=logger,
+        )
+
+    def decimate_model_nodes(self, model_nodes, reduction=0.6):
+        return self.fs_service.decimate_model_nodes(model_nodes=model_nodes, reduction=reduction)
+
+    def create_surface_from_parcellation_volume(self, volume_node, output_name=None):
+        return self.fs_service.create_surface_from_parcellation_volume(
+            volume_node=volume_node,
+            output_name=output_name,
+        )
+
     def apply_transform_to_nodes(self, nodes, transform_node, harden=False):
         if transform_node is None:
             raise ValueError("Transform node is required.")

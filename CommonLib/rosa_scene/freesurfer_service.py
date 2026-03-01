@@ -463,8 +463,6 @@ class FreeSurferService:
             os.path.join(self.module_dir, "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
             os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
-            # Backward-compatible fallback during transition.
-            os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "RosaHelper", "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
         ]
         for path in candidates:
             if os.path.isfile(path):
@@ -931,3 +929,32 @@ class FreeSurferService:
             node.SetAndObserveTransformNodeID(transform_node.GetID())
             if harden:
                 slicer.vtkSlicerTransformLogic().hardenTransform(node)
+
+    def decimate_model_nodes(self, model_nodes, reduction=0.6):
+        """Apply simple mesh decimation in-place for model nodes."""
+        r = max(0.0, min(float(reduction), 0.95))
+        if r <= 0.0:
+            return model_nodes or []
+        for node in model_nodes or []:
+            if node is None:
+                continue
+            poly = node.GetPolyData()
+            if poly is None or poly.GetNumberOfPoints() < 10:
+                continue
+            dec = vtk.vtkDecimatePro()
+            dec.SetInputData(poly)
+            dec.SetTargetReduction(r)
+            dec.PreserveTopologyOn()
+            dec.BoundaryVertexDeletionOff()
+            dec.Update()
+            out_poly = vtk.vtkPolyData()
+            out_poly.DeepCopy(dec.GetOutput())
+            node.SetAndObservePolyData(out_poly)
+        return model_nodes or []
+
+    def create_surface_from_parcellation_volume(self, volume_node, output_name=None):
+        """Create a derived 3D segmentation surface from a parcellation volume."""
+        if volume_node is None:
+            raise ValueError("Parcellation volume node is required.")
+        name = output_name or f"{volume_node.GetName()}_Surface"
+        return self._create_segmentation_from_parcellation_volume(volume_node, output_name=name)

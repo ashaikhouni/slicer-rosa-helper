@@ -15,7 +15,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - `AtlasLabeling`: contact-to-atlas assignment only
   - `NavigationBurn`: THOMAS burn + DICOM export only
 - UI policy (locked): use tabs for multi-workflow modules (for example `AtlasSources` FreeSurfer/THOMAS/Registry tabs).
-- Atlas extensibility contract (locked): new atlas integrations must follow `/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/ATLAS_SOURCE_CONTRACT.md`.
+- Atlas extensibility contract (locked): new atlas integrations must follow `ATLAS_SOURCE_CONTRACT.md`.
 - Trajectory ownership model:
   - trajectories are grouped by producer (`planned_rosa`, `imported_rosa`, `manual`, `guided_fit`, `de_novo`)
   - each module updates/replaces only its own trajectory group

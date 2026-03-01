@@ -9,10 +9,3 @@ slicerMacroBuildScriptedModule(
   SCRIPTS ${MODULE_PYTHON_SCRIPTS}
   WITH_GENERIC_TESTS
 )
-
-# Install module resources (electrode library, LUTs, icons).
-install(
-  DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/Resources/
-  DESTINATION ${Slicer_INSTALL_QTSCRIPTEDMODULES_LIB_DIR}/${MODULE_NAME}/Resources
-  COMPONENT Runtime
-)

@@ -21,7 +21,7 @@ for path in PATH_CANDIDATES:
 
 from rosa_core import lps_to_ras_point
 from rosa_workflow import WorkflowState
-from rosa_scene import AtlasCoreService
+from rosa_scene import AtlasAssignmentService, AtlasUtils
 
 
 class AtlasLabeling(ScriptedLoadableModule):
@@ -67,10 +67,6 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
         self.referenceSelector.removeEnabled = False
         self.referenceSelector.setMRMLScene(slicer.mrmlScene)
         form.addRow("Reference volume", self.referenceSelector)
-
-        self.preferThomasCheck = qt.QCheckBox("Prefer THOMAS when available")
-        self.preferThomasCheck.setChecked(True)
-        form.addRow(self.preferThomasCheck)
 
         self.assignButton = qt.QPushButton("Assign Contacts to Atlas")
         self.assignButton.clicked.connect(self.onAssignClicked)
@@ -177,15 +173,14 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
         if ref_node is None:
             ref_node = self.workflowNode.GetNodeReference("BaseVolume")
         try:
-            rows = self.logic.core.assign_contacts_to_atlases(
+            rows = self.logic.assignment_service.assign_contacts_to_atlases(
                 contacts=contacts,
                 freesurfer_volume_node=fs_node,
                 thomas_segmentation_nodes=th_nodes,
                 wm_volume_node=wm_node,
                 reference_volume_node=ref_node,
-                prefer_thomas=bool(self.preferThomasCheck.checked),
             )
-            self.logic.core.publish_atlas_assignment_rows(
+            self.logic.assignment_service.publish_atlas_assignment_rows(
                 atlas_rows=rows,
                 workflow_node=self.workflowNode,
             )
@@ -200,5 +195,6 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
 class AtlasLabelingLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = AtlasCoreService(module_dir=MODULE_DIR)
         self.workflow_state = WorkflowState()
+        self.utils = AtlasUtils()
+        self.assignment_service = AtlasAssignmentService(utils=self.utils, workflow_state=self.workflow_state)

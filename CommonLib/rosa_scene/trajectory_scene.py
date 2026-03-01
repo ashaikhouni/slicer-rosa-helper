@@ -88,10 +88,6 @@ class TrajectorySceneService:
         key = str(group or DEFAULT_GROUP).strip().lower()
         return key if key in TRAJECTORY_GROUP_CONFIG else DEFAULT_GROUP
 
-    def group_role(self, group):
-        cfg = TRAJECTORY_GROUP_CONFIG.get(self._normalize_group(group), {})
-        return cfg.get("role", "")
-
     def build_node_name(self, trajectory_name, group):
         """Return display node name for a trajectory logical name + group."""
         name = str(trajectory_name or "").strip()
@@ -166,16 +162,6 @@ class TrajectorySceneService:
         if hasattr(display, "SetPropertiesLabelVisibility"):
             display.SetPropertiesLabelVisibility(False)
 
-    def set_group_visibility(self, group, visible):
-        """Set visibility for all trajectories in one group."""
-        grp = self._normalize_group(group)
-        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
-            if self.infer_group_from_node(node) != grp:
-                continue
-            display = node.GetDisplayNode()
-            if display:
-                display.SetVisibility(bool(visible))
-
     def show_only_groups(self, groups):
         """Hide all trajectory groups except the provided one(s)."""
         keep = {self._normalize_group(g) for g in (groups or [])}
@@ -225,41 +211,6 @@ class TrajectorySceneService:
             if traj is not None:
                 out[name] = traj
         return out
-
-    def build_trajectory_map_with_scene_overrides(self, base_trajectories):
-        """Overlay in-scene line edits on top of trajectory dictionaries."""
-        out = {}
-        for traj in base_trajectories or []:
-            name = traj.get("name", "")
-            node = None
-            node_id = traj.get("node_id", "")
-            if node_id:
-                node = slicer.mrmlScene.GetNodeByID(node_id)
-            if node is None:
-                node_name = traj.get("node_name", "")
-                if node_name:
-                    node = self.find_line_markup_node(node_name)
-            if node is None and name:
-                node = self.find_line_markup_node(name)
-            scene_traj = self.trajectory_from_line_node(name, node)
-            out[name] = scene_traj if scene_traj is not None else traj
-        return out
-
-    def set_preview_line(self, trajectory_name, start_lps, end_lps, node_prefix="AutoFit_"):
-        """Create/update one preview trajectory line in scene."""
-        node_name = f"{node_prefix}{trajectory_name}"
-        node = self.find_line_markup_node(node_name)
-        if node is None:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsLineNode", node_name)
-            node.CreateDefaultDisplayNodes()
-        start_ras = lps_to_ras_point(start_lps)
-        end_ras = lps_to_ras_point(end_lps)
-        node.RemoveAllControlPoints()
-        node.AddControlPoint(vtk.vtkVector3d(*start_ras))
-        node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-        self.set_trajectory_metadata(node, trajectory_name=trajectory_name, group="autofit_preview", origin="preview")
-        self._apply_group_display(node, "autofit_preview")
-        return node
 
     def remove_preview_lines(self, trajectory_names=None, node_prefix="AutoFit_"):
         """Remove preview line markups from scene."""
