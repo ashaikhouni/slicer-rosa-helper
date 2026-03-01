@@ -67,7 +67,7 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 6** (`AtlasSources`, `Atlas Labeling`, and `Navigation Burn` extraction).
+- **Current phase target**: **Phase 8** (compatibility bridge removal and cleanup release).
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

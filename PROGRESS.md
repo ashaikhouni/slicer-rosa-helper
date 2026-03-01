@@ -1,12 +1,12 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-03-01 00:35:00Z
-- **Current phase**: Phase 7 — `Contact Import` module extraction (implementation in progress)
+- **Timestamp (UTC)**: 2026-03-01 01:10:00Z
+- **Current phase**: Phase 8 — compatibility bridge removal and cleanup (in progress)
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Phase 7 contact/trajectory import implementation smoke-tested locally with CSV/TSV/XLSX/POM examples.
+  - Phase 8 started: removed legacy workflow compatibility bridge files under `RosaHelper/Lib/rosa_slicer/workflow/*`.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -89,44 +89,41 @@
   - Fixed workflow registry string normalization and base/postop flag sync.
   - User confirmed end-to-end Phase 6 flow works.
 
-## Active Phase
 ### Phase 7 — `Contact Import` Module Extraction
-- **Objective**:
-  - Add import workflow for external contact files and publish them into shared workflow roles.
-- **In scope**:
-  - New `ContactImport` module for CSV/TSV/XLSX/POM.
-  - Coordinate frame mapping into selected target frame.
-  - Publish imported contacts to `ContactFiducials` and optional reconstructed trajectories to `WorkingTrajectoryLines`.
-  - Interop with `ContactsTrajectoryView`, `AtlasLabeling`, and `ExportCenter`.
-- **Out of scope**:
-  - New detection/fitting algorithms.
-  - Atlas source changes.
-- **Exit criteria**:
-  - Contact import works for supported formats.
-  - Imported contacts are available for atlas labeling/export without manual re-entry.
-  - Optional trajectory reconstruction is role-grouped and consumable by downstream modules.
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-03-01
+- **Commit range**: `8c9cdc1..b3da923`
+- **Acceptance checks passed**:
+  - Added dedicated `ContactImport` module for CSV/TSV/XLSX/POM ingestion.
+  - Enforced strict contact/trajectory schemas and required reference volume.
+  - Imported contacts now auto-create grouped external trajectories (`ImportedExternal`) and publish to workflow roles.
+  - Added generic example templates under `CommonLib/resources/examples/contact_import/`.
+  - User smoke-tested import templates and confirmed downstream interop.
+  - Loader refactor delivered tabbed `ROSA Load` + `Custom Import` flow with base/postop role assignment.
+  - Transform provenance now retained and organized under `RosaWorkflow/Transforms`.
 
-### Phase 7 Implementation Sequence
-1. [done] Add `ContactImport` module scaffold and extension registration.
-2. [done] Implement tabs for `Contacts` and `Trajectories`.
-3. [done] Enforce required reference volume (scene select or file load).
-4. [done] Implement strict schemas:
-   - contacts: `trajectory_name,index,x,y,z` (`label` optional)
-   - trajectories: `name,ex,ey,ez,tx,ty,tz`
-5. [done] Implement parsers: CSV/TSV/XLSX and POM (contacts).
-6. [done] Publish imported outputs to workflow roles.
-7. [done] Smoke-test in Slicer with example files:
-   - contacts: CSV/TSV/XLSX + POM
-   - trajectories: CSV/TSV/XLSX
-   - imported contacts auto-create grouped `ImportedExternal` trajectories for downstream modules.
+## Active Phase
+### Phase 8 — Compatibility Bridge Removal and Cleanup Release
+- **Objective**:
+  - Remove legacy bridge imports and finalize cleanup of monolithic leftovers while preserving all workflows.
+- **In scope**:
+  - Remove `RosaHelper/Lib/rosa_slicer/workflow/*` compatibility bridge.
+  - Ensure all modules use `CommonLib` workflow/core imports only.
+  - Final pass to remove stale couplings and dead code paths.
+  - Run full multi-module smoke regression before release push.
+- **Out of scope**:
+  - New end-user features unrelated to cleanup.
+- **Exit criteria**:
+  - No module imports from removed compatibility bridge path.
+  - All primary workflows pass smoke tests after bridge removal.
+  - Release branch is clean, documented, and ready to push.
 
 ## Open Issues / Decisions
 ### Blocking Items
 - None currently.
 
 ### Deferred Items
-- Full module extraction (Phases 3–7) after `CommonLib` stabilization.
-- Compatibility bridge removal deferred to Phase 8.
+- Optional additional cleanup/refactors after Phase 8 closure.
 
 ### Decision Log
 - **D-001**: Tracking format locked to `ROADMAP.md + PROGRESS.md`.
@@ -146,6 +143,7 @@
 - **D-015**: Removed Navigation Burn auto-register fallback to reduce user confusion; burn assumes workflow-aligned THOMAS segmentations.
 - **D-016**: Contact import contract locks `trajectory_name,index,x,y,z` as required contacts schema to avoid grouping ambiguity.
 - **D-017**: `RosaHelper` now acts as `Loader` with tabs (`ROSA Load`, `Custom Import`), and workflow transform nodes are organized under `RosaWorkflow/Transforms` while preserving native-to-base provenance.
+- **D-018**: Compatibility bridge removal started by deleting legacy `RosaHelper/Lib/rosa_slicer/workflow/*`; modules must import workflow services from `CommonLib`.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
