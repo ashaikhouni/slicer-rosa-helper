@@ -1,6 +1,5 @@
 """Atlas labeling module consuming shared workflow contacts and atlas sources."""
 
-import importlib.util
 import os
 import sys
 
@@ -22,22 +21,7 @@ for path in PATH_CANDIDATES:
 
 from rosa_core import lps_to_ras_point
 from rosa_workflow import WorkflowState
-
-_ROSA_HELPER_LOGIC_INSTANCE = None
-
-
-def _get_rosa_helper_logic_instance():
-    global _ROSA_HELPER_LOGIC_INSTANCE
-    if _ROSA_HELPER_LOGIC_INSTANCE is not None:
-        return _ROSA_HELPER_LOGIC_INSTANCE
-    helper_path = os.path.join(os.path.dirname(MODULE_DIR), "RosaHelper", "RosaHelper.py")
-    spec = importlib.util.spec_from_file_location("_rosahelper_logic_bridge", helper_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Unable to load RosaHelper logic bridge.")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    _ROSA_HELPER_LOGIC_INSTANCE = module.RosaHelperLogic()
-    return _ROSA_HELPER_LOGIC_INSTANCE
+from rosa_scene.loader_core_bridge import get_loader_core
 
 
 class AtlasLabeling(ScriptedLoadableModule):
@@ -222,5 +206,5 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
 class AtlasLabelingLogic(ScriptedLoadableModuleLogic):
     def __init__(self):
         super().__init__()
-        self.core = _get_rosa_helper_logic_instance()
+        self.core = get_loader_core(MODULE_DIR)
         self.workflow_state = WorkflowState()

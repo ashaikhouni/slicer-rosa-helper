@@ -7,6 +7,7 @@
 - **Working branch**: `main`
 - **Open worktree state**:
   - Phase 8 started: removed legacy workflow compatibility bridge files under `RosaHelper/Lib/rosa_slicer/workflow/*`.
+  - Centralized remaining Loader-core bridge access in shared `CommonLib/rosa_scene/loader_core_bridge.py` for Atlas modules.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -144,6 +145,7 @@
 - **D-016**: Contact import contract locks `trajectory_name,index,x,y,z` as required contacts schema to avoid grouping ambiguity.
 - **D-017**: `RosaHelper` now acts as `Loader` with tabs (`ROSA Load`, `Custom Import`), and workflow transform nodes are organized under `RosaWorkflow/Transforms` while preserving native-to-base provenance.
 - **D-018**: Compatibility bridge removal started by deleting legacy `RosaHelper/Lib/rosa_slicer/workflow/*`; modules must import workflow services from `CommonLib`.
+- **D-019**: Atlas modules now use a shared Loader-core bridge helper (`rosa_scene.loader_core_bridge`) instead of duplicating per-module dynamic import code.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
