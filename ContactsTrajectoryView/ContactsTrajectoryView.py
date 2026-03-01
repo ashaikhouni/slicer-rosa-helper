@@ -29,7 +29,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_scene import ElectrodeSceneService, TrajectorySceneService
+from rosa_scene import ElectrodeSceneService, TrajectorySceneService, widget_current_text
 from rosa_workflow import WorkflowPublisher, WorkflowState
 
 TRAJECTORY_SOURCE_OPTIONS = [
@@ -168,12 +168,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             slicer.app.processEvents()
         except Exception:
             pass
-
-    def _widget_text(self, widget):
-        if widget is None:
-            return ""
-        text_attr = getattr(widget, "currentText", "")
-        return text_attr() if callable(text_attr) else text_attr
 
     def _widget_value(self, widget):
         if widget is None:
@@ -350,7 +344,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _update_electrode_length_cell(self, row):
         model_combo = self.contactTable.cellWidget(row, 2)
-        model_id = self._widget_text(model_combo).strip()
+        model_id = widget_current_text(model_combo).strip()
         length_text = ""
         if model_id:
             length_text = f"{self._electrode_length_mm(model_id):.2f}"
@@ -426,14 +420,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             model_combo = self.contactTable.cellWidget(row, 2)
             tip_at_combo = self.contactTable.cellWidget(row, 4)
             tip_shift_spin = self.contactTable.cellWidget(row, 5)
-            model_id = self._widget_text(model_combo).strip()
+            model_id = widget_current_text(model_combo).strip()
             if not model_id:
                 continue
             rows.append(
                 {
                     "trajectory": traj_item.text(),
                     "model_id": model_id,
-                    "tip_at": self._widget_text(tip_at_combo) or "target",
+                    "tip_at": widget_current_text(tip_at_combo) or "target",
                     "tip_shift_mm": self._widget_value(tip_shift_spin),
                     "xyz_offset_mm": [0.0, 0.0, 0.0],
                 }
@@ -559,7 +553,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.onRefreshClicked()
 
     def onApplyModelAllClicked(self):
-        model_id = self._widget_text(self.defaultModelCombo).strip()
+        model_id = widget_current_text(self.defaultModelCombo).strip()
         if not model_id:
             return
         for row in range(self.contactTable.rowCount):
@@ -669,7 +663,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         traj_name = data() if callable(data) else data
         traj_name = str(traj_name or "").strip()
         if not traj_name:
-            traj_name = self._widget_text(self.trajectorySelector).strip()
+            traj_name = widget_current_text(self.trajectorySelector).strip()
         if not traj_name:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Contacts & Trajectory View", "No trajectory selected.")
             return
@@ -686,8 +680,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
         start_ras = lps_to_ras_point(trajectory["start"])
         end_ras = lps_to_ras_point(trajectory["end"])
-        slice_view = self._widget_text(self.sliceViewSelector) or "Red"
-        mode = self._widget_text(self.sliceModeSelector) or "long"
+        slice_view = widget_current_text(self.sliceViewSelector) or "Red"
+        mode = widget_current_text(self.sliceModeSelector) or "long"
 
         try:
             self.logic.electrode_scene.align_slice_to_trajectory(

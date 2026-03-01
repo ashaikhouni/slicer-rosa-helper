@@ -7,6 +7,8 @@ from __main__ import slicer, vtk
 from rosa_core import lps_to_ras_point
 from rosa_workflow import WorkflowPublisher, WorkflowState
 
+from .scene_utils import find_node_by_name as _find_node_by_name
+
 
 class ElectrodeSceneService:
     """Scene-level operations for contacts, electrode models, and trajectory views."""
@@ -17,10 +19,7 @@ class ElectrodeSceneService:
 
     def find_node_by_name(self, node_name, class_name):
         """Return first node with exact name and class, or None."""
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
+        return _find_node_by_name(node_name=node_name, class_name=class_name)
 
     def create_contacts_fiducials_node(self, contacts, node_name="ROSA_Contacts"):
         """Create one fiducial node from contact list in ROSA/LPS space."""

@@ -30,6 +30,7 @@ from rosa_core import (
 )
 from rosa_scene.case_loader_service import CaseLoaderService
 from rosa_scene.freesurfer_service import FreeSurferService
+from rosa_scene.scene_utils import find_node_by_name
 from rosa_scene.trajectory_scene import TrajectorySceneService
 from rosa_workflow.workflow_publish import WorkflowPublisher
 from rosa_workflow.workflow_state import WorkflowState
@@ -503,12 +504,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
                 continue
             node = self.logic.trajectory_scene.find_line_by_group_and_name(name, "imported_rosa")
             if node is None:
-                node = self.logic._find_node_by_name(name, "vtkMRMLMarkupsLineNode")
+                node = find_node_by_name(name, "vtkMRMLMarkupsLineNode")
             if node is not None:
                 imported_nodes.append(node)
             plan_node = self.logic.trajectory_scene.find_line_by_group_and_name(name, "planned_rosa")
             if plan_node is None:
-                plan_node = self.logic._find_node_by_name(f"Plan_{name}", "vtkMRMLMarkupsLineNode")
+                plan_node = find_node_by_name(f"Plan_{name}", "vtkMRMLMarkupsLineNode")
             if plan_node is not None:
                 planned_nodes.append(plan_node)
 
@@ -644,13 +645,6 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
 
         if logger:
             logger(f"[markups] created {len(trajectories)} line trajectories")
-
-    def _find_node_by_name(self, node_name, class_name):
-        """Return first node with exact name and class, or None."""
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
 
 
 def run(case_dir, reference=None, invert=False, harden=True, load_trajectories=True):

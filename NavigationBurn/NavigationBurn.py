@@ -20,7 +20,12 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_workflow import WorkflowPublisher, WorkflowState
-from rosa_scene import AtlasCoreService
+from rosa_scene import (
+    AtlasCoreService,
+    get_or_create_linear_transform,
+    preselect_base_volume,
+    widget_current_text,
+)
 
 
 class NavigationBurn(ScriptedLoadableModule):
@@ -159,22 +164,8 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
         self.burnAndExportButton.clicked.connect(self.onBurnAndExportClicked)
         form.addRow(self.burnAndExportButton)
 
-    def _widget_text(self, widget):
-        attr = getattr(widget, "currentText", "")
-        return attr() if callable(attr) else attr
-
-    def _find_node_by_name(self, node_name, class_name):
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
-
     def _get_or_create_nav_dicom_transform_node(self):
-        name = "NavMRI_DICOM_to_ROSA"
-        node = self._find_node_by_name(name, "vtkMRMLLinearTransformNode")
-        if node is None:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
-        return node
+        return get_or_create_linear_transform("NavMRI_DICOM_to_ROSA")
 
     def _workflow_segmentation_nodes(self):
         wf = self.workflowState.resolve_or_create_workflow_node()
@@ -183,7 +174,7 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
     def _refresh_nucleus_combo(self):
         seg_nodes = self._workflow_segmentation_nodes()
         nuclei = self.logic.core.collect_thomas_nuclei(seg_nodes)
-        current = (self._widget_text(self.nucleusCombo) or "").strip()
+        current = (widget_current_text(self.nucleusCombo) or "").strip()
         self.nucleusCombo.clear()
         if nuclei:
             for nucleus in nuclei:
@@ -198,11 +189,9 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
 
     def _preselect_base_volume(self):
         wf = self.workflowState.resolve_or_create_workflow_node()
-        base = wf.GetNodeReference("BaseVolume")
-        if base is not None:
-            self.burnInputSelector.setCurrentNode(base)
-        if self.referenceSelector.currentNode() is None and base is not None:
-            self.referenceSelector.setCurrentNode(base)
+        preselect_base_volume(selector=self.burnInputSelector, workflow_node=wf)
+        if self.referenceSelector.currentNode() is None:
+            preselect_base_volume(selector=self.referenceSelector, workflow_node=wf)
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
@@ -304,8 +293,8 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
             self.log(f"[thomas] using hardened temp fixed volume: {burn_input_for_burn.GetName()}")
 
         try:
-            side = (self._widget_text(self.sideCombo) or "Both").strip()
-            nucleus = (self._widget_text(self.nucleusCombo) or "").strip()
+            side = (widget_current_text(self.sideCombo) or "Both").strip()
+            nucleus = (widget_current_text(self.nucleusCombo) or "").strip()
             fill_value = float(self.fillSpin.value)
             output_name = self.outputNameEdit.text.strip() or "THOMAS_Burned_MRI"
             out_volume = self.logic.core.burn_thomas_nucleus_to_volume(
@@ -340,8 +329,8 @@ class NavigationBurnWidget(ScriptedLoadableModuleWidget):
         return out_volume
 
     def _series_description_default(self):
-        nucleus = (self._widget_text(self.nucleusCombo) or "NUCLEUS").strip().upper()
-        side = (self._widget_text(self.sideCombo) or "BOTH").strip().upper()
+        nucleus = (widget_current_text(self.nucleusCombo) or "NUCLEUS").strip().upper()
+        side = (widget_current_text(self.sideCombo) or "BOTH").strip().upper()
         return f"THOMAS_{nucleus}_{side}_BURNED"
 
     def _export_volume(self, volume_node):

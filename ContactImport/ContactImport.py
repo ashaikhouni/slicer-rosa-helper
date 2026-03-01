@@ -24,7 +24,7 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_core import lps_to_ras_point
-from rosa_scene import ElectrodeSceneService, TrajectorySceneService
+from rosa_scene import ElectrodeSceneService, TrajectorySceneService, widget_current_text
 from rosa_workflow import WorkflowPublisher, WorkflowState
 
 
@@ -143,10 +143,6 @@ class ContactImportWidget(ScriptedLoadableModuleWidget):
         columns.wordWrap = True
         form.addRow(columns)
 
-    def _widget_text(self, widget):
-        text_attr = getattr(widget, "currentText", "")
-        return text_attr() if callable(text_attr) else text_attr
-
     def _require_reference_volume(self):
         node = self.referenceSelector.currentNode()
         if node is None:
@@ -154,14 +150,14 @@ class ContactImportWidget(ScriptedLoadableModuleWidget):
         return node
 
     def _units_scale(self):
-        units = (self._widget_text(self.unitsCombo) or "mm").strip().lower()
+        units = (widget_current_text(self.unitsCombo) or "mm").strip().lower()
         return 1000.0 if units == "m" else 1.0
 
     def _coord_system(self):
-        return (self._widget_text(self.coordSystemCombo) or "RAS").strip().upper()
+        return (widget_current_text(self.coordSystemCombo) or "RAS").strip().upper()
 
     def _coord_type(self):
-        return (self._widget_text(self.coordTypeCombo) or "world").strip().lower()
+        return (widget_current_text(self.coordTypeCombo) or "world").strip().lower()
 
     def _ijk_to_world_ras(self, volume_node, ijk):
         ijk_to_ras = vtk.vtkMatrix4x4()

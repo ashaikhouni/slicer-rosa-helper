@@ -21,7 +21,13 @@ for path in PATH_CANDIDATES:
 
 from rosa_workflow import WorkflowState, WorkflowPublisher
 from rosa_workflow.workflow_registry import table_to_dict_rows
-from rosa_scene import AtlasCoreService
+from rosa_scene import (
+    AtlasCoreService,
+    find_node_by_name,
+    get_or_create_linear_transform,
+    preselect_base_volume,
+    widget_current_text,
+)
 
 
 class AtlasSources(ScriptedLoadableModule):
@@ -233,24 +239,11 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         self.registryRefreshButton.clicked.connect(self.refresh_registry_view)
         layout.addWidget(self.registryRefreshButton)
 
-    def _widget_text(self, widget):
-        text_attr = getattr(widget, "currentText", "")
-        return text_attr() if callable(text_attr) else text_attr
-
-    def _find_node_by_name(self, node_name, class_name):
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
-
     def _get_or_create_transform_node(self, name):
-        node = self._find_node_by_name(name, "vtkMRMLLinearTransformNode")
-        if node is None:
-            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", name)
-        return node
+        return get_or_create_linear_transform(name)
 
     def _refresh_fs_parcellation_combo(self):
-        current = (self._widget_text(self.fsParcellationCombo) or "all available").strip()
+        current = (widget_current_text(self.fsParcellationCombo) or "all available").strip()
         self.fsParcellationCombo.clear()
         self.fsParcellationCombo.addItem("all available")
         subject_dir = self.fsSubjectDirSelector.currentPath
@@ -283,12 +276,8 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         self.fsParcellationCombo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _preselect_base_volume(self, selector):
-        if selector is None:
-            return
         wf = self.workflowState.resolve_or_create_workflow_node()
-        base = wf.GetNodeReference("BaseVolume")
-        if base is not None:
-            selector.setCurrentNode(base)
+        preselect_base_volume(selector=selector, workflow_node=wf)
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
@@ -347,7 +336,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             workflow_node=self.workflowNode,
         )
         transform_node = self._get_or_create_transform_node(self.fsTransformNameEdit.text.strip() or "FS_to_ROSA")
-        init_mode = self._widget_text(self.fsInitModeCombo) or "useGeometryAlign"
+        init_mode = widget_current_text(self.fsInitModeCombo) or "useGeometryAlign"
         self.log(
             f"[fs] registration start: moving={moving_node.GetName()} -> fixed={fixed_node.GetName()} (init={init_mode})"
         )
@@ -416,7 +405,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         if self.fsToRosaTransformNodeID:
             transform_node = slicer.mrmlScene.GetNodeByID(self.fsToRosaTransformNodeID)
         if transform_node is None:
-            transform_node = self._find_node_by_name(
+            transform_node = find_node_by_name(
                 self.fsTransformNameEdit.text.strip() or "FS_to_ROSA",
                 "vtkMRMLLinearTransformNode",
             )
@@ -466,7 +455,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
         if not subject_dir:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Atlas Sources", "Select FreeSurfer subject directory.")
             return
-        selected = (self._widget_text(self.fsParcellationCombo) or "").strip()
+        selected = (widget_current_text(self.fsParcellationCombo) or "").strip()
         selected_names = None if selected == "all available" else [selected]
         lut_path = self.fsLUTPathSelector.currentPath.strip() if self.fsLUTPathSelector.currentPath else ""
         try:
@@ -517,7 +506,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             workflow_node=self.workflowNode,
         )
         transform_node = self._get_or_create_transform_node(self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA")
-        init_mode = self._widget_text(self.thomasInitModeCombo) or "useGeometryAlign"
+        init_mode = widget_current_text(self.thomasInitModeCombo) or "useGeometryAlign"
         self.log(
             f"[thomas] registration start: moving={moving_node.GetName()} -> fixed={fixed_node.GetName()} (init={init_mode})"
         )
@@ -605,7 +594,7 @@ class AtlasSourcesWidget(ScriptedLoadableModuleWidget):
             if self.thomasToRosaTransformNodeID:
                 transform_node = slicer.mrmlScene.GetNodeByID(self.thomasToRosaTransformNodeID)
             if transform_node is None:
-                transform_node = self._find_node_by_name(
+                transform_node = find_node_by_name(
                     self.thomasTransformNameEdit.text.strip() or "THOMAS_to_ROSA",
                     "vtkMRMLLinearTransformNode",
                 )

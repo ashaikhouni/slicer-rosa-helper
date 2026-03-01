@@ -17,6 +17,8 @@ except ImportError:
 
 from __main__ import slicer, vtk
 
+from .scene_utils import find_node_by_name
+
 
 class FreeSurferService:
     """Service layer for FreeSurfer integration inside Slicer."""
@@ -27,10 +29,7 @@ class FreeSurferService:
 
     def _find_node_by_name(self, node_name, class_name):
         """Return first node with exact name and class, or None."""
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
+        return find_node_by_name(node_name=node_name, class_name=class_name)
 
     def _cli_success(self, cli_node):
         """Return True when a CLI node finished without errors."""

@@ -91,12 +91,6 @@ class AtlasLabelingWidget(ScriptedLoadableModuleWidget):
         except Exception:
             pass
 
-    def _find_node_by_name(self, node_name, class_name):
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
-
     def _refresh_combo_from_nodes(self, combo, nodes, all_token=False):
         current = combo.currentData if hasattr(combo, "currentData") else None
         current_val = current() if callable(current) else current

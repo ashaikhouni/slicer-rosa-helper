@@ -9,15 +9,14 @@ except ImportError:  # pragma: no cover
 
 from __main__ import slicer, vtk
 
+from .scene_utils import find_node_by_name
+
 
 class AtlasUtils:
     """Small utility helpers reused by atlas-specific services."""
 
     def find_node_by_name(self, node_name, class_name):
-        for node in slicer.util.getNodesByClass(class_name):
-            if node.GetName() == node_name:
-                return node
-        return None
+        return find_node_by_name(node_name=node_name, class_name=class_name)
 
     def vtk_matrix_to_numpy_4x4(self, vtk_matrix):
         out = np.eye(4, dtype=float)
