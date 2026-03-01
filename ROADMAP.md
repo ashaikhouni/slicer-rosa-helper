@@ -67,7 +67,8 @@ Execution status is tracked separately in `PROGRESS.md`.
   - Remove bridge only in Phase 8 after all module extractions are stable.
 
 ## Current Phase Pointer
-- **Current phase target**: **Phase 8** (compatibility bridge removal and cleanup release).
+- **Current phase target**: **Roadmap complete (Phases 1-8 closed locally)**.
+- Next work should start as a new roadmap/workstream document.
 - Phase boundaries are locked unless this file is explicitly updated.
 
 ## Update Policy

@@ -1,13 +1,12 @@
 # ROSA Toolkit Progress Log
 
 ## Snapshot
-- **Timestamp (UTC)**: 2026-03-01 01:10:00Z
-- **Current phase**: Phase 8 — compatibility bridge removal and cleanup (in progress)
+- **Timestamp (UTC)**: 2026-03-01 03:35:00Z
+- **Current phase**: Phase 8 — compatibility bridge removal and cleanup (closed, local)
 - **Last stable pushed commit**: `7675dc1`
 - **Working branch**: `main`
 - **Open worktree state**:
-  - Phase 8 started: removed legacy workflow compatibility bridge files under `RosaHelper/Lib/rosa_slicer/workflow/*`.
-  - Centralized remaining Loader-core bridge access in shared `CommonLib/rosa_scene/loader_core_bridge.py` for Atlas modules.
+  - Clean working tree.
 
 ## Completed Phases
 ### Phase 1 — Shared MRML Workflow Contract Integration
@@ -103,28 +102,30 @@
   - Loader refactor delivered tabbed `ROSA Load` + `Custom Import` flow with base/postop role assignment.
   - Transform provenance now retained and organized under `RosaWorkflow/Transforms`.
 
-## Active Phase
 ### Phase 8 — Compatibility Bridge Removal and Cleanup Release
-- **Objective**:
-  - Remove legacy bridge imports and finalize cleanup of monolithic leftovers while preserving all workflows.
-- **In scope**:
-  - Remove `RosaHelper/Lib/rosa_slicer/workflow/*` compatibility bridge.
-  - Ensure all modules use `CommonLib` workflow/core imports only.
-  - Final pass to remove stale couplings and dead code paths.
-  - Run full multi-module smoke regression before release push.
-- **Out of scope**:
-  - New end-user features unrelated to cleanup.
-- **Exit criteria**:
-  - No module imports from removed compatibility bridge path.
-  - All primary workflows pass smoke tests after bridge removal.
-  - Release branch is clean, documented, and ready to push.
+- **Status**: Closed (local validation complete)
+- **Date closed**: 2026-03-01
+- **Commit range**: `b3da923..a5cf12e`
+- **Acceptance checks passed**:
+  - Removed legacy compatibility bridge files under `RosaHelper/Lib/rosa_slicer/workflow/*`.
+  - All modules import workflow/core services from extension-level `CommonLib`.
+  - Added and ran cleanup guardrail script `tools/phase8_sanity.py`:
+    - bridge files remaining: `0`
+    - compile failures: `0`
+    - only allowed legacy reference in checker itself.
+  - User smoke-tested multi-module workflows in Slicer and confirmed functional behavior.
+  - Final source-sync cleanup completed:
+    - active trajectory source shared across `PostopCTLocalization` and `ContactsTrajectoryView`
+    - default source fallback prefers `imported_rosa` when available.
 
-### Phase 8 Implementation Sequence
-1. [done] Remove legacy workflow bridge files from `RosaHelper/Lib/rosa_slicer/workflow/*`.
-2. [done] Centralize remaining Loader-core dynamic import through `CommonLib/rosa_scene/loader_core_bridge.py`.
-3. [done] Add `tools/phase8_sanity.py` check for bridge removal + import/path hygiene + compile sanity.
-4. [pending] Run full cross-module interactive smoke test in Slicer (Loader, ContactsTrajectoryView, PostopCTLocalization, AtlasSources, AtlasLabeling, NavigationBurn, ContactImport, ExportCenter).
-5. [pending] Close Phase 8 and push cleanup release.
+## Active Phase
+### Post-Phase State
+- **Objective**:
+  - Hold a stable cleanup baseline and prepare for next roadmap/workstream selection.
+- **In scope**:
+  - Bug fixes and release packaging/push.
+- **Out of scope**:
+  - New cross-module architecture phases (roadmap complete for phases 1-8).
 
 ## Open Issues / Decisions
 ### Blocking Items
@@ -154,6 +155,8 @@
 - **D-018**: Compatibility bridge removal started by deleting legacy `RosaHelper/Lib/rosa_slicer/workflow/*`; modules must import workflow services from `CommonLib`.
 - **D-019**: Atlas modules now use a shared Loader-core bridge helper (`rosa_scene.loader_core_bridge`) instead of duplicating per-module dynamic import code.
 - **D-020**: Added `tools/phase8_sanity.py` as a repeatable guardrail for cleanup release checks.
+- **D-021**: Phase 8 closed locally after bridge-removal sanity check + user smoke validation.
+- **D-022**: Active trajectory source is now shared and persisted across Postop CT and Contacts modules.
 
 ## Maintenance Rules
 - Update this file at phase boundaries with:
