@@ -39,13 +39,6 @@ conda env update -f environment.yml
 4. Generate contacts for one or more trajectories.
 5. Open `ROSA.04 Export -> 01 Export Center` and run `contacts_only` export.
 
-## Optional CLI Validation
-
-```bash
-cd <repo>
-python3 tools/phase8_sanity.py
-```
-
 ## Uninstall
 
 1. Remove repository path from `Settings -> Modules -> Additional module paths`.

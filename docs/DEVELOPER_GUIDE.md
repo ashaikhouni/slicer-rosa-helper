@@ -62,8 +62,6 @@ Keep responsibilities separate. If a feature spans modules, connect through work
 
 ## 5) Atlas Extension Pattern
 
-Atlas integration contract is defined in `ATLAS_SOURCE_CONTRACT.md`.
-
 To add a new atlas source:
 1. Implement provider using typed interface in `CommonLib/rosa_scene/atlas_provider_types.py`.
 2. Register provider in `CommonLib/rosa_scene/atlas_provider_registry.py`.
@@ -83,7 +81,7 @@ Comments:
 
 Dates:
 - keep "Last updated" headers in root docs current
-- for major interface/contract changes, update `PROGRESS.md` decision log and `ROADMAP.md` if scope changes
+- for major interface/contract changes, update this guide and the user guide in the same PR
 
 Compatibility:
 - preserve workflow role names unless migration is planned
@@ -103,15 +101,6 @@ Optional pytest run:
 cd <repo>
 PYTHONPATH=<python-env>/lib/python3.10/site-packages:$PYTHONPATH python3 -m pytest tests/rosa_core tests/shank_core tests/rosa_scene -q
 ```
-
-Cleanup sanity check:
-```bash
-cd <repo>
-python3 tools/phase8_sanity.py
-```
-
-Manual regression checklist:
-- use `REFRACTOR_CHECKLIST.md`
 
 ## 8) Adding New Functionality
 
