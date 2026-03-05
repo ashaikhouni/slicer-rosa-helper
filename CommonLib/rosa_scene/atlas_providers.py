@@ -16,6 +16,7 @@ from .atlas_provider_types import AtlasSampleResult
 
 
 def _query_index(index_cache, point_ras):
+    """Query nearest labeled voxel in cached point-locator index."""
     if not index_cache:
         return None
 
@@ -50,6 +51,7 @@ class VolumeLabelAtlasProvider:
     """Atlas provider for labeled scalar volumes (FS parcellation, WM, etc.)."""
 
     def __init__(self, source_id, display_name, volume_node, utils):
+        """Create provider for one label volume node."""
         self.source_id = str(source_id)
         self.display_name = str(display_name)
         self.volume_node = volume_node
@@ -58,9 +60,11 @@ class VolumeLabelAtlasProvider:
         self.index_cache = self._build_index(volume_node)
 
     def is_ready(self):
+        """Return True when provider has a usable index and volume node."""
         return self.index_cache is not None and self.volume_node is not None
 
     def _volume_label_lookup_name(self, label_value):
+        """Resolve one integer label to display name from volume color node."""
         if self.volume_node is None:
             return ""
         display = self.volume_node.GetDisplayNode()
@@ -76,6 +80,7 @@ class VolumeLabelAtlasProvider:
         return str(name) if name else ""
 
     def _build_index(self, volume_node):
+        """Build nearest-voxel query index and centroid cache for one label volume."""
         if np is None:
             raise RuntimeError("NumPy is required for atlas assignment.")
         if volume_node is None:
@@ -126,6 +131,7 @@ class VolumeLabelAtlasProvider:
         }
 
     def sample_contact(self, point_world_ras: Sequence[float]) -> AtlasSampleResult | None:
+        """Sample nearest label information for one world-RAS contact point."""
         if not self.is_ready():
             return None
         q = _query_index(self.index_cache, point_world_ras)
@@ -146,6 +152,7 @@ class ThomasSegmentationAtlasProvider:
     """Atlas provider for THOMAS segmentation nodes."""
 
     def __init__(self, segmentation_nodes, reference_volume_node, utils):
+        """Create THOMAS provider from segmentation nodes and reference volume."""
         self.source_id = "thomas"
         self.display_name = "THOMAS"
         self.segmentation_nodes = list(segmentation_nodes or [])
@@ -156,10 +163,12 @@ class ThomasSegmentationAtlasProvider:
         self.index_cache = self._build_index(skip_generic_thalamus=True)
 
     def is_ready(self):
+        """Return True when THOMAS index and native node are available."""
         return self.index_cache is not None and self.native_node is not None
 
     @staticmethod
     def _thomas_nucleus_from_segment_name(name):
+        """Extract THOMAS nucleus token from LEFT_/RIGHT_ segment names."""
         text = (name or "").strip().upper()
         if text.startswith("LEFT_"):
             return text[5:]
@@ -168,6 +177,7 @@ class ThomasSegmentationAtlasProvider:
         return text
 
     def _build_index(self, skip_generic_thalamus=True):
+        """Build THOMAS nearest-voxel query index from segmentation labelmaps."""
         if np is None:
             raise RuntimeError("NumPy is required for atlas assignment.")
         if not self.segmentation_nodes:
@@ -263,6 +273,7 @@ class ThomasSegmentationAtlasProvider:
         }
 
     def sample_contact(self, point_world_ras: Sequence[float]) -> AtlasSampleResult | None:
+        """Sample nearest THOMAS label for one world-RAS contact point."""
         if not self.is_ready():
             return None
         q = _query_index(self.index_cache, point_world_ras)

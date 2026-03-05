@@ -14,6 +14,8 @@ class ElectrodeSceneService:
     """Scene-level operations for contacts, electrode models, and trajectory views."""
 
     def __init__(self, workflow_state=None, workflow_publish=None):
+        """Initialize workflow-aware scene helpers used by multiple UI modules."""
+        # Shared workflow handles let scene updates publish role-based outputs consistently.
         self.workflow_state = workflow_state or WorkflowState()
         self.workflow_publish = workflow_publish or WorkflowPublisher(self.workflow_state)
 
@@ -234,18 +236,23 @@ class ElectrodeSceneService:
         )
 
     def _vsub(self, a, b):
+        """Return 3D vector subtraction ``a-b``."""
         return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 
     def _vadd(self, a, b):
+        """Return 3D vector addition ``a+b``."""
         return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 
     def _vmul(self, a, s):
+        """Return vector ``a`` scaled by scalar ``s``."""
         return [a[0] * s, a[1] * s, a[2] * s]
 
     def _vdot(self, a, b):
+        """Return 3D dot product."""
         return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
     def _vcross(self, a, b):
+        """Return 3D cross product."""
         return [
             a[1] * b[2] - a[2] * b[1],
             a[2] * b[0] - a[0] * b[2],
@@ -253,9 +260,11 @@ class ElectrodeSceneService:
         ]
 
     def _vnorm(self, a):
+        """Return Euclidean norm of a 3D vector."""
         return math.sqrt(self._vdot(a, a))
 
     def _vunit(self, a):
+        """Return unit-length direction vector for ``a``."""
         n = self._vnorm(a)
         if n <= 1e-9:
             raise ValueError("Zero-length trajectory vector")
@@ -391,10 +400,22 @@ class ElectrodeSceneService:
 
         return created
 
-    def align_slice_to_trajectory(self, start_ras, end_ras, slice_view="Red", mode="long"):
-        """Align a slice node to a trajectory using two RAS points."""
+    def align_slice_to_trajectory(self, start_ras, end_ras, slice_view="Red", mode="long", focus="entry"):
+        """Align a slice node to a trajectory using two RAS points.
+
+        Parameters
+        ----------
+        focus : str
+            One of: ``entry`` (start point), ``target`` (end point), ``midpoint``.
+        """
         direction = self._vunit(self._vsub(end_ras, start_ras))
-        center = self._vmul(self._vadd(start_ras, end_ras), 0.5)
+        focus_key = str(focus or "entry").strip().lower()
+        if focus_key == "target":
+            center = list(end_ras)
+        elif focus_key == "midpoint":
+            center = self._vmul(self._vadd(start_ras, end_ras), 0.5)
+        else:
+            center = list(start_ras)
 
         up = [0.0, 0.0, 1.0]
         if abs(self._vdot(direction, up)) > 0.9:
@@ -437,6 +458,42 @@ class ElectrodeSceneService:
             slice_node.JumpSliceByOffsetting(center[0], center[1], center[2])
         if hasattr(slice_node, "JumpSliceByCentering"):
             slice_node.JumpSliceByCentering(center[0], center[1], center[2])
+
+    def jump_slice_views_to_point(self, point_ras, slice_views=("Red", "Yellow", "Green")):
+        """Jump one or more slice views to the given RAS point without changing orientation."""
+        center = [float(point_ras[0]), float(point_ras[1]), float(point_ras[2])]
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return
+        for view_name in (slice_views or []):
+            slice_widget = lm.sliceWidget(str(view_name))
+            if slice_widget is None:
+                continue
+            slice_node = slice_widget.mrmlSliceNode()
+            if slice_node is None:
+                continue
+            if hasattr(slice_node, "JumpSliceByOffsetting"):
+                slice_node.JumpSliceByOffsetting(center[0], center[1], center[2])
+            if hasattr(slice_node, "JumpSliceByCentering"):
+                slice_node.JumpSliceByCentering(center[0], center[1], center[2])
+
+    def set_slice_view_layers(self, slice_view, background_node=None, foreground_node=None, foreground_opacity=0.5):
+        """Set background/foreground volume layers for one slice view."""
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return False
+        slice_widget = lm.sliceWidget(str(slice_view))
+        if slice_widget is None:
+            return False
+        composite = slice_widget.mrmlSliceCompositeNode()
+        if composite is None:
+            return False
+        bg_id = background_node.GetID() if background_node is not None else ""
+        fg_id = foreground_node.GetID() if foreground_node is not None else ""
+        composite.SetBackgroundVolumeID(bg_id)
+        composite.SetForegroundVolumeID(fg_id)
+        composite.SetForegroundOpacity(float(foreground_opacity) if fg_id else 0.0)
+        return True
 
     def set_planned_trajectory_visibility(self, visible):
         """Show or hide all planned backup trajectory lines."""

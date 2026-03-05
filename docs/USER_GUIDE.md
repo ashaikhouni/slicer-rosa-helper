@@ -70,6 +70,7 @@ Main actions:
 - Check/uncheck trajectories in `Use` column to control which trajectories generate contacts.
 - Generate or update contacts/models.
 - View QC metrics and align slice view along a selected trajectory.
+- Optional focus layout mode: top FourUp + bottom `long`/`down` trajectory views centered at trajectory entry.
 
 Important:
 - `Generate`/`Update` only operate on checked rows.

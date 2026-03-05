@@ -18,6 +18,7 @@ class AtlasAssignmentService:
     """Assign contacts to atlas labels and publish workflow table rows."""
 
     def __init__(self, utils, workflow_state=None):
+        """Initialize atlas assignment orchestration with reusable services."""
         self.utils = utils
         self.workflow_state = workflow_state or WorkflowState()
         self.electrode_scene = ElectrodeSceneService(workflow_state=self.workflow_state)
@@ -31,6 +32,7 @@ class AtlasAssignmentService:
         wm_volume_node=None,
         reference_volume_node=None,
     ):
+        """Sample configured atlas providers for each contact and return row dictionaries."""
         providers = self.provider_registry.build_default_providers(
             freesurfer_volume_node=freesurfer_volume_node,
             thomas_segmentation_nodes=thomas_segmentation_nodes,
@@ -50,6 +52,7 @@ class AtlasAssignmentService:
         return rows
 
     def publish_atlas_assignment_rows(self, atlas_rows, workflow_node=None):
+        """Publish atlas assignment rows to `Rosa_AtlasAssignments` and workflow role."""
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         columns = [
             "trajectory", "contact_label", "contact_index", "x_ras", "y_ras", "z_ras",

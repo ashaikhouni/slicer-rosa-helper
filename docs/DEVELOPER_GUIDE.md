@@ -19,6 +19,7 @@ Primary packages in `CommonLib`:
 - `shank_core`: pure-python CT shank detection pipeline
 - `rosa_workflow`: workflow state/publish/resolve/registry/export services
 - `rosa_scene`: Slicer scene services (trajectory/electrode/atlas helpers)
+  - includes shared layout orchestration via `layout_service.py`
 
 Import rule:
 - modules should import shared services only from `CommonLib/...`

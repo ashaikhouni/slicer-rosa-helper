@@ -45,6 +45,35 @@ class QCTests(unittest.TestCase):
         self.assertAlmostEqual(row["angle_deg"], 0.0, places=6)
         self.assertEqual(row["matched_contacts"], 3)
 
+    def test_compute_qc_metrics_includes_unmatched_planned(self):
+        planned_traj = {
+            "RHH": {"start": [0, 0, 0], "end": [10, 0, 0]},
+            "LHH": {"start": [0, 0, 0], "end": [0, 10, 0]},
+        }
+        final_traj = {"RHH": {"start": [0, 1, 0], "end": [10, 1, 0]}}
+        planned_contacts = [
+            {"trajectory": "RHH", "index": 1, "position_lps": [2, 0, 0]},
+            {"trajectory": "RHH", "index": 2, "position_lps": [5, 0, 0]},
+            {"trajectory": "LHH", "index": 1, "position_lps": [0, 2, 0]},
+        ]
+        final_contacts = [
+            {"trajectory": "RHH", "index": 1, "position_lps": [2, 1, 0]},
+            {"trajectory": "RHH", "index": 2, "position_lps": [5, 1, 0]},
+        ]
+        rows = compute_qc_metrics(
+            planned_traj,
+            final_traj,
+            planned_contacts,
+            final_contacts,
+            include_unmatched_planned=True,
+        )
+        self.assertEqual(len(rows), 2)
+        by_name = {row["trajectory"]: row for row in rows}
+        self.assertIn("LHH", by_name)
+        self.assertIsNone(by_name["LHH"]["entry_radial_mm"])
+        self.assertIsNone(by_name["LHH"]["angle_deg"])
+        self.assertEqual(by_name["LHH"]["matched_contacts"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

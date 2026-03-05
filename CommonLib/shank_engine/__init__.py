@@ -1,0 +1,73 @@
+"""Pure-Python detection engine interfaces for SEEG CT shank/contact detection."""
+
+from .artifacts import FileArtifactWriter, NullArtifactWriter, add_artifact, write_standard_artifacts
+from .bootstrap import register_builtin_pipelines
+from .contracts import (
+    DIAGNOSTICS_SCHEMA_VERSION,
+    RESULT_SCHEMA_VERSION,
+    ArtifactRecord,
+    BlobRecord,
+    ContactRecord,
+    DetectionContext,
+    DetectionDiagnostics,
+    DetectionError,
+    DetectionResult,
+    MaskRef,
+    ShankModel,
+    VolumeRef,
+    default_diagnostics,
+    default_result,
+    sanitize_result,
+    to_jsonable,
+)
+from .diagnostics import DiagnosticsCollector, StageExecutionError
+from .interfaces import (
+    ArtifactWriter,
+    BlobExtractor,
+    BlobScorer,
+    ContactDetector,
+    DetectionPipeline,
+    GatingComponent,
+    Initializer,
+    ModelSelector,
+    ShankRefiner,
+)
+from .registry import ComponentRegistry, PipelineRegistry, get_default_registry
+
+__all__ = [
+    "RESULT_SCHEMA_VERSION",
+    "DIAGNOSTICS_SCHEMA_VERSION",
+    "VolumeRef",
+    "MaskRef",
+    "BlobRecord",
+    "ShankModel",
+    "ContactRecord",
+    "DetectionContext",
+    "DetectionDiagnostics",
+    "DetectionResult",
+    "ArtifactRecord",
+    "DetectionError",
+    "default_diagnostics",
+    "default_result",
+    "to_jsonable",
+    "sanitize_result",
+    "DetectionPipeline",
+    "ArtifactWriter",
+    "GatingComponent",
+    "BlobExtractor",
+    "BlobScorer",
+    "Initializer",
+    "ShankRefiner",
+    "ModelSelector",
+    "ContactDetector",
+    "DiagnosticsCollector",
+    "StageExecutionError",
+    "PipelineRegistry",
+    "ComponentRegistry",
+    "get_default_registry",
+    "register_builtin_pipelines",
+    "NullArtifactWriter",
+    "FileArtifactWriter",
+    "add_artifact",
+    "write_standard_artifacts",
+]

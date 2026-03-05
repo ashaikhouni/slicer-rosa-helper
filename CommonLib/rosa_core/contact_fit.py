@@ -195,7 +195,7 @@ def fit_electrode_axis_and_tip(
     candidate_points_lps: np.ndarray | list[list[float]],
     planned_entry_lps: Point3D,
     planned_target_lps: Point3D,
-    contact_offsets_mm: list[float] | np.ndarray,
+    contact_offsets_mm: list[float] | np.ndarray | None = None,
     tip_at: str = "target",
     roi_radius_mm: float = 3.0,
     max_angle_deg: float = 12.0,
@@ -290,9 +290,7 @@ def fit_electrode_axis_and_tip(
     fitted_target = center + fit_deep_axis * deep_t
     fitted_entry = fitted_target - fit_deep_axis * planned_length
 
-    offs = np.asarray(contact_offsets_mm, dtype=float).reshape(-1)
-    if offs.size == 0:
-        return {"success": False, "reason": "No model offsets provided"}
+    offs = np.asarray(contact_offsets_mm if contact_offsets_mm is not None else [], dtype=float).reshape(-1)
     tip_at_norm = (tip_at or "target").lower()
     if tip_at_norm == "entry":
         fitted_tip = fitted_entry
@@ -300,18 +298,23 @@ def fit_electrode_axis_and_tip(
     else:
         fitted_tip = fitted_target
         offsets_axis = fit_super_axis
-    pred_centers = fitted_tip[None, :] + np.outer(offs, offsets_axis)
+    if offs.size > 0:
+        pred_centers = fitted_tip[None, :] + np.outer(offs, offsets_axis)
 
-    # Residual in 3D from predicted contacts to ROI cloud.
-    diff = pred_centers[:, None, :] - roi_pts[None, :, :]
-    d3 = np.linalg.norm(diff, axis=2)
-    residual_3d = float(np.mean(np.min(d3, axis=1)))
+        # Residual in 3D from predicted contacts to ROI cloud.
+        diff = pred_centers[:, None, :] - roi_pts[None, :, :]
+        d3 = np.linalg.norm(diff, axis=2)
+        residual_3d = float(np.mean(np.min(d3, axis=1)))
 
-    # Residual in 1D along fitted deep axis.
-    cand_t = (roi_pts - fitted_target) @ fit_deep_axis
-    pred_t = (pred_centers - fitted_target) @ fit_deep_axis
-    nearest_1d = np.min(np.abs(cand_t[None, :] - pred_t[:, None]), axis=1)
-    one_d_residual = float(np.mean(nearest_1d))
+        # Residual in 1D along fitted deep axis.
+        cand_t = (roi_pts - fitted_target) @ fit_deep_axis
+        pred_t = (pred_centers - fitted_target) @ fit_deep_axis
+        nearest_1d = np.min(np.abs(cand_t[None, :] - pred_t[:, None]), axis=1)
+        one_d_residual = float(np.mean(nearest_1d))
+    else:
+        # Model-free trajectory fit mode: use robust line-fit residuals only.
+        residual_3d = float(ransac_rms)
+        one_d_residual = float("nan")
 
     target_shift_mm = float(np.dot(fitted_target - target, fit_deep_axis))
     delta_target = fitted_target - target

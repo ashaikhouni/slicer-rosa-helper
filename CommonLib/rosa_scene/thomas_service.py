@@ -17,9 +17,11 @@ class ThomasService:
     """Operations related to THOMAS segmentation assets."""
 
     def __init__(self, utils):
+        """Create THOMAS helper with shared atlas utility dependency."""
         self.utils = utils
 
     def _load_label_volume_node(self, path):
+        """Load one THOMAS mask as labelmap volume, with legacy fallback path."""
         try:
             result = slicer.util.loadLabelVolume(path, returnNode=True)
             if isinstance(result, tuple):
@@ -37,6 +39,7 @@ class ThomasService:
                 return None
 
     def _infer_thomas_side(self, path):
+        """Infer left/right side from conventional THOMAS file path tokens."""
         text = (path or "").lower()
         if "/left/" in text or text.endswith("/left") or "lh" in os.path.basename(text):
             return "left"
@@ -45,6 +48,7 @@ class ThomasService:
         return "unknown"
 
     def _thomas_segment_name_from_path(self, path):
+        """Build canonical segment label name (e.g., ``LEFT_CM``) from file path."""
         base = os.path.basename(path)
         name = base.replace(".nii.gz", "").replace(".nii", "")
         side = self._infer_thomas_side(path)
@@ -61,6 +65,7 @@ class ThomasService:
         return f"{side.upper()}_{token}"
 
     def _thomas_color_for_label(self, segment_name, side):
+        """Return deterministic RGB color for a THOMAS segment and side."""
         key = (segment_name or "UNKNOWN").upper()
         base_map = {
             "THALAMUS": (0.90, 0.80, 0.20),
@@ -97,6 +102,7 @@ class ThomasService:
         return color
 
     def _style_thomas_segmentation(self, seg_node, side):
+        """Apply consistent 2D/3D display defaults for THOMAS segmentation nodes."""
         if seg_node is None:
             return
         seg_node.CreateDefaultDisplayNodes()
@@ -119,6 +125,7 @@ class ThomasService:
                 display.SetPreferredDisplayRepresentationName3D("Closed surface")
 
     def _find_thomas_mask_paths(self, thomas_dir):
+        """Collect expected THOMAS mask files from ``left`` and ``right`` subfolders."""
         root = os.path.abspath(thomas_dir)
         if not os.path.isdir(root):
             raise ValueError(f"THOMAS output directory not found: {thomas_dir}")
@@ -152,6 +159,7 @@ class ThomasService:
         return by_side, skipped
 
     def load_thomas_thalamus_masks(self, thomas_dir, logger=None, replace_existing=True, node_name_prefix="THOMAS_"):
+        """Load THOMAS masks into left/right segmentation nodes and color segments."""
         if not hasattr(slicer.modules, "segmentations"):
             raise RuntimeError("Segmentations module is not available in this Slicer install.")
         seg_logic = slicer.modules.segmentations.logic()
@@ -222,6 +230,7 @@ class ThomasService:
         }
 
     def _thomas_nucleus_from_segment_name(self, name):
+        """Normalize segment name to nucleus token without side prefix."""
         text = (name or "").strip().upper()
         if text.startswith("LEFT_"):
             return text[5:]
@@ -230,6 +239,7 @@ class ThomasService:
         return text
 
     def _thomas_side_from_segment_name(self, name, node_name=""):
+        """Infer segment side from segment or parent-node naming convention."""
         segment_text = (name or "").upper()
         node_text = (node_name or "").upper()
         if segment_text.startswith("LEFT_") or node_text.startswith("THOMAS_LEFT"):
@@ -239,6 +249,7 @@ class ThomasService:
         return "unknown"
 
     def collect_thomas_nuclei(self, segmentation_nodes):
+        """Return sorted unique nucleus names present across THOMAS segmentations."""
         nuclei = set()
         for seg_node in segmentation_nodes or []:
             if seg_node is None:
@@ -266,6 +277,7 @@ class ThomasService:
         output_name="THOMAS_Burned_MRI",
         logger=None,
     ):
+        """Burn selected THOMAS nucleus voxels into a cloned scalar MRI volume."""
         if np is None:
             raise RuntimeError("NumPy is required for burn workflow.")
         if input_volume_node is None:

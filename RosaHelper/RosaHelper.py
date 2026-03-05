@@ -233,6 +233,12 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             f"created {summary['trajectory_count']} trajectories"
         )
         self._publish_loaded_case_to_workflow(summary)
+        ref_name = summary.get("reference_volume")
+        ref_node_id = (summary.get("loaded_volume_node_ids") or {}).get(ref_name, "")
+        ref_node = slicer.mrmlScene.GetNodeByID(ref_node_id) if ref_node_id else None
+        if ref_node is not None:
+            self.logic.show_volume_in_all_slice_views(ref_node)
+            self.log(f"[view] centered slice views on {ref_node.GetName()}")
 
     def _infer_registry_role_for_volume(self, volume_node):
         """Infer workflow multi-volume role for one imported scalar volume."""
@@ -326,6 +332,8 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
         if self.customSetPostopCheck.checked:
             self.customPostopSelector.setCurrentNode(published)
 
+        self.logic.show_volume_in_all_slice_views(published)
+        self.log(f"[view] centered slice views on {published.GetName()}")
         self.log(f"[custom] imported {published.GetName()} ({path})")
         self.customVolumeNameEdit.clear()
         self.customSetBaseCheck.setChecked(False)
@@ -431,6 +439,8 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
                 self.customPostopSelector.setCurrentNode(published)
             self.registerMovingSelector.setCurrentNode(published)
 
+            self.logic.show_volume_in_all_slice_views(published)
+            self.log(f"[view] centered slice views on {published.GetName()}")
             self.log(
                 f"[custom] registered {moving.GetName()} -> {fixed.GetName()} "
                 f"and hardened in-place ({published.GetName()}); "
@@ -477,6 +487,29 @@ class RosaHelperWidget(ScriptedLoadableModuleWidget):
             )
             if wf.GetNodeReference("BaseVolume") is None:
                 self.logic.workflow_publish.set_default_base_volume(ros_nodes[0], workflow_node=wf)
+            if wf.GetNodeReference("PostopCT") is None:
+                postop_choice = None
+                best_score = -10**9
+                for volume_name, node_id in sorted((self.loadedVolumeNodeIDs or {}).items()):
+                    node = slicer.mrmlScene.GetNodeByID(node_id)
+                    if node is None:
+                        continue
+                    name = str(volume_name or node.GetName() or "").strip().lower()
+                    score = 0
+                    if "post" in name:
+                        score += 7
+                    if "ct" in name:
+                        score += 4
+                    if "pre" in name:
+                        score -= 5
+                    if "t1" in name or "mri" in name:
+                        score -= 2
+                    if score > best_score:
+                        best_score = score
+                        postop_choice = node
+                if postop_choice is not None and best_score > 0:
+                    self.logic.workflow_publish.set_default_role("PostopCT", postop_choice, workflow_node=wf)
+                    self.log(f"[workflow] auto-selected postop CT: {postop_choice.GetName()}")
 
         # Publish ROSA native->base transforms into transform registry.
         for rec in summary.get("ros_transform_records", []) or []:

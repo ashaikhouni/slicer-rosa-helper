@@ -69,20 +69,44 @@ def compute_qc_metrics(
     final_trajectories_by_name: dict[str, TrajectoryRecord],
     planned_contacts: list[ContactRecord],
     final_contacts: list[ContactRecord],
+    include_unmatched_planned: bool = False,
 ) -> list[QCMetricsRow]:
     """Compute per-trajectory radial and angular QC metrics.
 
     Inputs are expected in ROSA/LPS coordinates.
     Returns one dictionary row per trajectory with matching planned/final contacts.
+    When ``include_unmatched_planned`` is True, planned trajectories that do not
+    have a final counterpart are included with ``None`` metrics and
+    ``matched_contacts=0``.
     """
     planned_by_traj = sorted_contacts_by_trajectory(planned_contacts)
     final_by_traj = sorted_contacts_by_trajectory(final_contacts)
 
     rows = []
-    for traj_name in sorted(final_by_traj.keys()):
+    if include_unmatched_planned:
+        traj_names = sorted(planned_trajectories_by_name.keys())
+    else:
+        traj_names = sorted(final_by_traj.keys())
+
+    for traj_name in traj_names:
         planned = planned_trajectories_by_name.get(traj_name)
         final = final_trajectories_by_name.get(traj_name)
-        if planned is None or final is None:
+        if planned is None:
+            continue
+        if final is None:
+            if include_unmatched_planned:
+                rows.append(
+                    {
+                        "trajectory": traj_name,
+                        "entry_radial_mm": None,
+                        "target_radial_mm": None,
+                        "mean_contact_radial_mm": None,
+                        "max_contact_radial_mm": None,
+                        "rms_contact_radial_mm": None,
+                        "angle_deg": None,
+                        "matched_contacts": 0,
+                    }
+                )
             continue
 
         try:
@@ -108,6 +132,19 @@ def compute_qc_metrics(
         }
         matched_idx = sorted(set(planned_index_map.keys()) & set(final_index_map.keys()))
         if not matched_idx:
+            if include_unmatched_planned:
+                rows.append(
+                    {
+                        "trajectory": traj_name,
+                        "entry_radial_mm": entry_rad,
+                        "target_radial_mm": target_rad,
+                        "mean_contact_radial_mm": None,
+                        "max_contact_radial_mm": None,
+                        "rms_contact_radial_mm": None,
+                        "angle_deg": angle_deg,
+                        "matched_contacts": 0,
+                    }
+                )
             continue
 
         radial_errors = []

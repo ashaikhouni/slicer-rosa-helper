@@ -22,7 +22,7 @@ TRAJECTORY_GROUP_CONFIG = {
         "prefix": "",
         "display_color": (0.15, 0.65, 1.0),
         "selected_color": (0.35, 0.8, 1.0),
-        "line_thickness": 0.5,
+        "line_thickness": 0.4,
         "locked": False,
         "point_labels": True,
     },
@@ -30,9 +30,9 @@ TRAJECTORY_GROUP_CONFIG = {
         "role": "ManualTrajectoryLines",
         "folder": "Manual",
         "prefix": "",
-        "display_color": (1.0, 0.95, 0.1),
-        "selected_color": (1.0, 0.9, 0.3),
-        "line_thickness": 0.5,
+        "display_color": (0.78, 0.42, 0.18),
+        "selected_color": (0.88, 0.56, 0.30),
+        "line_thickness": 0.4,
         "locked": False,
         "point_labels": True,
     },
@@ -42,7 +42,7 @@ TRAJECTORY_GROUP_CONFIG = {
         "prefix": "Guided_",
         "display_color": (0.95, 0.35, 0.8),
         "selected_color": (1.0, 0.55, 0.9),
-        "line_thickness": 0.6,
+        "line_thickness": 0.45,
         "locked": False,
         "point_labels": True,
     },
@@ -52,7 +52,7 @@ TRAJECTORY_GROUP_CONFIG = {
         "prefix": "DeNovo_",
         "display_color": (0.2, 0.95, 0.45),
         "selected_color": (0.45, 1.0, 0.6),
-        "line_thickness": 0.55,
+        "line_thickness": 0.42,
         "locked": False,
         "point_labels": True,
     },
@@ -62,7 +62,7 @@ TRAJECTORY_GROUP_CONFIG = {
         "prefix": "Ext_",
         "display_color": (1.0, 0.65, 0.1),
         "selected_color": (1.0, 0.8, 0.35),
-        "line_thickness": 0.55,
+        "line_thickness": 0.42,
         "locked": False,
         "point_labels": True,
     },
@@ -72,19 +72,22 @@ TRAJECTORY_GROUP_CONFIG = {
         "prefix": "AutoFit_",
         "display_color": (0.2, 0.8, 1.0),
         "selected_color": (0.2, 0.8, 1.0),
-        "line_thickness": 0.5,
+        "line_thickness": 0.4,
         "locked": False,
         "point_labels": False,
     },
 }
 
 DEFAULT_GROUP = "manual"
+# Reserve yellow for active trajectory highlight only.
+ACTIVE_HIGHLIGHT_COLOR = (1.0, 0.95, 0.10)
 
 
 class TrajectorySceneService:
     """Read/write helpers for grouped trajectory line markups in the active scene."""
 
     def _normalize_group(self, group):
+        """Normalize caller group key and fallback to default when unknown."""
         key = str(group or DEFAULT_GROUP).strip().lower()
         return key if key in TRAJECTORY_GROUP_CONFIG else DEFAULT_GROUP
 
@@ -146,8 +149,15 @@ class TrajectorySceneService:
         return None
 
     def _apply_group_display(self, node, group):
+        """Apply configured color/visibility/lock style for one trajectory group."""
         cfg = TRAJECTORY_GROUP_CONFIG.get(self._normalize_group(group), TRAJECTORY_GROUP_CONFIG[DEFAULT_GROUP])
         node.SetLocked(bool(cfg.get("locked", False)))
+        # Compact labels: show trajectory name once on entry point plus E/T markers.
+        traj_name = (node.GetAttribute("Rosa.TrajectoryName") or "").strip() or (node.GetName() or "").strip()
+        if node.GetNumberOfControlPoints() >= 1:
+            node.SetNthControlPointLabel(0, f"{traj_name} E" if traj_name else "E")
+        if node.GetNumberOfControlPoints() >= 2:
+            node.SetNthControlPointLabel(1, "T")
         display = node.GetDisplayNode()
         if display is None:
             return
@@ -156,11 +166,63 @@ class TrajectorySceneService:
         display.SetColor(float(color[0]), float(color[1]), float(color[2]))
         display.SetSelectedColor(float(sel_color[0]), float(sel_color[1]), float(sel_color[2]))
         display.SetLineThickness(float(cfg.get("line_thickness", 0.5)))
+        display.SetOpacity(1.0)
         display.SetVisibility(True)
         if hasattr(display, "SetPointLabelsVisibility"):
             display.SetPointLabelsVisibility(bool(cfg.get("point_labels", True)))
         if hasattr(display, "SetPropertiesLabelVisibility"):
+            # Hide properties labels to avoid Slicer's auto-added length text.
             display.SetPropertiesLabelVisibility(False)
+        if hasattr(display, "SetTextScale"):
+            display.SetTextScale(1.5)
+        if hasattr(display, "SetGlyphScale"):
+            display.SetGlyphScale(1.5)
+        # Keep default slice behavior: show markups only on slices that intersect
+        # the markup geometry. Do not project lines onto all slices.
+        if hasattr(display, "SetSliceProjection"):
+            display.SetSliceProjection(False)
+        if hasattr(display, "SetSliceProjectionUseFiducialColor"):
+            display.SetSliceProjectionUseFiducialColor(True)
+        if hasattr(display, "SetSliceProjectionOpacity"):
+            display.SetSliceProjectionOpacity(0.9)
+
+    def highlight_selected_trajectory(self, selected_node_id="", scope_node_ids=None):
+        """Highlight one trajectory line and de-emphasize other lines in the same scope."""
+        selected_id = str(selected_node_id or "").strip()
+        scope = {str(node_id) for node_id in (scope_node_ids or []) if str(node_id)}
+        if not scope and not selected_id:
+            return
+
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"):
+            node_id = str(node.GetID() or "")
+            if scope and node_id not in scope:
+                continue
+            group = self.infer_group_from_node(node)
+            self._apply_group_display(node, group)
+            display = node.GetDisplayNode()
+            if display is None:
+                continue
+            cfg = TRAJECTORY_GROUP_CONFIG.get(self._normalize_group(group), TRAJECTORY_GROUP_CONFIG[DEFAULT_GROUP])
+            if selected_id and node_id == selected_id:
+                base = float(cfg.get("line_thickness", 0.5))
+                display.SetColor(
+                    float(ACTIVE_HIGHLIGHT_COLOR[0]),
+                    float(ACTIVE_HIGHLIGHT_COLOR[1]),
+                    float(ACTIVE_HIGHLIGHT_COLOR[2]),
+                )
+                # Markups may render using selected-color state; keep both in sync
+                # so highlight remains yellow regardless of MRML selected-state.
+                display.SetSelectedColor(
+                    float(ACTIVE_HIGHLIGHT_COLOR[0]),
+                    float(ACTIVE_HIGHLIGHT_COLOR[1]),
+                    float(ACTIVE_HIGHLIGHT_COLOR[2]),
+                )
+                display.SetLineThickness(base)
+                display.SetOpacity(0.50)
+                if hasattr(display, "SetSliceProjectionOpacity"):
+                    display.SetSliceProjectionOpacity(0.50)
+            elif selected_id:
+                display.SetOpacity(0.45)
 
     def show_only_groups(self, groups):
         """Hide all trajectory groups except the provided one(s)."""
@@ -180,6 +242,11 @@ class TrajectorySceneService:
         node.SetAttribute("Rosa.TrajectoryName", str(trajectory_name or ""))
         node.SetAttribute("Rosa.TrajectoryGroup", grp)
         node.SetAttribute("Rosa.TrajectoryOrigin", str(origin or grp))
+        if node.GetNumberOfControlPoints() >= 1:
+            traj_name = str(trajectory_name or "").strip()
+            node.SetNthControlPointLabel(0, f"{traj_name} E" if traj_name else "E")
+        if node.GetNumberOfControlPoints() >= 2:
+            node.SetNthControlPointLabel(1, "T")
 
     def trajectory_from_line_node(self, name, node):
         """Extract one line node as a trajectory dictionary in ROSA/LPS coordinates."""
@@ -232,6 +299,7 @@ class TrajectorySceneService:
                 slicer.mrmlScene.RemoveNode(node)
 
     def _ensure_subject_hierarchy_folder(self, parent_item_id, folder_name):
+        """Create or reuse a subject-hierarchy folder under the given parent item."""
         sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
         if sh_node is None:
             return 0
@@ -297,11 +365,25 @@ class TrajectorySceneService:
         node.RemoveAllControlPoints()
         node.AddControlPoint(vtk.vtkVector3d(*start_ras))
         node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-        node.SetNthControlPointLabel(0, f"{name}_start")
-        node.SetNthControlPointLabel(1, f"{name}_end")
+        node.SetNthControlPointLabel(0, f"{name} E" if name else "E")
+        node.SetNthControlPointLabel(1, "T")
         self.set_trajectory_metadata(node, trajectory_name=name, group=grp, origin=origin or grp)
         self._apply_group_display(node, grp)
         return node
+
+    def rename_trajectory_node(self, node, new_name):
+        """Rename one trajectory node while preserving its group/origin metadata."""
+        if node is None:
+            return False
+        clean_name = str(new_name or "").strip()
+        if not clean_name:
+            return False
+        group = self.infer_group_from_node(node)
+        origin = node.GetAttribute("Rosa.TrajectoryOrigin") or group
+        node.SetName(self.build_node_name(clean_name, group))
+        self.set_trajectory_metadata(node, trajectory_name=clean_name, group=group, origin=origin)
+        self._apply_group_display(node, group)
+        return True
 
     def collect_working_trajectory_rows(self, groups=None):
         """Return sorted trajectory rows from scene, optionally filtered by group list."""

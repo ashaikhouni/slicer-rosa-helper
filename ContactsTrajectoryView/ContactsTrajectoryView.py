@@ -27,12 +27,17 @@ from rosa_core import (
     electrode_length_mm,
     generate_contacts,
     load_electrode_library,
-    lps_to_ras_point,
     model_map,
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_scene import ElectrodeSceneService, TrajectorySceneService, widget_current_text
+from rosa_scene import (
+    ElectrodeSceneService,
+    LayoutService,
+    TrajectoryFocusController,
+    TrajectorySceneService,
+    widget_current_text,
+)
 from rosa_workflow import WorkflowPublisher, WorkflowState
 
 TRAJECTORY_SOURCE_OPTIONS = [
@@ -78,6 +83,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
         self._syncingSourceCombo = False
+        self._syncingFocusControls = False
+        self._syncingVolumeSelectors = False
+        self._pendingFollow = False
+        self._pendingFocusLayoutApply = False
+        self._updatingContactTable = False
+        self._renamingTrajectory = False
 
         top_form = qt.QFormLayout()
         self.layout.addLayout(top_form)
@@ -114,6 +125,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.layout.addStretch(1)
 
         self._load_electrode_library()
+        self.logic.layout_service.sanitize_focus_layout_state()
         self.onRefreshClicked()
 
     def enter(self):
@@ -143,6 +155,37 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             self.trajectorySourceCombo.setCurrentIndex(idx)
         finally:
             self._syncingSourceCombo = False
+
+    def _workflow_param_bool(self, key, default=False):
+        if self.workflowNode is None:
+            return bool(default)
+        value = str(self.workflowNode.GetParameter(key) or "").strip().lower()
+        if not value:
+            return bool(default)
+        return value in ("1", "true", "yes", "on")
+
+    def _set_workflow_param_bool(self, key, enabled):
+        if self.workflowNode is None:
+            return
+        self.workflowNode.SetParameter(key, "true" if bool(enabled) else "false")
+
+    def _sync_focus_controls_from_workflow(self):
+        autofollow = self._workflow_param_bool("TrajectoryFocusAutoFollow", True)
+        self._syncingFocusControls = True
+        try:
+            self.autoFollowTrajectoryCheck.setChecked(bool(autofollow))
+        finally:
+            self._syncingFocusControls = False
+
+    def _sync_focus_volume_selectors_from_workflow(self):
+        if self.workflowNode is None:
+            return
+        self._syncingVolumeSelectors = True
+        try:
+            self.focusBaseSelector.setCurrentNode(self.workflowNode.GetNodeReference("BaseVolume"))
+            self.focusPostopSelector.setCurrentNode(self.workflowNode.GetNodeReference("PostopCT"))
+        finally:
+            self._syncingVolumeSelectors = False
 
     def _role_has_nodes(self, role):
         return len(self.workflowState.role_nodes(role, workflow_node=self.workflowNode)) > 0
@@ -207,7 +250,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.contactTable.horizontalHeader().setSectionResizeMode(4, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(5, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(6, qt.QHeaderView.ResizeToContents)
-        self.contactTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        self.contactTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.contactTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.contactTable.cellClicked.connect(self.onContactTableCellClicked)
+        self.contactTable.currentCellChanged.connect(self.onContactTableCurrentCellChanged)
+        self.contactTable.itemChanged.connect(self.onContactTableItemChanged)
         form.addRow(self.contactTable)
 
         defaults_row = qt.QHBoxLayout()
@@ -272,33 +319,62 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._set_qc_enabled(False, "QC disabled: generate contacts first.")
 
     def _build_slice_view_ui(self):
-        """Create controls to align a slice view to a selected trajectory."""
+        """Create trajectory-focus layout controls."""
         section = ctk.ctkCollapsibleButton()
-        section.text = "Trajectory Slice View"
+        section.text = "Trajectory Focus View"
         section.collapsed = False
         self.layout.addWidget(section)
         form = qt.QFormLayout(section)
 
-        self.trajectorySelector = qt.QComboBox()
-        form.addRow("Trajectory", self.trajectorySelector)
+        volumes_row = qt.QHBoxLayout()
+        self.focusBaseSelector = slicer.qMRMLNodeComboBox()
+        self.focusBaseSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.focusBaseSelector.noneEnabled = True
+        self.focusBaseSelector.addEnabled = False
+        self.focusBaseSelector.removeEnabled = False
+        self.focusBaseSelector.renameEnabled = False
+        self.focusBaseSelector.setMRMLScene(slicer.mrmlScene)
+        volumes_row.addWidget(self.focusBaseSelector, 1)
 
-        self.sliceViewSelector = qt.QComboBox()
-        self.sliceViewSelector.addItems(["Red", "Yellow", "Green"])
-        form.addRow("Slice view", self.sliceViewSelector)
+        self.focusPostopSelector = slicer.qMRMLNodeComboBox()
+        self.focusPostopSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.focusPostopSelector.noneEnabled = True
+        self.focusPostopSelector.addEnabled = False
+        self.focusPostopSelector.removeEnabled = False
+        self.focusPostopSelector.renameEnabled = False
+        self.focusPostopSelector.setMRMLScene(slicer.mrmlScene)
+        volumes_row.addWidget(self.focusPostopSelector, 1)
 
-        self.sliceModeSelector = qt.QComboBox()
-        self.sliceModeSelector.addItems(["long", "down"])
-        form.addRow("Mode", self.sliceModeSelector)
+        self.applyFocusVolumesButton = qt.QPushButton("Set Base/Postop")
+        self.applyFocusVolumesButton.clicked.connect(self.onApplyFocusVolumesClicked)
+        volumes_row.addWidget(self.applyFocusVolumesButton)
+        form.addRow("Base / Postop", volumes_row)
 
-        self.alignSliceButton = qt.QPushButton("Align Slice to Trajectory")
-        self.alignSliceButton.clicked.connect(self.onAlignSliceClicked)
-        self.alignSliceButton.setEnabled(False)
-        form.addRow(self.alignSliceButton)
+        focus_row = qt.QHBoxLayout()
+        self.applyFocusLayoutButton = qt.QPushButton("Apply Focus Layout (2x3)")
+        self.applyFocusLayoutButton.clicked.connect(self.onApplyFocusLayoutClicked)
+        focus_row.addWidget(self.applyFocusLayoutButton)
+        self.restoreLayoutButton = qt.QPushButton("Restore Previous Layout")
+        self.restoreLayoutButton.clicked.connect(self.onResetFocusLayoutClicked)
+        focus_row.addWidget(self.restoreLayoutButton)
+        focus_row.addStretch(1)
+        form.addRow(focus_row)
+
+        self.autoFollowTrajectoryCheck = qt.QCheckBox("Auto-follow selected trajectory")
+        self.autoFollowTrajectoryCheck.setChecked(True)
+        self.autoFollowTrajectoryCheck.toggled.connect(self.onAutoFollowToggled)
+        form.addRow(self.autoFollowTrajectoryCheck)
 
     def _set_readonly_text_item(self, row, column, text):
         item = qt.QTableWidgetItem(str(text))
         item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
         self.contactTable.setItem(row, column, item)
+
+    def _set_editable_trajectory_item(self, row, text):
+        item = qt.QTableWidgetItem(str(text))
+        item.setFlags(item.flags() | qt.Qt.ItemIsEditable)
+        item.setData(qt.Qt.UserRole, str(text))
+        self.contactTable.setItem(row, 1, item)
 
     def _set_qc_enabled(self, enabled, message=""):
         self.qcSection.setEnabled(bool(enabled))
@@ -381,12 +457,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.log(f"[electrodes] loaded {len(self.modelIds)} models")
 
     def _populate_contact_table(self, trajectories):
+        self._updatingContactTable = True
         self.contactTable.setRowCount(0)
         auto_assigned = 0
         for row, traj in enumerate(trajectories):
             self.contactTable.insertRow(row)
             self.contactTable.setCellWidget(row, 0, self._build_use_checkbox())
-            self._set_readonly_text_item(row, 1, traj["name"])
+            self._set_editable_trajectory_item(row, traj["name"])
             self._set_readonly_text_item(row, 2, f"{trajectory_length_mm(traj):.2f}")
 
             model_combo = self._build_model_combo()
@@ -415,16 +492,68 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         if trajectories:
             self.log(f"[contacts] ready for {len(trajectories)} trajectories")
             self.log(f"[contacts] auto-assigned models for {auto_assigned}/{len(trajectories)}")
+            self.contactTable.selectRow(0)
         else:
             self.log("[contacts] no trajectories available")
+        self._updatingContactTable = False
 
-    def _populate_trajectory_selector(self, trajectories):
-        self.trajectorySelector.clear()
-        for traj in trajectories:
-            group = str(traj.get("group", "") or "unknown")
-            label = f"[{group}] {traj['name']}"
-            self.trajectorySelector.addItem(label, traj["name"])
-        self.alignSliceButton.setEnabled(bool(trajectories))
+    def onContactTableItemChanged(self, item):
+        if self._updatingContactTable or self._renamingTrajectory:
+            return
+        if item is None or item.column() != 1:
+            return
+        row = int(item.row())
+        if row < 0 or row >= len(self.loadedTrajectories):
+            return
+
+        old_name = str(item.data(qt.Qt.UserRole) or self.loadedTrajectories[row].get("name", "")).strip()
+        new_name = (item.text() or "").strip()
+        if not old_name:
+            return
+        if not new_name:
+            self._renamingTrajectory = True
+            item.setText(old_name)
+            self._renamingTrajectory = False
+            return
+        if new_name == old_name:
+            return
+
+        for r in range(self.contactTable.rowCount):
+            if r == row:
+                continue
+            other = self.contactTable.item(r, 1)
+            if other and (other.text() or "").strip().lower() == new_name.lower():
+                self._renamingTrajectory = True
+                item.setText(old_name)
+                self._renamingTrajectory = False
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "Contacts & Trajectory View",
+                    f"Trajectory name '{new_name}' already exists.",
+                )
+                return
+
+        node_id = self.loadedTrajectories[row].get("node_id", "")
+        renamed = self.logic.rename_trajectory(
+            node_id=node_id,
+            new_name=new_name,
+        )
+        if not renamed:
+            self._renamingTrajectory = True
+            item.setText(old_name)
+            self._renamingTrajectory = False
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Contacts & Trajectory View",
+                f"Failed to rename trajectory '{old_name}'.",
+            )
+            return
+
+        self.loadedTrajectories[row]["name"] = new_name
+        item.setData(qt.Qt.UserRole, new_name)
+        self.log(f"[trajectory] renamed {old_name} -> {new_name}")
+        self._refresh_summary()
+        self._schedule_follow_selected_trajectory()
 
     def _collect_assignments(self):
         rows = []
@@ -483,10 +612,19 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             final_trajectories_by_name=final_map,
             planned_contacts=planned_contacts,
             final_contacts=self.lastGeneratedContacts,
+            include_unmatched_planned=True,
         )
         if not rows:
-            return [], "QC disabled: no matching planned/final trajectories with contacts."
-        return rows, f"QC metrics computed for {len(rows)} trajectories."
+            return [], "QC disabled: no planned trajectories available for comparison."
+        return rows, f"QC metrics computed for {len(rows)} planned trajectories."
+
+    def _fmt_qc_metric(self, value):
+        if value is None:
+            return "NA"
+        try:
+            return f"{float(value):.2f}"
+        except Exception:
+            return "NA"
 
     def _refresh_qc_metrics(self):
         rows, status = self._compute_qc_rows()
@@ -499,12 +637,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.qcTable.setRowCount(len(rows))
         for r, row in enumerate(rows):
             self._set_qc_table_item(r, 0, row["trajectory"])
-            self._set_qc_table_item(r, 1, f"{row['entry_radial_mm']:.2f}")
-            self._set_qc_table_item(r, 2, f"{row['target_radial_mm']:.2f}")
-            self._set_qc_table_item(r, 3, f"{row['mean_contact_radial_mm']:.2f}")
-            self._set_qc_table_item(r, 4, f"{row['max_contact_radial_mm']:.2f}")
-            self._set_qc_table_item(r, 5, f"{row['rms_contact_radial_mm']:.2f}")
-            self._set_qc_table_item(r, 6, f"{row['angle_deg']:.2f}")
+            self._set_qc_table_item(r, 1, self._fmt_qc_metric(row.get("entry_radial_mm")))
+            self._set_qc_table_item(r, 2, self._fmt_qc_metric(row.get("target_radial_mm")))
+            self._set_qc_table_item(r, 3, self._fmt_qc_metric(row.get("mean_contact_radial_mm")))
+            self._set_qc_table_item(r, 4, self._fmt_qc_metric(row.get("max_contact_radial_mm")))
+            self._set_qc_table_item(r, 5, self._fmt_qc_metric(row.get("rms_contact_radial_mm")))
+            self._set_qc_table_item(r, 6, self._fmt_qc_metric(row.get("angle_deg")))
             self._set_qc_table_item(r, 7, str(row["matched_contacts"]))
 
     def _refresh_summary(self):
@@ -540,9 +678,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
+        self.logic.layout_service.sanitize_focus_layout_state()
         if not self._workflow_active_source():
             self._set_workflow_active_source(self._default_source_when_unset())
+        self._sync_focus_controls_from_workflow()
         self._sync_source_combo_from_workflow()
+        self._sync_focus_volume_selectors_from_workflow()
         source_key = self._selected_source_key()
         self.loadedTrajectories = self.logic.collect_trajectories_by_source(
             source_key=source_key,
@@ -552,11 +693,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
         self._populate_contact_table(self.loadedTrajectories)
-        self._populate_trajectory_selector(self.loadedTrajectories)
         self._apply_source_visibility(source_key)
         self._refresh_qc_metrics()
         self._refresh_summary()
         self.log(f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)}")
+        if not self.logic.layout_service.has_focus_slice_views():
+            self._schedule_apply_focus_layout()
+        self._apply_focus_slice_layers()
+        self._schedule_follow_selected_trajectory()
 
     def _selected_source_key(self):
         data = self.trajectorySourceCombo.currentData
@@ -628,11 +772,25 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             row["source"] = "contacts"
 
         self._refresh_qc_metrics()
+        qc_rows_for_publish = []
+        for row in self.lastQCMetricsRows:
+            out = dict(row)
+            for key in (
+                "entry_radial_mm",
+                "target_radial_mm",
+                "mean_contact_radial_mm",
+                "max_contact_radial_mm",
+                "rms_contact_radial_mm",
+                "angle_deg",
+            ):
+                if out.get(key) is None:
+                    out[key] = "NA"
+            qc_rows_for_publish.append(out)
         self.logic.electrode_scene.publish_contacts_outputs(
             contact_nodes_by_traj=contact_nodes,
             model_nodes_by_traj=model_nodes,
             assignment_rows=assignment_rows,
-            qc_rows=self.lastQCMetricsRows,
+            qc_rows=qc_rows_for_publish,
             workflow_node=self.workflowNode,
         )
         self.log(
@@ -679,44 +837,159 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             self.log(f"[contacts:update] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
 
-    def onAlignSliceClicked(self):
-        data = self.trajectorySelector.currentData
-        traj_name = data() if callable(data) else data
-        traj_name = str(traj_name or "").strip()
-        if not traj_name:
-            traj_name = widget_current_text(self.trajectorySelector).strip()
-        if not traj_name:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Contacts & Trajectory View", "No trajectory selected.")
-            return
+    def _selected_trajectory_name_from_table(self):
+        row = self.contactTable.currentRow()
+        if row < 0:
+            selected = self.contactTable.selectedItems()
+            if selected:
+                row = selected[0].row()
+        if row < 0 and self.contactTable.rowCount > 0:
+            row = 0
+        if row < 0:
+            return ""
+        item = self.contactTable.item(row, 1)
+        return (item.text() if item else "").strip()
 
+    def _selected_trajectory(self):
+        traj_name = self._selected_trajectory_name_from_table()
+        if not traj_name:
+            return None
         traj_map = self._build_trajectory_map_with_scene_overrides()
-        trajectory = traj_map.get(traj_name)
-        if trajectory is None:
-            qt.QMessageBox.warning(
-                slicer.util.mainWindow(),
-                "Contacts & Trajectory View",
-                f"Trajectory '{traj_name}' not found.",
+        return traj_map.get(traj_name)
+
+    def _highlight_selected_trajectory(self):
+        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        selected = self._selected_trajectory()
+        self.logic.focus_controller.focus_selected(
+            trajectory=selected,
+            scope_node_ids=scope_ids,
+            jump_cardinal=False,
+            align_focus_views=False,
+        )
+
+    def _resolve_primary_volumes(self):
+        base_nodes = self.workflowState.role_nodes("BaseVolume", workflow_node=self.workflowNode)
+        post_nodes = self.workflowState.role_nodes("PostopCT", workflow_node=self.workflowNode)
+        base_node = base_nodes[0] if base_nodes else None
+        post_node = post_nodes[0] if post_nodes else None
+        return base_node, post_node
+
+    def _apply_focus_slice_layers(self):
+        base_node, post_node = self._resolve_primary_volumes()
+        if post_node is not None and base_node is not None:
+            bg_node, fg_node, fg_opacity = post_node, base_node, 0.5
+        elif post_node is not None:
+            bg_node, fg_node, fg_opacity = post_node, None, 0.0
+        elif base_node is not None:
+            bg_node, fg_node, fg_opacity = base_node, None, 0.0
+        else:
+            bg_node, fg_node, fg_opacity = None, None, 0.0
+
+        for view_name in (
+            "Red",
+            "Yellow",
+            "Green",
+            self.logic.layout_service.TRAJECTORY_LONG_VIEW,
+            self.logic.layout_service.TRAJECTORY_DOWN_VIEW,
+        ):
+            self.logic.electrode_scene.set_slice_view_layers(
+                slice_view=view_name,
+                background_node=bg_node,
+                foreground_node=fg_node,
+                foreground_opacity=fg_opacity,
             )
-            return
 
-        start_ras = lps_to_ras_point(trajectory["start"])
-        end_ras = lps_to_ras_point(trajectory["end"])
-        slice_view = widget_current_text(self.sliceViewSelector) or "Red"
-        mode = widget_current_text(self.sliceModeSelector) or "long"
-
+    def _align_focus_views_for_selected(self, align_trajectory_views=True):
+        trajectory = self._selected_trajectory()
+        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
         try:
-            self.logic.electrode_scene.align_slice_to_trajectory(
-                start_ras=start_ras,
-                end_ras=end_ras,
-                slice_view=slice_view,
-                mode=mode,
+            return bool(
+                self.logic.focus_controller.focus_selected(
+                    trajectory=trajectory,
+                    scope_node_ids=scope_ids,
+                    jump_cardinal=True,
+                    align_focus_views=bool(align_trajectory_views),
+                    focus="entry",
+                )
             )
         except Exception as exc:
-            self.log(f"[slice] error: {exc}")
-            qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
-            return
+            self.log(f"[focus] alignment fallback: {exc}")
+            return False
 
-        self.log(f"[slice] aligned {slice_view} view to {traj_name} ({mode})")
+    def _follow_selected_trajectory_if_enabled(self):
+        if self._syncingFocusControls:
+            return
+        self._highlight_selected_trajectory()
+        if not bool(self.autoFollowTrajectoryCheck.checked):
+            return
+        align_trajectory_views = bool(self.logic.layout_service.has_focus_slice_views())
+        self._align_focus_views_for_selected(align_trajectory_views=align_trajectory_views)
+
+    def _schedule_follow_selected_trajectory(self):
+        if self._pendingFollow:
+            return
+        self._pendingFollow = True
+        qt.QTimer.singleShot(0, self._run_scheduled_follow)
+
+    def _run_scheduled_follow(self):
+        self._pendingFollow = False
+        self._follow_selected_trajectory_if_enabled()
+
+    def _schedule_apply_focus_layout(self):
+        if self._pendingFocusLayoutApply:
+            return
+        self._pendingFocusLayoutApply = True
+        qt.QTimer.singleShot(0, self._run_scheduled_apply_focus_layout)
+
+    def _run_scheduled_apply_focus_layout(self):
+        self._pendingFocusLayoutApply = False
+        self.onApplyFocusLayoutClicked()
+
+    def onContactTableCellClicked(self, _row, _col):
+        self._schedule_follow_selected_trajectory()
+
+    def onContactTableCurrentCellChanged(self, _currentRow, _currentColumn, _previousRow, _previousColumn):
+        self._schedule_follow_selected_trajectory()
+
+    def onAutoFollowToggled(self, checked):
+        self._set_workflow_param_bool("TrajectoryFocusAutoFollow", bool(checked))
+        self._highlight_selected_trajectory()
+        if bool(checked):
+            self._schedule_follow_selected_trajectory()
+
+    def onApplyFocusVolumesClicked(self):
+        base_node = self.focusBaseSelector.currentNode()
+        postop_node = self.focusPostopSelector.currentNode()
+        if base_node is not None:
+            self.logic.workflow_publish.set_default_role("BaseVolume", base_node, workflow_node=self.workflowNode)
+        if postop_node is not None:
+            self.logic.workflow_publish.set_default_role("PostopCT", postop_node, workflow_node=self.workflowNode)
+        else:
+            self.logic.workflow_publish.set_default_role("PostopCT", None, workflow_node=self.workflowNode)
+        self._apply_focus_slice_layers()
+        self._schedule_follow_selected_trajectory()
+        self.log(
+            "[focus] set defaults: "
+            f"base={(base_node.GetName() if base_node else 'unset')}, "
+            f"postop={(postop_node.GetName() if postop_node else 'unset')}"
+        )
+
+    def onApplyFocusLayoutClicked(self):
+        self.logic.layout_service.sanitize_focus_layout_state()
+        if not self.logic.layout_service.apply_trajectory_focus_layout():
+            self.log("[focus] failed to apply trajectory focus layout")
+            return
+        self._apply_focus_slice_layers()
+        self._schedule_follow_selected_trajectory()
+        self.log("[focus] trajectory focus layout applied")
+
+    def onResetFocusLayoutClicked(self):
+        if self.logic.layout_service.restore_previous_layout():
+            self.log("[focus] restored previous layout")
+
+    def onAlignSliceClicked(self):
+        # Deprecated manual align action retained for backward compatibility.
+        self._follow_selected_trajectory_if_enabled()
 
     def onShowPlannedToggled(self, checked):
         self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
@@ -730,9 +1003,15 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
         self.trajectory_scene = TrajectorySceneService()
+        self.layout_service = LayoutService()
         self.electrode_scene = ElectrodeSceneService(
             workflow_state=self.workflow_state,
             workflow_publish=self.workflow_publish,
+        )
+        self.focus_controller = TrajectoryFocusController(
+            trajectory_scene=self.trajectory_scene,
+            electrode_scene=self.electrode_scene,
+            layout_service=self.layout_service,
         )
 
     def _collect_trajectories_from_role(self, role, workflow_node=None):
@@ -827,3 +1106,10 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
         if planned:
             return planned
         return self.trajectory_scene.collect_planned_trajectory_map()
+
+    def rename_trajectory(self, node_id, new_name):
+        """Rename one working trajectory node (planned trajectories are left unchanged)."""
+        node = slicer.mrmlScene.GetNodeByID(str(node_id or ""))
+        if node is None:
+            return False
+        return bool(self.trajectory_scene.rename_trajectory_node(node, new_name))

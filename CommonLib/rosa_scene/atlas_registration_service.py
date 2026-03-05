@@ -11,6 +11,7 @@ class AtlasRegistrationService:
     """Registration and FreeSurfer loading operations."""
 
     def __init__(self, module_dir=None):
+        """Initialize service wrapper around `FreeSurferService`."""
         self.fs_service = FreeSurferService(module_dir=module_dir)
 
     def run_brainsfit_rigid_registration(
@@ -21,6 +22,7 @@ class AtlasRegistrationService:
         initialize_mode="useGeometryAlign",
         logger=None,
     ):
+        """Run rigid BRAINSFit registration via FreeSurfer service helper."""
         return self.fs_service.run_brainsfit_rigid_registration(
             fixed_volume_node=fixed_volume_node,
             moving_volume_node=moving_volume_node,
@@ -30,6 +32,7 @@ class AtlasRegistrationService:
         )
 
     def list_freesurfer_parcellation_candidates(self, subject_dir):
+        """List available FreeSurfer parcellation volumes in one subject directory."""
         return self.fs_service.freesurfer_parcellation_candidates(subject_dir)
 
     def load_freesurfer_parcellation_volumes(
@@ -41,6 +44,7 @@ class AtlasRegistrationService:
         create_3d_geometry=False,
         logger=None,
     ):
+        """Load selected FreeSurfer parcellation volumes and optional 3D models."""
         return self.fs_service.load_freesurfer_parcellation_volumes(
             subject_dir=subject_dir,
             selected_names=selected_names,
@@ -58,6 +62,7 @@ class AtlasRegistrationService:
         color_lut_path=None,
         logger=None,
     ):
+        """Load FreeSurfer surfaces and optional annotation overlays."""
         return self.fs_service.load_freesurfer_surfaces(
             subject_dir=subject_dir,
             surface_set=surface_set,
@@ -67,15 +72,18 @@ class AtlasRegistrationService:
         )
 
     def decimate_model_nodes(self, model_nodes, reduction=0.6):
+        """Decimate a list of model nodes by target reduction ratio."""
         return self.fs_service.decimate_model_nodes(model_nodes=model_nodes, reduction=reduction)
 
     def create_surface_from_parcellation_volume(self, volume_node, output_name=None):
+        """Create one closed-surface model from label-volume voxels."""
         return self.fs_service.create_surface_from_parcellation_volume(
             volume_node=volume_node,
             output_name=output_name,
         )
 
     def apply_transform_to_nodes(self, nodes, transform_node, harden=False):
+        """Apply one transform to nodes and optionally harden in-place."""
         if transform_node is None:
             raise ValueError("Transform node is required.")
         transform_id = transform_node.GetID()

@@ -11,6 +11,7 @@ class DicomIOService:
     """Import/export scalar volumes from/to DICOM directories."""
 
     def load_dicom_scalar_volume_from_directory(self, dicom_dir, logger=None):
+        """Load the most likely scalar series from a DICOM directory tree."""
         root = os.path.abspath(dicom_dir)
         if not os.path.isdir(root):
             raise ValueError(f"DICOM directory not found: {dicom_dir}")
@@ -86,6 +87,7 @@ class DicomIOService:
         return node
 
     def place_node_under_same_study(self, node, reference_node, logger=None):
+        """Move a node to the same subject-hierarchy study as a reference volume."""
         if node is None or reference_node is None:
             return False
         sh_node = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
@@ -112,6 +114,7 @@ class DicomIOService:
         modality="MR",
         logger=None,
     ):
+        """Export one scalar volume as a DICOM series using reference patient/study tags."""
         if volume_node is None:
             raise ValueError("Volume node is required for DICOM export.")
         if reference_volume_node is None:

@@ -25,6 +25,8 @@ try:
 except ImportError:  # pragma: no cover
     sitk = None
 
+from .blob_candidates import build_blob_labelmap, extract_blob_candidates, filter_blob_candidates
+
 
 def _require_numpy():
     if np is None:
@@ -226,6 +228,31 @@ def _distance_to_line_with_extension(points, start, end, extension_mm=8.0):
     return d, valid
 
 
+def _normalize_candidate_mode(value):
+    mode = str(value or "voxel").strip().lower()
+    if mode not in ("voxel", "blob_centroid"):
+        return "voxel"
+    return mode
+
+
+def _line_support_mask(points, line, radius_mm):
+    return _distance_to_segment_mask(
+        points,
+        start=line["start_ras"],
+        end=line["end_ras"],
+        radius_mm=radius_mm,
+    )
+
+
+def _assigned_mask_for_lines(points, lines, radius_mm):
+    if points is None or points.shape[0] == 0 or not lines:
+        return np.zeros((0,), dtype=bool) if points is None else np.zeros((points.shape[0],), dtype=bool)
+    assigned = np.zeros((points.shape[0],), dtype=bool)
+    for line in lines:
+        assigned |= _line_support_mask(points, line, radius_mm=radius_mm)
+    return assigned
+
+
 def _line_quality_tuple(line):
     """Quality ordering used for line conflict suppression."""
     model_score = line.get("best_model_score", None)
@@ -235,7 +262,9 @@ def _line_quality_tuple(line):
         has_model,
         model_val,
         float(line.get("inside_fraction", 0.0)),
+        float(line.get("support_weight", 0.0)),
         float(line.get("inlier_count", 0.0)),
+        float(line.get("depth_span_mm", 0.0)),
         -float(line.get("rms_mm", 999.0)),
     )
 
@@ -513,14 +542,32 @@ def _refine_lines_exclusive(
     gating_mask_kji,
     models_by_id=None,
     min_model_score=None,
+    min_metal_depth_mm=5.0,
+    start_zone_window_mm=10.0,
+    support_weights=None,
+    apply_start_zone_prior=True,
 ):
     """Second-pass refinement where each support point belongs to at most one line."""
     if not raw_lines or support_points is None or support_points.shape[0] == 0:
-        return [], {"gap_reject_count": 0, "duplicate_reject_count": 0}
+        empty_assigned = np.zeros((0,), dtype=bool)
+        return [], {
+            "gap_reject_count": 0,
+            "duplicate_reject_count": 0,
+            "start_zone_reject_count": 0,
+            "length_reject_count": 0,
+            "inlier_reject_count": 0,
+            "assigned_mask": empty_assigned,
+        }
 
     # Exclusive assignment stage: build one winner line index per point.
     n = support_points.shape[0]
     m = len(raw_lines)
+    if support_weights is None or len(support_weights) != n:
+        support_weights = np.ones((n,), dtype=float)
+    else:
+        support_weights = np.asarray(support_weights, dtype=float).reshape(-1)
+        support_weights = np.where(np.isfinite(support_weights), support_weights, 1.0)
+        support_weights = np.maximum(support_weights, 0.0)
     dist_mat = np.full((n, m), np.inf, dtype=float)
     for li, line in enumerate(raw_lines):
         d, valid = _distance_to_line_with_extension(
@@ -541,10 +588,14 @@ def _refine_lines_exclusive(
     # Re-fit each assigned cluster and enforce geometric/model plausibility.
     kept = []
     gap_reject_count = 0
+    start_zone_reject_count = 0
+    length_reject_count = 0
+    inlier_reject_count = 0
 
     for li in range(m):
         pts = support_points[assigned == li]
         if pts.shape[0] < int(min_inliers):
+            inlier_reject_count += 1
             continue
         center, axis = _fit_axis_pca(pts)
         t = (pts - center.reshape(1, 3)) @ axis
@@ -554,6 +605,7 @@ def _refine_lines_exclusive(
         hi = float(np.percentile(t, 98.0))
         length = float(hi - lo)
         if length < float(min_length_mm):
+            length_reject_count += 1
             continue
 
         p0 = center + axis * lo
@@ -594,17 +646,55 @@ def _refine_lines_exclusive(
             )
             length = float(np.linalg.norm(np.asarray(entry_ras) - np.asarray(target_ras)))
             if length < float(min_length_mm):
+                length_reject_count += 1
                 continue
 
         rms = float(np.sqrt(np.mean(_line_distances(pts, center, axis) ** 2))) if pts.shape[0] else 0.0
+        support_weight = float(np.sum(support_weights[assigned == li]))
+        depth_span = 0.0
+        if head_depth_kji is not None and pts.shape[0] > 0:
+            dvals = []
+            for point in pts:
+                d = _depth_at_ras_mm(point, head_depth_kji=head_depth_kji, ras_to_ijk_fn=ras_to_ijk_fn)
+                if d is not None:
+                    dvals.append(float(d))
+            if dvals:
+                depth_span = float(max(dvals) - min(dvals))
         line = {
             "start_ras": [float(entry_ras[0]), float(entry_ras[1]), float(entry_ras[2])],
             "end_ras": [float(target_ras[0]), float(target_ras[1]), float(target_ras[2])],
             "length_mm": float(length),
             "inlier_count": int(pts.shape[0]),
+            "support_weight": support_weight,
             "rms_mm": float(rms),
             "inside_fraction": float(inside_fraction),
+            "depth_span_mm": float(depth_span),
         }
+
+        # Require at least one support point in the shallow start-depth zone:
+        # [0, min_metal_depth_mm + start_zone_window_mm].
+        # Also allow entry-point depth to satisfy this rule; blob-centroid mode can
+        # have sparse support near entry even when the fitted entry is valid.
+        if bool(apply_start_zone_prior) and head_depth_kji is not None and pts.shape[0] > 0:
+            depth_vals = []
+            for point in pts:
+                d = _depth_at_ras_mm(point, head_depth_kji=head_depth_kji, ras_to_ijk_fn=ras_to_ijk_fn)
+                if d is not None:
+                    depth_vals.append(float(d))
+            if depth_vals:
+                start_hi = float(max(0.0, min_metal_depth_mm) + max(0.0, start_zone_window_mm))
+                has_start_zone_point = any((dv >= 0.0) and (dv <= start_hi) for dv in depth_vals)
+                if not has_start_zone_point:
+                    entry_depth = _depth_at_ras_mm(
+                        np.asarray(entry_ras, dtype=float),
+                        head_depth_kji=head_depth_kji,
+                        ras_to_ijk_fn=ras_to_ijk_fn,
+                    )
+                    if entry_depth is not None:
+                        has_start_zone_point = (float(entry_depth) >= 0.0) and (float(entry_depth) <= float(start_hi + 2.0))
+                if not has_start_zone_point:
+                    start_zone_reject_count += 1
+                    continue
 
         if models_by_id:
             model_fit = _select_best_model_for_line(
@@ -640,10 +730,121 @@ def _refine_lines_exclusive(
         support_radius_mm=max(1.0, float(inlier_radius_mm)),
         overlap_threshold=0.60,
     )
+    assigned_mask = _assigned_mask_for_lines(
+        points=support_points,
+        lines=kept,
+        radius_mm=max(1.0, float(inlier_radius_mm)),
+    )
     return kept, {
         "gap_reject_count": int(gap_reject_count),
+        "start_zone_reject_count": int(start_zone_reject_count),
         "duplicate_reject_count": int(duplicate_reject_count),
+        "length_reject_count": int(length_reject_count),
+        "inlier_reject_count": int(inlier_reject_count),
+        "assigned_mask": assigned_mask,
     }
+
+
+def _fit_line_proposals(
+    points,
+    center_ras,
+    head_depth_kji,
+    ras_to_ijk_fn,
+    gating_mask_kji,
+    inlier_radius_mm,
+    min_length_mm,
+    min_inliers,
+    ransac_iterations,
+    max_lines,
+):
+    """First-pass RANSAC proposals over support points."""
+    remaining = np.asarray(points, dtype=float).reshape(-1, 3)
+    lines = []
+    length_reject_count = 0
+    for _ in range(int(max_lines)):
+        if remaining.shape[0] < int(min_inliers):
+            break
+        fit = _ransac_fit_line(
+            remaining,
+            distance_threshold_mm=inlier_radius_mm,
+            min_inliers=min_inliers,
+            iterations=ransac_iterations,
+        )
+        if fit is None:
+            break
+
+        mask = fit["inlier_mask"]
+        inliers = remaining[mask]
+        center = fit["center"]
+        axis = fit["axis"]
+        t = (inliers - center.reshape(1, 3)) @ axis
+        if t.size < 2:
+            remaining = remaining[~mask]
+            continue
+        lo = float(np.percentile(t, 2.0))
+        hi = float(np.percentile(t, 98.0))
+        length = float(hi - lo)
+        if length < float(min_length_mm):
+            length_reject_count += 1
+            remaining = remaining[~mask]
+            continue
+
+        p_start = center + axis * lo
+        p_end = center + axis * hi
+        entry_ras, target_ras = _orient_segment_entry_target(
+            start_ras=p_start,
+            end_ras=p_end,
+            center_ras=center_ras,
+            head_depth_kji=head_depth_kji,
+            ras_to_ijk_fn=ras_to_ijk_fn,
+        )
+        inside_fraction = 1.0
+        if gating_mask_kji is not None:
+            inside_fraction = _segment_inside_mask_fraction(
+                start_ras=entry_ras,
+                end_ras=target_ras,
+                mask_kji=gating_mask_kji,
+                ras_to_ijk_fn=ras_to_ijk_fn,
+                step_mm=1.0,
+            )
+            clamped = _clamp_segment_to_mask(
+                start_ras=entry_ras,
+                end_ras=target_ras,
+                mask_kji=gating_mask_kji,
+                ras_to_ijk_fn=ras_to_ijk_fn,
+                step_mm=0.5,
+            )
+            if clamped is None:
+                remaining = remaining[~mask]
+                continue
+            entry_ras, target_ras = clamped
+            entry_ras, target_ras = _orient_segment_entry_target(
+                start_ras=entry_ras,
+                end_ras=target_ras,
+                center_ras=center_ras,
+                head_depth_kji=head_depth_kji,
+                ras_to_ijk_fn=ras_to_ijk_fn,
+            )
+            length = float(np.linalg.norm(np.asarray(entry_ras) - np.asarray(target_ras)))
+            if length < float(min_length_mm):
+                length_reject_count += 1
+                remaining = remaining[~mask]
+                continue
+
+        lines.append(
+            {
+                "start_ras": [float(entry_ras[0]), float(entry_ras[1]), float(entry_ras[2])],
+                "end_ras": [float(target_ras[0]), float(target_ras[1]), float(target_ras[2])],
+                "length_mm": float(length),
+                "inlier_count": int(fit["inlier_count"]),
+                "support_weight": float(fit["inlier_count"]),
+                "rms_mm": float(fit["rms_mm"]),
+                "inside_fraction": float(inside_fraction),
+                "depth_span_mm": 0.0,
+            }
+        )
+        remaining = remaining[~mask]
+    return lines, {"length_reject_count": int(length_reject_count)}
 
 
 def detect_from_preview(
@@ -663,13 +864,43 @@ def detect_from_preview(
     exclude_radius_mm=2.0,
     models_by_id=None,
     min_model_score=None,
+    min_metal_depth_mm=5.0,
+    start_zone_window_mm=10.0,
+    candidate_mode="voxel",
+    min_blob_voxels=2,
+    max_blob_voxels=1200,
+    min_blob_peak_hu=None,
+    max_blob_elongation=None,
+    enable_rescue_pass=True,
+    rescue_min_inliers_scale=0.6,
+    rescue_max_lines=6,
+    apply_start_zone_prior=None,
 ):
     """Detect trajectory lines using a precomputed preview mask result."""
     _require_numpy()
     t0 = time.perf_counter()
     t_setup0 = time.perf_counter()
+    mode = _normalize_candidate_mode(candidate_mode)
+    if apply_start_zone_prior is None:
+        apply_start_zone_prior = (mode == "voxel")
+    blob_ms = 0.0
+    effective_min_inliers = int(min_inliers)
+    effective_inlier_radius_mm = float(inlier_radius_mm)
 
     candidate_count = int(preview.get("candidate_count", 0))
+    empty_ras = np.empty((0, 3), dtype=float)
+    default_profile = {
+        "setup": 0.0,
+        "subsample": 0.0,
+        "depth_map": 0.0,
+        "ras_convert": 0.0,
+        "blob_stage": 0.0,
+        "exclude": 0.0,
+        "first_pass": 0.0,
+        "refine": 0.0,
+        "rescue": 0.0,
+        "total": 0.0,
+    }
     if candidate_count == 0:
         return {
             "head_mask_kept_count": 0,
@@ -677,12 +908,38 @@ def detect_from_preview(
             "metal_in_head_count": 0,
             "depth_kept_count": 0,
             "gap_reject_count": 0,
+            "start_zone_reject_count": 0,
             "duplicate_reject_count": 0,
+            "length_reject_count": 0,
+            "inlier_reject_count": 0,
+            "candidate_points_total": 0,
+            "candidate_points_after_mask": 0,
+            "candidate_points_after_depth": 0,
+            "effective_min_inliers": int(min_inliers),
+            "effective_inlier_radius_mm": float(inlier_radius_mm),
+            "fit1_lines_proposed": 0,
+            "fit2_lines_kept": 0,
+            "rescue_lines_kept": 0,
+            "final_lines_kept": 0,
+            "assigned_points_after_refine": 0,
+            "unassigned_points_after_refine": 0,
+            "rescued_points": 0,
+            "final_unassigned_points": 0,
+            "blob_count_total": 0,
+            "blob_count_kept": 0,
+            "blob_reject_small": 0,
+            "blob_reject_large": 0,
+            "blob_reject_intensity": 0,
+            "blob_reject_shape": 0,
+            "blob_centroids_all_ras": empty_ras,
+            "blob_centroids_kept_ras": empty_ras,
+            "blob_centroids_rejected_ras": empty_ras,
+            "blob_labelmap_kji": np.zeros((0,), dtype=np.uint16),
             "metal_depth_all_mm": np.empty((0,), dtype=float),
             "metal_depth_values_mm": np.empty((0,), dtype=float),
             "in_mask_depth_values_mm": np.empty((0,), dtype=float),
-            "in_mask_points_ras": np.empty((0, 3), dtype=float),
-            "profile_ms": {"setup": 0.0, "subsample": 0.0, "depth_map": 0.0, "ras_convert": 0.0, "exclude": 0.0, "first_pass": 0.0, "refine": 0.0, "total": 0.0},
+            "in_mask_points_ras": empty_ras,
+            "profile_ms": default_profile,
             "lines": [],
         }
 
@@ -728,11 +985,93 @@ def detect_from_preview(
         )
     depth_map_ms = (time.perf_counter() - t_depthmap0) * 1000.0
 
-    head_mask_kept_count = int(head_mask_kept_count_full)
     t_ras0 = time.perf_counter()
     points = np.asarray(ijk_kji_to_ras_fn(ijk_kji), dtype=float).reshape(-1, 3)
+    point_weights = np.ones((points.shape[0],), dtype=float)
+    blob_count_total = 0
+    blob_count_kept = 0
+    blob_reject_small = 0
+    blob_reject_large = 0
+    blob_reject_intensity = 0
+    blob_reject_shape = 0
+    blob_centroids_all_ras = empty_ras
+    blob_centroids_kept_ras = empty_ras
+    blob_centroids_rejected_ras = empty_ras
+    blob_labelmap_kji = np.zeros((0,), dtype=np.uint16)
+    if mode == "blob_centroid":
+        t_blob0 = time.perf_counter()
+        metal_blob_mask_kji = preview.get("metal_in_gate_mask_kji")
+        if metal_blob_mask_kji is None:
+            metal_blob_mask_kji = preview.get("metal_depth_pass_mask_kji")
+        metal_mask_kji = np.asarray(preview.get("metal_mask_kji"), dtype=bool)
+        if gating_mask_kji is not None:
+            debug_blob_mask_kji = np.logical_and(metal_mask_kji, np.asarray(gating_mask_kji, dtype=bool))
+        else:
+            debug_blob_mask_kji = metal_mask_kji
+        # Debug centroids/labels are extracted from all in-head metal voxels.
+        # Fitting still uses depth-pass metal blobs below.
+        # Use face-connectivity (6-neighbor) so contacts that only touch
+        # diagonally across slices do not collapse into a single 3D blob.
+        blob_debug = extract_blob_candidates(
+            metal_mask_kji=debug_blob_mask_kji,
+            arr_kji=arr_kji,
+            depth_map_kji=head_depth_kji,
+            ijk_kji_to_ras_fn=ijk_kji_to_ras_fn,
+            fully_connected=False,
+        )
+        blob_raw = extract_blob_candidates(
+            metal_mask_kji=metal_blob_mask_kji,
+            arr_kji=arr_kji,
+            depth_map_kji=head_depth_kji,
+            ijk_kji_to_ras_fn=ijk_kji_to_ras_fn,
+            fully_connected=False,
+        )
+        blob_filtered = filter_blob_candidates(
+            blob_result=blob_raw,
+            min_blob_voxels=int(min_blob_voxels),
+            max_blob_voxels=int(max_blob_voxels),
+            min_blob_peak_hu=min_blob_peak_hu,
+            max_blob_elongation=max_blob_elongation,
+        )
+        blob_count_total = int(blob_raw.get("blob_count_total", 0))
+        blob_count_kept = int(blob_filtered.get("blob_count_kept", 0))
+        blob_reject_small = int(blob_filtered.get("blob_reject_small", 0))
+        blob_reject_large = int(blob_filtered.get("blob_reject_large", 0))
+        blob_reject_intensity = int(blob_filtered.get("blob_reject_intensity", 0))
+        blob_reject_shape = int(blob_filtered.get("blob_reject_shape", 0))
+        blob_centroids_all_ras = np.asarray(blob_debug.get("blobs", []), dtype=object)
+        if blob_centroids_all_ras.size:
+            blob_centroids_all_ras = np.asarray(
+                [b.get("centroid_ras") for b in blob_debug.get("blobs", []) if b.get("centroid_ras") is not None],
+                dtype=float,
+            ).reshape(-1, 3)
+        else:
+            blob_centroids_all_ras = empty_ras
+        blob_centroids_kept_ras = np.asarray(blob_filtered.get("blob_centroids_kept_ras", empty_ras), dtype=float).reshape(-1, 3)
+        blob_centroids_rejected_ras = np.asarray(blob_filtered.get("blob_centroids_rejected_ras", empty_ras), dtype=float).reshape(-1, 3)
+        blob_labelmap_kji = build_blob_labelmap(blob_debug.get("labels_kji"), keep_blob_ids=None)
+        points = np.asarray(blob_filtered.get("candidate_points_ras", empty_ras), dtype=float).reshape(-1, 3)
+        point_weights = np.asarray(blob_filtered.get("candidate_weights", np.ones((points.shape[0],), dtype=float)), dtype=float)
+        sampled_depth_values_mm = np.empty((0,), dtype=float)
+        # Blob mode uses depth as a soft feature/weighting signal, not a hard
+        # pre-filter. Report depth-kept count as mask-kept for diagnostics.
+        depth_kept_count = int(metal_in_head_count)
+        blob_ms = (time.perf_counter() - t_blob0) * 1000.0
     in_mask_points_ras = points.copy()
     ras_convert_ms = (time.perf_counter() - t_ras0) * 1000.0
+    head_mask_kept_count = int(points.shape[0])
+    if mode == "blob_centroid":
+        n_support = int(points.shape[0])
+        if n_support > 0:
+            avg_support_per_line = float(n_support) / float(max(1, int(max_lines)))
+            auto_min = int(round(0.60 * avg_support_per_line))
+            auto_min = max(3, min(18, auto_min))
+            effective_min_inliers = min(int(min_inliers), auto_min, max(3, n_support - 1))
+            effective_min_inliers = max(3, effective_min_inliers)
+            # Blob-centroid support is sparser/noisier than voxel clouds.
+            effective_inlier_radius_mm = max(float(inlier_radius_mm), 2.0)
+        else:
+            effective_min_inliers = int(min_inliers)
     setup_ms = (time.perf_counter() - t_setup0) * 1000.0
 
     if head_mask_kept_count == 0:
@@ -743,7 +1082,33 @@ def detect_from_preview(
             "metal_in_head_count": metal_in_head_count,
             "depth_kept_count": depth_kept_count,
             "gap_reject_count": 0,
+            "start_zone_reject_count": 0,
             "duplicate_reject_count": 0,
+            "length_reject_count": 0,
+            "inlier_reject_count": 0,
+            "candidate_points_total": int(candidate_count),
+            "candidate_points_after_mask": int(metal_in_head_count),
+            "candidate_points_after_depth": int(depth_kept_count),
+            "effective_min_inliers": int(effective_min_inliers),
+            "effective_inlier_radius_mm": float(effective_inlier_radius_mm),
+            "fit1_lines_proposed": 0,
+            "fit2_lines_kept": 0,
+            "rescue_lines_kept": 0,
+            "final_lines_kept": 0,
+            "assigned_points_after_refine": 0,
+            "unassigned_points_after_refine": 0,
+            "rescued_points": 0,
+            "final_unassigned_points": 0,
+            "blob_count_total": int(blob_count_total),
+            "blob_count_kept": int(blob_count_kept),
+            "blob_reject_small": int(blob_reject_small),
+            "blob_reject_large": int(blob_reject_large),
+            "blob_reject_intensity": int(blob_reject_intensity),
+            "blob_reject_shape": int(blob_reject_shape),
+            "blob_centroids_all_ras": blob_centroids_all_ras,
+            "blob_centroids_kept_ras": blob_centroids_kept_ras,
+            "blob_centroids_rejected_ras": blob_centroids_rejected_ras,
+            "blob_labelmap_kji": blob_labelmap_kji,
             "metal_depth_all_mm": metal_depth_all_mm,
             "metal_depth_values_mm": metal_depth_values_mm,
             "in_mask_depth_values_mm": sampled_depth_values_mm,
@@ -753,9 +1118,11 @@ def detect_from_preview(
                 "subsample": float(subsample_ms),
                 "depth_map": float(depth_map_ms),
                 "ras_convert": float(ras_convert_ms),
+                "blob_stage": float(blob_ms),
                 "exclude": 0.0,
                 "first_pass": 0.0,
                 "refine": 0.0,
+                "rescue": 0.0,
                 "total": float((time.perf_counter() - t0) * 1000.0),
             },
             "lines": [],
@@ -775,100 +1142,30 @@ def detect_from_preview(
             )
             keep &= ~seg_mask
         remaining = remaining[keep]
+        point_weights = point_weights[keep]
     exclude_ms = (time.perf_counter() - t_exclude0) * 1000.0
 
-    lines = []
     support_points = remaining.copy()
+    support_weights = point_weights.copy()
     t_firstpass0 = time.perf_counter()
-
-    for _ in range(int(max_lines)):
-        if remaining.shape[0] < int(min_inliers):
-            break
-
-        fit = _ransac_fit_line(
-            remaining,
-            distance_threshold_mm=inlier_radius_mm,
-            min_inliers=min_inliers,
-            iterations=ransac_iterations,
-        )
-        if fit is None:
-            break
-
-        mask = fit["inlier_mask"]
-        inliers = remaining[mask]
-        center = fit["center"]
-        axis = fit["axis"]
-
-        t = (inliers - center.reshape(1, 3)) @ axis
-        if t.size < 2:
-            remaining = remaining[~mask]
-            continue
-
-        lo = float(np.percentile(t, 2.0))
-        hi = float(np.percentile(t, 98.0))
-        length = hi - lo
-        if length < float(min_length_mm):
-            remaining = remaining[~mask]
-            continue
-
-        p_start = center + axis * lo
-        p_end = center + axis * hi
-
-        entry_ras, target_ras = _orient_segment_entry_target(
-            start_ras=p_start,
-            end_ras=p_end,
-            center_ras=center_ras,
-            head_depth_kji=head_depth_kji,
-            ras_to_ijk_fn=ras_to_ijk_fn,
-        )
-
-        inside_fraction = 1.0
-        if gating_mask_kji is not None:
-            inside_fraction = _segment_inside_mask_fraction(
-                start_ras=entry_ras,
-                end_ras=target_ras,
-                mask_kji=gating_mask_kji,
-                ras_to_ijk_fn=ras_to_ijk_fn,
-                step_mm=1.0,
-            )
-            clamped = _clamp_segment_to_mask(
-                start_ras=entry_ras,
-                end_ras=target_ras,
-                mask_kji=gating_mask_kji,
-                ras_to_ijk_fn=ras_to_ijk_fn,
-                step_mm=0.5,
-            )
-            if clamped is None:
-                remaining = remaining[~mask]
-                continue
-            entry_ras, target_ras = clamped
-            entry_ras, target_ras = _orient_segment_entry_target(
-                start_ras=entry_ras,
-                end_ras=target_ras,
-                center_ras=center_ras,
-                head_depth_kji=head_depth_kji,
-                ras_to_ijk_fn=ras_to_ijk_fn,
-            )
-            length = float(np.linalg.norm(np.asarray(entry_ras) - np.asarray(target_ras)))
-            if length < float(min_length_mm):
-                remaining = remaining[~mask]
-                continue
-
-        line = {
-            "start_ras": [float(entry_ras[0]), float(entry_ras[1]), float(entry_ras[2])],
-            "end_ras": [float(target_ras[0]), float(target_ras[1]), float(target_ras[2])],
-            "length_mm": float(length),
-            "inlier_count": int(fit["inlier_count"]),
-            "rms_mm": float(fit["rms_mm"]),
-            "inside_fraction": float(inside_fraction),
-        }
-        lines.append(line)
-        remaining = remaining[~mask]
+    lines, first_pass_stats = _fit_line_proposals(
+        points=remaining,
+        center_ras=np.asarray(center_ras, dtype=float),
+        head_depth_kji=head_depth_kji,
+        ras_to_ijk_fn=ras_to_ijk_fn,
+        gating_mask_kji=gating_mask_kji,
+        inlier_radius_mm=float(effective_inlier_radius_mm),
+        min_length_mm=float(min_length_mm),
+        min_inliers=int(effective_min_inliers),
+        ransac_iterations=int(ransac_iterations),
+        max_lines=int(max_lines),
+    )
     first_pass_ms = (time.perf_counter() - t_firstpass0) * 1000.0
+    fit1_lines_proposed = int(len(lines))
 
     # Second pass: exclusive reassignment to reduce duplicated/overlapping shanks.
     t_refine0 = time.perf_counter()
-    lines, refine_stats = _refine_lines_exclusive(
+    lines_refined, refine_stats = _refine_lines_exclusive(
         arr_kji=arr_kji,
         spacing_xyz=spacing_xyz,
         ras_to_ijk_fn=ras_to_ijk_fn,
@@ -876,26 +1173,120 @@ def detect_from_preview(
         head_depth_kji=head_depth_kji,
         support_points=support_points,
         raw_lines=lines,
-        inlier_radius_mm=float(inlier_radius_mm),
+        inlier_radius_mm=float(effective_inlier_radius_mm),
         min_length_mm=float(min_length_mm),
-        min_inliers=int(min_inliers),
+        min_inliers=int(effective_min_inliers),
         gating_mask_kji=gating_mask_kji,
         models_by_id=models_by_id,
         min_model_score=min_model_score,
+        min_metal_depth_mm=float(min_metal_depth_mm),
+        start_zone_window_mm=float(start_zone_window_mm),
+        support_weights=support_weights,
+        apply_start_zone_prior=bool(apply_start_zone_prior),
     )
     refine_ms = (time.perf_counter() - t_refine0) * 1000.0
     gap_reject_count = int(refine_stats.get("gap_reject_count", 0))
+    start_zone_reject_count = int(refine_stats.get("start_zone_reject_count", 0))
     duplicate_reject_count = int(refine_stats.get("duplicate_reject_count", 0))
+    length_reject_count = int(first_pass_stats.get("length_reject_count", 0)) + int(refine_stats.get("length_reject_count", 0))
+    inlier_reject_count = int(refine_stats.get("inlier_reject_count", 0))
+    assigned_mask = np.asarray(
+        refine_stats.get("assigned_mask", np.zeros((support_points.shape[0],), dtype=bool)),
+        dtype=bool,
+    ).reshape(-1)
+    if assigned_mask.size != support_points.shape[0]:
+        assigned_mask = _assigned_mask_for_lines(
+            points=support_points,
+            lines=lines_refined,
+            radius_mm=max(1.0, float(inlier_radius_mm)),
+        )
+
+    fit2_lines_kept = int(len(lines_refined))
+    assigned_points_after_refine = int(np.count_nonzero(assigned_mask))
+    unassigned_points_after_refine = int(max(0, support_points.shape[0] - assigned_points_after_refine))
+
+    # Rescue pass over still-unassigned support points.
+    rescue_lines = []
+    rescued_points = 0
+    rescue_ms = 0.0
+    if bool(enable_rescue_pass) and unassigned_points_after_refine > 0:
+        t_rescue0 = time.perf_counter()
+        rescue_points = support_points[~assigned_mask]
+        rescue_weights = support_weights[~assigned_mask]
+        rescue_min_inliers = max(
+            5,
+            int(round(float(effective_min_inliers) * float(max(0.1, rescue_min_inliers_scale)))),
+        )
+        rescue_raw, rescue_first_stats = _fit_line_proposals(
+            points=rescue_points,
+            center_ras=np.asarray(center_ras, dtype=float),
+            head_depth_kji=head_depth_kji,
+            ras_to_ijk_fn=ras_to_ijk_fn,
+            gating_mask_kji=gating_mask_kji,
+            inlier_radius_mm=float(effective_inlier_radius_mm),
+            min_length_mm=float(min_length_mm),
+            min_inliers=int(rescue_min_inliers),
+            ransac_iterations=int(ransac_iterations),
+            max_lines=int(max(0, rescue_max_lines)),
+        )
+        length_reject_count += int(rescue_first_stats.get("length_reject_count", 0))
+        rescue_lines, rescue_refine_stats = _refine_lines_exclusive(
+            arr_kji=arr_kji,
+            spacing_xyz=spacing_xyz,
+            ras_to_ijk_fn=ras_to_ijk_fn,
+            center_ras=np.asarray(center_ras, dtype=float),
+            head_depth_kji=head_depth_kji,
+            support_points=rescue_points,
+            raw_lines=rescue_raw,
+            inlier_radius_mm=float(effective_inlier_radius_mm),
+            min_length_mm=float(min_length_mm),
+            min_inliers=int(rescue_min_inliers),
+            gating_mask_kji=gating_mask_kji,
+            models_by_id=models_by_id,
+            min_model_score=min_model_score,
+            min_metal_depth_mm=float(min_metal_depth_mm),
+            start_zone_window_mm=float(start_zone_window_mm),
+            support_weights=rescue_weights,
+            apply_start_zone_prior=bool(apply_start_zone_prior),
+        )
+        gap_reject_count += int(rescue_refine_stats.get("gap_reject_count", 0))
+        start_zone_reject_count += int(rescue_refine_stats.get("start_zone_reject_count", 0))
+        duplicate_reject_count += int(rescue_refine_stats.get("duplicate_reject_count", 0))
+        length_reject_count += int(rescue_refine_stats.get("length_reject_count", 0))
+        inlier_reject_count += int(rescue_refine_stats.get("inlier_reject_count", 0))
+        rescue_assigned_mask = np.asarray(
+            rescue_refine_stats.get("assigned_mask", np.zeros((rescue_points.shape[0],), dtype=bool)),
+            dtype=bool,
+        ).reshape(-1)
+        rescued_points = int(np.count_nonzero(rescue_assigned_mask))
+        rescue_ms = (time.perf_counter() - t_rescue0) * 1000.0
+
+    all_lines = list(lines_refined) + list(rescue_lines)
+    all_lines, extra_dup = _suppress_conflicting_lines_by_support(
+        lines=all_lines,
+        support_points=support_points,
+        support_radius_mm=max(1.0, float(inlier_radius_mm)),
+        overlap_threshold=0.60,
+    )
+    duplicate_reject_count += int(extra_dup)
     lines = sorted(
-        lines,
+        all_lines,
         key=lambda line: (
             float(line.get("best_model_score", 0.0)) if line.get("best_model_score") is not None else -1e9,
             float(line.get("inside_fraction", 0.0)),
+            float(line.get("support_weight", 0.0)),
             float(line.get("inlier_count", 0)),
+            float(line.get("depth_span_mm", 0.0)),
             -float(line.get("rms_mm", 999.0)),
         ),
         reverse=True,
     )
+    final_assigned_mask = _assigned_mask_for_lines(
+        points=support_points,
+        lines=lines,
+        radius_mm=max(1.0, float(inlier_radius_mm)),
+    )
+    final_unassigned_points = int(max(0, support_points.shape[0] - int(np.count_nonzero(final_assigned_mask))))
 
     return {
         "head_mask_kept_count": head_mask_kept_count,
@@ -903,8 +1294,34 @@ def detect_from_preview(
         "inside_method": inside_method,
         "metal_in_head_count": metal_in_head_count,
         "depth_kept_count": depth_kept_count,
+        "candidate_points_total": int(candidate_count),
+        "candidate_points_after_mask": int(metal_in_head_count),
+        "candidate_points_after_depth": int(depth_kept_count),
+        "effective_min_inliers": int(effective_min_inliers),
+        "effective_inlier_radius_mm": float(effective_inlier_radius_mm),
+        "fit1_lines_proposed": int(fit1_lines_proposed),
+        "fit2_lines_kept": int(fit2_lines_kept),
+        "rescue_lines_kept": int(len(rescue_lines)),
+        "final_lines_kept": int(len(lines)),
+        "assigned_points_after_refine": int(assigned_points_after_refine),
+        "unassigned_points_after_refine": int(unassigned_points_after_refine),
+        "rescued_points": int(rescued_points),
+        "final_unassigned_points": int(final_unassigned_points),
         "gap_reject_count": int(gap_reject_count),
+        "start_zone_reject_count": int(start_zone_reject_count),
         "duplicate_reject_count": int(duplicate_reject_count),
+        "length_reject_count": int(length_reject_count),
+        "inlier_reject_count": int(inlier_reject_count),
+        "blob_count_total": int(blob_count_total),
+        "blob_count_kept": int(blob_count_kept),
+        "blob_reject_small": int(blob_reject_small),
+        "blob_reject_large": int(blob_reject_large),
+        "blob_reject_intensity": int(blob_reject_intensity),
+        "blob_reject_shape": int(blob_reject_shape),
+        "blob_centroids_all_ras": blob_centroids_all_ras,
+        "blob_centroids_kept_ras": blob_centroids_kept_ras,
+        "blob_centroids_rejected_ras": blob_centroids_rejected_ras,
+        "blob_labelmap_kji": blob_labelmap_kji,
         "metal_depth_all_mm": metal_depth_all_mm,
         "metal_depth_values_mm": metal_depth_values_mm,
         "in_mask_depth_values_mm": sampled_depth_values_mm,
@@ -914,9 +1331,11 @@ def detect_from_preview(
             "subsample": float(subsample_ms),
             "depth_map": float(depth_map_ms),
             "ras_convert": float(ras_convert_ms),
+            "blob_stage": float(blob_ms),
             "exclude": float(exclude_ms),
             "first_pass": float(first_pass_ms),
             "refine": float(refine_ms),
+            "rescue": float(rescue_ms),
             "total": float((time.perf_counter() - t0) * 1000.0),
         },
         "lines": lines,

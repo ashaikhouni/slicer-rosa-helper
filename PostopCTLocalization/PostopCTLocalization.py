@@ -9,6 +9,7 @@ Last updated: 2026-03-01
 
 import os
 import sys
+import json
 
 try:
     import numpy as np
@@ -37,11 +38,12 @@ from rosa_core import (
     lps_to_ras_point,
     model_map,
     suggest_model_id_for_trajectory,
+    trajectory_length_mm,
 )
-from rosa_scene import ElectrodeSceneService, TrajectorySceneService
+from rosa_scene import ElectrodeSceneService, LayoutService, TrajectoryFocusController, TrajectorySceneService
+from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
-from shank_core import pipeline as shank_pipeline
 
 GUIDED_SOURCE_OPTIONS = [
     ("working", "Working (active)"),
@@ -86,6 +88,10 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.candidatesLPS = np.empty((0, 3), dtype=float) if np is not None else []
         self.fitResults = {}
         self._syncingGuidedSourceCombo = False
+        self._syncingPipelineCombo = False
+        self._pendingGuidedFollow = False
+        self._updatingGuidedTable = False
+        self._renamingGuidedTrajectory = False
 
         form = qt.QFormLayout()
         self.layout.addLayout(form)
@@ -97,15 +103,16 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.ctSelector.removeEnabled = False
         self.ctSelector.setMRMLScene(slicer.mrmlScene)
         self.ctSelector.setToolTip("Postop CT used for guided fit / de novo detection.")
+        self.ctSelector.currentNodeChanged.connect(lambda _node: self._apply_primary_slice_layers())
         form.addRow("Postop CT", self.ctSelector)
 
         topRow = qt.QHBoxLayout()
         self.refreshButton = qt.QPushButton("Refresh Workflow Inputs")
         self.refreshButton.clicked.connect(self.onRefreshClicked)
         topRow.addWidget(self.refreshButton)
-        self.resetViewsButton = qt.QPushButton("Reset Ax/Cor/Sag")
-        self.resetViewsButton.clicked.connect(self.onResetViewsClicked)
-        topRow.addWidget(self.resetViewsButton)
+        self.applyFocusLayoutButton = qt.QPushButton("Apply Focus Layout (2x3)")
+        self.applyFocusLayoutButton.clicked.connect(self.onApplyFocusLayoutClicked)
+        topRow.addWidget(self.applyFocusLayoutButton)
         topRow.addStretch(1)
         form.addRow(topRow)
 
@@ -117,6 +124,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.layout.addWidget(self.modeTabs)
         self._build_guided_fit_tab()
         self._build_de_novo_tab()
+        self._build_shared_trajectory_ui()
 
         self.statusText = qt.QPlainTextEdit()
         self.statusText.setReadOnly(True)
@@ -140,12 +148,6 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.modeTabs.addTab(tab, "Guided Fit")
         form = qt.QFormLayout(tab)
 
-        self.guidedSourceCombo = qt.QComboBox()
-        for key, label in GUIDED_SOURCE_OPTIONS:
-            self.guidedSourceCombo.addItem(label, key)
-        self.guidedSourceCombo.currentIndexChanged.connect(self.onGuidedSourceChanged)
-        form.addRow("Trajectory source", self.guidedSourceCombo)
-
         self.guidedThresholdSpin = qt.QDoubleSpinBox()
         self.guidedThresholdSpin.setRange(300.0, 4000.0)
         self.guidedThresholdSpin.setDecimals(1)
@@ -162,9 +164,6 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         detectRow.addWidget(self.resetWindowButton)
         detectRow.addStretch(1)
         form.addRow(detectRow)
-
-        self.guidedTrajectorySelector = qt.QComboBox()
-        form.addRow("Selected trajectory", self.guidedTrajectorySelector)
 
         self.guidedRoiRadiusSpin = qt.QDoubleSpinBox()
         self.guidedRoiRadiusSpin.setRange(1.0, 6.0)
@@ -188,7 +187,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         form.addRow("Max depth shift", self.guidedMaxDepthShiftSpin)
 
         fitRow = qt.QHBoxLayout()
-        self.fitSelectedButton = qt.QPushButton("Fit Selected")
+        self.fitSelectedButton = qt.QPushButton("Fit Checked")
         self.fitSelectedButton.clicked.connect(self.onFitSelectedClicked)
         fitRow.addWidget(self.fitSelectedButton)
         self.fitAllButton = qt.QPushButton("Fit All")
@@ -201,10 +200,57 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         fitRow.addWidget(self.applyFitButton)
         form.addRow(fitRow)
 
+    def _build_shared_trajectory_ui(self):
+        """Build shared trajectory source + table UI visible for both tabs."""
+        section = ctk.ctkCollapsibleButton()
+        section.text = "Trajectory Set"
+        section.collapsed = False
+        self.layout.addWidget(section)
+        form = qt.QFormLayout(section)
+
+        self.guidedSourceCombo = qt.QComboBox()
+        for key, label in GUIDED_SOURCE_OPTIONS:
+            self.guidedSourceCombo.addItem(label, key)
+        self.guidedSourceCombo.currentIndexChanged.connect(self.onGuidedSourceChanged)
+        form.addRow("Trajectory source", self.guidedSourceCombo)
+
+        self.guidedTrajectoryTable = qt.QTableWidget()
+        self.guidedTrajectoryTable.setColumnCount(3)
+        self.guidedTrajectoryTable.setHorizontalHeaderLabels(["Use", "Trajectory", "Length (mm)"])
+        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
+        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Stretch)
+        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
+        self.guidedTrajectoryTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.guidedTrajectoryTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.guidedTrajectoryTable.cellClicked.connect(self.onGuidedTrajectoryTableCellClicked)
+        self.guidedTrajectoryTable.currentCellChanged.connect(self.onGuidedTrajectoryTableCurrentCellChanged)
+        self.guidedTrajectoryTable.itemChanged.connect(self.onGuidedTrajectoryItemChanged)
+        form.addRow(self.guidedTrajectoryTable)
+
+        actions_row = qt.QHBoxLayout()
+        self.removeCheckedButton = qt.QPushButton("Remove Checked Trajectories")
+        self.removeCheckedButton.clicked.connect(self.onRemoveCheckedClicked)
+        actions_row.addWidget(self.removeCheckedButton)
+        actions_row.addStretch(1)
+        form.addRow(actions_row)
+
     def _build_de_novo_tab(self):
         tab = qt.QWidget()
         self.modeTabs.addTab(tab, "De Novo Detect")
         form = qt.QFormLayout(tab)
+
+        self.deNovoPipelineCombo = qt.QComboBox()
+        self.deNovoPipelineCombo.setToolTip("Detection engine pipeline for de novo CT localization.")
+        for entry in self.logic.available_de_novo_pipelines():
+            label = str(entry.get("display_name") or entry.get("key") or "pipeline")
+            if bool(entry.get("scaffold", False)):
+                label = f"{label} (scaffold)"
+            self.deNovoPipelineCombo.addItem(label, str(entry.get("key") or ""))
+        self.deNovoPipelineCombo.currentIndexChanged.connect(self.onDeNovoPipelineChanged)
+        default_index = self.deNovoPipelineCombo.findData(self.logic.default_de_novo_pipeline_key)
+        if default_index >= 0:
+            self.deNovoPipelineCombo.setCurrentIndex(default_index)
+        form.addRow("Detection pipeline", self.deNovoPipelineCombo)
 
         self.deNovoThresholdSpin = qt.QDoubleSpinBox()
         self.deNovoThresholdSpin.setRange(300.0, 4000.0)
@@ -270,6 +316,14 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.deNovoHeadThresholdSpin.setSuffix(" HU")
         form.addRow("Head threshold", self.deNovoHeadThresholdSpin)
 
+        self.deNovoHeadMaskMethodCombo = qt.QComboBox()
+        self.deNovoHeadMaskMethodCombo.addItem("Outside air (default)", "outside_air")
+        self.deNovoHeadMaskMethodCombo.addItem("Not-air LCC", "not_air_lcc")
+        self.deNovoHeadMaskMethodCombo.addItem("Legacy", "legacy")
+        self.deNovoHeadMaskMethodCombo.addItem("Tissue cut", "tissue_cut")
+        self.deNovoHeadMaskMethodCombo.addItem("Tissue cut (no close)", "tissue_cut_noclose")
+        form.addRow("Head mask method", self.deNovoHeadMaskMethodCombo)
+
         self.deNovoMinDepthSpin = qt.QDoubleSpinBox()
         self.deNovoMinDepthSpin.setRange(0.0, 100.0)
         self.deNovoMinDepthSpin.setDecimals(2)
@@ -284,6 +338,69 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.deNovoMaxDepthSpin.setSuffix(" mm")
         form.addRow("Max metal depth", self.deNovoMaxDepthSpin)
 
+        self.deNovoStartZoneWindowSpin = qt.QDoubleSpinBox()
+        self.deNovoStartZoneWindowSpin.setRange(0.0, 50.0)
+        self.deNovoStartZoneWindowSpin.setDecimals(2)
+        self.deNovoStartZoneWindowSpin.setValue(10.0)
+        self.deNovoStartZoneWindowSpin.setSuffix(" mm")
+        self.deNovoStartZoneWindowSpin.setToolTip(
+            "Each detected shank must include at least one support point in "
+            "[Min metal depth, Min metal depth + this window]."
+        )
+        form.addRow("Start-zone window", self.deNovoStartZoneWindowSpin)
+
+        self.deNovoCandidateModeCombo = qt.QComboBox()
+        self.deNovoCandidateModeCombo.addItem("Voxel", "voxel")
+        self.deNovoCandidateModeCombo.addItem("Blob centroid", "blob_centroid")
+        form.addRow("Candidate mode", self.deNovoCandidateModeCombo)
+
+        self.deNovoMinBlobVoxelsSpin = qt.QSpinBox()
+        self.deNovoMinBlobVoxelsSpin.setRange(1, 10000)
+        self.deNovoMinBlobVoxelsSpin.setValue(2)
+        form.addRow("Min blob voxels", self.deNovoMinBlobVoxelsSpin)
+
+        self.deNovoMaxBlobVoxelsSpin = qt.QSpinBox()
+        self.deNovoMaxBlobVoxelsSpin.setRange(1, 20000)
+        self.deNovoMaxBlobVoxelsSpin.setValue(1200)
+        form.addRow("Max blob voxels", self.deNovoMaxBlobVoxelsSpin)
+
+        self.deNovoMinBlobPeakHuEdit = qt.QLineEdit()
+        self.deNovoMinBlobPeakHuEdit.setPlaceholderText("optional (empty = disabled)")
+        form.addRow("Min blob peak HU", self.deNovoMinBlobPeakHuEdit)
+
+        self.deNovoEnableRescueCheck = qt.QCheckBox("Enable rescue pass")
+        self.deNovoEnableRescueCheck.setChecked(True)
+        form.addRow(self.deNovoEnableRescueCheck)
+
+        self.deNovoRescueScaleSpin = qt.QDoubleSpinBox()
+        self.deNovoRescueScaleSpin.setRange(0.1, 1.0)
+        self.deNovoRescueScaleSpin.setDecimals(2)
+        self.deNovoRescueScaleSpin.setSingleStep(0.05)
+        self.deNovoRescueScaleSpin.setValue(0.6)
+        form.addRow("Rescue min-inlier scale", self.deNovoRescueScaleSpin)
+
+        self.deNovoRescueMaxLinesSpin = qt.QSpinBox()
+        self.deNovoRescueMaxLinesSpin.setRange(0, 30)
+        self.deNovoRescueMaxLinesSpin.setValue(6)
+        form.addRow("Rescue max lines", self.deNovoRescueMaxLinesSpin)
+
+        self.deNovoUseModelScoreCheck = qt.QCheckBox("Use model-template scoring")
+        self.deNovoUseModelScoreCheck.setChecked(True)
+        self.deNovoUseModelScoreCheck.toggled.connect(self._onUseModelScoreToggled)
+        form.addRow(self.deNovoUseModelScoreCheck)
+
+        self.deNovoMinModelScoreSpin = qt.QDoubleSpinBox()
+        self.deNovoMinModelScoreSpin.setRange(-1.0, 5.0)
+        self.deNovoMinModelScoreSpin.setDecimals(2)
+        self.deNovoMinModelScoreSpin.setSingleStep(0.05)
+        self.deNovoMinModelScoreSpin.setValue(0.10)
+        form.addRow("Min model score", self.deNovoMinModelScoreSpin)
+        self._onUseModelScoreToggled(bool(self.deNovoUseModelScoreCheck.checked))
+
+        self.deNovoDebugDiagnosticsCheck = qt.QCheckBox("Debug diagnostics (nodes + JSON)")
+        self.deNovoDebugDiagnosticsCheck.setChecked(False)
+        form.addRow(self.deNovoDebugDiagnosticsCheck)
+
         self.deNovoReplaceCheck = qt.QCheckBox("Replace existing working trajectories")
         self.deNovoReplaceCheck.setChecked(True)
         form.addRow(self.deNovoReplaceCheck)
@@ -294,6 +411,9 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
 
     def _onUseExactToggled(self, checked):
         self.deNovoExactCountSpin.setEnabled(bool(checked))
+
+    def _onUseModelScoreToggled(self, checked):
+        self.deNovoMinModelScoreSpin.setEnabled(bool(checked))
 
     def _load_electrode_library(self):
         try:
@@ -337,6 +457,14 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             except Exception:
                 return float(default)
 
+    @staticmethod
+    def _optional_float_from_text(text):
+        """Parse optional float value from text; empty string -> None."""
+        raw = str(text or "").strip()
+        if not raw:
+            return None
+        return float(raw)
+
     def _assignment_map_from_workflow(self):
         amap = {}
         table = self.workflowNode.GetNodeReference("ElectrodeAssignmentTable")
@@ -354,17 +482,169 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             }
         return amap
 
-    def _populate_guided_trajectory_selector(self):
-        self.guidedTrajectorySelector.clear()
+    def _populate_guided_trajectory_table(self):
+        self._updatingGuidedTable = True
+        try:
+            self.guidedTrajectoryTable.setRowCount(0)
+            for row, traj in enumerate(self.loadedTrajectories):
+                self.guidedTrajectoryTable.insertRow(row)
+
+                use_check = qt.QCheckBox()
+                use_check.setChecked(True)
+                use_check.setStyleSheet("margin-left:8px; margin-right:8px;")
+                self.guidedTrajectoryTable.setCellWidget(row, 0, use_check)
+
+                traj_name = str(traj.get("name", ""))
+                name_item = qt.QTableWidgetItem(traj_name)
+                name_item.setFlags(name_item.flags() | qt.Qt.ItemIsEditable)
+                name_item.setData(qt.Qt.UserRole, traj_name)
+                self.guidedTrajectoryTable.setItem(row, 1, name_item)
+
+                length_item = qt.QTableWidgetItem(f"{trajectory_length_mm(traj):.2f}")
+                length_item.setFlags(length_item.flags() & ~qt.Qt.ItemIsEditable)
+                self.guidedTrajectoryTable.setItem(row, 2, length_item)
+
+            if self.guidedTrajectoryTable.rowCount > 0:
+                self.guidedTrajectoryTable.selectRow(0)
+        finally:
+            self._updatingGuidedTable = False
+
+    def onGuidedTrajectoryItemChanged(self, item):
+        if self._updatingGuidedTable or self._renamingGuidedTrajectory:
+            return
+        if item is None or item.column() != 1:
+            return
+        row = int(item.row())
+        if row < 0 or row >= len(self.loadedTrajectories):
+            return
+
+        old_name = str(item.data(qt.Qt.UserRole) or self.loadedTrajectories[row].get("name", "")).strip()
+        new_name = str(item.text() or "").strip()
+        if not old_name:
+            return
+        if not new_name:
+            self._renamingGuidedTrajectory = True
+            item.setText(old_name)
+            self._renamingGuidedTrajectory = False
+            return
+        if new_name == old_name:
+            return
+
+        for r in range(self.guidedTrajectoryTable.rowCount):
+            if r == row:
+                continue
+            other = self.guidedTrajectoryTable.item(r, 1)
+            if other and str(other.text() or "").strip().lower() == new_name.lower():
+                self._renamingGuidedTrajectory = True
+                item.setText(old_name)
+                self._renamingGuidedTrajectory = False
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "Postop CT Localization",
+                    f"Trajectory name '{new_name}' already exists.",
+                )
+                return
+
+        node_id = self.loadedTrajectories[row].get("node_id", "")
+        if not self.logic.rename_trajectory(node_id=node_id, new_name=new_name):
+            self._renamingGuidedTrajectory = True
+            item.setText(old_name)
+            self._renamingGuidedTrajectory = False
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                f"Failed to rename trajectory '{old_name}'.",
+            )
+            return
+
+        self.loadedTrajectories[row]["name"] = new_name
+        item.setData(qt.Qt.UserRole, new_name)
+        self.log(f"[trajectory] renamed {old_name} -> {new_name}")
+        self._refresh_summary()
+        self._schedule_guided_follow()
+
+    def _selected_guided_trajectory_name(self):
+        row = self.guidedTrajectoryTable.currentRow()
+        if row < 0:
+            selected = self.guidedTrajectoryTable.selectedItems()
+            if selected:
+                row = selected[0].row()
+        if row < 0 and self.guidedTrajectoryTable.rowCount > 0:
+            row = 0
+        if row < 0:
+            return ""
+        item = self.guidedTrajectoryTable.item(row, 1)
+        return str(item.text() if item else "").strip()
+
+    def _selected_guided_trajectory(self):
+        name = self._selected_guided_trajectory_name()
+        if not name:
+            return None
         for traj in self.loadedTrajectories:
-            group = str(traj.get("group", "") or "working")
-            label = f"[{group}] {traj['name']}"
-            self.guidedTrajectorySelector.addItem(label, traj["name"])
+            if str(traj.get("name", "")) == name:
+                return traj
+        return None
+
+    def _center_on_guided_selection(self):
+        selected = self._selected_guided_trajectory()
+        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        self.logic.focus_controller.focus_selected(
+            trajectory=selected,
+            scope_node_ids=scope_ids,
+            jump_cardinal=True,
+            align_focus_views=bool(self.logic.layout_service.has_focus_slice_views()),
+            focus="entry",
+        )
+
+    def _schedule_guided_follow(self):
+        if self._pendingGuidedFollow:
+            return
+        self._pendingGuidedFollow = True
+        qt.QTimer.singleShot(0, self._run_scheduled_guided_follow)
+
+    def _run_scheduled_guided_follow(self):
+        self._pendingGuidedFollow = False
+        self._center_on_guided_selection()
 
     def _selected_guided_source_key(self):
         data = self.guidedSourceCombo.currentData
         value = data() if callable(data) else data
         return str(value or "working")
+
+    def _sync_ct_selector_from_workflow(self):
+        postop_nodes = self.workflowState.role_nodes("PostopCT", workflow_node=self.workflowNode)
+        if postop_nodes:
+            self.ctSelector.setCurrentNode(postop_nodes[0])
+
+    def _resolve_base_postop_nodes(self):
+        base_nodes = self.workflowState.role_nodes("BaseVolume", workflow_node=self.workflowNode)
+        postop_nodes = self.workflowState.role_nodes("PostopCT", workflow_node=self.workflowNode)
+        base_node = base_nodes[0] if base_nodes else None
+        postop_node = postop_nodes[0] if postop_nodes else None
+        if postop_node is None:
+            postop_node = self.ctSelector.currentNode()
+        return base_node, postop_node
+
+    def _apply_primary_slice_layers(self):
+        base_node, postop_node = self._resolve_base_postop_nodes()
+        if base_node is not None and postop_node is not None:
+            bg_id = base_node.GetID()
+            fg_id = postop_node.GetID()
+            fg_opacity = 0.5
+        elif base_node is not None:
+            bg_id = base_node.GetID()
+            fg_id = ""
+            fg_opacity = 0.0
+        elif postop_node is not None:
+            bg_id = postop_node.GetID()
+            fg_id = ""
+            fg_opacity = 0.0
+        else:
+            return
+        for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
+            composite.SetBackgroundVolumeID(bg_id)
+            composite.SetForegroundVolumeID(fg_id)
+            composite.SetForegroundOpacity(fg_opacity)
 
     def _workflow_active_source(self):
         if self.workflowNode is None:
@@ -375,6 +655,34 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         if self.workflowNode is None:
             return
         self.workflowNode.SetParameter("ActiveTrajectorySource", str(source_key or "").strip().lower())
+
+    def _workflow_de_novo_pipeline_key(self):
+        if self.workflowNode is None:
+            return ""
+        return str(self.workflowNode.GetParameter("DeNovoPipelineKey") or "").strip()
+
+    def _set_workflow_de_novo_pipeline_key(self, pipeline_key):
+        if self.workflowNode is None:
+            return
+        self.workflowNode.SetParameter("DeNovoPipelineKey", str(pipeline_key or "").strip())
+
+    def _set_de_novo_pipeline_combo(self, pipeline_key):
+        key = str(pipeline_key or "").strip()
+        idx = self.deNovoPipelineCombo.findData(key)
+        if idx < 0 or idx == self.deNovoPipelineCombo.currentIndex:
+            return
+        self._syncingPipelineCombo = True
+        try:
+            self.deNovoPipelineCombo.setCurrentIndex(idx)
+        finally:
+            self._syncingPipelineCombo = False
+
+    def _sync_de_novo_pipeline_from_workflow(self):
+        key = self._workflow_de_novo_pipeline_key()
+        if not key:
+            key = self.logic.default_de_novo_pipeline_key
+            self._set_workflow_de_novo_pipeline_key(key)
+        self._set_de_novo_pipeline_combo(key)
 
     def _set_guided_source_combo(self, source_key):
         idx = self.guidedSourceCombo.findData(str(source_key or "").strip().lower())
@@ -434,22 +742,37 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
+        self._sync_ct_selector_from_workflow()
         if not self._workflow_active_source():
             self._set_workflow_active_source(self._default_source_when_unset())
         self._sync_guided_source_from_workflow()
+        self._sync_de_novo_pipeline_from_workflow()
         source_key = self._selected_guided_source_key()
         self.loadedTrajectories = self.logic.collect_trajectories_by_source(
             source_key=source_key,
             workflow_node=self.workflowNode,
         )
         self.assignmentMap = self._assignment_map_from_workflow()
-        self._populate_guided_trajectory_selector()
+        self._populate_guided_trajectory_table()
         self._apply_guided_source_visibility(source_key)
+        self._apply_primary_slice_layers()
         self._refresh_summary()
+        self._schedule_guided_follow()
         self.log(
             f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)} "
             f"assignments={len(self.assignmentMap)}"
         )
+
+    def enter(self):
+        """Ensure base+postop overlay and focus behavior each time module is opened."""
+        parent_enter = getattr(super(), "enter", None)
+        if callable(parent_enter):
+            parent_enter()
+        self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
+        self.logic.layout_service.sanitize_focus_layout_state()
+        self._sync_ct_selector_from_workflow()
+        self._apply_primary_slice_layers()
+        self._schedule_guided_follow()
 
     def onGuidedSourceChanged(self, _idx):
         if self._syncingGuidedSourceCombo:
@@ -457,12 +780,26 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self._set_workflow_active_source(self._selected_guided_source_key())
         self.onRefreshClicked()
 
-    def onResetViewsClicked(self):
-        try:
-            self.logic.reset_standard_slice_views()
-            self.log("[slice] reset to Axial/Coronal/Sagittal")
-        except Exception as exc:
-            self.log(f"[slice] reset warning: {exc}")
+    def onDeNovoPipelineChanged(self, _idx):
+        if self._syncingPipelineCombo:
+            return
+        pipeline_data = self.deNovoPipelineCombo.currentData
+        pipeline_key = pipeline_data() if callable(pipeline_data) else pipeline_data
+        self._set_workflow_de_novo_pipeline_key(str(pipeline_key or self.logic.default_de_novo_pipeline_key))
+
+    def onApplyFocusLayoutClicked(self):
+        self.logic.layout_service.sanitize_focus_layout_state()
+        if not self.logic.layout_service.apply_trajectory_focus_layout():
+            self.log("[focus] failed to apply trajectory focus layout")
+            return
+        self.log("[focus] trajectory focus layout applied")
+        self._schedule_guided_follow()
+
+    def onGuidedTrajectoryTableCellClicked(self, _row, _col):
+        self._schedule_guided_follow()
+
+    def onGuidedTrajectoryTableCurrentCellChanged(self, _currentRow, _currentColumn, _previousRow, _previousColumn):
+        self._schedule_guided_follow()
 
     def onDetectCandidatesClicked(self):
         volume_node = self.ctSelector.currentNode()
@@ -485,7 +822,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.applyFitButton.setEnabled(False)
 
         self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
-        self.logic.show_volume_in_all_slice_views(volume_node)
+        self._apply_primary_slice_layers()
         self.logic.apply_ct_window_from_threshold(volume_node, threshold=threshold)
         n = int(points_lps.shape[0]) if np is not None else len(points_lps)
         self.log(f"[guided] detected {n} candidate points at threshold {threshold:.1f}")
@@ -510,7 +847,14 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             tolerance_mm=5.0,
         )
         if not model_id:
-            return None
+            # Model-free guided fit: still allow trajectory axis/depth fitting.
+            return {
+                "trajectory": traj["name"],
+                "model_id": "",
+                "tip_at": "target",
+                "tip_shift_mm": 0.0,
+                "xyz_offset_mm": [0.0, 0.0, 0.0],
+            }
         return {
             "trajectory": traj["name"],
             "model_id": model_id,
@@ -537,11 +881,12 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 self.log(f"[guided] {name}: skipped (no electrode model)")
                 continue
             model = self.modelsById.get(assignment["model_id"])
+            offsets = model["contact_center_offsets_from_tip_mm"] if model else []
             fit = fit_electrode_axis_and_tip(
                 candidate_points_lps=self.candidatesLPS,
                 planned_entry_lps=traj["start"],
                 planned_target_lps=traj["end"],
-                contact_offsets_mm=model["contact_center_offsets_from_tip_mm"],
+                contact_offsets_mm=offsets,
                 tip_at=assignment.get("tip_at", "target"),
                 roi_radius_mm=float(self.guidedRoiRadiusSpin.value),
                 max_angle_deg=float(self.guidedMaxAngleSpin.value),
@@ -607,16 +952,16 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self.log(f"[guided] fitted {success}/{len(names)} trajectories")
 
     def onFitSelectedClicked(self):
-        data = self.guidedTrajectorySelector.currentData
-        name = data() if callable(data) else data
-        name = str(name or "").strip()
-        if not name:
-            name = self.guidedTrajectorySelector.currentText.strip()
-        if not name:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a trajectory.")
+        names = self._checked_guided_trajectory_names()
+        if not names:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                "Check at least one trajectory in the table.",
+            )
             return
         try:
-            self._fit_names([name])
+            self._fit_names(names)
         except Exception as exc:
             self.log(f"[guided] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
@@ -639,14 +984,65 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
             "Guided fit is now applied directly when you click 'Fit Selected' or 'Fit All'.",
         )
 
+    def _checked_guided_trajectory_names(self):
+        names = []
+        for row in range(self.guidedTrajectoryTable.rowCount):
+            check = self.guidedTrajectoryTable.cellWidget(row, 0)
+            if check is None or not bool(check.checked):
+                continue
+            item = self.guidedTrajectoryTable.item(row, 1)
+            if item is None:
+                continue
+            name = str(item.text() or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    def onRemoveCheckedClicked(self):
+        names = self._checked_guided_trajectory_names()
+        if not names:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                "Check at least one trajectory to remove.",
+            )
+            return
+        removed = self.logic.remove_trajectories_by_name(names=names, source_key=self._selected_guided_source_key())
+        for name in names:
+            self.fitResults.pop(name, None)
+        self.log(f"[trajectory] removed {removed}/{len(names)} trajectories")
+        self.onRefreshClicked()
+
     def onDeNovoDetectClicked(self):
         volume_node = self.ctSelector.currentNode()
         if volume_node is None:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
             return
+        try:
+            min_blob_peak_hu = self._optional_float_from_text(self.deNovoMinBlobPeakHuEdit.text)
+        except Exception:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                "Min blob peak HU must be numeric or empty.",
+            )
+            return
 
         max_lines = int(self.deNovoExactCountSpin.value) if self.deNovoUseExactCountCheck.checked else int(
             self.deNovoMaxLinesSpin.value
+        )
+        candidate_mode_data = self.deNovoCandidateModeCombo.currentData
+        candidate_mode = candidate_mode_data() if callable(candidate_mode_data) else candidate_mode_data
+        candidate_mode = str(candidate_mode or "voxel")
+        head_mask_method_data = self.deNovoHeadMaskMethodCombo.currentData
+        head_mask_method = head_mask_method_data() if callable(head_mask_method_data) else head_mask_method_data
+        head_mask_method = str(head_mask_method or "outside_air")
+        pipeline_data = self.deNovoPipelineCombo.currentData
+        pipeline_key = pipeline_data() if callable(pipeline_data) else pipeline_data
+        pipeline_key = str(
+            pipeline_key
+            or self._workflow_de_novo_pipeline_key()
+            or self.logic.default_de_novo_pipeline_key
         )
         self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
 
@@ -664,8 +1060,22 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 ransac_iterations=int(self.deNovoRansacSpin.value),
                 use_head_mask=bool(self.deNovoUseHeadMaskCheck.checked),
                 head_mask_threshold_hu=float(self.deNovoHeadThresholdSpin.value),
+                head_mask_method=head_mask_method,
                 min_metal_depth_mm=float(self.deNovoMinDepthSpin.value),
                 max_metal_depth_mm=float(self.deNovoMaxDepthSpin.value),
+                start_zone_window_mm=float(self.deNovoStartZoneWindowSpin.value),
+                candidate_mode=candidate_mode,
+                min_blob_voxels=int(self.deNovoMinBlobVoxelsSpin.value),
+                max_blob_voxels=int(self.deNovoMaxBlobVoxelsSpin.value),
+                min_blob_peak_hu=min_blob_peak_hu,
+                max_blob_elongation=None,
+                enable_rescue_pass=bool(self.deNovoEnableRescueCheck.checked),
+                rescue_min_inliers_scale=float(self.deNovoRescueScaleSpin.value),
+                rescue_max_lines=int(self.deNovoRescueMaxLinesSpin.value),
+                use_model_score=bool(self.deNovoUseModelScoreCheck.checked),
+                min_model_score=float(self.deNovoMinModelScoreSpin.value),
+                models_by_id=(self.modelsById if bool(self.deNovoUseModelScoreCheck.checked) else None),
+                pipeline_key=pipeline_key,
             )
         except Exception as exc:
             self.log(f"[denovo] failed: {exc}")
@@ -680,10 +1090,104 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
                 volume_node=volume_node,
                 metal_mask_kji=result.get("metal_mask_kji"),
                 head_mask_kji=result.get("gating_mask_kji"),
+                head_distance_map_kji=result.get("head_distance_map_kji"),
+                distance_surface_mask_kji=result.get("distance_surface_mask_kji"),
+                not_air_mask_kji=result.get("not_air_mask_kji"),
+                not_air_eroded_mask_kji=result.get("not_air_eroded_mask_kji"),
+                head_core_mask_kji=result.get("head_core_mask_kji"),
+                metal_gate_mask_kji=result.get("metal_gate_mask_kji"),
+                metal_in_gate_mask_kji=result.get("metal_in_gate_mask_kji"),
+                depth_window_mask_kji=result.get("depth_window_mask_kji"),
+                metal_depth_pass_mask_kji=result.get("metal_depth_pass_mask_kji"),
             )
             self.log("[denovo] displayed head/metal mask overlay")
         except Exception as exc:
             self.log(f"[denovo] mask display warning: {exc}")
+
+        params = {
+            "pipeline_key": pipeline_key,
+            "threshold_hu": float(self.deNovoThresholdSpin.value),
+            "candidate_mode": candidate_mode,
+            "inlier_radius_mm": float(self.deNovoInlierRadiusSpin.value),
+            "min_length_mm": float(self.deNovoMinLengthSpin.value),
+            "min_inliers": int(self.deNovoMinInliersSpin.value),
+            "ransac_iterations": int(self.deNovoRansacSpin.value),
+            "max_lines": int(max_lines),
+            "min_depth_mm": float(self.deNovoMinDepthSpin.value),
+            "max_depth_mm": float(self.deNovoMaxDepthSpin.value),
+            "head_mask_method": head_mask_method,
+            "start_zone_window_mm": float(self.deNovoStartZoneWindowSpin.value),
+            "min_blob_voxels": int(self.deNovoMinBlobVoxelsSpin.value),
+            "max_blob_voxels": int(self.deNovoMaxBlobVoxelsSpin.value),
+            "min_blob_peak_hu": min_blob_peak_hu,
+            "enable_rescue_pass": bool(self.deNovoEnableRescueCheck.checked),
+            "rescue_min_inliers_scale": float(self.deNovoRescueScaleSpin.value),
+            "rescue_max_lines": int(self.deNovoRescueMaxLinesSpin.value),
+            "use_model_score": bool(self.deNovoUseModelScoreCheck.checked),
+            "min_model_score": float(self.deNovoMinModelScoreSpin.value),
+        }
+        diagnostics = self.logic._build_detection_diagnostics(result=result, params=params)
+
+        self.log(
+            "[denovo] mode={mode} candidates={cand} after-mask={after_mask} after-depth={after_depth} "
+            "min_inliers={min_inliers} inlier_radius={inlier_radius:.2f} fit1={fit1} fit2={fit2} rescue={rescue} "
+            "final={final} unassigned={unassigned} total={total:.1f}ms".format(
+                mode=str(diagnostics.get("candidate_mode", "voxel")),
+                cand=int(diagnostics.get("candidate_points_total", 0)),
+                after_mask=int(diagnostics.get("candidate_points_after_mask", 0)),
+                after_depth=int(diagnostics.get("candidate_points_after_depth", 0)),
+                min_inliers=int(diagnostics.get("effective_min_inliers", 0)),
+                inlier_radius=float(diagnostics.get("effective_inlier_radius_mm", 0.0)),
+                fit1=int(diagnostics.get("fit1_lines_proposed", 0)),
+                fit2=int(diagnostics.get("fit2_lines_kept", 0)),
+                rescue=int(diagnostics.get("rescue_lines_kept", 0)),
+                final=int(diagnostics.get("final_lines_kept", 0)),
+                unassigned=int(diagnostics.get("final_unassigned_points", 0)),
+                total=float(diagnostics.get("profile_ms", {}).get("total", 0.0)),
+            )
+        )
+        try:
+            if bool(self.deNovoDebugDiagnosticsCheck.checked):
+                self.logic.show_blob_diagnostics(
+                    volume_node=volume_node,
+                    blob_labelmap_kji=result.get("blob_labelmap_kji"),
+                    blob_centroids_all_ras=result.get("blob_centroids_all_ras"),
+                    blob_centroids_kept_ras=result.get("blob_centroids_kept_ras"),
+                    blob_centroids_rejected_ras=result.get("blob_centroids_rejected_ras"),
+                )
+            else:
+                # Always show included blob centroids in 3D, keep all/rejected
+                # hidden unless debug mode is enabled.
+                self.logic.show_blob_diagnostics(
+                    volume_node=volume_node,
+                    blob_labelmap_kji=None,
+                    blob_centroids_all_ras=np.empty((0, 3), dtype=float),
+                    blob_centroids_kept_ras=result.get("blob_centroids_kept_ras"),
+                    blob_centroids_rejected_ras=np.empty((0, 3), dtype=float),
+                )
+        except Exception as exc:
+            self.log(f"[denovo] blob diagnostics warning: {exc}")
+
+        if bool(self.deNovoDebugDiagnosticsCheck.checked):
+            try:
+                out_json = self.logic.write_detection_diagnostics_json(
+                    volume_node=volume_node,
+                    diagnostics=diagnostics,
+                )
+                self.log(
+                    "[denovo:debug] blobs(total={total}, kept={kept}, reject_small={small}, reject_large={large}, "
+                    "reject_intensity={intensity}, reject_shape={shape})".format(
+                        total=int(diagnostics.get("blob_count_total", 0)),
+                        kept=int(diagnostics.get("blob_count_kept", 0)),
+                        small=int(diagnostics.get("blob_reject_small", 0)),
+                        large=int(diagnostics.get("blob_reject_large", 0)),
+                        intensity=int(diagnostics.get("blob_reject_intensity", 0)),
+                        shape=int(diagnostics.get("blob_reject_shape", 0)),
+                    )
+                )
+                self.log(f"[denovo:debug] diagnostics json: {out_json}")
+            except Exception as exc:
+                self.log(f"[denovo] debug diagnostics warning: {exc}")
 
         lines = result.get("lines", [])
         if not lines:
@@ -704,8 +1208,7 @@ class PostopCTLocalizationWidget(ScriptedLoadableModuleWidget):
         self._set_workflow_active_source("de_novo")
         self._set_guided_source_combo("de_novo")
         self.log(
-            f"[denovo] candidates={int(result.get('candidate_count', 0))}, "
-            f"in-mask={int(result.get('head_mask_kept_count', 0))}, "
+            f"[denovo] start-zone-reject={int(result.get('start_zone_reject_count', 0))}, "
             f"new_lines={len(lines)}, total_rows={len(rows)}"
         )
         self.log(
@@ -725,10 +1228,47 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
         self.trajectory_scene = TrajectorySceneService()
+        self.layout_service = LayoutService()
         self.electrode_scene = ElectrodeSceneService(
             workflow_state=self.workflow_state,
             workflow_publish=self.workflow_publish,
         )
+        self.focus_controller = TrajectoryFocusController(
+            trajectory_scene=self.trajectory_scene,
+            electrode_scene=self.electrode_scene,
+            layout_service=self.layout_service,
+        )
+        self.pipeline_registry = PipelineRegistry()
+        register_builtin_pipelines(self.pipeline_registry)
+        self.default_de_novo_pipeline_key = self._resolve_default_de_novo_pipeline_key()
+
+    def _resolve_default_de_novo_pipeline_key(self):
+        keys = list(self.pipeline_registry.keys())
+        if not keys:
+            return ""
+        preferred = "blob_ransac_v1"
+        return preferred if preferred in keys else str(keys[0])
+
+    def available_de_novo_pipelines(self):
+        """Return display metadata for registered de novo engine pipelines."""
+        entries = []
+        for key in self.pipeline_registry.keys():
+            display_name = key
+            scaffold = False
+            try:
+                pipeline = self.pipeline_registry.create_pipeline(key)
+                display_name = str(getattr(pipeline, "display_name", key) or key)
+                scaffold = bool(getattr(pipeline, "scaffold", False))
+            except Exception:
+                pass
+            entries.append(
+                {
+                    "key": str(key),
+                    "display_name": display_name,
+                    "scaffold": scaffold,
+                }
+            )
+        return entries
 
     def register_postop_ct(self, volume_node, workflow_node=None):
         self.workflow_publish.register_volume(
@@ -740,6 +1280,129 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             is_default_postop=True,
             workflow_node=workflow_node,
         )
+
+    def _engine_result_to_legacy_detection_result(self, engine_result, ctx_extras, config):
+        """Map canonical engine result to legacy de-novo payload shape.
+
+        The widget currently expects legacy keys (`lines`, mask arrays, reject
+        counters). For `blob_ransac_v1`, we preserve the exact legacy payload via
+        `ctx_extras['legacy_result']`. Other pipelines receive a minimal mapped
+        payload that still supports trajectory ingestion + diagnostics.
+        """
+
+        legacy = ctx_extras.get("legacy_result") if isinstance(ctx_extras, dict) else None
+        if isinstance(legacy, dict):
+            return legacy
+
+        diagnostics = dict((engine_result.get("diagnostics") or {}))
+        counts = dict(diagnostics.get("counts") or {})
+        timing = dict(diagnostics.get("timing") or {})
+
+        lines = []
+        for idx, traj in enumerate(list(engine_result.get("trajectories") or []), start=1):
+            start = list(traj.get("start_ras", []))
+            end = list(traj.get("end_ras", []))
+            params = dict(traj.get("params") or {})
+            if len(start) != 3:
+                start = list(params.get("start_ras", [0.0, 0.0, 0.0]))
+            if len(end) != 3:
+                end = list(params.get("end_ras", [0.0, 0.0, 0.0]))
+            if len(start) != 3:
+                start = [0.0, 0.0, 0.0]
+            if len(end) != 3:
+                end = [0.0, 0.0, 0.0]
+            start_np = np.asarray(start, dtype=float).reshape(3)
+            end_np = np.asarray(end, dtype=float).reshape(3)
+            lines.append(
+                {
+                    "name": str(traj.get("name") or f"T{idx:02d}"),
+                    "start_ras": [float(v) for v in start_np],
+                    "end_ras": [float(v) for v in end_np],
+                    "length_mm": float(np.linalg.norm(end_np - start_np)),
+                    "inlier_count": int(traj.get("support_count", 0)),
+                    "support_weight": float(traj.get("support_mass", traj.get("support_count", 0.0))),
+                    "inside_fraction": float(traj.get("confidence", 0.0)),
+                    "rms_mm": float(params.get("rms_mm", 0.0)),
+                    "depth_span_mm": float(params.get("depth_span_mm", 0.0)),
+                    "best_model_id": str(params.get("best_model_id", "")),
+                    "best_model_score": params.get("best_model_score", None),
+                }
+            )
+
+        return {
+            "candidate_count": int(counts.get("candidate_points_total", 0)),
+            "head_mask_kept_count": int(counts.get("candidate_points_after_mask", 0)),
+            "gating_mask_type": str(diagnostics.get("extras", {}).get("gating_mask_type", "engine")),
+            "inside_method": str(diagnostics.get("extras", {}).get("inside_method", "engine")),
+            "metal_in_head_count": int(counts.get("candidate_points_after_mask", 0)),
+            "depth_kept_count": int(counts.get("candidate_points_after_depth", 0)),
+            "gap_reject_count": int(counts.get("gap_reject_count", 0)),
+            "duplicate_reject_count": int(counts.get("duplicate_reject_count", 0)),
+            "start_zone_reject_count": int(counts.get("start_zone_reject_count", 0)),
+            "length_reject_count": int(counts.get("length_reject_count", 0)),
+            "inlier_reject_count": int(counts.get("inlier_reject_count", 0)),
+            "candidate_points_total": int(counts.get("candidate_points_total", 0)),
+            "candidate_points_after_mask": int(counts.get("candidate_points_after_mask", 0)),
+            "candidate_points_after_depth": int(counts.get("candidate_points_after_depth", 0)),
+            "effective_min_inliers": int(config.get("min_inliers", 0)),
+            "effective_inlier_radius_mm": float(config.get("inlier_radius_mm", 0.0)),
+            "blob_count_total": int(counts.get("blob_count_total", 0)),
+            "blob_count_kept": int(counts.get("blob_count_kept", 0)),
+            "blob_reject_small": int(counts.get("blob_reject_small", 0)),
+            "blob_reject_large": int(counts.get("blob_reject_large", 0)),
+            "blob_reject_intensity": int(counts.get("blob_reject_intensity", 0)),
+            "blob_reject_shape": int(counts.get("blob_reject_shape", 0)),
+            "fit1_lines_proposed": int(counts.get("fit1_lines_proposed", 0)),
+            "fit2_lines_kept": int(counts.get("fit2_lines_kept", 0)),
+            "rescue_lines_kept": int(counts.get("rescue_lines_kept", 0)),
+            "final_lines_kept": int(counts.get("final_lines_kept", len(lines))),
+            "assigned_points_after_refine": int(counts.get("assigned_points_after_refine", 0)),
+            "unassigned_points_after_refine": int(counts.get("unassigned_points_after_refine", 0)),
+            "rescued_points": int(counts.get("rescued_points", 0)),
+            "final_unassigned_points": int(counts.get("final_unassigned_points", 0)),
+            "profile_ms": {
+                "total": float(timing.get("total_ms", 0.0)),
+                "first_pass": float(timing.get("stage.seed_initialization.ms", 0.0)),
+                "refine": float(timing.get("stage.em_refinement.ms", 0.0)),
+                "rescue": float(timing.get("stage.model_selection.ms", 0.0)),
+            },
+            "lines": lines,
+        }
+
+    def rename_trajectory(self, node_id, new_name):
+        """Rename one trajectory line node while preserving group metadata."""
+        node = slicer.mrmlScene.GetNodeByID(str(node_id or ""))
+        if node is None:
+            return False
+        return bool(self.trajectory_scene.rename_trajectory_node(node, new_name))
+
+    def remove_trajectories_by_name(self, names, source_key="working"):
+        """Delete trajectories by logical name from current scene/source scope."""
+        source = str(source_key or "working").strip().lower()
+        allowed_groups = {
+            "working": {"imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"},
+            "imported_rosa": {"imported_rosa"},
+            "imported_external": {"imported_external"},
+            "manual": {"manual"},
+            "guided_fit": {"guided_fit"},
+            "de_novo": {"de_novo"},
+            "planned_rosa": {"planned_rosa"},
+        }.get(source, {"imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"})
+
+        target_names = {str(name).strip() for name in (names or []) if str(name).strip()}
+        if not target_names:
+            return 0
+        removed = 0
+        for node in list(slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode")):
+            group = self.trajectory_scene.infer_group_from_node(node)
+            if group not in allowed_groups:
+                continue
+            logical_name = self.trajectory_scene.logical_name_from_node(node)
+            if logical_name not in target_names:
+                continue
+            slicer.mrmlScene.RemoveNode(node)
+            removed += 1
+        return removed
 
     def _get_or_create_labelmap_node(self, node_name):
         node = None
@@ -756,7 +1419,17 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         if mask_kji is None:
             return None
         node = self._get_or_create_labelmap_node(node_name)
-        arr = np.asarray(mask_kji, dtype=np.uint8)
+        arr = np.asarray(mask_kji)
+        if arr.dtype == np.bool_:
+            arr = arr.astype(np.uint8)
+        elif np.issubdtype(arr.dtype, np.integer):
+            # Keep integer label depth for multi-component debug maps.
+            if arr.max() > np.iinfo(np.uint8).max:
+                arr = arr.astype(np.uint16)
+            elif arr.dtype != np.uint8:
+                arr = arr.astype(np.uint8)
+        else:
+            arr = arr.astype(np.uint8)
         slicer.util.updateVolumeFromArray(node, arr)
         m = vtk.vtkMatrix4x4()
         reference_volume_node.GetIJKToRASMatrix(m)
@@ -771,7 +1444,22 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             display.SetVisibility(True)
         return node
 
-    def show_metal_and_head_masks(self, volume_node, metal_mask_kji=None, head_mask_kji=None):
+    def show_metal_and_head_masks(
+        self,
+        volume_node,
+        metal_mask_kji=None,
+        head_mask_kji=None,
+        head_distance_map_kji=None,
+        distance_surface_mask_kji=None,
+        not_air_mask_kji=None,
+        not_air_eroded_mask_kji=None,
+        head_core_mask_kji=None,
+        metal_gate_mask_kji=None,
+        metal_in_gate_mask_kji=None,
+        depth_window_mask_kji=None,
+        metal_depth_pass_mask_kji=None,
+    ):
+        """Display troubleshooting masks for de novo shank detection."""
         if metal_mask_kji is None:
             raise ValueError("metal_mask_kji is required for mask visualization")
 
@@ -787,11 +1475,80 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
                 node_name=f"{volume_node.GetName()}_HeadMask",
                 mask_kji=head_mask_kji,
             )
+        distance_map_inside_mask = None
+        if head_distance_map_kji is not None:
+            distance_map_inside_mask = np.asarray(head_distance_map_kji, dtype=float) > 0.0
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_DistanceMapMask",
+                mask_kji=distance_map_inside_mask,
+            )
+        if distance_surface_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_DistanceSurfaceMask",
+                mask_kji=distance_surface_mask_kji,
+            )
+        if not_air_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_NotAirMask",
+                mask_kji=not_air_mask_kji,
+            )
+        if not_air_eroded_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_NotAirErodedMask",
+                mask_kji=not_air_eroded_mask_kji,
+            )
+        if head_core_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_HeadCoreMask",
+                mask_kji=head_core_mask_kji,
+            )
+        if metal_gate_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_MetalGateMask",
+                mask_kji=metal_gate_mask_kji,
+            )
+        if metal_in_gate_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_MetalInGateMask",
+                mask_kji=metal_in_gate_mask_kji,
+            )
+        if depth_window_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_DepthWindowMask",
+                mask_kji=depth_window_mask_kji,
+            )
+        if metal_depth_pass_mask_kji is not None:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_DepthPassMetalMask",
+                mask_kji=metal_depth_pass_mask_kji,
+            )
 
+        # Overlay label IDs (for troubleshooting):
+        # 1=head/gating, 2=metal, 3=depth window, 4=row/column distance surface,
+        # 5=metal kept after depth gate, 6=distance-map inside mask, 7=metal-in-gate.
         combo = np.zeros_like(np.asarray(metal_mask_kji, dtype=np.uint8), dtype=np.uint8)
         if head_mask_kji is not None:
             combo[np.asarray(head_mask_kji, dtype=bool)] = 1
+        if distance_map_inside_mask is not None:
+            combo[np.asarray(distance_map_inside_mask, dtype=bool)] = 6
+        if distance_surface_mask_kji is not None:
+            combo[np.asarray(distance_surface_mask_kji, dtype=bool)] = 4
+        if depth_window_mask_kji is not None:
+            combo[np.asarray(depth_window_mask_kji, dtype=bool)] = 3
         combo[metal_bool] = 2
+        if metal_in_gate_mask_kji is not None:
+            combo[np.asarray(metal_in_gate_mask_kji, dtype=bool)] = 7
+        if metal_depth_pass_mask_kji is not None:
+            combo[np.asarray(metal_depth_pass_mask_kji, dtype=bool)] = 5
         combo_node = self._update_labelmap_from_mask(
             reference_volume_node=volume_node,
             node_name=f"{volume_node.GetName()}_MaskOverlay",
@@ -804,6 +1561,145 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             label=combo_node,
             labelOpacity=0.55,
         )
+
+    def _get_or_create_fiducial_node(self, node_name, color_rgb):
+        node = None
+        try:
+            node = slicer.util.getNode(node_name)
+        except Exception:
+            node = None
+        if node is None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", node_name)
+            node.CreateDefaultDisplayNodes()
+            node.SetAttribute("Rosa.Managed", "1")
+        display = node.GetDisplayNode()
+        if display is not None:
+            display.SetColor(float(color_rgb[0]), float(color_rgb[1]), float(color_rgb[2]))
+            display.SetSelectedColor(float(color_rgb[0]), float(color_rgb[1]), float(color_rgb[2]))
+            display.SetGlyphScale(1.0)
+            display.SetTextScale(0.8)
+            display.SetVisibility(True)
+            if hasattr(display, "SetPointLabelsVisibility"):
+                display.SetPointLabelsVisibility(False)
+            # Keep default slice behavior: points are only shown when the
+            # current slice intersects them.
+            if hasattr(display, "SetSliceProjection"):
+                display.SetSliceProjection(False)
+        return node
+
+    def _set_fiducials_from_ras_points(self, node, points_ras):
+        node.RemoveAllControlPoints()
+        pts = np.asarray(points_ras, dtype=float).reshape(-1, 3)
+        for p in pts:
+            node.AddControlPoint(vtk.vtkVector3d(float(p[0]), float(p[1]), float(p[2])))
+        node.SetLocked(True)
+        return int(pts.shape[0])
+
+    def show_blob_diagnostics(
+        self,
+        volume_node,
+        blob_labelmap_kji=None,
+        blob_centroids_all_ras=None,
+        blob_centroids_kept_ras=None,
+        blob_centroids_rejected_ras=None,
+    ):
+        """Create/update blob debug overlays and centroid markups."""
+        if blob_labelmap_kji is not None and np.asarray(blob_labelmap_kji).size > 0:
+            self._update_labelmap_from_mask(
+                reference_volume_node=volume_node,
+                node_name=f"{volume_node.GetName()}_BlobLabelMap",
+                mask_kji=blob_labelmap_kji,
+            )
+        all_node = self._get_or_create_fiducial_node(
+            f"{volume_node.GetName()}_BlobCentroids_All",
+            color_rgb=(1.0, 1.0, 0.0),
+        )
+        kept_node = self._get_or_create_fiducial_node(
+            f"{volume_node.GetName()}_BlobCentroids_Kept",
+            color_rgb=(0.1, 0.9, 0.1),
+        )
+        rej_node = self._get_or_create_fiducial_node(
+            f"{volume_node.GetName()}_BlobCentroids_Rejected",
+            color_rgb=(0.95, 0.25, 0.25),
+        )
+        self._set_fiducials_from_ras_points(all_node, blob_centroids_all_ras)
+        self._set_fiducials_from_ras_points(kept_node, blob_centroids_kept_ras)
+        self._set_fiducials_from_ras_points(rej_node, blob_centroids_rejected_ras)
+
+    @staticmethod
+    def _build_detection_diagnostics(result, params):
+        """Build stable diagnostics payload for logs/tests/debug export."""
+        profile = dict(result.get("profile_ms", {}) or {})
+        summary = {
+            "candidate_mode": str((params or {}).get("candidate_mode", "voxel")),
+            "candidate_points_total": int(result.get("candidate_points_total", 0)),
+            "candidate_points_after_mask": int(result.get("candidate_points_after_mask", 0)),
+            "candidate_points_after_depth": int(result.get("candidate_points_after_depth", 0)),
+            "effective_min_inliers": int(result.get("effective_min_inliers", 0)),
+            "effective_inlier_radius_mm": float(result.get("effective_inlier_radius_mm", 0.0)),
+            "blob_count_total": int(result.get("blob_count_total", 0)),
+            "blob_count_kept": int(result.get("blob_count_kept", 0)),
+            "blob_reject_small": int(result.get("blob_reject_small", 0)),
+            "blob_reject_large": int(result.get("blob_reject_large", 0)),
+            "blob_reject_intensity": int(result.get("blob_reject_intensity", 0)),
+            "blob_reject_shape": int(result.get("blob_reject_shape", 0)),
+            "fit1_lines_proposed": int(result.get("fit1_lines_proposed", 0)),
+            "fit2_lines_kept": int(result.get("fit2_lines_kept", 0)),
+            "rescue_lines_kept": int(result.get("rescue_lines_kept", 0)),
+            "final_lines_kept": int(result.get("final_lines_kept", len(result.get("lines", []) or []))),
+            "assigned_points_after_refine": int(result.get("assigned_points_after_refine", 0)),
+            "unassigned_points_after_refine": int(result.get("unassigned_points_after_refine", 0)),
+            "rescued_points": int(result.get("rescued_points", 0)),
+            "final_unassigned_points": int(result.get("final_unassigned_points", 0)),
+            "gap_reject_count": int(result.get("gap_reject_count", 0)),
+            "duplicate_reject_count": int(result.get("duplicate_reject_count", 0)),
+            "start_zone_reject_count": int(result.get("start_zone_reject_count", 0)),
+            "length_reject_count": int(result.get("length_reject_count", 0)),
+            "inlier_reject_count": int(result.get("inlier_reject_count", 0)),
+            "profile_ms": {
+                "setup": float(profile.get("setup", 0.0)),
+                "subsample": float(profile.get("subsample", 0.0)),
+                "depth_map": float(profile.get("depth_map", 0.0)),
+                "ras_convert": float(profile.get("ras_convert", 0.0)),
+                "blob_stage": float(profile.get("blob_stage", 0.0)),
+                "exclude": float(profile.get("exclude", 0.0)),
+                "fit1_stage": float(profile.get("first_pass", 0.0)),
+                "fit2_stage": float(profile.get("refine", 0.0)),
+                "rescue_stage": float(profile.get("rescue", 0.0)),
+                "total": float(profile.get("total", 0.0)),
+            },
+            "params": dict(params or {}),
+        }
+        lines = list(result.get("lines", []) or [])
+        summary["lines"] = [
+            {
+                "index": int(i + 1),
+                "start_ras": list(line.get("start_ras", [0.0, 0.0, 0.0])),
+                "end_ras": list(line.get("end_ras", [0.0, 0.0, 0.0])),
+                "length_mm": float(line.get("length_mm", 0.0)),
+                "inlier_count": int(line.get("inlier_count", 0)),
+                "support_weight": float(line.get("support_weight", 0.0)),
+                "rms_mm": float(line.get("rms_mm", 0.0)),
+                "inside_fraction": float(line.get("inside_fraction", 0.0)),
+                "depth_span_mm": float(line.get("depth_span_mm", 0.0)),
+                "best_model_id": str(line.get("best_model_id", "")),
+                "best_model_score": (
+                    None if line.get("best_model_score", None) is None else float(line.get("best_model_score"))
+                ),
+            }
+            for i, line in enumerate(lines)
+        ]
+        return summary
+
+    def write_detection_diagnostics_json(self, volume_node, diagnostics):
+        """Persist debug diagnostics JSON under /tmp for troubleshooting."""
+        out_dir = os.path.join("/tmp", "rosa_postopct_debug")
+        os.makedirs(out_dir, exist_ok=True)
+        safe_name = str(volume_node.GetName() or "volume").replace(os.sep, "_")
+        out_path = os.path.join(out_dir, f"{safe_name}_denovo_diagnostics.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(diagnostics, f, indent=2)
+        return out_path
 
     def _vtk_matrix_to_numpy(self, vtk_matrix4x4):
         out = np.eye(4, dtype=float)
@@ -836,9 +1732,38 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         return lps
 
     def show_volume_in_all_slice_views(self, volume_node):
+        if volume_node is None:
+            return
         volume_id = volume_node.GetID()
+        app_logic = slicer.app.applicationLogic() if hasattr(slicer.app, "applicationLogic") else None
+        if app_logic is not None:
+            sel = app_logic.GetSelectionNode()
+            if sel is not None:
+                sel.SetReferenceActiveVolumeID(volume_id)
+                app_logic.PropagateVolumeSelection(0)
         for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
             composite.SetBackgroundVolumeID(volume_id)
+        bounds = [0.0] * 6
+        volume_node.GetRASBounds(bounds)
+        cx = 0.5 * (bounds[0] + bounds[1])
+        cy = 0.5 * (bounds[2] + bounds[3])
+        cz = 0.5 * (bounds[4] + bounds[5])
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return
+        for view_name in ("Red", "Yellow", "Green"):
+            widget = lm.sliceWidget(view_name)
+            if widget is None:
+                continue
+            logic = widget.sliceLogic()
+            if logic is not None:
+                logic.FitSliceToAll()
+            slice_node = widget.mrmlSliceNode()
+            if slice_node is not None:
+                try:
+                    slice_node.JumpSliceByCentering(cx, cy, cz)
+                except Exception:
+                    pass
 
     def apply_ct_window_from_threshold(self, volume_node, threshold):
         display = volume_node.GetDisplayNode()
@@ -950,10 +1875,12 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         return []
 
     def _ijk_kji_to_ras_points(self, volume_node, ijk_kji):
-        ijk = np.zeros_like(ijk_kji, dtype=float)
-        ijk[:, 0] = ijk_kji[:, 2]
-        ijk[:, 1] = ijk_kji[:, 1]
-        ijk[:, 2] = ijk_kji[:, 0]
+        # Accept list or ndarray; normalize to (N,3) array in KJI order.
+        idx = np.asarray(ijk_kji, dtype=float).reshape(-1, 3)
+        ijk = np.zeros_like(idx, dtype=float)
+        ijk[:, 0] = idx[:, 2]
+        ijk[:, 1] = idx[:, 1]
+        ijk[:, 2] = idx[:, 0]
         ijk_h = np.concatenate([ijk, np.ones((ijk.shape[0], 1), dtype=float)], axis=1)
         m_vtk = vtk.vtkMatrix4x4()
         volume_node.GetIJKToRASMatrix(m_vtk)
@@ -990,16 +1917,25 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
         ransac_iterations,
         use_head_mask,
         head_mask_threshold_hu,
+        head_mask_method,
         min_metal_depth_mm,
         max_metal_depth_mm,
+        start_zone_window_mm,
+        candidate_mode="voxel",
+        min_blob_voxels=2,
+        max_blob_voxels=1200,
+        min_blob_peak_hu=None,
+        max_blob_elongation=None,
+        enable_rescue_pass=True,
+        rescue_min_inliers_scale=0.6,
+        rescue_max_lines=6,
+        use_model_score=True,
+        min_model_score=0.10,
+        models_by_id=None,
+        pipeline_key=None,
     ):
-        result = shank_pipeline.run_detection(
-            arr_kji=slicer.util.arrayFromVolume(volume_node),
-            spacing_xyz=volume_node.GetSpacing(),
+        config = dict(
             threshold=float(threshold),
-            ijk_kji_to_ras_fn=lambda idx: self._ijk_kji_to_ras_points(volume_node, idx),
-            ras_to_ijk_fn=lambda ras: self._ras_to_ijk_float(volume_node, ras),
-            center_ras=self._volume_center_ras(volume_node),
             max_points=int(max_points),
             max_lines=int(max_lines),
             inlier_radius_mm=float(inlier_radius_mm),
@@ -1011,14 +1947,48 @@ class PostopCTLocalizationLogic(ScriptedLoadableModuleLogic):
             head_mask_threshold_hu=float(head_mask_threshold_hu),
             head_mask_aggressive_cleanup=False,
             head_mask_close_mm=2.0,
-            head_mask_method="outside_air",
+            head_mask_method=str(head_mask_method or "outside_air"),
             head_mask_metal_dilate_mm=1.0,
+            head_gate_erode_vox=1,
+            head_gate_dilate_vox=1,
+            head_gate_margin_mm=0.0,
             min_metal_depth_mm=float(min_metal_depth_mm),
             max_metal_depth_mm=float(max_metal_depth_mm),
-            models_by_id=None,
-            min_model_score=None,
+            candidate_mode=str(candidate_mode or "voxel"),
+            min_blob_voxels=int(min_blob_voxels),
+            max_blob_voxels=int(max_blob_voxels),
+            min_blob_peak_hu=min_blob_peak_hu,
+            max_blob_elongation=max_blob_elongation,
+            enable_rescue_pass=bool(enable_rescue_pass),
+            rescue_min_inliers_scale=float(rescue_min_inliers_scale),
+            rescue_max_lines=int(rescue_max_lines),
+            min_model_score=(float(min_model_score) if bool(use_model_score) else None),
+            pipeline_key=str(pipeline_key or self.default_de_novo_pipeline_key),
         )
-        return result
+        ctx_extras = {}
+        if bool(use_model_score) and isinstance(models_by_id, dict) and models_by_id:
+            ctx_extras["models_by_id"] = models_by_id
+        ctx = {
+            "run_id": f"denovo_{volume_node.GetName()}",
+            "arr_kji": slicer.util.arrayFromVolume(volume_node),
+            "spacing_xyz": volume_node.GetSpacing(),
+            "ijk_kji_to_ras_fn": lambda idx: self._ijk_kji_to_ras_points(volume_node, idx),
+            "ras_to_ijk_fn": lambda ras: self._ras_to_ijk_float(volume_node, ras),
+            "center_ras": self._volume_center_ras(volume_node),
+            "config": config,
+            "extras": ctx_extras,
+        }
+        selected_pipeline_key = str(config.get("pipeline_key") or self.default_de_novo_pipeline_key)
+        available = set(self.pipeline_registry.keys())
+        if selected_pipeline_key not in available:
+            selected_pipeline_key = self.default_de_novo_pipeline_key
+        engine_result = self.pipeline_registry.run(selected_pipeline_key, ctx)
+        if str(engine_result.get("status", "ok")).lower() == "error":
+            error = dict(engine_result.get("error") or {})
+            stage = str(error.get("stage") or "pipeline")
+            message = str(error.get("message") or "Detection pipeline failed")
+            raise RuntimeError(f"{message} (stage={stage}, pipeline={selected_pipeline_key})")
+        return self._engine_result_to_legacy_detection_result(engine_result, ctx_extras, config)
 
     def _next_side_names(self, lines, existing_names, midline_x_ras=0.0):
         used = set(existing_names)

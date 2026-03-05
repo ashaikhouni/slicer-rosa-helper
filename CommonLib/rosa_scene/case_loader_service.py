@@ -214,12 +214,39 @@ class CaseLoaderService:
         return lps
 
     def show_volume_in_all_slice_views(self, volume_node):
-        """Set volume as slice background for all slice composite nodes."""
+        """Set volume as background and recenter visible slice views."""
         if volume_node is None:
             return
         volume_id = volume_node.GetID()
+        app_logic = slicer.app.applicationLogic() if hasattr(slicer.app, "applicationLogic") else None
+        if app_logic is not None:
+            sel = app_logic.GetSelectionNode()
+            if sel is not None:
+                sel.SetReferenceActiveVolumeID(volume_id)
+                app_logic.PropagateVolumeSelection(0)
         for composite in slicer.util.getNodesByClass("vtkMRMLSliceCompositeNode"):
             composite.SetBackgroundVolumeID(volume_id)
+        bounds = [0.0] * 6
+        volume_node.GetRASBounds(bounds)
+        cx = 0.5 * (bounds[0] + bounds[1])
+        cy = 0.5 * (bounds[2] + bounds[3])
+        cz = 0.5 * (bounds[4] + bounds[5])
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return
+        for view_name in ("Red", "Yellow", "Green"):
+            widget = lm.sliceWidget(view_name)
+            if widget is None:
+                continue
+            logic = widget.sliceLogic()
+            if logic is not None:
+                logic.FitSliceToAll()
+            slice_node = widget.mrmlSliceNode()
+            if slice_node is not None:
+                try:
+                    slice_node.JumpSliceByCentering(cx, cy, cz)
+                except Exception:
+                    pass
 
     def apply_ct_window_from_threshold(self, volume_node, threshold):
         """Apply a CT display window derived from detection threshold."""

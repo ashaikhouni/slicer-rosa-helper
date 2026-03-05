@@ -82,12 +82,12 @@ class QCMetricsRow(TypedDict):
     """Per-trajectory QC metrics row."""
 
     trajectory: str
-    entry_radial_mm: float
-    target_radial_mm: float
-    mean_contact_radial_mm: float
-    max_contact_radial_mm: float
-    rms_contact_radial_mm: float
-    angle_deg: float
+    entry_radial_mm: float | None
+    target_radial_mm: float | None
+    mean_contact_radial_mm: float | None
+    max_contact_radial_mm: float | None
+    rms_contact_radial_mm: float | None
+    angle_deg: float | None
     matched_contacts: int
 
 

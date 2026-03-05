@@ -27,6 +27,7 @@ from shank_core.io import (  # noqa: E402
 )
 from shank_core.masking import build_preview_masks  # noqa: E402
 from rosa_core.electrode_models import load_electrode_library, model_map  # noqa: E402
+from shank_engine import PipelineRegistry, register_builtin_pipelines  # noqa: E402
 
 
 def _add_common_mask_args(parser):
@@ -40,8 +41,8 @@ def _add_common_mask_args(parser):
     parser.add_argument("--head-mask-close-mm", type=float, default=2.0)
     parser.add_argument(
         "--head-mask-method",
-        choices=["legacy", "tissue_cut", "tissue_cut_noclose", "outside_air"],
-        default="outside_air",
+        choices=["legacy", "tissue_cut", "tissue_cut_noclose", "outside_air", "not_air_lcc"],
+        default="not_air_lcc",
         help="Head mask construction method (tissue_cut_noclose skips closing for speed comparison).",
     )
     parser.add_argument(
@@ -53,14 +54,44 @@ def _add_common_mask_args(parser):
     parser.add_argument("--min-metal-depth-mm", type=float, default=5.0)
     parser.add_argument("--max-metal-depth-mm", type=float, default=220.0)
     parser.add_argument("--head-mask-aggressive-cleanup", action=bool_action, default=True)
+    parser.add_argument("--head-gate-erode-vox", type=int, default=1)
+    parser.add_argument("--head-gate-dilate-vox", type=int, default=1)
+    parser.add_argument("--head-gate-margin-mm", type=float, default=0.0)
 
 def _add_detection_args(parser):
+    parser.add_argument(
+        "--pipeline-key",
+        default="blob_ransac_v1",
+        help="Detection engine pipeline key (default: blob_ransac_v1).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default="shank_detect_cli",
+        help="Run identifier for engine diagnostics/artifact folder naming.",
+    )
     parser.add_argument("--max-points", type=int, default=300000)
     parser.add_argument("--max-lines", type=int, default=30)
     parser.add_argument("--inlier-radius-mm", type=float, default=1.2)
     parser.add_argument("--min-length-mm", type=float, default=20.0)
     parser.add_argument("--min-inliers", type=int, default=250)
     parser.add_argument("--ransac-iterations", type=int, default=240)
+    parser.add_argument(
+        "--candidate-mode",
+        choices=["voxel", "blob_centroid"],
+        default="voxel",
+        help="Candidate generation mode for line fitting.",
+    )
+    parser.add_argument("--min-blob-voxels", type=int, default=2)
+    parser.add_argument("--max-blob-voxels", type=int, default=1200)
+    parser.add_argument(
+        "--min-blob-peak-hu",
+        type=float,
+        default=None,
+        help="Optional peak HU filter for blobs (blob_centroid mode).",
+    )
+    parser.add_argument("--enable-rescue-pass", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--rescue-min-inliers-scale", type=float, default=0.6)
+    parser.add_argument("--rescue-max-lines", type=int, default=6)
     bool_action = argparse.BooleanOptionalAction
     parser.add_argument("--use-model-score", action=bool_action, default=True)
     parser.add_argument("--min-model-score", type=float, default=0.10)
@@ -86,6 +117,9 @@ def cmd_preview_masks(args):
         head_mask_close_mm=args.head_mask_close_mm,
         head_mask_method=args.head_mask_method,
         head_mask_metal_dilate_mm=args.head_mask_metal_dilate_mm,
+        head_gate_erode_vox=args.head_gate_erode_vox,
+        head_gate_dilate_vox=args.head_gate_dilate_vox,
+        head_gate_margin_mm=args.head_gate_margin_mm,
         min_metal_depth_mm=args.min_metal_depth_mm,
         max_metal_depth_mm=args.max_metal_depth_mm,
     )
@@ -122,6 +156,9 @@ def cmd_preview_masks(args):
         "profile_flags": result.get("profile_flags", {}),
         "head_mask_method": args.head_mask_method,
         "head_mask_metal_dilate_mm": float(args.head_mask_metal_dilate_mm),
+        "head_gate_erode_vox": int(args.head_gate_erode_vox),
+        "head_gate_dilate_vox": int(args.head_gate_dilate_vox),
+        "head_gate_margin_mm": float(args.head_gate_margin_mm),
         "outputs": {
             "metal_mask": os.path.join(masks_dir, "metal_mask.nii.gz"),
             "gating_mask": os.path.join(masks_dir, "gating_mask.nii.gz"),
@@ -159,7 +196,6 @@ def cmd_preview_masks(args):
 
 def cmd_detect(args):
     os.makedirs(args.out_dir, exist_ok=True)
-    from shank_core.pipeline import run_detection  # local import: only needed for detect command
 
     img, arr_kji, spacing_xyz = read_volume(args.ct)
     ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
@@ -172,43 +208,114 @@ def cmd_detect(args):
         lib = load_electrode_library(args.electrode_library)
         models_by_id = model_map(lib)
 
-    result = run_detection(
-        arr_kji=arr_kji,
-        spacing_xyz=spacing_xyz,
-        threshold=args.metal_threshold_hu,
-        ijk_kji_to_ras_fn=lambda ijk_kji: kji_to_ras_points_matrix(ijk_kji, ijk_to_ras),
-        ras_to_ijk_fn=lambda ras_xyz: ras_to_ijk_float_matrix(ras_xyz, ras_to_ijk),
-        center_ras=center_ras,
-        max_points=args.max_points,
-        max_lines=args.max_lines,
-        inlier_radius_mm=args.inlier_radius_mm,
-        min_length_mm=args.min_length_mm,
-        min_inliers=args.min_inliers,
-        ransac_iterations=args.ransac_iterations,
-        use_head_mask=args.use_head_mask,
-        build_head_mask=args.build_head_mask,
-        head_mask_threshold_hu=args.head_mask_threshold_hu,
-        head_mask_aggressive_cleanup=args.head_mask_aggressive_cleanup,
-        head_mask_close_mm=args.head_mask_close_mm,
-        head_mask_method=args.head_mask_method,
-        head_mask_metal_dilate_mm=args.head_mask_metal_dilate_mm,
-        min_metal_depth_mm=args.min_metal_depth_mm,
-        max_metal_depth_mm=args.max_metal_depth_mm,
-        models_by_id=models_by_id,
-        min_model_score=args.min_model_score if bool(args.use_model_score) else None,
-    )
+    registry = PipelineRegistry()
+    register_builtin_pipelines(registry)
+    extras = {"models_by_id": models_by_id} if isinstance(models_by_id, dict) else {}
+    config = {
+        "threshold": float(args.metal_threshold_hu),
+        "max_points": int(args.max_points),
+        "max_lines": int(args.max_lines),
+        "inlier_radius_mm": float(args.inlier_radius_mm),
+        "min_length_mm": float(args.min_length_mm),
+        "min_inliers": int(args.min_inliers),
+        "ransac_iterations": int(args.ransac_iterations),
+        "use_head_mask": bool(args.use_head_mask),
+        "build_head_mask": bool(args.build_head_mask),
+        "head_mask_threshold_hu": float(args.head_mask_threshold_hu),
+        "head_mask_aggressive_cleanup": bool(args.head_mask_aggressive_cleanup),
+        "head_mask_close_mm": float(args.head_mask_close_mm),
+        "head_mask_method": str(args.head_mask_method),
+        "head_mask_metal_dilate_mm": float(args.head_mask_metal_dilate_mm),
+        "head_gate_erode_vox": int(args.head_gate_erode_vox),
+        "head_gate_dilate_vox": int(args.head_gate_dilate_vox),
+        "head_gate_margin_mm": float(args.head_gate_margin_mm),
+        "min_metal_depth_mm": float(args.min_metal_depth_mm),
+        "max_metal_depth_mm": float(args.max_metal_depth_mm),
+        "candidate_mode": str(args.candidate_mode),
+        "min_blob_voxels": int(args.min_blob_voxels),
+        "max_blob_voxels": int(args.max_blob_voxels),
+        "min_blob_peak_hu": args.min_blob_peak_hu,
+        "enable_rescue_pass": bool(args.enable_rescue_pass),
+        "rescue_min_inliers_scale": float(args.rescue_min_inliers_scale),
+        "rescue_max_lines": int(args.rescue_max_lines),
+        "min_model_score": float(args.min_model_score) if bool(args.use_model_score) else None,
+    }
+    ctx = {
+        "run_id": str(args.run_id),
+        "arr_kji": arr_kji,
+        "spacing_xyz": spacing_xyz,
+        "ijk_kji_to_ras_fn": lambda ijk_kji: kji_to_ras_points_matrix(ijk_kji, ijk_to_ras),
+        "ras_to_ijk_fn": lambda ras_xyz: ras_to_ijk_float_matrix(ras_xyz, ras_to_ijk),
+        "center_ras": center_ras,
+        "config": config,
+        "extras": extras,
+    }
+    engine_result = registry.run(str(args.pipeline_key), ctx)
+    if str(engine_result.get("status", "ok")).lower() == "error":
+        err = dict(engine_result.get("error") or {})
+        stage = str(err.get("stage") or "pipeline")
+        message = str(err.get("message") or "Detection failed")
+        raise RuntimeError(f"{message} (stage={stage}, pipeline={args.pipeline_key})")
+
+    legacy_result = extras.get("legacy_result") if isinstance(extras, dict) else None
+    if isinstance(legacy_result, dict):
+        result = legacy_result
+        lines = list(result.get("lines", []) or [])
+    else:
+        diagnostics = dict((engine_result.get("diagnostics") or {}))
+        counts = dict(diagnostics.get("counts") or {})
+        timing = dict(diagnostics.get("timing") or {})
+        lines = []
+        for idx, traj in enumerate(list(engine_result.get("trajectories") or []), start=1):
+            start = list(traj.get("start_ras", []))
+            end = list(traj.get("end_ras", []))
+            params = dict(traj.get("params") or {})
+            if len(start) != 3:
+                start = list(params.get("start_ras", [0.0, 0.0, 0.0]))
+            if len(end) != 3:
+                end = list(params.get("end_ras", [0.0, 0.0, 0.0]))
+            lines.append(
+                {
+                    "name": str(traj.get("name") or f"T{idx:02d}"),
+                    "start_ras": [float(v) for v in start[:3]],
+                    "end_ras": [float(v) for v in end[:3]],
+                    "length_mm": float(traj.get("length_mm", params.get("length_mm", 0.0))),
+                    "inlier_count": int(traj.get("support_count", 0)),
+                    "rms_mm": float(params.get("rms_mm", 0.0)),
+                    "inside_fraction": float(traj.get("confidence", 0.0)),
+                }
+            )
+        result = {
+            "candidate_count": int(counts.get("candidate_points_total", 0)),
+            "head_mask_kept_count": int(counts.get("candidate_points_after_mask", 0)),
+            "fit1_lines_proposed": int(counts.get("fit1_lines_proposed", 0)),
+            "fit2_lines_kept": int(counts.get("fit2_lines_kept", 0)),
+            "rescue_lines_kept": int(counts.get("rescue_lines_kept", 0)),
+            "final_unassigned_points": int(counts.get("final_unassigned_points", 0)),
+            "blob_count_total": int(counts.get("blob_count_total", 0)),
+            "blob_count_kept": int(counts.get("blob_count_kept", 0)),
+            "profile_ms": {"total": float(timing.get("total_ms", 0.0))},
+            "profile_flags": {},
+            "lines": lines,
+        }
 
     masks_dir = os.path.join(args.out_dir, "masks")
     lines_dir = os.path.join(args.out_dir, "lines")
     os.makedirs(masks_dir, exist_ok=True)
     os.makedirs(lines_dir, exist_ok=True)
 
-    write_mask_like(img, result["metal_mask_kji"], os.path.join(masks_dir, "metal_mask.nii.gz"))
+    outputs = {}
+    metal_mask = result.get("metal_mask_kji")
+    if metal_mask is not None:
+        metal_path = os.path.join(masks_dir, "metal_mask.nii.gz")
+        write_mask_like(img, metal_mask, metal_path)
+        outputs["metal_mask"] = metal_path
     gating = result.get("gating_mask_kji", result.get("head_mask_kji"))
     if gating is not None:
-        write_mask_like(img, gating, os.path.join(masks_dir, "gating_mask.nii.gz"))
+        gating_path = os.path.join(masks_dir, "gating_mask.nii.gz")
+        write_mask_like(img, gating, gating_path)
+        outputs["gating_mask"] = gating_path
 
-    lines = result.get("lines", [])
     lines_json = os.path.join(lines_dir, "trajectories.json")
     with open(lines_json, "w", encoding="utf-8") as f:
         json.dump(lines, f, indent=2)
@@ -229,21 +336,24 @@ def cmd_detect(args):
 
     summary = {
         "ct": os.path.abspath(args.ct),
+        "pipeline_key": str(args.pipeline_key),
         "candidate_count": int(result.get("candidate_count", 0)),
         "in_mask_count": int(result.get("head_mask_kept_count", 0)),
         "line_count": len(lines),
+        "candidate_mode": args.candidate_mode,
+        "fit1_lines_proposed": int(result.get("fit1_lines_proposed", 0)),
+        "fit2_lines_kept": int(result.get("fit2_lines_kept", 0)),
+        "rescue_lines_kept": int(result.get("rescue_lines_kept", 0)),
+        "final_unassigned_points": int(result.get("final_unassigned_points", 0)),
+        "blob_count_total": int(result.get("blob_count_total", 0)),
+        "blob_count_kept": int(result.get("blob_count_kept", 0)),
         "use_model_score": bool(args.use_model_score),
         "min_model_score": float(args.min_model_score),
         "head_mask_method": args.head_mask_method,
         "head_mask_metal_dilate_mm": float(args.head_mask_metal_dilate_mm),
         "profile_ms": result.get("profile_ms", {}),
         "profile_flags": result.get("profile_flags", {}),
-        "outputs": {
-            "metal_mask": os.path.join(masks_dir, "metal_mask.nii.gz"),
-            "gating_mask": os.path.join(masks_dir, "gating_mask.nii.gz"),
-            "trajectories_json": lines_json,
-            "trajectories_csv": lines_csv,
-        },
+        "outputs": dict(outputs, trajectories_json=lines_json, trajectories_csv=lines_csv),
     }
     with open(os.path.join(args.out_dir, "summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
