@@ -35,6 +35,17 @@ class _OverrideBlobExtractor:
         ]
 
 
+class _OverrideGating:
+    def compute(self, ctx, state):
+        return {
+            "candidate_count": 1,
+            "metal_in_head_count": 1,
+            "depth_kept_count": 1,
+            "gating_mask_type": "test",
+            "inside_method": "test",
+        }
+
+
 class PipelinesTests(unittest.TestCase):
     def test_all_pipelines_share_run_signature(self):
         reg = PipelineRegistry()
@@ -62,7 +73,12 @@ class PipelinesTests(unittest.TestCase):
             {
                 "run_id": "r1-override",
                 "config": {},
-                "components": {"blob_extractor": _OverrideBlobExtractor()},
+                "arr_kji": np.zeros((2, 2, 2), dtype=np.float32),
+                "ijk_kji_to_ras_fn": _kji_to_ras_points_identity,
+                "components": {
+                    "gating": _OverrideGating(),
+                    "blob_extractor": _OverrideBlobExtractor(),
+                },
             }
         )
         self.assertEqual(out["status"], "ok")
