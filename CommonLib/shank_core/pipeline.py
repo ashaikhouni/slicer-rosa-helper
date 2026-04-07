@@ -121,6 +121,7 @@ def run_detection(
     min_model_score: float | None = None,
     precomputed_gating_mask_kji: np.ndarray | None = None,
     precomputed_head_distance_map_kji: np.ndarray | None = None,
+    include_debug_masks: bool = False,
 ) -> DetectionResult:
     """Run end-to-end trajectory detection from CT array + geometry callbacks.
 
@@ -150,6 +151,7 @@ def run_detection(
         max_metal_depth_mm=max_metal_depth_mm,
         precomputed_gating_mask_kji=precomputed_gating_mask_kji,
         precomputed_head_distance_map_kji=precomputed_head_distance_map_kji,
+        include_debug_masks=bool(include_debug_masks),
     )
     preview_ms = (time.perf_counter() - t_preview0) * 1000.0
 

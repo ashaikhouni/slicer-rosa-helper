@@ -56,6 +56,16 @@ TRAJECTORY_GROUP_CONFIG = {
         "locked": False,
         "point_labels": True,
     },
+    "deep_core": {
+        "role": "DeepCoreTrajectoryLines",
+        "folder": "DeepCore",
+        "prefix": "DeepCore_",
+        "display_color": (0.10, 0.85, 0.95),
+        "selected_color": (0.30, 0.95, 1.0),
+        "line_thickness": 0.42,
+        "locked": False,
+        "point_labels": True,
+    },
     "imported_external": {
         "role": "ImportedExternalTrajectoryLines",
         "folder": "ImportedExternal",
@@ -111,6 +121,8 @@ class TrajectorySceneService:
             return "guided_fit"
         if name.startswith("DeNovo_"):
             return "de_novo"
+        if name.startswith("DeepCore_"):
+            return "deep_core"
         if name.startswith("Ext_"):
             return "imported_external"
         if name.startswith("AutoFit_"):
@@ -265,6 +277,13 @@ class TrajectorySceneService:
             "group": group,
             "start": lps_to_ras_point(p0),
             "end": lps_to_ras_point(p1),
+            "best_model_id": str(node.GetAttribute("Rosa.BestModelId") or ""),
+            "best_model_score": (
+                None
+                if not (node.GetAttribute("Rosa.BestModelScore") or "").strip()
+                else float(node.GetAttribute("Rosa.BestModelScore"))
+            ),
+            "proposal_family": str(node.GetAttribute("Rosa.DeepCoreProposalFamily") or ""),
         }
 
     def collect_planned_trajectory_map(self):

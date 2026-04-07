@@ -6,7 +6,7 @@ Last updated: 2026-03-01
 import os
 import sys
 
-from __main__ import ctk, qt, slicer
+from __main__ import ctk, qt, slicer, vtk
 from slicer.ScriptedLoadableModule import (
     ScriptedLoadableModule,
     ScriptedLoadableModuleLogic,
@@ -46,6 +46,7 @@ TRAJECTORY_SOURCE_OPTIONS = [
     ("imported_external", "Imported External"),
     ("manual", "Manual (scene)"),
     ("guided_fit", "Guided Fit"),
+    ("deep_core", "Deep Core"),
     ("de_novo", "De Novo"),
     ("planned_rosa", "Planned ROSA"),
 ]
@@ -89,6 +90,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._pendingFocusLayoutApply = False
         self._updatingContactTable = False
         self._renamingTrajectory = False
+        self._workflowObserverTag = None
+        self._workflowObserverNode = None
+        self._workflowRefreshPending = False
+        self._workflowRefreshInFlight = False
 
         top_form = qt.QFormLayout()
         self.layout.addLayout(top_form)
@@ -126,11 +131,58 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
         self._load_electrode_library()
         self.logic.layout_service.sanitize_focus_layout_state()
+        self._ensure_workflow_observer()
         self.onRefreshClicked()
 
     def enter(self):
         """Refresh module state when entering this module."""
+        self._ensure_workflow_observer()
         self.onRefreshClicked()
+
+    def cleanup(self):
+        self._remove_workflow_observer()
+        parent_cleanup = getattr(super(), "cleanup", None)
+        if callable(parent_cleanup):
+            parent_cleanup()
+
+    def _remove_workflow_observer(self):
+        node = getattr(self, "_workflowObserverNode", None)
+        tag = getattr(self, "_workflowObserverTag", None)
+        if node is not None and tag is not None:
+            try:
+                node.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._workflowObserverNode = None
+        self._workflowObserverTag = None
+
+    def _ensure_workflow_observer(self):
+        node = self.workflowState.resolve_or_create_workflow_node()
+        if node is None:
+            self._remove_workflow_observer()
+            return
+        if node is getattr(self, "_workflowObserverNode", None) and getattr(self, "_workflowObserverTag", None) is not None:
+            return
+        self._remove_workflow_observer()
+        self._workflowObserverNode = node
+        self._workflowObserverTag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_workflow_node_modified)
+
+    def _on_workflow_node_modified(self, caller=None, event=None):
+        if self._workflowRefreshPending or self._workflowRefreshInFlight:
+            return
+        self._workflowRefreshPending = True
+        qt.QTimer.singleShot(0, self._refresh_from_workflow_change)
+
+    def _refresh_from_workflow_change(self):
+        self._workflowRefreshPending = False
+        if self._workflowRefreshInFlight:
+            return
+        self._workflowRefreshInFlight = True
+        try:
+            self._sync_source_combo_from_workflow()
+            self.onRefreshClicked()
+        finally:
+            self._workflowRefreshInFlight = False
 
     def _workflow_active_source(self):
         if self.workflowNode is None:
@@ -196,6 +248,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             return "imported_rosa"
         if self._role_has_nodes("GuidedFitTrajectoryLines"):
             return "guided_fit"
+        if self._role_has_nodes("DeepCoreTrajectoryLines"):
+            return "deep_core"
         if self._role_has_nodes("DeNovoTrajectoryLines"):
             return "de_novo"
         if self._role_has_nodes("ImportedExternalTrajectoryLines"):
@@ -468,12 +522,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            suggested_model = suggest_model_id_for_trajectory(
-                trajectory=traj,
-                models_by_id=self.modelsById,
-                model_ids=self.modelIds,
-                tolerance_mm=5.0,
-            )
+            suggested_model = str(traj.get("best_model_id") or "").strip()
+            if not suggested_model:
+                suggested_model = suggest_model_id_for_trajectory(
+                    trajectory=traj,
+                    models_by_id=self.modelsById,
+                    model_ids=self.modelIds,
+                    tolerance_mm=5.0,
+                )
             if suggested_model:
                 idx = model_combo.findText(suggested_model)
                 if idx >= 0:
@@ -660,11 +716,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _apply_source_visibility(self, source_key):
         key = str(source_key or "working").strip().lower()
         group_map = {
-            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"],
+            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"],
             "imported_rosa": ["imported_rosa"],
             "imported_external": ["imported_external"],
             "manual": ["manual"],
             "guided_fit": ["guided_fit"],
+            "deep_core": ["autofit_preview"],
             "de_novo": ["de_novo"],
             "planned_rosa": ["planned_rosa"],
         }
@@ -1036,7 +1093,7 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             if trajectories:
                 return trajectories
             rows = self.trajectory_scene.collect_working_trajectory_rows(
-                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "de_novo"]
+                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"]
             )
             fallback = []
             for row in rows:
@@ -1053,6 +1110,8 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             return self._collect_trajectories_from_role("ImportedTrajectoryLines", workflow_node=wf)
         if source == "guided_fit":
             return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
+        if source == "deep_core":
+            return self._collect_trajectories_from_role("DeepCoreTrajectoryLines", workflow_node=wf)
         if source == "de_novo":
             return self._collect_trajectories_from_role("DeNovoTrajectoryLines", workflow_node=wf)
         if source == "imported_external":

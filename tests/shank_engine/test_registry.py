@@ -24,6 +24,16 @@ class RegistryTests(unittest.TestCase):
         keys = reg.keys()
         self.assertIn("blob_ransac_v1", keys)
         self.assertIn("blob_em_v2", keys)
+        self.assertIn("blob_consensus_v1", keys)
+        self.assertIn("blob_persistence_v1", keys)
+        self.assertIn("shank_axis_v1", keys)
+        self.assertIn("shank_cluster_v1", keys)
+        self.assertIn("de_novo_hypothesis_select_v1", keys)
+        self.assertIn("de_novo_seed_extend_v2", keys)
+        self.assertIn("shank_graph_v1", keys)
+        self.assertIn("shank_hypothesis_v1", keys)
+        self.assertIn("shank_stitch_v1", keys)
+        self.assertIn("shank_grow_v1", keys)
 
     def test_duplicate_registration_raises(self):
         reg = PipelineRegistry()

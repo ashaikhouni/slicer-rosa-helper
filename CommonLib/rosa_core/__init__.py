@@ -15,7 +15,7 @@ from .contacts import (
     save_contacts_markups_json,
     save_contacts_rosa_json,
 )
-from .contact_fit import fit_electrode_axis_and_tip
+from .contact_fit import fit_electrode_axis_and_tip, refine_fit_batch_with_exclusive_terminal_assignment
 from .electrode_models import default_electrode_library_path, load_electrode_library, model_map
 from .exporters import build_fcsv_rows, build_markups_lines, build_markups_document
 from .ros_parser import parse_ros_file
@@ -59,6 +59,7 @@ __all__ = [
     "default_electrode_library_path",
     "find_ros_file",
     "fit_electrode_axis_and_tip",
+    "refine_fit_batch_with_exclusive_terminal_assignment",
     "generate_contacts",
     "invert_4x4",
     "is_identity_4x4",

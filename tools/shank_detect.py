@@ -41,15 +41,15 @@ def _add_common_mask_args(parser):
     parser.add_argument("--head-mask-close-mm", type=float, default=2.0)
     parser.add_argument(
         "--head-mask-method",
-        choices=["legacy", "tissue_cut", "tissue_cut_noclose", "outside_air", "not_air_lcc"],
+        choices=["outside_air", "not_air_lcc"],
         default="not_air_lcc",
-        help="Head mask construction method (tissue_cut_noclose skips closing for speed comparison).",
+        help="Head mask construction method.",
     )
     parser.add_argument(
         "--head-mask-metal-dilate-mm",
         type=float,
         default=1.0,
-        help="Only for tissue_cut: dilation radius to suppress metal bridges before closing/fill.",
+        help="Reserved compatibility option (currently unused by supported methods).",
     )
     parser.add_argument("--min-metal-depth-mm", type=float, default=5.0)
     parser.add_argument("--max-metal-depth-mm", type=float, default=220.0)
@@ -75,12 +75,6 @@ def _add_detection_args(parser):
     parser.add_argument("--min-length-mm", type=float, default=20.0)
     parser.add_argument("--min-inliers", type=int, default=250)
     parser.add_argument("--ransac-iterations", type=int, default=240)
-    parser.add_argument(
-        "--candidate-mode",
-        choices=["voxel", "blob_centroid"],
-        default="voxel",
-        help="Candidate generation mode for line fitting.",
-    )
     parser.add_argument("--min-blob-voxels", type=int, default=2)
     parser.add_argument("--max-blob-voxels", type=int, default=1200)
     parser.add_argument(
@@ -88,6 +82,12 @@ def _add_detection_args(parser):
         type=float,
         default=None,
         help="Optional peak HU filter for blobs (blob_centroid mode).",
+    )
+    parser.add_argument(
+        "--use-distance-mask-for-blob-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use metal depth-pass mask for blob candidate extraction (blob_em_v2).",
     )
     parser.add_argument("--enable-rescue-pass", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--rescue-min-inliers-scale", type=float, default=0.6)
@@ -122,6 +122,7 @@ def cmd_preview_masks(args):
         head_gate_margin_mm=args.head_gate_margin_mm,
         min_metal_depth_mm=args.min_metal_depth_mm,
         max_metal_depth_mm=args.max_metal_depth_mm,
+        include_debug_masks=True,
     )
 
     masks_dir = os.path.join(args.out_dir, "masks")
@@ -231,14 +232,16 @@ def cmd_detect(args):
         "head_gate_margin_mm": float(args.head_gate_margin_mm),
         "min_metal_depth_mm": float(args.min_metal_depth_mm),
         "max_metal_depth_mm": float(args.max_metal_depth_mm),
-        "candidate_mode": str(args.candidate_mode),
+        "candidate_mode": "voxel",
         "min_blob_voxels": int(args.min_blob_voxels),
         "max_blob_voxels": int(args.max_blob_voxels),
         "min_blob_peak_hu": args.min_blob_peak_hu,
+        "use_distance_mask_for_blob_candidates": bool(args.use_distance_mask_for_blob_candidates),
         "enable_rescue_pass": bool(args.enable_rescue_pass),
         "rescue_min_inliers_scale": float(args.rescue_min_inliers_scale),
         "rescue_max_lines": int(args.rescue_max_lines),
         "min_model_score": float(args.min_model_score) if bool(args.use_model_score) else None,
+        "debug_masks": False,
     }
     ctx = {
         "run_id": str(args.run_id),
@@ -340,7 +343,7 @@ def cmd_detect(args):
         "candidate_count": int(result.get("candidate_count", 0)),
         "in_mask_count": int(result.get("head_mask_kept_count", 0)),
         "line_count": len(lines),
-        "candidate_mode": args.candidate_mode,
+        "candidate_mode": "voxel",
         "fit1_lines_proposed": int(result.get("fit1_lines_proposed", 0)),
         "fit2_lines_kept": int(result.get("fit2_lines_kept", 0)),
         "rescue_lines_kept": int(result.get("rescue_lines_kept", 0)),

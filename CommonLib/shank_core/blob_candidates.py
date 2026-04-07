@@ -49,6 +49,29 @@ def _blob_elongation_kji(points_kji):
     return float(evals[-1] / evals[0])
 
 
+def _blob_pca_features(points_xyz):
+    """Return PCA axis/eigenvalues for points in XYZ space."""
+    _require_numpy()
+    pts = np.asarray(points_xyz, dtype=np.float64)
+    if pts.shape[0] < 3:
+        return {
+            "axis": np.asarray([0.0, 0.0, 1.0], dtype=float),
+            "evals": np.asarray([0.0, 0.0, 0.0], dtype=float),
+        }
+    centered = pts - np.mean(pts, axis=0, keepdims=True)
+    cov = (centered.T @ centered) / max(1, pts.shape[0] - 1)
+    evals, evecs = np.linalg.eigh(cov)
+    order = np.argsort(evals)
+    evals = np.maximum(evals[order], 1e-9)
+    axis = evecs[:, order[-1]]
+    n = float(np.linalg.norm(axis))
+    if n > 1e-9:
+        axis = axis / n
+    else:
+        axis = np.asarray([0.0, 0.0, 1.0], dtype=float)
+    return {"axis": axis.astype(float), "evals": evals.astype(float)}
+
+
 def extract_blob_candidates(
     metal_mask_kji,
     arr_kji=None,
@@ -90,15 +113,37 @@ def extract_blob_candidates(
             continue
         centroid_kji = np.mean(idx.astype(np.float64), axis=0)
         centroid_ras = None
+        pca_axis_ras = None
+        pca_evals = np.asarray([0.0, 0.0, 0.0], dtype=float)
+        length_mm = 0.0
+        diameter_mm = 0.0
         if ijk_kji_to_ras_fn is not None:
             centroid_ras = np.asarray(ijk_kji_to_ras_fn([centroid_kji]), dtype=float).reshape(-1, 3)[0]
+            ras_pts = np.asarray(ijk_kji_to_ras_fn(idx.astype(np.float64)), dtype=float).reshape(-1, 3)
+            pca = _blob_pca_features(ras_pts)
+            pca_axis_ras = pca["axis"]
+            pca_evals = pca["evals"]
+            if ras_pts.shape[0] >= 2:
+                proj = (ras_pts - np.mean(ras_pts, axis=0, keepdims=True)) @ pca_axis_ras.reshape(3)
+                length_mm = float(np.max(proj) - np.min(proj))
+            diameter_mm = float(2.0 * np.sqrt(max(1e-9, float(np.mean(pca_evals[:2])))))
+        else:
+            pca = _blob_pca_features(idx.astype(np.float64))
+            pca_evals = pca["evals"]
+            pca_axis_ras = pca["axis"]
+            if idx.shape[0] >= 2:
+                proj = (idx.astype(np.float64) - np.mean(idx.astype(np.float64), axis=0, keepdims=True)) @ pca_axis_ras.reshape(3)
+                length_mm = float(np.max(proj) - np.min(proj))
+            diameter_mm = float(2.0 * np.sqrt(max(1e-9, float(np.mean(pca_evals[:2])))))
 
         hu_max = None
+        hu_q95 = None
         hu_mean = None
         if arr_vals is not None:
             vals = arr_vals[sel]
             if vals.size > 0:
                 hu_max = float(np.max(vals))
+                hu_q95 = float(np.percentile(vals, 95))
                 hu_mean = float(np.mean(vals))
 
         d_min = None
@@ -120,11 +165,16 @@ def extract_blob_candidates(
                     [float(centroid_ras[0]), float(centroid_ras[1]), float(centroid_ras[2])] if centroid_ras is not None else None
                 ),
                 "hu_max": hu_max,
+                "hu_q95": hu_q95,
                 "hu_mean": hu_mean,
                 "depth_min": d_min,
                 "depth_mean": d_mean,
                 "depth_max": d_max,
                 "elongation": _blob_elongation_kji(idx),
+                "pca_axis_ras": [float(pca_axis_ras[0]), float(pca_axis_ras[1]), float(pca_axis_ras[2])],
+                "pca_evals": [float(pca_evals[0]), float(pca_evals[1]), float(pca_evals[2])],
+                "length_mm": float(length_mm),
+                "diameter_mm": float(diameter_mm),
             }
         )
     return {

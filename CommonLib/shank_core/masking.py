@@ -31,15 +31,6 @@ def _require_sitk():
         raise RuntimeError("SimpleITK is required for masking operations")
 
 
-def _radius_xyz(mm: float, spacing_xyz) -> list[int]:
-    """Convert a physical radius in mm to voxel radius in X/Y/Z."""
-    return [
-        max(0, int(round(float(mm) / max(1e-6, float(spacing_xyz[0]))))),
-        max(0, int(round(float(mm) / max(1e-6, float(spacing_xyz[1]))))),
-        max(0, int(round(float(mm) / max(1e-6, float(spacing_xyz[2]))))),
-    ]
-
-
 def largest_component_binary(binary_img):
     """Return largest connected component from a binary SimpleITK image."""
     _require_sitk()
@@ -163,82 +154,6 @@ def axial_row_col_span_envelope_kji(mask_kji):
     return out
 
 
-def build_tissue_cut_distance_and_gating_masks_kji(
-    arr_kji,
-    spacing_xyz,
-    threshold_hu: float = -300.0,
-    metal_threshold_hu: float = 1800.0,
-    metal_dilate_mm: float = 1.0,
-    aggressive_cleanup: bool = True,
-):
-    """Build dual masks for tissue-cut-no-close depth gating.
-
-    Returns
-    -------
-    (gating_mask_kji, distance_mask_kji)
-      - gating_mask_kji: where metal candidates are allowed to exist
-        (`LCC(tissue & ~dilate(metal))` with metal re-added inside tissue LCC).
-      - distance_mask_kji: wire-bridge tolerant surface for depth computation
-        (`fill_holes(gating_mask_kji)`; single fill-hole + single distance map).
-    """
-    _require_numpy()
-    _require_sitk()
-
-    arr = np.asarray(arr_kji, dtype=np.float32)
-    img = sitk.GetImageFromArray(arr)
-    img.SetSpacing((float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])))
-
-    tissue = sitk.BinaryThreshold(
-        img,
-        lowerThreshold=float(threshold_hu),
-        upperThreshold=1e9,
-        insideValue=1,
-        outsideValue=0,
-    )
-
-    # Main tissue component (patient envelope).
-    tissue_lcc = largest_component_binary(tissue)
-    if tissue_lcc is None:
-        empty = np.zeros(arr.shape, dtype=bool)
-        return empty, empty
-    tissue_lcc_arr = sitk.GetArrayFromImage(tissue_lcc).astype(bool)
-
-    # Depth surface should be robust to external metal bridges.
-    metal_raw = sitk.BinaryThreshold(
-        img,
-        lowerThreshold=float(metal_threshold_hu),
-        upperThreshold=1e9,
-        insideValue=1,
-        outsideValue=0,
-    )
-    metal = metal_raw
-    dilate_mm = max(0.0, float(metal_dilate_mm))
-    if dilate_mm > 1e-6:
-        rx = max(0, int(round(dilate_mm / max(1e-6, float(spacing_xyz[0])))))
-        ry = max(0, int(round(dilate_mm / max(1e-6, float(spacing_xyz[1])))))
-        rz = 0  # keep bridge suppression primarily in-plane to avoid over-carving along z
-        if rx > 0 or ry > 0:
-            metal = sitk.BinaryDilate(metal, [rx, ry, rz])
-
-    tissue_cut = sitk.And(tissue_lcc, sitk.BinaryNot(metal))
-    core = largest_component_binary(tissue_cut)
-    if core is None:
-        gating_mask = tissue_lcc_arr.copy()
-    else:
-        gating_mask = sitk.GetArrayFromImage(core).astype(bool)
-
-    # Restore true metal voxels inside patient tissue; this prevents contact dropouts.
-    metal_arr = sitk.GetArrayFromImage(metal_raw).astype(bool)
-    gating_mask = np.logical_or(gating_mask, np.logical_and(metal_arr, tissue_lcc_arr))
-
-    # Single hole-healing step for distance surface.
-    # Use tissue LCC (not metal-cut core) so intracranial depths remain stable
-    # around contacts while gating still benefits from bridge suppression.
-    distance_mask = sitk.GetArrayFromImage(sitk.BinaryFillhole(tissue_lcc, fullyConnected=False)).astype(bool)
-
-    return gating_mask, distance_mask
-
-
 def build_outside_air_mask_kji(
     arr_kji,
     air_threshold_hu: float = -500.0,
@@ -357,33 +272,28 @@ def build_head_mask_kji(
     threshold_hu: float = -300.0,
     close_mm: float = 2.0,
     aggressive_cleanup: bool = True,
-    method: str = "legacy",
+    method: str = "outside_air",
     metal_threshold_hu: float = 1800.0,
     metal_dilate_mm: float = 1.0,
 ):
-    """Build largest-component head mask in KJI index order.
+    """Build head gate in KJI index order.
 
     Parameters
     ----------
-    method : {"legacy", "tissue_cut", "tissue_cut_noclose", "outside_air", "not_air_lcc"}
-        - legacy: threshold + close + LCC + slice-wise cleanup.
-        - tissue_cut: threshold tissue, remove dilated metal bridges, 3D close/fill, LCC.
-        - tissue_cut_noclose: tissue-cut gating mask without 3D closing.
+    method : {"outside_air", "not_air_lcc"}
         - outside_air: invert border-connected air mask (threshold_hu used as air threshold).
         - not_air_lcc: not-air erosion + LCC + dilation gate.
+
+    Notes
+    -----
+    `close_mm`, `aggressive_cleanup`, `metal_threshold_hu`, and `metal_dilate_mm`
+    are retained in the signature for compatibility with older callers.
     """
     _require_numpy()
     _require_sitk()
 
-    method = str(method or "legacy").strip().lower()
+    method = str(method or "outside_air").strip().lower()
     arr = np.asarray(arr_kji, dtype=np.float32)
-    img = sitk.GetImageFromArray(arr)
-    img.SetSpacing((float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])))
-
-    if method == "outside_air":
-        outside_air = build_outside_air_mask_kji(arr_kji=arr, air_threshold_hu=threshold_hu)
-        return np.logical_not(outside_air)
-
     if method == "not_air_lcc":
         gate_out = build_not_air_lcc_gate_kji(
             arr_kji=arr,
@@ -394,82 +304,8 @@ def build_head_mask_kji(
             gate_margin_mm=0.0,
         )
         return np.asarray(gate_out.get("head_gate_mask_kji"), dtype=bool)
-
-    if method == "tissue_cut_noclose":
-        gating_mask, _distance_mask = build_tissue_cut_distance_and_gating_masks_kji(
-            arr_kji=arr,
-            spacing_xyz=spacing_xyz,
-            threshold_hu=threshold_hu,
-            metal_threshold_hu=metal_threshold_hu,
-            metal_dilate_mm=metal_dilate_mm,
-            aggressive_cleanup=aggressive_cleanup,
-        )
-        return gating_mask
-
-    if method == "tissue_cut":
-        tissue = sitk.BinaryThreshold(
-            img,
-            lowerThreshold=float(threshold_hu),
-            upperThreshold=1e9,
-            insideValue=1,
-            outsideValue=0,
-        )
-        metal = sitk.BinaryThreshold(
-            img,
-            lowerThreshold=float(metal_threshold_hu),
-            upperThreshold=1e9,
-            insideValue=1,
-            outsideValue=0,
-        )
-        dilate_mm = max(0.0, float(metal_dilate_mm))
-        if dilate_mm > 1e-6:
-            radius_xyz = _radius_xyz(dilate_mm, spacing_xyz)
-            if any(r > 0 for r in radius_xyz):
-                metal = sitk.BinaryDilate(metal, radius_xyz)
-
-        tissue_cut = sitk.And(tissue, sitk.BinaryNot(metal))
-        close_mm = max(0.0, float(close_mm))
-        if close_mm > 1e-6:
-            radius_xyz = _radius_xyz(close_mm, spacing_xyz)
-            if any(r > 0 for r in radius_xyz):
-                tissue_cut = sitk.BinaryMorphologicalClosing(tissue_cut, radius_xyz)
-
-        healed = sitk.BinaryFillhole(tissue_cut, fullyConnected=False)
-        largest = largest_component_binary(healed)
-        if largest is None:
-            return np.zeros(arr.shape, dtype=bool)
-        largest_arr = sitk.GetArrayFromImage(largest).astype(bool)
-        if bool(aggressive_cleanup):
-            largest_arr = keep_largest_slice_component_kji(largest_arr, axis=0, min_slice_voxels=64)
-        return largest_arr
-
-    mask = sitk.BinaryThreshold(
-        img,
-        lowerThreshold=float(threshold_hu),
-        upperThreshold=1e9,
-        insideValue=1,
-        outsideValue=0,
-    )
-
-    close_mm = max(0.0, float(close_mm))
-    if close_mm > 1e-6:
-        radius_xyz = _radius_xyz(close_mm, spacing_xyz)
-        if any(r > 0 for r in radius_xyz):
-            mask = sitk.BinaryMorphologicalClosing(mask, radius_xyz)
-
-    largest = largest_component_binary(mask)
-    if largest is None:
-        return np.zeros(arr.shape, dtype=bool)
-
-    largest_arr = sitk.GetArrayFromImage(largest).astype(bool)
-    largest_arr = fill_holes_axial_kji(largest_arr)
-    if bool(aggressive_cleanup):
-        largest_arr = keep_largest_slice_component_kji(largest_arr, axis=0, min_slice_voxels=64)
-        largest_arr = keep_largest_slice_component_kji(largest_arr, axis=1, min_slice_voxels=64)
-        largest_arr = keep_largest_slice_component_kji(largest_arr, axis=2, min_slice_voxels=64)
-    else:
-        largest_arr = keep_largest_slice_component_kji(largest_arr, axis=0, min_slice_voxels=64)
-    return largest_arr
+    outside_air = build_outside_air_mask_kji(arr_kji=arr, air_threshold_hu=threshold_hu)
+    return np.logical_not(outside_air)
 
 
 def compute_head_distance_map_kji(head_mask_kji, spacing_xyz):
@@ -525,12 +361,21 @@ def build_preview_masks(
     max_metal_depth_mm=220.0,
     precomputed_gating_mask_kji=None,
     precomputed_head_distance_map_kji=None,
+    include_debug_masks: bool = False,
 ):
     """Build metal candidates and apply optional head/depth gating.
 
     Returns dictionary keys consumed by both UI and CLI.
     Depth values are in mm from the outer head surface (inside-positive),
     with practical defaults of 5-220 mm.
+
+    Parameters
+    ----------
+    include_debug_masks:
+        When False, only algorithm-required masks are materialized in the
+        returned payload (metal, gating, depth-pass, distance map, candidates).
+        Additional visualization/debug masks are omitted to keep detection runs
+        lightweight. UI preview/debug paths can set this True.
     """
     _require_numpy()
     _require_sitk()
@@ -553,7 +398,9 @@ def build_preview_masks(
     depth_window_mask = None
     metal_depth_pass_mask = np.zeros(arr.shape, dtype=bool)
     metal_in_gate_mask = np.zeros(arr.shape, dtype=bool)
-    head_method = str(head_mask_method or "legacy").strip().lower()
+    head_method = str(head_mask_method or "outside_air").strip().lower()
+    if head_method not in {"outside_air", "not_air_lcc"}:
+        head_method = "outside_air"
     not_air_mask = None
     not_air_eroded_mask = None
     head_core_mask = None
@@ -566,22 +413,12 @@ def build_preview_masks(
         if precomputed_gating_mask_kji is not None:
             gating_mask = np.asarray(precomputed_gating_mask_kji, dtype=bool)
         else:
-            if head_method == "tissue_cut_noclose":
-                gating_mask, distance_surface_mask = build_tissue_cut_distance_and_gating_masks_kji(
-                    arr_kji=arr,
-                    spacing_xyz=spacing_xyz,
-                    threshold_hu=head_mask_threshold_hu,
-                    metal_threshold_hu=threshold,
-                    metal_dilate_mm=head_mask_metal_dilate_mm,
-                    aggressive_cleanup=head_mask_aggressive_cleanup,
-                )
-                gating_mask = np.asarray(gating_mask, dtype=bool)
-            elif head_method == "outside_air":
+            if head_method == "outside_air":
                 outside_air = build_outside_air_mask_kji(arr_kji=arr, air_threshold_hu=head_mask_threshold_hu)
                 gating_mask = np.logical_not(outside_air)
                 # Use a fast per-slice envelope only for distance-surface stabilization.
                 distance_surface_mask = axial_row_col_span_envelope_kji(gating_mask)
-            elif head_method == "not_air_lcc":
+            else:
                 gate_out = build_not_air_lcc_gate_kji(
                     arr_kji=arr,
                     spacing_xyz=spacing_xyz,
@@ -596,18 +433,6 @@ def build_preview_masks(
                 gating_mask = np.asarray(gate_out.get("head_gate_mask_kji"), dtype=bool)
                 metal_gate_mask = np.asarray(gate_out.get("metal_gate_mask_kji"), dtype=bool)
                 dist_head = np.asarray(gate_out.get("head_distance_map_kji"), dtype=np.float32)
-            else:
-                head_mask = build_head_mask_kji(
-                    arr_kji=arr,
-                    spacing_xyz=spacing_xyz,
-                    threshold_hu=head_mask_threshold_hu,
-                    close_mm=head_mask_close_mm,
-                    aggressive_cleanup=head_mask_aggressive_cleanup,
-                    method=head_mask_method,
-                    metal_threshold_hu=threshold,
-                    metal_dilate_mm=head_mask_metal_dilate_mm,
-                )
-                gating_mask = np.asarray(head_mask, dtype=bool)
         head_mask_ms = (time.perf_counter() - t_head0) * 1000.0
         inside_method = "head_distance"
         gating_mask_type = "head_distance"
@@ -617,7 +442,7 @@ def build_preview_masks(
             dist_head = np.asarray(precomputed_head_distance_map_kji, dtype=np.float32)
         elif head_method == "not_air_lcc" and dist_head is not None:
             pass
-        elif head_method in ("tissue_cut_noclose", "outside_air"):
+        elif head_method == "outside_air":
             if distance_surface_mask is not None:
                 dist_head = compute_head_distance_map_kji(distance_surface_mask, spacing_xyz=spacing_xyz)
             else:
@@ -673,6 +498,7 @@ def build_preview_masks(
     else:
         candidate_enum_ms = (time.perf_counter() - t_enum0) * 1000.0
 
+    debug_masks = bool(include_debug_masks)
     return {
         "candidate_count": candidate_count,
         "head_mask_kept_count": int(head_mask_kept_count),
@@ -685,14 +511,33 @@ def build_preview_masks(
         "gating_mask_kji": gating_mask.astype(np.uint8) if gating_mask is not None else None,
         "head_mask_kji": gating_mask.astype(np.uint8) if gating_mask is not None else None,
         "distance_surface_mask_kji": (
-            np.asarray(distance_surface_mask, dtype=np.uint8) if distance_surface_mask is not None else None
+            np.asarray(distance_surface_mask, dtype=np.uint8)
+            if (debug_masks and distance_surface_mask is not None)
+            else None
         ),
-        "not_air_mask_kji": np.asarray(not_air_mask, dtype=np.uint8) if not_air_mask is not None else None,
-        "not_air_eroded_mask_kji": np.asarray(not_air_eroded_mask, dtype=np.uint8) if not_air_eroded_mask is not None else None,
-        "head_core_mask_kji": np.asarray(head_core_mask, dtype=np.uint8) if head_core_mask is not None else None,
-        "metal_gate_mask_kji": np.asarray(metal_gate_mask, dtype=np.uint8) if metal_gate_mask is not None else None,
+        "not_air_mask_kji": (
+            np.asarray(not_air_mask, dtype=np.uint8) if (debug_masks and not_air_mask is not None) else None
+        ),
+        "not_air_eroded_mask_kji": (
+            np.asarray(not_air_eroded_mask, dtype=np.uint8)
+            if (debug_masks and not_air_eroded_mask is not None)
+            else None
+        ),
+        "head_core_mask_kji": (
+            np.asarray(head_core_mask, dtype=np.uint8) if (debug_masks and head_core_mask is not None) else None
+        ),
+        "metal_gate_mask_kji": (
+            np.asarray(metal_gate_mask, dtype=np.uint8) if (debug_masks and metal_gate_mask is not None) else None
+        ),
+        # Canonical permissive in-head metal candidate mask.
+        "metal_in_head_mask_kji": np.asarray(metal_in_gate_mask, dtype=np.uint8),
+        # Short alias used by some pipelines/tests.
+        "metal_in_head": np.asarray(metal_in_gate_mask, dtype=np.uint8),
+        # Backward-compatible alias.
         "metal_in_gate_mask_kji": np.asarray(metal_in_gate_mask, dtype=np.uint8),
-        "depth_window_mask_kji": np.asarray(depth_window_mask, dtype=np.uint8) if depth_window_mask is not None else None,
+        "depth_window_mask_kji": (
+            np.asarray(depth_window_mask, dtype=np.uint8) if (debug_masks and depth_window_mask is not None) else None
+        ),
         "metal_depth_pass_mask_kji": np.asarray(metal_depth_pass_mask, dtype=np.uint8),
         "head_distance_map_kji": dist_head,
         "in_mask_ijk_kji": in_mask_ijk_kji,

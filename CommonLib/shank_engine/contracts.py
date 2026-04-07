@@ -44,6 +44,7 @@ class BlobRecord:
     centroid_kji: tuple[float, float, float]
     voxel_count: int
     peak_hu: float = 0.0
+    q95_hu: float = 0.0
     mean_hu: float = 0.0
     pca_axis_ras: tuple[float, float, float] = (0.0, 0.0, 1.0)
     pca_evals: tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -54,6 +55,7 @@ class BlobRecord:
     depth_max_mm: float = 0.0
     depth_mean_mm: float = 0.0
     scores: dict[str, float] = field(default_factory=dict)
+    meta: dict[str, Any] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
 
 

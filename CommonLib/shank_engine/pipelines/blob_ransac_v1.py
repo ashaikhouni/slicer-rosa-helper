@@ -1,4 +1,4 @@
-"""Adapter pipeline for the existing shank_core blob/ransac detector."""
+"""Adapter pipeline for the existing shank_core voxel/ransac detector."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from .base import BaseDetectionPipeline
 
 
 class BlobRansacV1Pipeline(BaseDetectionPipeline):
-    """Bridge wrapper around the current production shank_core pipeline."""
+    """Bridge wrapper around the current production shank_core voxel pipeline."""
 
     pipeline_id = "blob_ransac_v1"
-    display_name = "Blob RANSAC v1"
+    display_name = "Voxel RANSAC v1"
     pipeline_version = "1.0.0"
 
     def run(self, ctx: DetectionContext) -> DetectionResult:
@@ -50,7 +50,7 @@ class BlobRansacV1Pipeline(BaseDetectionPipeline):
                 else:
                     diagnostics.set_count(key, int(value))
 
-            diagnostics.set_extra("candidate_mode", str(config.get("candidate_mode", "blob_centroid")))
+            diagnostics.set_extra("candidate_mode", "voxel")
             diagnostics.note("using legacy shank_core adapter")
 
             writer = self.get_artifact_writer(ctx, result)
