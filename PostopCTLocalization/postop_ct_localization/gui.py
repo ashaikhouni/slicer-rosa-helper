@@ -49,8 +49,8 @@ class PostopCTLocalizationWidgetBaseMixin:
         self._updatingGuidedTable = False
         self._renamingGuidedTrajectory = False
         self._syncingModeTabs = False
-        self._lastDeepCorePayload = None
-        self._lastDeepCoreProposalPayload = None
+        self._lastDeepCoreDebugResult = None
+        self._lastDeepCoreProposalResult = None
         self._deNovoControlsByPipeline = {}
         self._deNovoTabIndexByPipeline = {}
 
@@ -529,8 +529,8 @@ class PostopCTLocalizationWidgetBaseMixin:
 
     def onCtSelectorChanged(self, node):
         """Update display layers and threshold ranges when CT selection changes."""
-        self._lastDeepCorePayload = None
-        self._lastDeepCoreProposalPayload = None
+        self._lastDeepCoreDebugResult = None
+        self._lastDeepCoreProposalResult = None
         self.logic.trajectory_scene.remove_preview_lines()
         self._apply_primary_slice_layers()
         self._sync_threshold_ranges_from_ct(node)

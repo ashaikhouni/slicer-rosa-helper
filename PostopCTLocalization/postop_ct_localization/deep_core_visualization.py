@@ -6,29 +6,9 @@ try:
 except ImportError:
     np = None
 
-try:
-    import SimpleITK as sitk
-except ImportError:
-    sitk = None
+from __main__ import qt, slicer, vtk
 
-from __main__ import ctk, qt, slicer, vtk
-
-from rosa_core import (
-    load_electrode_library,
-    lps_to_ras_point,
-    model_map,
-    suggest_model_id_for_trajectory,
-    trajectory_length_mm,
-)
-from rosa_core.contact_fit import fit_electrode_axis_and_tip
-from rosa_scene import ElectrodeSceneService, LayoutService, TrajectoryFocusController, TrajectorySceneService
-from shank_core.blob_candidates import build_blob_labelmap, extract_blob_candidates
-from shank_core.masking import build_preview_masks, compute_head_distance_map_kji, largest_component_binary
-from shank_engine import PipelineRegistry, register_builtin_pipelines
-from rosa_workflow import WorkflowPublisher, WorkflowState
-from rosa_workflow.workflow_registry import table_to_dict_rows
-
-from .constants import DE_NOVO_MODE_SPECS, GUIDED_SOURCE_OPTIONS
+from shank_core.masking import build_preview_masks
 
 class DeepCoreVisualizationLogicMixin:
     @staticmethod
@@ -330,24 +310,31 @@ class DeepCoreVisualizationLogicMixin:
             "graph": {"color": (0.15, 0.85, 0.20), "tag": "G"},
             "blob_connectivity": {"color": (0.10, 0.85, 0.95), "tag": "B"},
             "blob_axis": {"color": (0.95, 0.60, 0.15), "tag": "A"},
-            "contact_chain": {"color": (1.00, 0.45, 0.10), "tag": "C"},
-            "pair_ransac": {"color": (0.90, 0.20, 0.85), "tag": "P"},
-            "uncovered_rescue": {"color": (0.95, 0.25, 0.25), "tag": "U"},
-            "dropout_rescue": {"color": (0.95, 0.90, 0.20), "tag": "D"},
         }
         return dict(style_map.get(family_key, {"color": (0.75, 0.75, 0.75), "tag": "X"}))
 
     def show_deep_core_proposals(self, volume_node, proposals):
         self.trajectory_scene.remove_preview_lines()
+        star_node_name = f"{volume_node.GetName()}_DeepCoreSkullJumpStars" if volume_node is not None else "DeepCoreSkullJumpStars"
+        shallow_node_name = f"{volume_node.GetName()}_DeepCoreProposalShallow" if volume_node is not None else "DeepCoreProposalShallow"
+        deep_node_name = f"{volume_node.GetName()}_DeepCoreProposalDeep" if volume_node is not None else "DeepCoreProposalDeep"
+        self._remove_node_if_exists(star_node_name)
+        self._remove_node_if_exists(shallow_node_name)
+        self._remove_node_if_exists(deep_node_name)
         nodes = []
+        skull_jump_records = []
+        shallow_records = []
+        deep_records = []
         for idx, proposal in enumerate(list(proposals or []), start=1):
             family = str(proposal.get("proposal_family") or "unknown")
             style = self._deep_core_proposal_family_style(family)
             line_tag = str(style.get("tag") or "X")
+            start_ras = list(proposal.get("start_ras") or [0.0, 0.0, 0.0])
+            end_ras = list(proposal.get("end_ras") or [0.0, 0.0, 0.0])
             node = self.trajectory_scene.create_or_update_trajectory_line(
                 name=f"{line_tag}{idx:02d}",
-                start_ras=list(proposal.get("start_ras") or [0.0, 0.0, 0.0]),
-                end_ras=list(proposal.get("end_ras") or [0.0, 0.0, 0.0]),
+                start_ras=start_ras,
+                end_ras=end_ras,
                 node_id=None,
                 group="autofit_preview",
                 origin="deep_core_debug",
@@ -363,6 +350,47 @@ class DeepCoreVisualizationLogicMixin:
             else:
                 node.SetAttribute("Rosa.DeepCoreAnnulusMeanHu", f"{float(annulus_mean):.3f}")
             node.SetAttribute("Rosa.DeepCoreAnnulusSampleCount", str(int(annulus_samples)))
+            skull_jump = self._proposal_skull_transition_from_annulus_gradient(
+                volume_node=volume_node,
+                proposal=proposal,
+            )
+            skull_jump_point = skull_jump.get("point_ras")
+            if skull_jump_point is None:
+                node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", "")
+                node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", "")
+            else:
+                node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", f"{float(skull_jump.get('jump_hu_per_mm', 0.0)):.3f}")
+                node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", f"{float(skull_jump.get('axial_pos_mm', 0.0)):.3f}")
+                skull_jump_records.append(
+                    {
+                        "point_ras": [float(v) for v in np.asarray(skull_jump_point, dtype=float).reshape(3)],
+                        "label": f"{line_tag}{idx:02d}*",
+                        "description": "first large annulus jump",
+                    }
+                )
+            shallow_name = str(proposal.get("shallow_endpoint_name") or "").strip().lower()
+            deep_name = str(proposal.get("deep_endpoint_name") or "").strip().lower()
+            shallow_ras = end_ras if shallow_name == "end" else start_ras
+            if deep_name == "start":
+                deep_ras = start_ras
+            elif deep_name == "end":
+                deep_ras = end_ras
+            else:
+                deep_ras = end_ras if shallow_name == "start" else start_ras
+            shallow_records.append(
+                {
+                    "point_ras": [float(v) for v in np.asarray(shallow_ras, dtype=float).reshape(3)],
+                    "label": f"{line_tag}{idx:02d}Sh",
+                    "description": "trajectory shallow end",
+                }
+            )
+            deep_records.append(
+                {
+                    "point_ras": [float(v) for v in np.asarray(deep_ras, dtype=float).reshape(3)],
+                    "label": f"{line_tag}{idx:02d}Dp",
+                    "description": "trajectory deep end",
+                }
+            )
             atom_ids = [int(v) for v in list(proposal.get("atom_id_list") or []) if int(v) > 0]
             blob_ids = [int(v) for v in list(proposal.get("blob_id_list") or []) if int(v) > 0]
             node.SetAttribute("Rosa.DeepCoreAtomIds", ",".join(str(v) for v in atom_ids))
@@ -378,6 +406,42 @@ class DeepCoreVisualizationLogicMixin:
             context_id=self.workflow_state.context_id(),
             nodes=nodes,
         )
+        if skull_jump_records:
+            star_node = self._get_or_create_fiducial_node(
+                star_node_name,
+                color_rgb=(1.0, 0.1, 0.1),
+                glyph_scale=1.6,
+                text_scale=0.7,
+                show_labels=True,
+            )
+            self._copy_parent_transform(volume_node, star_node)
+            self._set_fiducials_from_point_records(star_node, skull_jump_records, show_labels=True, text_scale=0.7)
+            star_display = star_node.GetDisplayNode()
+            if star_display is not None and hasattr(star_display, "SetGlyphTypeFromString"):
+                try:
+                    star_display.SetGlyphTypeFromString("StarBurst2D")
+                except Exception:
+                    pass
+        if shallow_records:
+            shallow_node = self._get_or_create_fiducial_node(
+                shallow_node_name,
+                color_rgb=(0.10, 0.90, 1.00),
+                glyph_scale=1.3,
+                text_scale=1.2,
+                show_labels=True,
+            )
+            self._copy_parent_transform(volume_node, shallow_node)
+            self._set_fiducials_from_point_records(shallow_node, shallow_records, show_labels=True, text_scale=1.2)
+        if deep_records:
+            deep_node = self._get_or_create_fiducial_node(
+                deep_node_name,
+                color_rgb=(1.00, 0.90, 0.10),
+                glyph_scale=1.3,
+                text_scale=1.2,
+                show_labels=True,
+            )
+            self._copy_parent_transform(volume_node, deep_node)
+            self._set_fiducials_from_point_records(deep_node, deep_records, show_labels=True, text_scale=1.2)
         return nodes
 
     def _get_or_create_fiducial_node(self, node_name, color_rgb, glyph_scale=1.0, text_scale=0.8, show_labels=False):
@@ -459,6 +523,7 @@ class DeepCoreVisualizationLogicMixin:
         self._remove_node_if_exists(f"{volume_node.GetName()}_BlobCentroids_Rejected")
         self._remove_nodes_with_prefix(f"{volume_node.GetName()}_ComplexBlobChain_")
         self._remove_nodes_with_prefix(f"{volume_node.GetName()}_ContactChain_")
+        self._remove_node_if_exists(f"{volume_node.GetName()}_ComplexBlobChain_CandidateSeeds")
         all_node = self._get_or_create_fiducial_node(
             f"{volume_node.GetName()}_RawBlobCentroids",
             color_rgb=(1.0, 1.0, 0.0),
@@ -484,11 +549,17 @@ class DeepCoreVisualizationLogicMixin:
                             float(row.get("support_z_ras", 0.0)),
                         ],
                         "memberships": [],
+                        "seed_line_ids": set(),
+                        "candidate_seed_only": False,
                     }
                 line_id = int(row.get("line_id", 0))
                 line_order = int(row.get("line_order", 0))
                 if line_id > 0:
                     aggregated[key]["memberships"].append((int(line_id), int(line_order)))
+                    if bool(row.get("is_seed")):
+                        aggregated[key]["seed_line_ids"].add(int(line_id))
+                elif bool(row.get("is_candidate_seed")):
+                    aggregated[key]["candidate_seed_only"] = True
             role_code_map = {"edge": "E", "core": "C", "crossing": "X"}
             line_palette = [
                 (0.15, 0.75, 0.95),
@@ -508,6 +579,8 @@ class DeepCoreVisualizationLogicMixin:
                 "core": 1.1,
                 "crossing": 2.1,
             }
+            seed_records = []
+            candidate_seed_records = []
             line_groups = {}
             unassigned_groups = {}
             has_memberships = False
@@ -536,6 +609,7 @@ class DeepCoreVisualizationLogicMixin:
                                 "point_ras": list(item.get("point_ras") or [0.0, 0.0, 0.0]),
                                 "node_role": role,
                                 "node_id": int(item.get("node_id", -1)),
+                                "is_seed": bool(int(line_id) in set(item.get("seed_line_ids") or set())),
                                 "description": base_description,
                             }
                         )
@@ -548,10 +622,36 @@ class DeepCoreVisualizationLogicMixin:
                             "description": base_description,
                         }
                     )
+                if bool(item.get("candidate_seed_only")):
+                    candidate_seed_records.append(
+                        {
+                            "point_ras": list(item.get("point_ras") or [0.0, 0.0, 0.0]),
+                            "label": "S?",
+                            "description": "{base}\ncandidate_seed=1\naccepted_seed=0".format(
+                                base=base_description,
+                            ),
+                        }
+                    )
             for (blob_id, line_id), records in sorted(line_groups.items()):
                 path_color = line_palette[(int(line_id) - 1) % len(line_palette)]
                 path_name = f"{volume_node.GetName()}_ComplexBlobChain_b{int(blob_id)}_L{int(line_id)}_Path"
                 sorted_records = sorted(records, key=lambda item: int(item.get("line_order", 0)))
+                for record in sorted_records:
+                    if bool(record.get("is_seed")):
+                        seed_records.append(
+                            {
+                                "point_ras": list(record.get("point_ras") or [0.0, 0.0, 0.0]),
+                                "label": f"L{int(line_id)}S",
+                                "description": "{base}\nblob_line=b{blob}_L{line}\nseed_node=1\nline_order={order}\nnode_role={role}\nnode_id={node_id}".format(
+                                    base=str(record.get("description") or ""),
+                                    blob=int(blob_id),
+                                    line=int(line_id),
+                                    order=int(record.get("line_order", 0)),
+                                    role=str(record.get("node_role") or ""),
+                                    node_id=int(record.get("node_id", -1)),
+                                ),
+                            }
+                        )
                 line_segments = []
                 for idx in range(len(sorted_records) - 1):
                     p0 = list(sorted_records[idx].get("point_ras") or [0.0, 0.0, 0.0])
@@ -589,6 +689,32 @@ class DeepCoreVisualizationLogicMixin:
                     )
                     self._copy_parent_transform(volume_node, role_node)
                     self._set_fiducials_from_point_records(role_node, role_records, show_labels=False, text_scale=0.0)
+            seed_node_name = f"{volume_node.GetName()}_ComplexBlobChain_SeedNodes"
+            if seed_records:
+                seed_node = self._get_or_create_fiducial_node(
+                    seed_node_name,
+                    color_rgb=(1.0, 0.15, 0.15),
+                    glyph_scale=2.6,
+                    text_scale=1.1,
+                    show_labels=True,
+                )
+                self._copy_parent_transform(volume_node, seed_node)
+                self._set_fiducials_from_point_records(seed_node, seed_records, show_labels=True, text_scale=1.1)
+            else:
+                self._remove_node_if_exists(seed_node_name)
+            candidate_seed_node_name = f"{volume_node.GetName()}_ComplexBlobChain_CandidateSeeds"
+            if candidate_seed_records:
+                candidate_seed_node = self._get_or_create_fiducial_node(
+                    candidate_seed_node_name,
+                    color_rgb=(1.0, 0.6, 0.1),
+                    glyph_scale=2.0,
+                    text_scale=0.95,
+                    show_labels=True,
+                )
+                self._copy_parent_transform(volume_node, candidate_seed_node)
+                self._set_fiducials_from_point_records(candidate_seed_node, candidate_seed_records, show_labels=True, text_scale=0.95)
+            else:
+                self._remove_node_if_exists(candidate_seed_node_name)
             if has_memberships:
                 for blob_id, role_groups in sorted(unassigned_groups.items()):
                     for role, records in sorted(role_groups.items()):
@@ -620,6 +746,8 @@ class DeepCoreVisualizationLogicMixin:
                     self._set_fiducials_from_point_records(unassigned_node, records, show_labels=False, text_scale=0.0)
         else:
             self._remove_nodes_with_prefix(f"{volume_node.GetName()}_ComplexBlobChain_")
+            self._remove_node_if_exists(f"{volume_node.GetName()}_ComplexBlobChain_SeedNodes")
+            self._remove_node_if_exists(f"{volume_node.GetName()}_ComplexBlobChain_CandidateSeeds")
 
         contact_rows = [dict(row or {}) for row in list(contact_chain_rows or [])]
         if contact_rows:
