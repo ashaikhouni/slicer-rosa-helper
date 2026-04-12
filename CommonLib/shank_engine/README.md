@@ -221,20 +221,8 @@ result = pipeline.run(ctx)
 
 | Key | Class | Strategy |
 |-----|-------|----------|
-| `blob_ransac_v1` | `BlobRansacV1Pipeline` | Legacy shank_core RANSAC adapter |
+| `blob_ransac_v1` | `BlobRansacV1Pipeline` | Legacy shank_core RANSAC adapter (default) |
 | `blob_em_v2` | `BlobEMV2Pipeline` | EM-based blob assignment and refinement |
-| `blob_consensus_v1` | `BlobConsensusV1Pipeline` | Multi-strategy consensus voting |
-| `blob_persistence_v1` | `BlobPersistenceV1Pipeline` | Multi-threshold persistence scoring |
-| `blob_persistence_v2` | `BlobPersistenceV2Pipeline` | Persistence with lineage tracking |
-| `hybrid_bead_string_v1` | `HybridBeadStringV1Pipeline` | Bead-chain and string-fit hybrid |
-| `de_novo_hypothesis_select_v1` | `DeNovoHypothesisSelectV1Pipeline` | Hypothesis generation + global selection |
-| `de_novo_seed_extend_v2` | `DeNovoSeedExtendV2Pipeline` | Seed-extend with refinement pass |
-| `shank_axis_v1` | `ShankAxisV1Pipeline` | Geometry-first axis optimization |
-| `shank_cluster_v1` | `ShankClusterV1Pipeline` | Orientation clustering |
-| `shank_graph_v1` | `ShankGraphV1Pipeline` | Graph-based model fusion |
-| `shank_grow_v1` | `ShankGrowV1Pipeline` | Iterative shank growth |
-| `shank_hypothesis_v1` | `ShankHypothesisV1Pipeline` | Local hypothesis generation |
-| `shank_stitch_v1` | `ShankStitchV1Pipeline` | Segment stitching |
 
 ## Adding a New Pipeline
 
