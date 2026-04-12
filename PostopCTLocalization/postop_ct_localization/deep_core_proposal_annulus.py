@@ -19,22 +19,27 @@ class DeepCoreProposalAnnulusMixin(DeepCoreAnnulusMixin):
         idx = np.asarray(ijk_kji, dtype=float).reshape(-1, 3)
         if idx.size == 0:
             return np.empty((0, 3), dtype=float)
-        # Prefer the VolumeAccessor if available on the pipeline.
-        vol = getattr(self, "_vol", None)
-        if vol is not None:
-            return np.asarray(
-                vol.ijk_kji_to_ras_points(volume_node, idx), dtype=float
-            ).reshape(-1, 3)
-        # Legacy path: direct VTK call.
+        # If volume_node carries a context fn (proxy), use it directly.
+        ctx_fn = getattr(volume_node, "_ijk_kji_to_ras_fn", None)
+        if ctx_fn is not None:
+            return np.asarray(ctx_fn(idx), dtype=float).reshape(-1, 3)
+        # Real Slicer volume path: try via VTK if available.
         if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-            from __main__ import vtk  # noqa: deferred
-            m_vtk = vtk.vtkMatrix4x4()
-            volume_node.GetIJKToRASMatrix(m_vtk)
-            mat = np.eye(4, dtype=float)
-            for r in range(4):
-                for c in range(4):
-                    mat[r, c] = float(m_vtk.GetElement(r, c))
-            return kji_to_ras_points_matrix(idx, mat)
+            try:
+                from __main__ import vtk  # noqa: deferred
+            except ImportError:
+                try:
+                    import vtk
+                except ImportError:
+                    vtk = None
+            if vtk is not None:
+                m_vtk = vtk.vtkMatrix4x4()
+                volume_node.GetIJKToRASMatrix(m_vtk)
+                mat = np.eye(4, dtype=float)
+                for r in range(4):
+                    for c in range(4):
+                        mat[r, c] = float(m_vtk.GetElement(r, c))
+                return kji_to_ras_points_matrix(idx, mat)
         return np.asarray(kji_to_ras_points(volume_node, idx), dtype=float).reshape(-1, 3)
 
     @classmethod

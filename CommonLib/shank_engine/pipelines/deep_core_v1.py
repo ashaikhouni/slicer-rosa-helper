@@ -33,15 +33,44 @@ from ..pipelines.base import BaseDetectionPipeline
 # Volume proxy — lets mixin code treat DetectionContext data like a volume_node
 # ---------------------------------------------------------------------------
 
+def _get_vtk_module():
+    """Return the vtk module if available (Slicer) or None (CLI)."""
+    try:
+        from __main__ import vtk  # Slicer embeds vtk in __main__
+        return vtk
+    except ImportError:
+        try:
+            import vtk  # Standalone vtk install
+            return vtk
+        except ImportError:
+            return None
+
+
+def _get_slicer_module():
+    try:
+        from __main__ import slicer
+        return slicer
+    except ImportError:
+        return None
+
+
 def _slicer_array_kji(volume_node):
-    """Extract a numpy array from a Slicer volume node (lazy import)."""
-    from __main__ import slicer
+    """Extract a numpy array from a Slicer volume node (if available)."""
+    slicer = _get_slicer_module()
+    if slicer is None:
+        raise RuntimeError(
+            "No Slicer available; algorithm code received a non-proxy volume_node"
+        )
     return np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float)
 
 
 def _slicer_ras_to_ijk_fn(volume_node):
-    """Return a ras_xyz -> ijk_xyz callable for a Slicer volume (lazy import)."""
-    from __main__ import vtk
+    """Return a ras_xyz -> ijk_xyz callable for a Slicer volume."""
+    vtk = _get_vtk_module()
+    if vtk is None:
+        raise RuntimeError(
+            "No vtk available; algorithm code received a non-proxy volume_node"
+        )
     m_vtk = vtk.vtkMatrix4x4()
     volume_node.GetRASToIJKMatrix(m_vtk)
     mat = np.eye(4, dtype=float)
@@ -58,7 +87,11 @@ def _slicer_ras_to_ijk_fn(volume_node):
 
 def _slicer_ijk_kji_to_ras(volume_node, ijk_kji):
     """Convert KJI indices to RAS points via the volume's IJK->RAS matrix."""
-    from __main__ import vtk
+    vtk = _get_vtk_module()
+    if vtk is None:
+        raise RuntimeError(
+            "No vtk available; algorithm code received a non-proxy volume_node"
+        )
     idx = np.asarray(ijk_kji, dtype=float).reshape(-1, 3)
     if idx.size == 0:
         return np.empty((0, 3), dtype=float)
@@ -185,27 +218,22 @@ def _make_pipeline_class():
         ):
             """Extract metal candidate points from a CT volume as LPS coords.
 
-            Uses the proxy's cached array when possible; falls back to the
-            real volume node otherwise.
+            Uses the proxy's cached array + ``ijk_kji_to_ras_fn`` when
+            possible; falls back to a real Slicer volume node otherwise.
             """
             from shank_core.masking import build_preview_masks
-            from __main__ import vtk
 
-            # Resolve array + real Slicer node for matrix extraction
+            # Resolve array, spacing, and an IJK/KJI->RAS transform
             if isinstance(volume_node, _ContextVolumeProxy):
                 arr = volume_node._arr_kji
                 spacing = volume_node._spacing
+                ijk_kji_to_ras_fn = volume_node._ijk_kji_to_ras_fn
                 real_node = volume_node._volume_node
             else:
                 arr = _slicer_array_kji(volume_node)
                 spacing = tuple(float(v) for v in volume_node.GetSpacing())
+                ijk_kji_to_ras_fn = None
                 real_node = volume_node
-
-            if real_node is None:
-                return {
-                    "points_lps": np.empty((0, 3), dtype=float),
-                    "threshold_hu": float(threshold),
-                }
 
             used_threshold = float(threshold)
             best_preview: dict | None = None
@@ -240,18 +268,18 @@ def _make_pipeline_class():
                     "points_lps": np.empty((0, 3), dtype=float),
                     "threshold_hu": float(used_threshold),
                 }
-            n = idx.shape[0]
-            ijk_h = np.ones((n, 4), dtype=float)
-            ijk_h[:, 0] = idx[:, 2]
-            ijk_h[:, 1] = idx[:, 1]
-            ijk_h[:, 2] = idx[:, 0]
-            m_vtk = vtk.vtkMatrix4x4()
-            real_node.GetIJKToRASMatrix(m_vtk)
-            mat = np.eye(4, dtype=float)
-            for r in range(4):
-                for c in range(4):
-                    mat[r, c] = float(m_vtk.GetElement(r, c))
-            ras = (ijk_h @ mat.T)[:, :3]
+
+            # Convert KJI indices to RAS using whichever transform we have
+            if ijk_kji_to_ras_fn is not None:
+                ras = np.asarray(ijk_kji_to_ras_fn(idx.astype(float)), dtype=float).reshape(-1, 3)
+            elif real_node is not None:
+                ras = _slicer_ijk_kji_to_ras(real_node, idx.astype(float))
+            else:
+                return {
+                    "points_lps": np.empty((0, 3), dtype=float),
+                    "threshold_hu": float(used_threshold),
+                }
+
             lps = ras.copy()
             lps[:, 0] *= -1.0
             lps[:, 1] *= -1.0
