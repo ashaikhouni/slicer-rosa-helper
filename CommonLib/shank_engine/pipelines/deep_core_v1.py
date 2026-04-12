@@ -129,15 +129,99 @@ def _make_pipeline_class():
             """Bridge for mixin code that calls self._ijk_kji_to_ras_points."""
             if isinstance(volume_node, _ContextVolumeProxy) and volume_node._ijk_kji_to_ras_fn is not None:
                 return volume_node._ijk_kji_to_ras_fn(ijk_kji)
-            # Fallback for real Slicer volume nodes
             from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
             return SlicerVolumeAccessor().ijk_kji_to_ras_points(volume_node, ijk_kji)
 
         def extract_threshold_candidates_lps(self, volume_node, threshold, **kwargs):
             """Bridge for mixin code that calls self.extract_threshold_candidates_lps."""
+            if isinstance(volume_node, _ContextVolumeProxy) and volume_node._volume_node is not None:
+                volume_node = volume_node._volume_node
             from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
             return SlicerVolumeAccessor().extract_threshold_candidates_lps(
                 volume_node=volume_node, threshold=threshold, **kwargs
+            )
+
+        # -- Cached overrides for hot annulus methods ----------------------
+        # The DeepCoreAnnulusMixin shim creates a new SlicerVolumeAccessor
+        # and re-reads the volume on every call.  These overrides use the
+        # already-extracted ctx data when a _ContextVolumeProxy is passed.
+
+        @staticmethod
+        def _volume_array_kji(volume_node):
+            if isinstance(volume_node, _ContextVolumeProxy):
+                return volume_node._arr_kji
+            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
+            return SlicerVolumeAccessor().array_kji(volume_node)
+
+        @staticmethod
+        def _ras_to_ijk_fn_for_volume(volume_node):
+            if isinstance(volume_node, _ContextVolumeProxy) and volume_node._ras_to_ijk_fn is not None:
+                return volume_node._ras_to_ijk_fn
+            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
+            return SlicerVolumeAccessor().ras_to_ijk_fn(volume_node)
+
+        def _scan_reference_hu_values(self, volume_node, lower_hu=-500.0, upper_hu=2500.0):
+            arr_kji = self._volume_array_kji(volume_node)
+            if arr_kji is None:
+                return None
+            values = np.asarray(arr_kji, dtype=float).reshape(-1)
+            keep = np.isfinite(values) & (values > float(lower_hu))
+            if upper_hu is not None:
+                keep &= values < float(upper_hu)
+            ref = np.asarray(values[keep], dtype=float).reshape(-1)
+            if ref.size <= 0:
+                return None
+            ref.sort()
+            return ref
+
+        def _depth_at_ras_with_volume(self, volume_node, depth_map_kji, point_ras):
+            fn = self._ras_to_ijk_fn_for_volume(volume_node)
+            if depth_map_kji is None or fn is None:
+                return None
+            ijk = fn(point_ras)
+            i, j, k = int(round(float(ijk[0]))), int(round(float(ijk[1]))), int(round(float(ijk[2])))
+            if k < 0 or j < 0 or i < 0 or k >= depth_map_kji.shape[0] or j >= depth_map_kji.shape[1] or i >= depth_map_kji.shape[2]:
+                return None
+            val = float(depth_map_kji[k, j, i])
+            return val if np.isfinite(val) else None
+
+        def _cross_section_annulus_stats_hu(
+            self, volume_node, center_ras, axis_ras,
+            annulus_inner_mm=3.0, annulus_outer_mm=4.0,
+            radial_steps=2, angular_samples=12,
+        ):
+            arr_kji = self._volume_array_kji(volume_node)
+            fn = self._ras_to_ijk_fn_for_volume(volume_node)
+            if arr_kji is None or fn is None:
+                return {"mean_hu": None, "median_hu": None, "sample_count": 0}
+            center = np.asarray(center_ras if center_ras is not None else [0, 0, 0], dtype=float).reshape(3)
+            _axis, u, v = self._orthonormal_basis_for_axis(axis_ras)
+            radii = np.linspace(float(annulus_inner_mm), float(annulus_outer_mm), int(max(1, radial_steps)))
+            angles = np.linspace(0, 2 * np.pi, int(max(4, angular_samples)), endpoint=False)
+            samples = []
+            for r in radii.tolist():
+                for theta in angles.tolist():
+                    offset = float(r) * np.cos(float(theta)) * u + float(r) * np.sin(float(theta)) * v
+                    ijk = fn(center + offset)
+                    i, j, k = int(round(float(ijk[0]))), int(round(float(ijk[1]))), int(round(float(ijk[2])))
+                    if 0 <= k < arr_kji.shape[0] and 0 <= j < arr_kji.shape[1] and 0 <= i < arr_kji.shape[2]:
+                        val = float(arr_kji[k, j, i])
+                        if np.isfinite(val):
+                            samples.append(val)
+            if not samples:
+                return {"mean_hu": None, "median_hu": None, "sample_count": 0}
+            sa = np.asarray(samples, dtype=float)
+            return {"mean_hu": float(np.mean(sa)), "median_hu": float(np.median(sa)), "sample_count": int(sa.size)}
+
+        def _cross_section_annulus_mean_ct_hu(
+            self, volume_node, center_ras, axis_ras,
+            annulus_inner_mm=3.0, annulus_outer_mm=4.0,
+            radial_steps=2, angular_samples=12,
+        ):
+            return self._cross_section_annulus_stats_hu(
+                volume_node, center_ras, axis_ras,
+                annulus_inner_mm, annulus_outer_mm,
+                radial_steps, angular_samples,
             )
 
         # ---------------------------------------------------------------
