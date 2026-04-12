@@ -364,147 +364,147 @@ def _make_support_stage_class():
         def _ijk_kji_to_ras_points(self, volume_node, ijk_kji):
             return self._vol.ijk_kji_to_ras_points(volume_node, ijk_kji)
 
-    def run(
-        self,
-        volume_node: Any,
-        mask: MaskStageOutput,
-        support_config: DeepCoreSupportConfig | None = None,
-        annulus_config: DeepCoreAnnulusConfig | None = None,
-        internal_config: DeepCoreInternalConfig | None = None,
-        show_support_diagnostics: bool = True,
-    ) -> SupportStageOutput:
-        defaults = deep_core_default_config()
-        support_cfg = support_config or defaults.support
-        annulus_cfg = annulus_config or defaults.annulus
-        internal_cfg = internal_config or defaults.internal
+        def run(
+            self,
+            volume_node: Any,
+            mask: MaskStageOutput,
+            support_config: DeepCoreSupportConfig | None = None,
+            annulus_config: DeepCoreAnnulusConfig | None = None,
+            internal_config: DeepCoreInternalConfig | None = None,
+            show_support_diagnostics: bool = True,
+        ) -> SupportStageOutput:
+            defaults = deep_core_default_config()
+            support_cfg = support_config or defaults.support
+            annulus_cfg = annulus_config or defaults.annulus
+            internal_cfg = internal_config or defaults.internal
 
-        arr_kji = np.asarray(self._vol.array_kji(volume_node), dtype=np.float32)
-        _ijk_kji_to_ras = lambda idx: self._vol.ijk_kji_to_ras_points(volume_node, idx)
+            arr_kji = np.asarray(self._vol.array_kji(volume_node), dtype=np.float32)
+            _ijk_kji_to_ras = lambda idx: self._vol.ijk_kji_to_ras_points(volume_node, idx)
 
-        raw_blob_result = extract_blob_candidates(
-            metal_mask_kji=mask.deep_seed_raw_mask_kji,
-            arr_kji=arr_kji,
-            depth_map_kji=mask.head_distance_map_kji,
-            ijk_kji_to_ras_fn=_ijk_kji_to_ras,
-        )
-        grown_blob_result = extract_blob_candidates(
-            metal_mask_kji=mask.deep_seed_mask_kji,
-            arr_kji=arr_kji,
-            depth_map_kji=mask.head_distance_map_kji,
-            ijk_kji_to_ras_fn=_ijk_kji_to_ras,
-        )
-        sample_payload = self._build_support_atom_payload(
-            volume_node=volume_node,
-            labels_kji=raw_blob_result.get("labels_kji"),
-            blobs=list(raw_blob_result.get("blobs") or []),
-            support_spacing_mm=float(support_cfg.support_spacing_mm),
-            component_min_elongation=float(support_cfg.component_min_elongation),
-            line_atom_diameter_max_mm=float(support_cfg.line_atom_diameter_max_mm),
-            line_atom_min_span_mm=float(support_cfg.line_atom_min_span_mm),
-            line_atom_min_pca_dominance=float(support_cfg.line_atom_min_pca_dominance),
-            contact_component_diameter_max_mm=float(support_cfg.contact_component_diameter_max_mm),
-            support_cube_size_mm=float(support_cfg.support_cube_size_mm),
-            head_distance_map_kji=mask.head_distance_map_kji,
-            annulus_config=annulus_cfg,
-            internal_config=internal_cfg,
-        )
+            raw_blob_result = extract_blob_candidates(
+                metal_mask_kji=mask.deep_seed_raw_mask_kji,
+                arr_kji=arr_kji,
+                depth_map_kji=mask.head_distance_map_kji,
+                ijk_kji_to_ras_fn=_ijk_kji_to_ras,
+            )
+            grown_blob_result = extract_blob_candidates(
+                metal_mask_kji=mask.deep_seed_mask_kji,
+                arr_kji=arr_kji,
+                depth_map_kji=mask.head_distance_map_kji,
+                ijk_kji_to_ras_fn=_ijk_kji_to_ras,
+            )
+            sample_payload = self._build_support_atom_payload(
+                volume_node=volume_node,
+                labels_kji=raw_blob_result.get("labels_kji"),
+                blobs=list(raw_blob_result.get("blobs") or []),
+                support_spacing_mm=float(support_cfg.support_spacing_mm),
+                component_min_elongation=float(support_cfg.component_min_elongation),
+                line_atom_diameter_max_mm=float(support_cfg.line_atom_diameter_max_mm),
+                line_atom_min_span_mm=float(support_cfg.line_atom_min_span_mm),
+                line_atom_min_pca_dominance=float(support_cfg.line_atom_min_pca_dominance),
+                contact_component_diameter_max_mm=float(support_cfg.contact_component_diameter_max_mm),
+                support_cube_size_mm=float(support_cfg.support_cube_size_mm),
+                head_distance_map_kji=mask.head_distance_map_kji,
+                annulus_config=annulus_cfg,
+                internal_config=internal_cfg,
+            )
 
-        raw_blobs = [
-            dict(blob or {})
-            for blob in list(raw_blob_result.get("blobs") or [])
-        ]
-        support_atoms = list(sample_payload.get("support_atoms") or [])
-        kept_parent_blob_ids = {
-            int(a.get("parent_blob_id", -1))
-            for a in support_atoms
-            if int(dict(a or {}).get("parent_blob_id", -1)) > 0
-        }
+            raw_blobs = [
+                dict(blob or {})
+                for blob in list(raw_blob_result.get("blobs") or [])
+            ]
+            support_atoms = list(sample_payload.get("support_atoms") or [])
+            kept_parent_blob_ids = {
+                int(a.get("parent_blob_id", -1))
+                for a in support_atoms
+                if int(dict(a or {}).get("parent_blob_id", -1)) > 0
+            }
 
-        blob_labelmap_kji = (
-            build_blob_labelmap(raw_blob_result.get("labels_kji"))
-            if show_support_diagnostics
-            else None
-        )
+            blob_labelmap_kji = (
+                build_blob_labelmap(raw_blob_result.get("labels_kji"))
+                if show_support_diagnostics
+                else None
+            )
 
-        blob_centroids_all_ras = np.asarray(
-            [b.get("centroid_ras") for b in raw_blobs if b.get("centroid_ras") is not None],
-            dtype=float,
-        ).reshape(-1, 3)
-        blob_centroids_kept_ras = np.asarray(
-            [b.get("centroid_ras") for b in raw_blobs
-             if b.get("centroid_ras") is not None and int(b.get("blob_id", -1)) in kept_parent_blob_ids],
-            dtype=float,
-        ).reshape(-1, 3)
-        blob_centroids_rejected_ras = np.asarray(
-            [b.get("centroid_ras") for b in raw_blobs
-             if b.get("centroid_ras") is not None and int(b.get("blob_id", -1)) not in kept_parent_blob_ids],
-            dtype=float,
-        ).reshape(-1, 3)
+            blob_centroids_all_ras = np.asarray(
+                [b.get("centroid_ras") for b in raw_blobs if b.get("centroid_ras") is not None],
+                dtype=float,
+            ).reshape(-1, 3)
+            blob_centroids_kept_ras = np.asarray(
+                [b.get("centroid_ras") for b in raw_blobs
+                 if b.get("centroid_ras") is not None and int(b.get("blob_id", -1)) in kept_parent_blob_ids],
+                dtype=float,
+            ).reshape(-1, 3)
+            blob_centroids_rejected_ras = np.asarray(
+                [b.get("centroid_ras") for b in raw_blobs
+                 if b.get("centroid_ras") is not None and int(b.get("blob_id", -1)) not in kept_parent_blob_ids],
+                dtype=float,
+            ).reshape(-1, 3)
 
-        blob_axes_ras_by_id = {
-            int(k): [float(v) for v in np.asarray(val, dtype=float).reshape(3).tolist()]
-            for k, val in dict(sample_payload.get("axes_ras_by_id") or {}).items()
-            if int(k) > 0 and np.asarray(val, dtype=float).reshape(-1).size == 3
-        }
-        blob_elongation_by_id = {
-            int(k): float(v)
-            for k, v in dict(sample_payload.get("elongation_by_id") or {}).items()
-            if int(k) > 0
-        }
-        blob_parent_blob_ids_by_id = {
-            int(k): int(v)
-            for k, v in dict(sample_payload.get("parent_blob_ids_by_id") or {}).items()
-            if int(k) > 0
-        }
+            blob_axes_ras_by_id = {
+                int(k): [float(v) for v in np.asarray(val, dtype=float).reshape(3).tolist()]
+                for k, val in dict(sample_payload.get("axes_ras_by_id") or {}).items()
+                if int(k) > 0 and np.asarray(val, dtype=float).reshape(-1).size == 3
+            }
+            blob_elongation_by_id = {
+                int(k): float(v)
+                for k, v in dict(sample_payload.get("elongation_by_id") or {}).items()
+                if int(k) > 0
+            }
+            blob_parent_blob_ids_by_id = {
+                int(k): int(v)
+                for k, v in dict(sample_payload.get("parent_blob_ids_by_id") or {}).items()
+                if int(k) > 0
+            }
 
-        blob_sample_points_ras = np.asarray(sample_payload.get("points_ras"), dtype=float).reshape(-1, 3)
-        blob_sample_blob_ids = np.asarray(sample_payload.get("blob_ids"), dtype=np.int32).reshape(-1)
-        blob_sample_atom_ids = np.asarray(sample_payload.get("atom_ids"), dtype=np.int32).reshape(-1)
+            blob_sample_points_ras = np.asarray(sample_payload.get("points_ras"), dtype=float).reshape(-1, 3)
+            blob_sample_blob_ids = np.asarray(sample_payload.get("blob_ids"), dtype=np.int32).reshape(-1)
+            blob_sample_atom_ids = np.asarray(sample_payload.get("atom_ids"), dtype=np.int32).reshape(-1)
 
-        stats = dict(mask.stats)
-        stats.update({
-            "support_spacing_mm": float(support_cfg.support_spacing_mm),
-            "component_min_elongation": float(support_cfg.component_min_elongation),
-            "line_atom_diameter_max_mm": float(support_cfg.line_atom_diameter_max_mm),
-            "line_atom_min_span_mm": float(support_cfg.line_atom_min_span_mm),
-            "line_atom_min_pca_dominance": float(support_cfg.line_atom_min_pca_dominance),
-            "contact_component_diameter_max_mm": float(support_cfg.contact_component_diameter_max_mm),
-            "support_cube_size_mm": float(support_cfg.support_cube_size_mm),
-            "deep_seed_sampled_blob_count": int(len(blob_elongation_by_id)),
-            "deep_seed_atom_count": int(len(support_atoms)),
-            "deep_seed_raw_blob_count": int(raw_blob_result.get("blob_count_total", 0)),
-            "deep_seed_grown_blob_count": int(grown_blob_result.get("blob_count_total", 0)),
-            "deep_seed_sample_count": int(blob_sample_points_ras.shape[0]),
-            "deep_seed_line_blob_token_count": int(np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
-            "deep_seed_contact_blob_token_count": int(np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
-            "deep_seed_complex_blob_token_count": int(np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
-            "deep_seed_complex_blob_chain_row_count": int(len(list(sample_payload.get("complex_blob_chain_rows") or []))),
-            "deep_seed_contact_chain_row_count": int(len(list(sample_payload.get("contact_chain_rows") or []))),
-            "deep_seed_contact_chain_debug_row_count": int(len(list(sample_payload.get("contact_chain_debug_rows") or []))),
-        })
+            stats = dict(mask.stats)
+            stats.update({
+                "support_spacing_mm": float(support_cfg.support_spacing_mm),
+                "component_min_elongation": float(support_cfg.component_min_elongation),
+                "line_atom_diameter_max_mm": float(support_cfg.line_atom_diameter_max_mm),
+                "line_atom_min_span_mm": float(support_cfg.line_atom_min_span_mm),
+                "line_atom_min_pca_dominance": float(support_cfg.line_atom_min_pca_dominance),
+                "contact_component_diameter_max_mm": float(support_cfg.contact_component_diameter_max_mm),
+                "support_cube_size_mm": float(support_cfg.support_cube_size_mm),
+                "deep_seed_sampled_blob_count": int(len(blob_elongation_by_id)),
+                "deep_seed_atom_count": int(len(support_atoms)),
+                "deep_seed_raw_blob_count": int(raw_blob_result.get("blob_count_total", 0)),
+                "deep_seed_grown_blob_count": int(grown_blob_result.get("blob_count_total", 0)),
+                "deep_seed_sample_count": int(blob_sample_points_ras.shape[0]),
+                "deep_seed_line_blob_token_count": int(np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
+                "deep_seed_contact_blob_token_count": int(np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
+                "deep_seed_complex_blob_token_count": int(np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3).shape[0]),
+                "deep_seed_complex_blob_chain_row_count": int(len(list(sample_payload.get("complex_blob_chain_rows") or []))),
+                "deep_seed_contact_chain_row_count": int(len(list(sample_payload.get("contact_chain_rows") or []))),
+                "deep_seed_contact_chain_debug_row_count": int(len(list(sample_payload.get("contact_chain_debug_rows") or []))),
+            })
 
-        return SupportStageOutput(
-            mask=mask,
-            support_atoms=support_atoms,
-            blob_sample_points_ras=blob_sample_points_ras,
-            blob_sample_blob_ids=blob_sample_blob_ids,
-            blob_sample_atom_ids=blob_sample_atom_ids,
-            blob_axes_ras_by_id=blob_axes_ras_by_id,
-            blob_elongation_by_id=blob_elongation_by_id,
-            blob_class_by_id=dict(sample_payload.get("blob_class_by_id") or {}),
-            blob_parent_blob_ids_by_id=blob_parent_blob_ids_by_id,
-            blob_labelmap_kji=blob_labelmap_kji,
-            blob_centroids_all_ras=blob_centroids_all_ras,
-            blob_centroids_kept_ras=blob_centroids_kept_ras,
-            blob_centroids_rejected_ras=blob_centroids_rejected_ras,
-            line_blob_sample_points_ras=np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3),
-            contact_blob_sample_points_ras=np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3),
-            complex_blob_sample_points_ras=np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3),
-            complex_blob_chain_rows=list(sample_payload.get("complex_blob_chain_rows") or []),
-            contact_chain_rows=list(sample_payload.get("contact_chain_rows") or []),
-            contact_chain_debug_rows=list(sample_payload.get("contact_chain_debug_rows") or []),
-            stats=stats,
-        )
+            return SupportStageOutput(
+                mask=mask,
+                support_atoms=support_atoms,
+                blob_sample_points_ras=blob_sample_points_ras,
+                blob_sample_blob_ids=blob_sample_blob_ids,
+                blob_sample_atom_ids=blob_sample_atom_ids,
+                blob_axes_ras_by_id=blob_axes_ras_by_id,
+                blob_elongation_by_id=blob_elongation_by_id,
+                blob_class_by_id=dict(sample_payload.get("blob_class_by_id") or {}),
+                blob_parent_blob_ids_by_id=blob_parent_blob_ids_by_id,
+                blob_labelmap_kji=blob_labelmap_kji,
+                blob_centroids_all_ras=blob_centroids_all_ras,
+                blob_centroids_kept_ras=blob_centroids_kept_ras,
+                blob_centroids_rejected_ras=blob_centroids_rejected_ras,
+                line_blob_sample_points_ras=np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3),
+                contact_blob_sample_points_ras=np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3),
+                complex_blob_sample_points_ras=np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3),
+                complex_blob_chain_rows=list(sample_payload.get("complex_blob_chain_rows") or []),
+                contact_chain_rows=list(sample_payload.get("contact_chain_rows") or []),
+                contact_chain_debug_rows=list(sample_payload.get("contact_chain_debug_rows") or []),
+                stats=stats,
+            )
 
     return SupportStage
 
