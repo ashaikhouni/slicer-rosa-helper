@@ -148,6 +148,13 @@ class DeepCoreDebugLogicMixin(
         pipeline = self.get_deep_core_pipeline()
         det_result = pipeline.run(ctx)
 
+        # Surface pipeline errors
+        if det_result.get("status") == "error":
+            err = det_result.get("error", {})
+            notes = det_result.get("diagnostics", {}).get("notes", [])
+            msg = err.get("message", "unknown error") if err else "unknown error"
+            raise RuntimeError(f"[deep-core pipeline] {msg} (notes: {notes})")
+
         # Build legacy support result for the wrapper
         support_result = debug_result
         if support_result is None:

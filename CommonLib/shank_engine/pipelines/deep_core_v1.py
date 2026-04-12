@@ -499,6 +499,9 @@ def _make_pipeline_class():
             except Exception as exc:
                 self.fail(ctx=ctx, result=result, diagnostics=diag,
                           stage="unknown", exc=exc)
+                # Ensure cached outputs exist even on failure
+                if not hasattr(self, "_last_proposal_payload"):
+                    self._last_proposal_payload = {"proposals": []}
 
             return self.finalize(result, diag, t_start)
 
