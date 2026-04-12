@@ -14,6 +14,8 @@ def register_builtin_pipelines(registry: PipelineRegistry) -> None:
 
     from .pipelines.blob_ransac_v1 import BlobRansacV1Pipeline
     from .pipelines.blob_em_v2 import BlobEMV2Pipeline
+    from .pipelines.deep_core_v1 import DeepCoreV1Pipeline
 
     registry.register_pipeline("blob_ransac_v1", BlobRansacV1Pipeline, overwrite=True)
     registry.register_pipeline("blob_em_v2", BlobEMV2Pipeline, overwrite=True)
+    registry.register_pipeline("deep_core_v1", DeepCoreV1Pipeline, overwrite=True)

@@ -230,7 +230,7 @@ class DeepCoreDebugWidgetMixin:
         try:
             config = self._deep_core_config_from_ui()
             self._log_deep_core_config(config)
-            support_result = self.logic.get_deep_core_pipeline().run_debug(
+            support_result = self.logic.run_deep_core_debug(
                 volume_node=volume_node,
                 config=config,
                 show_support_diagnostics=bool(self.deepCoreShowSupportCheck.checked),
@@ -450,13 +450,13 @@ class DeepCoreDebugWidgetMixin:
             config = self._deep_core_config_from_ui()
             self._log_deep_core_config(config)
             if support_result is None:
-                support_result = self.logic.get_deep_core_pipeline().run_debug(
+                support_result = self.logic.run_deep_core_debug(
                     volume_node=volume_node,
                     config=config,
                     show_support_diagnostics=False,
                 )
                 self._lastDeepCoreDebugResult = support_result
-            proposal_result = self.logic.get_deep_core_pipeline().run_proposals(
+            proposal_result = self.logic.run_deep_core_proposals(
                 volume_node=volume_node,
                 config=config,
                 debug_result=support_result,

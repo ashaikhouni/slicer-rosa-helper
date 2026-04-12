@@ -223,6 +223,7 @@ result = pipeline.run(ctx)
 |-----|-------|----------|
 | `blob_ransac_v1` | `BlobRansacV1Pipeline` | Legacy shank_core RANSAC adapter (default) |
 | `blob_em_v2` | `BlobEMV2Pipeline` | EM-based blob assignment and refinement |
+| `deep_core_v1` | `DeepCoreV1Pipeline` | Deep-core mask + support atom + graph proposals |
 
 ## Adding a New Pipeline
 
