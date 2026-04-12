@@ -160,8 +160,14 @@ def _make_pipeline_class():
             from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
             return SlicerVolumeAccessor().ras_to_ijk_fn(volume_node)
 
-        def _scan_reference_hu_values(self, volume_node, lower_hu=-500.0, upper_hu=2500.0):
-            arr_kji = self._volume_array_kji(volume_node)
+        # Note: the base DeepCoreAnnulusMixin declares some of these as
+        # @classmethod / @staticmethod, so callers may use cls.method() or
+        # self.method().  All overrides here must work in both call styles
+        # by accepting *args and dispatching on argument types.
+
+        @classmethod
+        def _scan_reference_hu_values(cls, volume_node, lower_hu=-500.0, upper_hu=2500.0):
+            arr_kji = cls._volume_array_kji(volume_node)
             if arr_kji is None:
                 return None
             values = np.asarray(arr_kji, dtype=float).reshape(-1)
@@ -174,8 +180,9 @@ def _make_pipeline_class():
             ref.sort()
             return ref
 
-        def _depth_at_ras_with_volume(self, volume_node, depth_map_kji, point_ras):
-            fn = self._ras_to_ijk_fn_for_volume(volume_node)
+        @classmethod
+        def _depth_at_ras_with_volume(cls, volume_node, depth_map_kji, point_ras):
+            fn = cls._ras_to_ijk_fn_for_volume(volume_node)
             if depth_map_kji is None or fn is None:
                 return None
             ijk = fn(point_ras)
@@ -185,17 +192,18 @@ def _make_pipeline_class():
             val = float(depth_map_kji[k, j, i])
             return val if np.isfinite(val) else None
 
+        @classmethod
         def _cross_section_annulus_stats_hu(
-            self, volume_node, center_ras, axis_ras,
+            cls, volume_node, center_ras, axis_ras,
             annulus_inner_mm=3.0, annulus_outer_mm=4.0,
             radial_steps=2, angular_samples=12,
         ):
-            arr_kji = self._volume_array_kji(volume_node)
-            fn = self._ras_to_ijk_fn_for_volume(volume_node)
+            arr_kji = cls._volume_array_kji(volume_node)
+            fn = cls._ras_to_ijk_fn_for_volume(volume_node)
             if arr_kji is None or fn is None:
                 return {"mean_hu": None, "median_hu": None, "sample_count": 0}
             center = np.asarray(center_ras if center_ras is not None else [0, 0, 0], dtype=float).reshape(3)
-            _axis, u, v = self._orthonormal_basis_for_axis(axis_ras)
+            _axis, u, v = cls._orthonormal_basis_for_axis(axis_ras)
             radii = np.linspace(float(annulus_inner_mm), float(annulus_outer_mm), int(max(1, radial_steps)))
             angles = np.linspace(0, 2 * np.pi, int(max(4, angular_samples)), endpoint=False)
             samples = []
@@ -213,12 +221,13 @@ def _make_pipeline_class():
             sa = np.asarray(samples, dtype=float)
             return {"mean_hu": float(np.mean(sa)), "median_hu": float(np.median(sa)), "sample_count": int(sa.size)}
 
+        @classmethod
         def _cross_section_annulus_mean_ct_hu(
-            self, volume_node, center_ras, axis_ras,
+            cls, volume_node, center_ras, axis_ras,
             annulus_inner_mm=3.0, annulus_outer_mm=4.0,
             radial_steps=2, angular_samples=12,
         ):
-            return self._cross_section_annulus_stats_hu(
+            return cls._cross_section_annulus_stats_hu(
                 volume_node, center_ras, axis_ras,
                 annulus_inner_mm, annulus_outer_mm,
                 radial_steps, angular_samples,
