@@ -45,6 +45,8 @@ class DeepCoreMaskResult:
 
     @property
     def stats(self) -> dict[str, Any]:
+        if self._typed is not None:
+            return self._typed.stats
         return dict(self.payload.get("stats") or {})
 
     @property
@@ -77,16 +79,27 @@ class DeepCoreSupportResult:
 
     @property
     def stats(self) -> dict[str, Any]:
+        if self._typed is not None:
+            return self._typed.stats
         return dict(self.payload.get("stats") or {})
 
     @property
-    def combined_payload(self) -> dict[str, Any]:
+    def combined_payload(self):
+        """Return the typed output directly when available — it supports
+        ``.get()`` so callers that do ``combined_payload.get("key")``
+        work without materialising a dict."""
+        if self._typed is not None:
+            return self._typed
         merged = dict(self.mask_result.combined_payload)
         merged.update(dict(self.payload or {}))
         return merged
 
     def to_legacy_payload(self) -> dict[str, Any]:
-        return self.combined_payload
+        if self._typed is not None:
+            return self._typed.to_payload()
+        merged = dict(self.mask_result.combined_payload)
+        merged.update(dict(self.payload or {}))
+        return merged
 
 
 @dataclass(frozen=True)
@@ -111,12 +124,23 @@ class DeepCoreProposalResult:
 
     @property
     def combined_payload(self) -> dict[str, Any]:
+        if self._typed is not None:
+            # Merge support typed output with proposal payload — only
+            # materialise the proposal dict (small), not the full support.
+            out = dict(self.payload or {})
+            return out
         merged = dict(self.support_result.combined_payload)
         merged.update(dict(self.payload or {}))
         return merged
 
     def to_legacy_payload(self) -> dict[str, Any]:
-        return self.combined_payload
+        if self._typed is not None:
+            out = self._typed.support.to_payload()
+            out.update(self._typed.to_payload())
+            return out
+        merged = dict(self.support_result.combined_payload)
+        merged.update(dict(self.payload or {}))
+        return merged
 
 
 # ---------------------------------------------------------------------------

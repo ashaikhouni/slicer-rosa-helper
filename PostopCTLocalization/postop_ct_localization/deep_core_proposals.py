@@ -46,7 +46,8 @@ class DeepCoreProposalLogicMixin(
         proposal_cfg = proposal_config if proposal_config is not None else _DEFAULT_PROPOSAL_CONFIG
         _annulus_cfg = annulus_config if annulus_config is not None else _DEFAULT_ANNULUS_CONFIG
         _internal_cfg = internal_config if internal_config is not None else _DEFAULT_INTERNAL_CONFIG
-        support_payload = dict(getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result)) or {})
+        _resolved = getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result))
+        support_payload = _resolved if hasattr(_resolved, "get") else dict(_resolved or {})
         prepared = self._prepare_support_atom_inputs(
             support_atoms=support_payload.get("support_atoms"),
             token_points_ras=support_payload.get("blob_sample_points_ras"),
@@ -208,7 +209,8 @@ class DeepCoreProposalLogicMixin(
         annulus_cfg = annulus_config if annulus_config is not None else _DEFAULT_ANNULUS_CONFIG
         internal_cfg = internal_config if internal_config is not None else _DEFAULT_INTERNAL_CONFIG
         payload = dict(proposal_payload or {})
-        support_payload = dict(getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result)) or {})
+        _resolved = getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result))
+        support_payload = _resolved if hasattr(_resolved, "get") else dict(_resolved or {})
         proposals = self._finalize_extended_proposals(
             volume_node=volume_node,
             proposals=payload.get("proposals"),
@@ -244,7 +246,8 @@ class DeepCoreProposalLogicMixin(
         mask_cfg = mask_config if mask_config is not None else _DEFAULT_MASK_CONFIG
         proposal_cfg = proposal_config if proposal_config is not None else _DEFAULT_PROPOSAL_CONFIG
         payload = dict(proposal_payload or {})
-        support_payload = dict(getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result)) or {})
+        _resolved = getattr(support_result, "combined_payload", getattr(support_result, "payload", support_result))
+        support_payload = _resolved if hasattr(_resolved, "get") else dict(_resolved or {})
         proposals = self._reject_short_floating_proposals(
             volume_node=volume_node,
             proposals=payload.get("proposals"),

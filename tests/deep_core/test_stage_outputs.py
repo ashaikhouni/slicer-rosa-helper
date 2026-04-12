@@ -83,6 +83,27 @@ class TestSupportStageOutput(unittest.TestCase):
         support = self._make_support()
         self.assertFalse(support.metal_grown_mask_kji.any())
 
+    def test_get_support_field(self):
+        support = self._make_support()
+        atoms = support.get("support_atoms")
+        self.assertEqual(len(atoms), 1)
+        self.assertEqual(atoms[0]["atom_id"], 1)
+
+    def test_get_mask_field_via_support(self):
+        support = self._make_support()
+        hdm = support.get("head_distance_map_kji")
+        self.assertIsNotNone(hdm)
+        np.testing.assert_allclose(hdm, 20.0)
+
+    def test_get_missing_key_returns_default(self):
+        support = self._make_support()
+        self.assertIsNone(support.get("nonexistent_key"))
+        self.assertEqual(support.get("nonexistent_key", 42), 42)
+
+    def test_combined_payload_returns_self(self):
+        support = self._make_support()
+        self.assertIs(support.combined_payload, support)
+
     def test_to_payload_includes_mask_keys(self):
         support = self._make_support()
         payload = support.to_payload()

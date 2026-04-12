@@ -8,7 +8,7 @@ constructor and returns a typed dataclass result.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -114,7 +114,61 @@ class SupportStageOutput:
     def metal_grown_mask_kji(self) -> np.ndarray:
         return self.mask.metal_grown_mask_kji
 
-    # -- backward-compat helpers -------------------------------------------
+    # -- dict-like access for proposal methods -----------------------------
+    #
+    # The proposal stage methods read support data via
+    #     support_payload.get("blob_sample_points_ras")
+    # By implementing ``get()`` and ``combined_payload`` here the typed
+    # object can be passed directly, avoiding a full dict copy.
+
+    _KEY_MAP: ClassVar[dict[str, str]] = {
+        "support_atoms": "support_atoms",
+        "blob_sample_points_ras": "blob_sample_points_ras",
+        "blob_sample_blob_ids": "blob_sample_blob_ids",
+        "blob_sample_atom_ids": "blob_sample_atom_ids",
+        "blob_axes_ras_by_id": "blob_axes_ras_by_id",
+        "blob_elongation_by_id": "blob_elongation_by_id",
+        "blob_class_by_id": "blob_class_by_id",
+        "blob_parent_blob_ids_by_id": "blob_parent_blob_ids_by_id",
+        "blob_labelmap_kji": "blob_labelmap_kji",
+        "blob_centroids_all_ras": "blob_centroids_all_ras",
+        "blob_centroids_kept_ras": "blob_centroids_kept_ras",
+        "blob_centroids_rejected_ras": "blob_centroids_rejected_ras",
+        "line_blob_sample_points_ras": "line_blob_sample_points_ras",
+        "contact_blob_sample_points_ras": "contact_blob_sample_points_ras",
+        "complex_blob_sample_points_ras": "complex_blob_sample_points_ras",
+        "complex_blob_chain_rows": "complex_blob_chain_rows",
+        "contact_chain_rows": "contact_chain_rows",
+        "contact_chain_debug_rows": "contact_chain_debug_rows",
+        "stats": "stats",
+        # Keys that live on the mask sub-object:
+        "head_distance_map_kji": "head_distance_map_kji",
+        "metal_grown_mask_kji": "metal_grown_mask_kji",
+        "hull_mask_kji": "_mask_hull_mask_kji",
+        "deep_core_mask_kji": "_mask_deep_core_mask_kji",
+        "metal_mask_kji": "_mask_metal_mask_kji",
+        "deep_seed_raw_mask_kji": "_mask_deep_seed_raw_mask_kji",
+        "deep_seed_mask_kji": "_mask_deep_seed_mask_kji",
+        "smoothed_hull_kji": "_mask_smoothed_hull_kji",
+    }
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Dict-like lookup so proposal methods can read fields directly."""
+        attr = self._KEY_MAP.get(key)
+        if attr is None:
+            return default
+        if attr.startswith("_mask_"):
+            return getattr(self.mask, attr[6:], default)
+        return getattr(self, attr, default)
+
+    @property
+    def combined_payload(self):
+        """Return *self* — the proposal methods call
+        ``getattr(support_result, "combined_payload", ...)`` and then
+        ``.get("key")`` on the result.  Returning self satisfies both."""
+        return self
+
+    # -- full materialisation (only for legacy widget code) ----------------
 
     def to_payload(self) -> dict[str, Any]:
         """Return the legacy dict with keys from both mask and support."""
@@ -282,42 +336,33 @@ class MaskStage:
 # SupportStage
 # ---------------------------------------------------------------------------
 
-class SupportStage:
-    """Extract support atoms from deep-core metal blobs.
+def _make_support_stage_class():
+    """Build the SupportStage class with mixin bases.
 
-    Internally uses atom building, complex blob decomposition, and
-    contact chain recovery — previously spread across 4 mixins.
+    Done in a factory so the mixin imports stay local and the module-level
+    namespace is not polluted.
     """
+    from .deep_core_annulus import DeepCoreAnnulusMixin
+    from .deep_core_atoms import DeepCoreAtomBuilderMixin
+    from .deep_core_candidate_inputs import DeepCoreCandidateInputMixin
+    from .deep_core_complex_blob import DeepCoreComplexBlobMixin
+    from .deep_core_contact_chain import DeepCoreContactChainMixin
 
-    def __init__(self, volume_accessor, annulus: AnnulusSampler):
-        self._vol = volume_accessor
-        self._annulus = annulus
-        # Import the mixin classes and instantiate a temporary helper that
-        # provides the atom/complex/chain methods.  This avoids duplicating
-        # ~3,000 lines of code during the transition.  Once those files are
-        # refactored into plain functions this indirection can be removed.
-        from .deep_core_atoms import DeepCoreAtomBuilderMixin
-        from .deep_core_candidate_inputs import DeepCoreCandidateInputMixin
-        from .deep_core_complex_blob import DeepCoreComplexBlobMixin
-        from .deep_core_contact_chain import DeepCoreContactChainMixin
-        from .deep_core_annulus import DeepCoreAnnulusMixin
+    class SupportStage(
+        DeepCoreAtomBuilderMixin,
+        DeepCoreCandidateInputMixin,
+        DeepCoreContactChainMixin,
+        DeepCoreComplexBlobMixin,
+        DeepCoreAnnulusMixin,
+    ):
+        """Extract support atoms from deep-core metal blobs."""
 
-        class _Helpers(
-            DeepCoreAtomBuilderMixin,
-            DeepCoreCandidateInputMixin,
-            DeepCoreContactChainMixin,
-            DeepCoreComplexBlobMixin,
-            DeepCoreAnnulusMixin,
-        ):
-            pass
+        def __init__(self, volume_accessor, annulus: AnnulusSampler):
+            self._vol = volume_accessor
+            self._annulus = annulus
 
-        self._h = _Helpers()
-        # Give the helper a _vol attribute and _ijk_kji_to_ras_points method
-        # so that atoms.py calls like self._ijk_kji_to_ras_points work.
-        self._h._vol = volume_accessor
-        self._h._ijk_kji_to_ras_points = (
-            lambda vn, idx: volume_accessor.ijk_kji_to_ras_points(vn, idx)
-        )
+        def _ijk_kji_to_ras_points(self, volume_node, ijk_kji):
+            return self._vol.ijk_kji_to_ras_points(volume_node, ijk_kji)
 
     def run(
         self,
@@ -348,7 +393,7 @@ class SupportStage:
             depth_map_kji=mask.head_distance_map_kji,
             ijk_kji_to_ras_fn=_ijk_kji_to_ras,
         )
-        sample_payload = self._h._build_support_atom_payload(
+        sample_payload = self._build_support_atom_payload(
             volume_node=volume_node,
             labels_kji=raw_blob_result.get("labels_kji"),
             blobs=list(raw_blob_result.get("blobs") or []),
@@ -461,80 +506,79 @@ class SupportStage:
             stats=stats,
         )
 
+    return SupportStage
+
+
+SupportStage = _make_support_stage_class()
+
 
 # ---------------------------------------------------------------------------
 # ProposalStage
 # ---------------------------------------------------------------------------
 
-class ProposalStage:
-    """Generate, filter, extend, and finalize trajectory proposals.
+def _make_proposal_stage_class():
+    """Build the ProposalStage class with mixin bases."""
+    from .deep_core_proposals import DeepCoreProposalLogicMixin
 
-    Internally delegates to the existing candidate generation, dedup,
-    annulus, and finalize mixin code via a temporary helper object.
-    """
+    class ProposalStage(DeepCoreProposalLogicMixin):
+        """Generate, filter, extend, and finalize trajectory proposals."""
 
-    def __init__(self, volume_accessor, annulus: AnnulusSampler):
-        self._vol = volume_accessor
-        self._annulus = annulus
-        # Build a helper that carries all the proposal mixin methods
-        # including the orchestration methods on DeepCoreProposalLogicMixin.
-        from .deep_core_proposals import DeepCoreProposalLogicMixin
+        def __init__(self, volume_accessor, annulus: AnnulusSampler):
+            self._vol = volume_accessor
+            self._annulus = annulus
 
-        class _Helpers(DeepCoreProposalLogicMixin):
-            pass
+        def run(
+            self,
+            volume_node: Any,
+            support: SupportStageOutput,
+            config: DeepCoreConfig | None = None,
+        ) -> ProposalStageOutput:
+            cfg = config or deep_core_default_config()
 
-        self._h = _Helpers()
-        self._h._vol = volume_accessor
+            # Pass the typed SupportStageOutput directly — it satisfies
+            # the .get() / .combined_payload interface the mixin methods
+            # expect, avoiding a full dict materialisation.
+            raw_payload = self._build_deep_core_raw_proposals_stage(
+                volume_node=volume_node,
+                support_result=support,
+                mask_config=cfg.mask,
+                support_config=cfg.support,
+                proposal_config=cfg.proposal,
+                annulus_config=cfg.annulus,
+                internal_config=cfg.internal,
+            )
+            pre_ext_payload = self._apply_pre_extension_annulus_rejection_stage(
+                volume_node=volume_node,
+                support_result=support,
+                proposal_payload=raw_payload,
+                annulus_config=cfg.annulus,
+            )
+            ext_payload = self._extend_deep_core_proposals_stage(
+                volume_node=volume_node,
+                support_result=support,
+                proposal_payload=pre_ext_payload,
+                mask_config=cfg.mask,
+                support_config=cfg.support,
+                proposal_config=cfg.proposal,
+                annulus_config=cfg.annulus,
+                internal_config=cfg.internal,
+            )
+            final_payload = self._apply_final_deep_core_rejection_stage(
+                volume_node=volume_node,
+                support_result=support,
+                proposal_payload=ext_payload,
+                mask_config=cfg.mask,
+                proposal_config=cfg.proposal,
+            )
 
-    def _support_to_payload(self, support: SupportStageOutput) -> dict[str, Any]:
-        """Convert typed support output to the legacy dict the mixin code expects."""
-        return support.to_payload()
+            return ProposalStageOutput(
+                support=support,
+                proposals=list(final_payload.get("proposals") or []),
+                candidate_count=int(final_payload.get("candidate_count", 0)),
+                token_count=int(final_payload.get("token_count", 0)),
+            )
 
-    def run(
-        self,
-        volume_node: Any,
-        support: SupportStageOutput,
-        config: DeepCoreConfig | None = None,
-    ) -> ProposalStageOutput:
-        cfg = config or deep_core_default_config()
-        support_payload = self._support_to_payload(support)
+    return ProposalStage
 
-        raw_payload = self._h._build_deep_core_raw_proposals_stage(
-            volume_node=volume_node,
-            support_result=support_payload,
-            mask_config=cfg.mask,
-            support_config=cfg.support,
-            proposal_config=cfg.proposal,
-            annulus_config=cfg.annulus,
-            internal_config=cfg.internal,
-        )
-        pre_ext_payload = self._h._apply_pre_extension_annulus_rejection_stage(
-            volume_node=volume_node,
-            support_result=support_payload,
-            proposal_payload=raw_payload,
-            annulus_config=cfg.annulus,
-        )
-        ext_payload = self._h._extend_deep_core_proposals_stage(
-            volume_node=volume_node,
-            support_result=support_payload,
-            proposal_payload=pre_ext_payload,
-            mask_config=cfg.mask,
-            support_config=cfg.support,
-            proposal_config=cfg.proposal,
-            annulus_config=cfg.annulus,
-            internal_config=cfg.internal,
-        )
-        final_payload = self._h._apply_final_deep_core_rejection_stage(
-            volume_node=volume_node,
-            support_result=support_payload,
-            proposal_payload=ext_payload,
-            mask_config=cfg.mask,
-            proposal_config=cfg.proposal,
-        )
 
-        return ProposalStageOutput(
-            support=support,
-            proposals=list(final_payload.get("proposals") or []),
-            candidate_count=int(final_payload.get("candidate_count", 0)),
-            token_count=int(final_payload.get("token_count", 0)),
-        )
+ProposalStage = _make_proposal_stage_class()
