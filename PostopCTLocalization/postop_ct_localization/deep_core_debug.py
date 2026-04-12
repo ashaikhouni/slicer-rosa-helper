@@ -15,6 +15,7 @@ from typing import Any
 import numpy as np
 
 from .deep_core_config import DeepCoreConfig, deep_core_default_config
+from .deep_core_proposal_annulus import DeepCoreProposalAnnulusMixin
 from .deep_core_visualization import DeepCoreVisualizationLogicMixin
 from .deep_core_widget import DeepCoreDebugWidgetMixin
 
@@ -88,7 +89,10 @@ def _detection_result_to_legacy_proposal(volume_node, det_result, support_result
     )
 
 
-class DeepCoreDebugLogicMixin(DeepCoreVisualizationLogicMixin):
+class DeepCoreDebugLogicMixin(
+    DeepCoreVisualizationLogicMixin,
+    DeepCoreProposalAnnulusMixin,
+):
     """Deep-core logic bridge — creates pipeline via registry."""
 
     def get_deep_core_pipeline(self):
