@@ -293,9 +293,7 @@ def _make_pipeline_class():
         # Proposal sub-stages — delegate to mixin methods
         # ---------------------------------------------------------------
 
-        def _run_candidates(self, ctx, support, cfg):
-            dc = _parse_deep_core_config(cfg)
-            proxy = _ContextVolumeProxy(ctx)
+        def _run_candidates(self, proxy, support, dc):
             return self._build_deep_core_raw_proposals_stage(
                 volume_node=proxy,
                 support_result=support,
@@ -306,9 +304,7 @@ def _make_pipeline_class():
                 internal_config=dc.internal,
             )
 
-        def _run_annulus_rejection(self, ctx, support, proposals, cfg):
-            dc = _parse_deep_core_config(cfg)
-            proxy = _ContextVolumeProxy(ctx)
+        def _run_annulus_rejection(self, proxy, support, proposals, dc):
             return self._apply_pre_extension_annulus_rejection_stage(
                 volume_node=proxy,
                 support_result=support,
@@ -316,9 +312,7 @@ def _make_pipeline_class():
                 annulus_config=dc.annulus,
             )
 
-        def _run_extension(self, ctx, support, proposals, cfg):
-            dc = _parse_deep_core_config(cfg)
-            proxy = _ContextVolumeProxy(ctx)
+        def _run_extension(self, proxy, support, proposals, dc):
             return self._extend_deep_core_proposals_stage(
                 volume_node=proxy,
                 support_result=support,
@@ -330,9 +324,7 @@ def _make_pipeline_class():
                 internal_config=dc.internal,
             )
 
-        def _run_final_rejection(self, ctx, support, proposals, cfg):
-            dc = _parse_deep_core_config(cfg)
-            proxy = _ContextVolumeProxy(ctx)
+        def _run_final_rejection(self, proxy, support, proposals, dc):
             return self._apply_final_deep_core_rejection_stage(
                 volume_node=proxy,
                 support_result=support,
@@ -383,9 +375,11 @@ def _make_pipeline_class():
             t_start = time.perf_counter()
             result = self.make_result(ctx)
             diag = self.diagnostics(result)
-            cfg = self._config(ctx)
+            cfg = _parse_deep_core_config(self._config(ctx))
 
             try:
+                proxy = _ContextVolumeProxy(ctx)
+
                 mask = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="mask", fn=lambda: self._run_mask(ctx, cfg))
 
@@ -394,19 +388,19 @@ def _make_pipeline_class():
 
                 proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="candidate_generation",
-                    fn=lambda: self._run_candidates(ctx, support, cfg))
+                    fn=lambda: self._run_candidates(proxy, support, cfg))
 
                 proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="annulus_rejection",
-                    fn=lambda: self._run_annulus_rejection(ctx, support, proposals, cfg))
+                    fn=lambda: self._run_annulus_rejection(proxy, support, proposals, cfg))
 
                 proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="extension",
-                    fn=lambda: self._run_extension(ctx, support, proposals, cfg))
+                    fn=lambda: self._run_extension(proxy, support, proposals, cfg))
 
                 proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="final_rejection",
-                    fn=lambda: self._run_final_rejection(ctx, support, proposals, cfg))
+                    fn=lambda: self._run_final_rejection(proxy, support, proposals, cfg))
 
                 result["trajectories"] = self._proposals_to_trajectories(proposals)
 
@@ -424,7 +418,7 @@ def _make_pipeline_class():
             t_start = time.perf_counter()
             result = self.make_result(ctx)
             diag = self.diagnostics(result)
-            cfg = self._config(ctx)
+            cfg = _parse_deep_core_config(self._config(ctx))
 
             try:
                 mask = self.run_stage(ctx=ctx, result=result, diagnostics=diag,

@@ -110,6 +110,9 @@ class DeepCoreDebugLogicMixin(
     def run_deep_core_debug(self, volume_node, config=None, show_support_diagnostics=True):
         """Run mask + support stages via the pipeline and return legacy result."""
         ctx = self.build_deep_core_context(volume_node, config)
+        # Cache context so proposals can reuse the array copy
+        self._last_deep_core_ctx = ctx
+        self._last_deep_core_ctx_volume_id = str(volume_node.GetID() if hasattr(volume_node, "GetID") else "")
         pipeline = self.get_deep_core_pipeline()
         det_result = pipeline.run_debug(ctx)
 
@@ -137,7 +140,16 @@ class DeepCoreDebugLogicMixin(
 
     def run_deep_core_proposals(self, volume_node, config=None, debug_result=None):
         """Run full pipeline via the pipeline and return legacy result."""
-        ctx = self.build_deep_core_context(volume_node, config)
+        # Reuse cached context if it matches the same volume (avoids re-copying the array)
+        cached_vid = getattr(self, "_last_deep_core_ctx_volume_id", None)
+        current_vid = str(volume_node.GetID() if hasattr(volume_node, "GetID") else "")
+        if cached_vid == current_vid and getattr(self, "_last_deep_core_ctx", None) is not None:
+            ctx = self._last_deep_core_ctx
+            # Update config in case the user changed controls between debug and proposals
+            cfg = config or deep_core_default_config()
+            ctx["config"] = cfg.to_flat_dict()
+        else:
+            ctx = self.build_deep_core_context(volume_node, config)
         pipeline = self.get_deep_core_pipeline()
         det_result = pipeline.run(ctx)
 
