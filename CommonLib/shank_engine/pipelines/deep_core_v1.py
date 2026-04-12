@@ -170,9 +170,16 @@ def _parse_deep_core_config(cfg: dict[str, Any]):
         return defaults
     # If keys are dotted (mask.hull_threshold_hu), use with_updates
     dotted = {k: v for k, v in cfg.items() if "." in str(k)}
-    if dotted:
-        return defaults.with_updates(dotted)
-    return defaults
+    if not dotted:
+        return defaults
+    # Coerce list values to tuples for tuple fields (e.g. model_fit.families)
+    coerced = {}
+    for k, v in dotted.items():
+        if k == "model_fit.families" and isinstance(v, (list, set)):
+            coerced[k] = tuple(str(s) for s in v)
+        else:
+            coerced[k] = v
+    return defaults.with_updates(coerced)
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +576,52 @@ def _make_pipeline_class():
             )
 
         # ---------------------------------------------------------------
+        # Model fit (Phase B) — replaces extension when enabled
+        # ---------------------------------------------------------------
+
+        def _get_electrode_library(self):
+            """Load and cache the electrode library on the pipeline instance."""
+            lib = getattr(self, "_electrode_library", None)
+            if lib is None:
+                from rosa_core.electrode_models import load_electrode_library
+                lib = load_electrode_library()
+                self._electrode_library = lib
+            return lib
+
+        def _run_model_fit(self, ctx, support, proposals, dc):
+            """Group-fit electrode templates to proposals (replaces extension)."""
+            from postop_ct_localization.deep_core_model_fit import (
+                filter_models_by_family,
+                run_model_fit_group,
+            )
+
+            mfg = dc.model_fit
+            library = self._get_electrode_library()
+            models = filter_models_by_family(
+                library,
+                tuple(mfg.families),
+                int(mfg.min_in_brain_contacts),
+            )
+
+            input_proposals = list(proposals.get("proposals") or [])
+            arr_kji = np.asarray(ctx["arr_kji"], dtype=float)
+            ras_to_ijk_fn = ctx["ras_to_ijk_fn"]
+            head_distance_map_kji = support.get("head_distance_map_kji")
+
+            result = run_model_fit_group(
+                proposals=input_proposals,
+                arr_kji=arr_kji,
+                ras_to_ijk_fn=ras_to_ijk_fn,
+                head_distance_map_kji=head_distance_map_kji,
+                library_models=models,
+                cfg=mfg,
+            )
+            out = dict(proposals)
+            out["proposals"] = list(result["accepted_proposals"])
+            out["model_fit_stats"] = dict(result.get("stats") or {})
+            return out
+
+        # ---------------------------------------------------------------
         # Result conversion
         # ---------------------------------------------------------------
 
@@ -597,6 +650,12 @@ def _make_pipeline_class():
                 if p.get("best_model_id") is not None:
                     t["best_model_id"] = str(p["best_model_id"])
                     t["best_model_score"] = float(p.get("best_model_score", 0.0))
+                if p.get("best_model_n_hits") is not None:
+                    t["best_model_n_hits"] = int(p["best_model_n_hits"])
+                    t["best_model_in_brain_total"] = int(p.get("best_model_in_brain_total", 0))
+                    t["best_model_contact_count"] = int(p.get("best_model_contact_count", 0))
+                if p.get("model_contact_positions_ras") is not None:
+                    t["model_contact_positions_ras"] = list(p["model_contact_positions_ras"])
                 t["_proposal_index"] = len(trajectories)
                 trajectories.append(t)
             return trajectories
@@ -628,13 +687,19 @@ def _make_pipeline_class():
                     stage_name="annulus_rejection",
                     fn=lambda: self._run_annulus_rejection(proxy, support, proposals, cfg))
 
-                proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
-                    stage_name="extension",
-                    fn=lambda: self._run_extension(proxy, support, proposals, cfg))
-
-                proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
-                    stage_name="final_rejection",
-                    fn=lambda: self._run_final_rejection(proxy, support, proposals, cfg))
+                if cfg.model_fit.enabled:
+                    proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
+                        stage_name="model_fit",
+                        fn=lambda: self._run_model_fit(ctx, support, proposals, cfg))
+                    # model_fit's group assignment + hard-reject already
+                    # handles dedup and rejection; skip final_rejection.
+                else:
+                    proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
+                        stage_name="extension",
+                        fn=lambda: self._run_extension(proxy, support, proposals, cfg))
+                    proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
+                        stage_name="final_rejection",
+                        fn=lambda: self._run_final_rejection(proxy, support, proposals, cfg))
 
                 result["trajectories"] = self._proposals_to_trajectories(proposals)
 

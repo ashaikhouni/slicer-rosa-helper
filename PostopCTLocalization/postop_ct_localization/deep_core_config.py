@@ -106,14 +106,14 @@ class DeepCoreMaskConfig:
         ),
     )
     deep_core_shrink_mm: float = field(
-        default=15.0,
+        default=20.0,
         metadata=_ui_meta(
             "Deep-core shrink",
             minimum=0.0,
             maximum=40.0,
             decimals=2,
             suffix=" mm",
-            description="Minimum hull distance required for deep-core support.",
+            description="Minimum hull distance required for deep-core support (axes only).",
         ),
     )
     metal_threshold_hu: float = field(
@@ -461,6 +461,37 @@ class DeepCoreInternalConfig:
 
 
 @dataclass(frozen=True)
+class DeepCoreModelFitConfig:
+    """Phase B: electrode-template group fitting parameters.
+
+    When ``enabled`` is true, the model_fit stage replaces the geometric
+    extension stage with template matching against electrode models from
+    the configured families.  Each candidate proposal is fitted to a
+    library electrode by sliding the deepest contact along the proposal
+    axis and scoring per-contact HU samples.
+    """
+
+    enabled: bool = True
+    families: tuple[str, ...] = ("DIXI",)
+    deep_anchor_search_mm: float = 5.0
+    deep_anchor_step_mm: float = 0.5
+    hit_hu_threshold: float = 1500.0
+    sample_radius_vox: int = 2
+    lateral_offset_mm: float = 2.5
+    min_lateral_drop_hu: float = 500.0
+    in_brain_min_depth_mm: float = 10.0
+    min_in_brain_contacts: int = 6
+    min_in_brain_hit_fraction: float = 0.70
+    conflict_radius_mm: float = 2.0
+    # Median HU along the contact-spanning axis segment must exceed this
+    # threshold. Real electrodes have very high median HU along their
+    # axis (because every voxel is metal or near-metal); false fits that
+    # accidentally hit bright voxels from other electrodes have low
+    # median HU because the axis passes through tissue between hits.
+    min_axis_segment_median_hu: float = 600.0
+
+
+@dataclass(frozen=True)
 class DeepCoreConfig:
     """Top-level Deep Core configuration."""
 
@@ -469,6 +500,7 @@ class DeepCoreConfig:
     proposal: DeepCoreProposalConfig = field(default_factory=DeepCoreProposalConfig)
     annulus: DeepCoreAnnulusConfig = field(default_factory=DeepCoreAnnulusConfig)
     internal: DeepCoreInternalConfig = field(default_factory=DeepCoreInternalConfig)
+    model_fit: DeepCoreModelFitConfig = field(default_factory=DeepCoreModelFitConfig)
 
     def with_updates(self, updates: dict[str, Any]) -> "DeepCoreConfig":
         """Return a copy with dotted-path updates applied."""
@@ -489,7 +521,7 @@ class DeepCoreConfig:
         """Flatten nested config sections for logging/debugging."""
 
         out: dict[str, Any] = {}
-        for section_name in ("mask", "support", "proposal", "annulus", "internal"):
+        for section_name in ("mask", "support", "proposal", "annulus", "internal", "model_fit"):
             section_obj = getattr(self, section_name)
             for f in fields(section_obj):
                 out[f"{section_name}.{f.name}"] = getattr(section_obj, f.name)

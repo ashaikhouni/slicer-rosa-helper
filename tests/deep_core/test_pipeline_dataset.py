@@ -86,37 +86,45 @@ class DeepCoreV1DatasetRegressionTests(unittest.TestCase):
         )
         pred = predicted_shanks_from_result(result)
 
-        # Loose match: 10 mm tip tolerance, 25° angle, 20 mm shallow tolerance
-        _, summary = match_shanks(
+        _, loose = match_shanks(
             gt, pred,
             match_distance_mm=10.0,
             match_angle_deg=25.0,
             match_start_mm=20.0,
         )
-        return gt, pred, summary
+        _, strict = match_shanks(
+            gt, pred,
+            match_distance_mm=4.0,
+            match_angle_deg=25.0,
+            match_start_mm=15.0,
+        )
+        return gt, pred, loose, strict
 
     def test_T1_default_config(self):
-        """T1 with default deep_core config: locked baseline."""
-        gt, pred, summary = self._run_subject("T1")
+        """T1 with default (Phase B model_fit) config: locked baseline."""
+        gt, pred, loose, strict = self._run_subject("T1")
         self.assertEqual(len(gt), 12, "T1 GT count drifted")
-        # Locked baseline: ~15 predicted, 11/12 matched under loose match
-        self.assertGreaterEqual(len(pred), 12, "Predicted count regressed")
-        self.assertLessEqual(len(pred), 20, "Too many predictions (precision regression)")
-        matched = int(summary.get("matched", 0))
-        self.assertGreaterEqual(matched, 10, f"Only matched {matched}/{len(gt)} shanks (regression)")
+        # Locked baseline (Phase B model_fit, default DIXI):
+        # - 12 GT, 12 predicted, 8/12 loose match, 3/12 strict match
+        self.assertGreaterEqual(len(pred), 10, "Predicted count regressed")
+        self.assertLessEqual(len(pred), 16, "Too many predictions (precision regression)")
+        n_loose = int(loose.get("matched", 0))
+        n_strict = int(strict.get("matched", 0))
+        self.assertGreaterEqual(n_loose, 7, f"Loose match regressed: {n_loose}/{len(gt)}")
+        self.assertGreaterEqual(n_strict, 2, f"Strict match regressed: {n_strict}/{len(gt)}")
 
     def test_T22_metal_threshold_1000(self):
-        """T22 with metal_threshold=1000: locked baseline."""
-        gt, pred, summary = self._run_subject(
+        """T22 with metal_threshold=1000: locked Phase B baseline."""
+        gt, pred, loose, strict = self._run_subject(
             "T22",
             deep_core_config_overrides={"mask.metal_threshold_hu": 1000.0},
         )
         self.assertEqual(len(gt), 9, "T22 GT count drifted")
-        self.assertGreaterEqual(len(pred), 8, "Predicted count regressed")
-        self.assertLessEqual(len(pred), 15, "Too many predictions")
-        matched = int(summary.get("matched", 0))
-        # Locked baseline: 7/9 matched with these settings
-        self.assertGreaterEqual(matched, 6, f"Only matched {matched}/{len(gt)} shanks")
+        # Locked baseline (Phase B): 9 GT, 8 predicted, 4/9 loose match
+        self.assertGreaterEqual(len(pred), 6, "Predicted count regressed")
+        self.assertLessEqual(len(pred), 12, "Too many predictions")
+        n_loose = int(loose.get("matched", 0))
+        self.assertGreaterEqual(n_loose, 3, f"Loose match regressed: {n_loose}/{len(gt)}")
 
 
 if __name__ == "__main__":
