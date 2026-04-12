@@ -16,7 +16,8 @@ Core design rule:
 
 Primary packages in `CommonLib`:
 - `rosa_core`: pure-python domain logic (parser, transforms, contact generation, QC, exporters)
-- `shank_core`: pure-python CT shank detection pipeline
+- `shank_core`: pure-python CT shank detection utilities (masking, blob extraction)
+- `shank_engine`: detection pipeline framework — see `CommonLib/shank_engine/README.md`
 - `rosa_workflow`: workflow state/publish/resolve/registry/export services
 - `rosa_scene`: Slicer scene services (trajectory/electrode/atlas helpers)
   - includes shared layout orchestration via `layout_service.py`
