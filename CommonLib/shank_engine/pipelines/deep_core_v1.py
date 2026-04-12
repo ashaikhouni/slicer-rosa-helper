@@ -33,6 +33,49 @@ from ..pipelines.base import BaseDetectionPipeline
 # Volume proxy — lets mixin code treat DetectionContext data like a volume_node
 # ---------------------------------------------------------------------------
 
+def _slicer_array_kji(volume_node):
+    """Extract a numpy array from a Slicer volume node (lazy import)."""
+    from __main__ import slicer
+    return np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float)
+
+
+def _slicer_ras_to_ijk_fn(volume_node):
+    """Return a ras_xyz -> ijk_xyz callable for a Slicer volume (lazy import)."""
+    from __main__ import vtk
+    m_vtk = vtk.vtkMatrix4x4()
+    volume_node.GetRASToIJKMatrix(m_vtk)
+    mat = np.eye(4, dtype=float)
+    for r in range(4):
+        for c in range(4):
+            mat[r, c] = float(m_vtk.GetElement(r, c))
+
+    def _fn(ras_xyz):
+        h = np.array([float(ras_xyz[0]), float(ras_xyz[1]), float(ras_xyz[2]), 1.0], dtype=float)
+        return (mat @ h)[:3]
+
+    return _fn
+
+
+def _slicer_ijk_kji_to_ras(volume_node, ijk_kji):
+    """Convert KJI indices to RAS points via the volume's IJK->RAS matrix."""
+    from __main__ import vtk
+    idx = np.asarray(ijk_kji, dtype=float).reshape(-1, 3)
+    if idx.size == 0:
+        return np.empty((0, 3), dtype=float)
+    ijk = np.zeros_like(idx, dtype=float)
+    ijk[:, 0] = idx[:, 2]
+    ijk[:, 1] = idx[:, 1]
+    ijk[:, 2] = idx[:, 0]
+    ijk_h = np.concatenate([ijk, np.ones((ijk.shape[0], 1), dtype=float)], axis=1)
+    m_vtk = vtk.vtkMatrix4x4()
+    volume_node.GetIJKToRASMatrix(m_vtk)
+    mat = np.eye(4, dtype=float)
+    for r in range(4):
+        for c in range(4):
+            mat[r, c] = float(m_vtk.GetElement(r, c))
+    return (mat @ ijk_h.T).T[:, :3]
+
+
 class _ContextVolumeProxy:
     """Lightweight object that satisfies what mixin code expects from
     ``volume_node`` — backed entirely by ``DetectionContext`` data.
@@ -129,36 +172,107 @@ def _make_pipeline_class():
             """Bridge for mixin code that calls self._ijk_kji_to_ras_points."""
             if isinstance(volume_node, _ContextVolumeProxy) and volume_node._ijk_kji_to_ras_fn is not None:
                 return volume_node._ijk_kji_to_ras_fn(ijk_kji)
-            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
-            return SlicerVolumeAccessor().ijk_kji_to_ras_points(volume_node, ijk_kji)
+            return _slicer_ijk_kji_to_ras(volume_node, ijk_kji)
 
-        def extract_threshold_candidates_lps(self, volume_node, threshold, **kwargs):
-            """Bridge for mixin code that calls self.extract_threshold_candidates_lps."""
-            if isinstance(volume_node, _ContextVolumeProxy) and volume_node._volume_node is not None:
-                volume_node = volume_node._volume_node
-            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
-            return SlicerVolumeAccessor().extract_threshold_candidates_lps(
-                volume_node=volume_node, threshold=threshold, **kwargs
-            )
+        def extract_threshold_candidates_lps(
+            self,
+            volume_node,
+            threshold,
+            head_mask_threshold_hu=-500.0,
+            min_metal_depth_mm=5.0,
+            max_metal_depth_mm=220.0,
+            head_mask_method="outside_air",
+        ):
+            """Extract metal candidate points from a CT volume as LPS coords.
+
+            Uses the proxy's cached array when possible; falls back to the
+            real volume node otherwise.
+            """
+            from shank_core.masking import build_preview_masks
+            from __main__ import vtk
+
+            # Resolve array + real Slicer node for matrix extraction
+            if isinstance(volume_node, _ContextVolumeProxy):
+                arr = volume_node._arr_kji
+                spacing = volume_node._spacing
+                real_node = volume_node._volume_node
+            else:
+                arr = _slicer_array_kji(volume_node)
+                spacing = tuple(float(v) for v in volume_node.GetSpacing())
+                real_node = volume_node
+
+            if real_node is None:
+                return {
+                    "points_lps": np.empty((0, 3), dtype=float),
+                    "threshold_hu": float(threshold),
+                }
+
+            used_threshold = float(threshold)
+            best_preview: dict | None = None
+            best_count = -1
+            while True:
+                preview = build_preview_masks(
+                    arr_kji=np.asarray(arr, dtype=float),
+                    spacing_xyz=spacing,
+                    threshold=float(used_threshold),
+                    use_head_mask=True,
+                    build_head_mask=True,
+                    head_mask_threshold_hu=float(head_mask_threshold_hu),
+                    head_mask_method=str(head_mask_method),
+                    head_gate_erode_vox=1,
+                    head_gate_dilate_vox=1,
+                    head_gate_margin_mm=0.0,
+                    min_metal_depth_mm=float(min_metal_depth_mm),
+                    max_metal_depth_mm=float(max_metal_depth_mm),
+                    include_debug_masks=False,
+                )
+                count = int(preview.get("depth_kept_count") or 0)
+                if count > best_count:
+                    best_preview = preview
+                    best_count = count
+                if count >= 300000 or used_threshold <= 500.0 + 1e-6:
+                    break
+                used_threshold = max(500.0, used_threshold - 50.0)
+            preview = best_preview if best_preview is not None else {}
+            idx = np.argwhere(np.asarray(preview.get("metal_depth_pass_mask_kji"), dtype=bool))
+            if idx.size == 0:
+                return {
+                    "points_lps": np.empty((0, 3), dtype=float),
+                    "threshold_hu": float(used_threshold),
+                }
+            n = idx.shape[0]
+            ijk_h = np.ones((n, 4), dtype=float)
+            ijk_h[:, 0] = idx[:, 2]
+            ijk_h[:, 1] = idx[:, 1]
+            ijk_h[:, 2] = idx[:, 0]
+            m_vtk = vtk.vtkMatrix4x4()
+            real_node.GetIJKToRASMatrix(m_vtk)
+            mat = np.eye(4, dtype=float)
+            for r in range(4):
+                for c in range(4):
+                    mat[r, c] = float(m_vtk.GetElement(r, c))
+            ras = (ijk_h @ mat.T)[:, :3]
+            lps = ras.copy()
+            lps[:, 0] *= -1.0
+            lps[:, 1] *= -1.0
+            return {"points_lps": lps, "threshold_hu": float(used_threshold)}
 
         # -- Cached overrides for hot annulus methods ----------------------
-        # The DeepCoreAnnulusMixin shim creates a new SlicerVolumeAccessor
-        # and re-reads the volume on every call.  These overrides use the
-        # already-extracted ctx data when a _ContextVolumeProxy is passed.
+        # The DeepCoreAnnulusMixin shim re-reads the Slicer volume on every
+        # call.  These overrides use the already-extracted ctx data when a
+        # _ContextVolumeProxy is passed.
 
         @staticmethod
         def _volume_array_kji(volume_node):
             if isinstance(volume_node, _ContextVolumeProxy):
                 return volume_node._arr_kji
-            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
-            return SlicerVolumeAccessor().array_kji(volume_node)
+            return _slicer_array_kji(volume_node)
 
         @staticmethod
         def _ras_to_ijk_fn_for_volume(volume_node):
             if isinstance(volume_node, _ContextVolumeProxy) and volume_node._ras_to_ijk_fn is not None:
                 return volume_node._ras_to_ijk_fn
-            from postop_ct_localization.deep_core_volume import SlicerVolumeAccessor
-            return SlicerVolumeAccessor().ras_to_ijk_fn(volume_node)
+            return _slicer_ras_to_ijk_fn(volume_node)
 
         # Note: the base DeepCoreAnnulusMixin declares some of these as
         # @classmethod / @staticmethod, so callers may use cls.method() or
@@ -370,9 +484,9 @@ def _make_pipeline_class():
                 "complex_blob_chain_rows": list(sample_payload.get("complex_blob_chain_rows") or []),
                 "contact_chain_rows": list(sample_payload.get("contact_chain_rows") or []),
                 "contact_chain_debug_rows": list(sample_payload.get("contact_chain_debug_rows") or []),
-                "line_blob_points_ras": np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3),
-                "contact_blob_points_ras": np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3),
-                "complex_blob_points_ras": np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3),
+                "line_blob_sample_points_ras": np.asarray(sample_payload.get("line_blob_points_ras"), dtype=float).reshape(-1, 3),
+                "contact_blob_sample_points_ras": np.asarray(sample_payload.get("contact_blob_points_ras"), dtype=float).reshape(-1, 3),
+                "complex_blob_sample_points_ras": np.asarray(sample_payload.get("complex_blob_points_ras"), dtype=float).reshape(-1, 3),
                 "raw_blob_result": raw_blob_result,
                 "grown_blob_result": grown_blob_result,
                 "stats": {

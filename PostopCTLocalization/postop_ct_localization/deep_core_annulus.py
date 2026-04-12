@@ -14,7 +14,9 @@ import numpy as np
 class AnnulusSampler:
     """Geometric and CT annulus sampling helpers.
 
-    Constructed with a ``VolumeAccessor`` (see ``deep_core_volume.py``).
+    Constructed with a ``VolumeAccessor``-compatible object (an object
+    providing ``array_kji(vn)``, ``spacing_xyz(vn)``,
+    ``ras_to_ijk_fn(vn)``, and ``ijk_kji_to_ras_points(vn, idx)``).
     """
 
     def __init__(self, volume_accessor):
@@ -192,15 +194,53 @@ class AnnulusSampler:
 
 
 # ---------------------------------------------------------------------------
-# Legacy mixin shim
+# Slicer-backed helpers (used by the mixin shim below)
+# ---------------------------------------------------------------------------
+
+def _slicer_volume_array_kji(volume_node):
+    """Return a ``volume_node``'s array_kji using Slicer (lazy import)."""
+    if volume_node is None:
+        return None
+    try:
+        from __main__ import slicer
+        return np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float)
+    except Exception:
+        return None
+
+
+def _slicer_ras_to_ijk_fn(volume_node):
+    """Return a callable ``ras_xyz -> ijk_xyz`` using Slicer (lazy import)."""
+    if volume_node is None or not hasattr(volume_node, "GetRASToIJKMatrix"):
+        return None
+    try:
+        from __main__ import vtk
+        m_vtk = vtk.vtkMatrix4x4()
+        volume_node.GetRASToIJKMatrix(m_vtk)
+        mat = np.eye(4, dtype=float)
+        for r in range(4):
+            for c in range(4):
+                mat[r, c] = float(m_vtk.GetElement(r, c))
+
+        def _fn(ras_xyz):
+            h = np.array([float(ras_xyz[0]), float(ras_xyz[1]), float(ras_xyz[2]), 1.0], dtype=float)
+            return (mat @ h)[:3]
+
+        return _fn
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Mixin used by non-pipeline callers (DeepCoreDebugLogicMixin visualization
+# path calls these on real Slicer volume_node objects).
 # ---------------------------------------------------------------------------
 
 class DeepCoreAnnulusMixin:
-    """Backward-compatible mixin that delegates to an AnnulusSampler.
+    """Annulus/geometry helpers over a real Slicer volume_node.
 
-    During the transition period, the mixin creates a per-call
-    ``AnnulusSampler`` using the ``SlicerVolumeAccessor``. Once all callers
-    are migrated to the composed pipeline, this class can be removed.
+    The pipeline class overrides all of these methods to use
+    pre-extracted context data; this mixin is only used from the
+    visualization code that still operates on Slicer nodes directly.
     """
 
     @staticmethod
@@ -213,27 +253,43 @@ class DeepCoreAnnulusMixin:
 
     @classmethod
     def _scan_reference_hu_values(cls, volume_node, lower_hu=-500.0, upper_hu=2500.0):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.scan_reference_hu_values(volume_node, lower_hu, upper_hu)
+        arr_kji = _slicer_volume_array_kji(volume_node)
+        if arr_kji is None:
+            return None
+        values = np.asarray(arr_kji, dtype=float).reshape(-1)
+        keep = np.isfinite(values) & (values > float(lower_hu))
+        if upper_hu is not None:
+            keep &= values < float(upper_hu)
+        ref = np.asarray(values[keep], dtype=float).reshape(-1)
+        if ref.size <= 0:
+            return None
+        ref.sort()
+        return ref
 
     @staticmethod
     def _volume_array_kji(volume_node):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.volume_array_kji(volume_node)
+        return _slicer_volume_array_kji(volume_node)
 
     @staticmethod
     def _ras_to_ijk_fn_for_volume(volume_node):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.ras_to_ijk_fn(volume_node)
+        return _slicer_ras_to_ijk_fn(volume_node)
 
     @classmethod
     def _depth_at_ras_with_volume(cls, volume_node, depth_map_kji, point_ras):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.depth_at_ras(volume_node, depth_map_kji, point_ras)
+        fn = _slicer_ras_to_ijk_fn(volume_node)
+        if depth_map_kji is None or fn is None:
+            return None
+        ijk = fn(point_ras)
+        i, j, k = int(round(float(ijk[0]))), int(round(float(ijk[1]))), int(round(float(ijk[2])))
+        if (
+            k < 0 or j < 0 or i < 0
+            or k >= depth_map_kji.shape[0]
+            or j >= depth_map_kji.shape[1]
+            or i >= depth_map_kji.shape[2]
+        ):
+            return None
+        val = float(depth_map_kji[k, j, i])
+        return val if np.isfinite(val) else None
 
     @classmethod
     def _cross_section_annulus_stats_hu(
@@ -241,13 +297,28 @@ class DeepCoreAnnulusMixin:
         annulus_inner_mm=3.0, annulus_outer_mm=4.0,
         radial_steps=2, angular_samples=12,
     ):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.cross_section_annulus_stats_hu(
-            volume_node, center_ras, axis_ras,
-            annulus_inner_mm, annulus_outer_mm,
-            radial_steps, angular_samples,
-        )
+        arr_kji = _slicer_volume_array_kji(volume_node)
+        fn = _slicer_ras_to_ijk_fn(volume_node)
+        if arr_kji is None or fn is None:
+            return {"mean_hu": None, "median_hu": None, "sample_count": 0}
+        center = np.asarray(center_ras if center_ras is not None else [0.0, 0.0, 0.0], dtype=float).reshape(3)
+        _axis, u, v = AnnulusSampler.orthonormal_basis_for_axis(axis_ras)
+        radii = np.linspace(float(annulus_inner_mm), float(annulus_outer_mm), int(max(1, radial_steps)))
+        angles = np.linspace(0.0, 2.0 * np.pi, int(max(4, angular_samples)), endpoint=False)
+        samples = []
+        for r in radii.tolist():
+            for theta in angles.tolist():
+                offset = float(r) * np.cos(float(theta)) * u + float(r) * np.sin(float(theta)) * v
+                ijk = fn(center + offset)
+                i, j, k = int(round(float(ijk[0]))), int(round(float(ijk[1]))), int(round(float(ijk[2])))
+                if 0 <= k < arr_kji.shape[0] and 0 <= j < arr_kji.shape[1] and 0 <= i < arr_kji.shape[2]:
+                    val = float(arr_kji[k, j, i])
+                    if np.isfinite(val):
+                        samples.append(val)
+        if not samples:
+            return {"mean_hu": None, "median_hu": None, "sample_count": 0}
+        sa = np.asarray(samples, dtype=float)
+        return {"mean_hu": float(np.mean(sa)), "median_hu": float(np.median(sa)), "sample_count": int(sa.size)}
 
     @classmethod
     def _cross_section_annulus_mean_ct_hu(
@@ -255,9 +326,7 @@ class DeepCoreAnnulusMixin:
         annulus_inner_mm=3.0, annulus_outer_mm=4.0,
         radial_steps=2, angular_samples=12,
     ):
-        from .deep_core_volume import SlicerVolumeAccessor
-        sampler = AnnulusSampler(SlicerVolumeAccessor())
-        return sampler.cross_section_annulus_mean_ct_hu(
+        return cls._cross_section_annulus_stats_hu(
             volume_node, center_ras, axis_ras,
             annulus_inner_mm, annulus_outer_mm,
             radial_steps, angular_samples,

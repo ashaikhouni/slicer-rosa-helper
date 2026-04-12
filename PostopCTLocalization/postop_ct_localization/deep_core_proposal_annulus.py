@@ -27,11 +27,13 @@ class DeepCoreProposalAnnulusMixin(DeepCoreAnnulusMixin):
             ).reshape(-1, 3)
         # Legacy path: direct VTK call.
         if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-            from .deep_core_volume import _vtk_matrix_to_numpy
             from __main__ import vtk  # noqa: deferred
             m_vtk = vtk.vtkMatrix4x4()
             volume_node.GetIJKToRASMatrix(m_vtk)
-            mat = _vtk_matrix_to_numpy(m_vtk)
+            mat = np.eye(4, dtype=float)
+            for r in range(4):
+                for c in range(4):
+                    mat[r, c] = float(m_vtk.GetElement(r, c))
             return kji_to_ras_points_matrix(idx, mat)
         return np.asarray(kji_to_ras_points(volume_node, idx), dtype=float).reshape(-1, 3)
 
