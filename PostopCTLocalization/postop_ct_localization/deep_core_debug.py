@@ -41,14 +41,14 @@ def _build_detection_context(
     }
 
 
-def _detection_result_to_legacy_support(volume_node, det_result):
+def _detection_result_to_legacy_support(volume_node, det_result, pipeline=None):
     """Convert a debug ``DetectionResult`` to the legacy
     ``DeepCoreSupportResult`` shape the widget reads."""
     from .deep_core_pipeline import DeepCoreMaskResult, DeepCoreSupportResult
 
-    meta = det_result.get("meta", {})
-    mask_output = meta.get("mask_output", {})
-    support_output = meta.get("support_output", {})
+    # Read heavy data from pipeline cache (not from result, which is JSON-safe)
+    mask_output = getattr(pipeline, "_last_mask_output", None) or {}
+    support_output = getattr(pipeline, "_last_support_output", None) or {}
 
     mask_payload = dict(mask_output)
     mask_payload["volume_node_id"] = str(volume_node.GetID() if hasattr(volume_node, "GetID") else "")
@@ -64,24 +64,19 @@ def _detection_result_to_legacy_support(volume_node, det_result):
     )
 
 
-def _detection_result_to_legacy_proposal(volume_node, det_result, support_result):
+def _detection_result_to_legacy_proposal(volume_node, det_result, support_result, pipeline=None):
     """Convert a full ``DetectionResult`` to the legacy
     ``DeepCoreProposalResult`` shape the widget reads."""
     from .deep_core_pipeline import DeepCoreProposalResult
 
-    # Extract proposals from trajectories — each has _proposal with original dict
-    proposals = []
-    for t in det_result.get("trajectories", []):
-        p = t.get("_proposal")
-        if p is not None:
-            proposals.append(p)
-        else:
-            proposals.append(t)
+    # Get proposals from pipeline cache (original dicts with numpy arrays)
+    proposal_payload = getattr(pipeline, "_last_proposal_payload", None) or {}
+    proposals = list(proposal_payload.get("proposals") or [])
 
     payload = {
         "proposals": proposals,
-        "candidate_count": int(det_result.get("diagnostics", {}).get("counts", {}).get("candidate_count", 0)),
-        "token_count": int(det_result.get("diagnostics", {}).get("counts", {}).get("token_count", 0)),
+        "candidate_count": int(proposal_payload.get("candidate_count", 0)),
+        "token_count": int(proposal_payload.get("token_count", 0)),
     }
     return DeepCoreProposalResult(
         support_result=support_result,
@@ -118,7 +113,7 @@ class DeepCoreDebugLogicMixin(
 
         # Create debug viz volumes if requested
         if show_support_diagnostics:
-            mask_output = det_result.get("meta", {}).get("mask_output", {})
+            mask_output = getattr(pipeline, "_last_mask_output", None) or {}
             if mask_output:
                 try:
                     from .deep_core_volume import SlicerVolumeAccessor
@@ -136,7 +131,7 @@ class DeepCoreDebugLogicMixin(
                 except Exception:
                     pass
 
-        return _detection_result_to_legacy_support(volume_node, det_result)
+        return _detection_result_to_legacy_support(volume_node, det_result, pipeline=pipeline)
 
     def run_deep_core_proposals(self, volume_node, config=None, debug_result=None):
         """Run full pipeline via the pipeline and return legacy result."""
@@ -156,6 +151,6 @@ class DeepCoreDebugLogicMixin(
         # Build legacy support result for the wrapper
         support_result = debug_result
         if support_result is None:
-            support_result = _detection_result_to_legacy_support(volume_node, det_result)
+            support_result = _detection_result_to_legacy_support(volume_node, det_result, pipeline=pipeline)
 
-        return _detection_result_to_legacy_proposal(volume_node, det_result, support_result)
+        return _detection_result_to_legacy_proposal(volume_node, det_result, support_result, pipeline=pipeline)

@@ -446,8 +446,7 @@ def _make_pipeline_class():
                 if p.get("best_model_id") is not None:
                     t["best_model_id"] = str(p["best_model_id"])
                     t["best_model_score"] = float(p.get("best_model_score", 0.0))
-                # Preserve original proposal dict in meta for widget access
-                t["_proposal"] = p
+                t["_proposal_index"] = len(trajectories)
                 trajectories.append(t)
             return trajectories
 
@@ -491,6 +490,12 @@ def _make_pipeline_class():
                 diag.set_count("proposal_count", len(result["trajectories"]))
                 diag.set_count("atom_count", int(support.get("stats", {}).get("atom_count", 0)))
 
+                # Cache heavy data on self — NOT in result (sanitize_result
+                # would try to JSON-serialize numpy arrays).
+                self._last_mask_output = mask
+                self._last_support_output = support
+                self._last_proposal_payload = proposals
+
             except Exception as exc:
                 self.fail(ctx=ctx, result=result, diagnostics=diag,
                           stage="unknown", exc=exc)
@@ -511,8 +516,10 @@ def _make_pipeline_class():
                 support = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="support", fn=lambda: self._run_support(ctx, mask, cfg))
 
-                result["meta"]["mask_output"] = mask
-                result["meta"]["support_output"] = support
+                # Cache heavy data on self — NOT in result["meta"] (sanitize_result
+                # would try to JSON-serialize numpy arrays, which is extremely slow).
+                self._last_mask_output = mask
+                self._last_support_output = support
 
                 diag.set_count("atom_count", int(support.get("stats", {}).get("atom_count", 0)))
 
