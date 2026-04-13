@@ -4,6 +4,42 @@ Status: planning checkpoint, 2026-04-13.
 Supersedes: the template-matching design implicit in `deep_core_model_fit.py` today.
 Related: `PHASE_B_STATUS.md` (current baseline and failure modes).
 
+## Resume point for next session
+
+Checkpoint commit `cf455cb` landed the config, pipeline contract, plan, and a pass-through stub. The stub in `PostopCTLocalization/postop_ct_localization/deep_core_model_fit.py` emits proposals unchanged. Your job is to replace it.
+
+**Start here:**
+
+1. Read this whole document (everything below), then `git log --oneline -5`.
+2. Verify the runtime inputs are what the plan expects: quick probe that `_run_model_fit` receives `metal_mask_kji`, `hull_mask_kji`, `support_atoms`, `blob_sample_points_ras` (all wired through in `CommonLib/shank_engine/pipelines/deep_core_v1.py:_run_model_fit`).
+3. Create a new helper module `PostopCTLocalization/postop_ct_localization/deep_core_axis_reconstruction.py` with pure-Python / numpy helpers:
+   - `refine_axis_from_cloud(points_ras) -> (center, axis, residual_rms)` — PCA line fit, no RANSAC.
+   - `reabsorb_colinear_atoms(refined_axis, center, existing_extent, atom_pool, cfg) -> list[atom_ids]` — uses `reabsorb_radial_tol_mm`, `reabsorb_angle_tol_deg`, `reabsorb_axial_window_mm`.
+   - `build_metal_profile(points_ras, axis, center) -> (t_min, t_max, boolean_profile, step)` — project cloud onto axis into a 0.5mm bin boolean profile.
+   - `extend_axis_along_mask(profile, axis, center, metal_mask_kji, head_distance_map_kji, ras_to_ijk_fn, cfg) -> (t_deep_extended, t_shallow_extended, extended_profile)` — walks both directions; stops on empty run, head_distance floor, or volume exit. Uses `extension_step_mm`, `extension_tube_radius_mm`, `extension_max_gap_mm`, `extension_termination_gap_mm`, `extension_head_distance_floor_mm`.
+   - `classify_tissue_along_axis(axis, center, t_range, arr_kji, ras_to_ijk_fn, cfg) -> array of class labels` — lateral HU ring sampling with smoothing. Uses `lateral_hu_ring_radius_mm`, `lateral_hu_ring_samples`, `hu_air_max`, `hu_brain_max`, `hu_bone_max`, `hu_classification_smoothing`.
+   - `find_bone_brain_interface(class_labels, step_mm) -> t_interface` — first sustained brain→bone transition walking shallow.
+   - `library_span_match(intracranial_span_mm, library_models, tolerance_mm) -> best_model_id or None`.
+4. Unit-test each helper in `tests/deep_core/test_axis_reconstruction.py` with synthetic volumes + synthetic atoms. Each helper should have a couple of happy-path + one edge-case test. Don't aim for full coverage — just prove each function does what it says in isolation before chaining.
+5. Rewrite `run_model_fit_group` in `deep_core_model_fit.py` to call the helpers in the 8-step sequence described below. Keep the function signature so `deep_core_v1.py` doesn't need to change.
+6. Run `python3 -m unittest tests.deep_core.test_pipeline_dataset -v` on T1 and T22. Expect improvement on LPMC / RPMC / RAMC / LAMC.
+7. Tune the config defaults if needed — re-run `tmp/calibrate_phase_b.py` to collect fresh empirical data if a threshold feels wrong.
+8. Re-lock the regression baselines in `test_pipeline_dataset.py` to the new numbers.
+9. Update `PHASE_B_STATUS.md` to reflect the new algorithm, current T1/T22 numbers, and remaining known issues.
+
+**Things this session already validated empirically (don't re-derive):**
+
+- HU classification bands `[−500, 150, 1800]` cleanly separate air / brain / bone on T1. Defaults are correct.
+- `head_distance_map_kji ≤ 0` reliably marks scalp exit into external air. `extension_head_distance_floor_mm = −1` gives a clean buffer.
+- Cross-section widening is NOT a reliable bolt-onset signal — dropped from the config. Don't reintroduce it.
+- LPMC and RPMC need metal-mask extension past the 20mm deep_core shrink rind; LAMC needs a smaller group-conflict radius; RAMC needs its endpoints to come from observed metal instead of library anchor search. All three classes of fix are covered by the planned algorithm.
+
+**Commit boundaries in the next session:**
+
+1. Helper module + unit tests (one commit).
+2. `run_model_fit_group` rewrite + regression baseline update (one commit).
+3. `PHASE_B_STATUS.md` refresh (one commit, only if worth a separate pass).
+
 ## What the previous design got wrong
 
 Phase B today treats the problem as "slide each library model along each proposal axis and score per-contact HU samples." That breaks because:
