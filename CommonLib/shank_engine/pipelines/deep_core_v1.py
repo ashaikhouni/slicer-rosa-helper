@@ -514,6 +514,8 @@ def _make_pipeline_class():
                 # Mask fields forwarded for downstream stages
                 "head_distance_map_kji": mask["head_distance_map_kji"],
                 "metal_grown_mask_kji": mask["metal_grown_mask_kji"],
+                "metal_mask_kji": mask["metal_mask_kji"],
+                "hull_mask_kji": mask["hull_mask_kji"],
                 # Raw data for debug visualization
                 "blob_labelmap_kji": build_blob_labelmap(raw_blob_result.get("labels_kji")),
                 "complex_blob_chain_rows": list(sample_payload.get("complex_blob_chain_rows") or []),
@@ -589,7 +591,10 @@ def _make_pipeline_class():
             return lib
 
         def _run_model_fit(self, ctx, support, proposals, dc):
-            """Group-fit electrode templates to proposals (replaces extension)."""
+            """Phase B: trajectory reconstruction (axis refinement, extension,
+            bone↔brain interface, rejection). See
+            ``docs/PHASE_B_REDESIGN.md``. Currently a pass-through stub.
+            """
             from postop_ct_localization.deep_core_model_fit import (
                 filter_models_by_family,
                 run_model_fit_group,
@@ -597,24 +602,23 @@ def _make_pipeline_class():
 
             mfg = dc.model_fit
             library = self._get_electrode_library()
-            models = filter_models_by_family(
-                library,
-                tuple(mfg.families),
-                int(mfg.min_in_brain_contacts),
-            )
+            models = filter_models_by_family(library, tuple(mfg.families))
 
             input_proposals = list(proposals.get("proposals") or [])
             arr_kji = np.asarray(ctx["arr_kji"], dtype=float)
             ras_to_ijk_fn = ctx["ras_to_ijk_fn"]
-            head_distance_map_kji = support.get("head_distance_map_kji")
 
             result = run_model_fit_group(
                 proposals=input_proposals,
                 arr_kji=arr_kji,
                 ras_to_ijk_fn=ras_to_ijk_fn,
-                head_distance_map_kji=head_distance_map_kji,
+                head_distance_map_kji=support.get("head_distance_map_kji"),
                 library_models=models,
                 cfg=mfg,
+                metal_mask_kji=support.get("metal_mask_kji"),
+                hull_mask_kji=support.get("hull_mask_kji"),
+                support_atoms=list(support.get("support_atoms") or []),
+                blob_sample_points_ras=support.get("blob_sample_points_ras"),
             )
             out = dict(proposals)
             out["proposals"] = list(result["accepted_proposals"])

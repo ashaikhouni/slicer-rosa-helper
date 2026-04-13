@@ -462,33 +462,266 @@ class DeepCoreInternalConfig:
 
 @dataclass(frozen=True)
 class DeepCoreModelFitConfig:
-    """Phase B: electrode-template group fitting parameters.
+    """Phase B: trajectory reconstruction from candidate proposals.
 
-    When ``enabled`` is true, the model_fit stage replaces the geometric
-    extension stage with template matching against electrode models from
-    the configured families.  Each candidate proposal is fitted to a
-    library electrode by sliding the deepest contact along the proposal
-    axis and scoring per-contact HU samples.
+    The model_fit stage takes proposals from candidate generation (seeded
+    in the clean deep_core region) and reconstructs each one into a
+    trajectory by: (1) refining the axis via PCA line-fit on the
+    proposal's atom point cloud, (2) reabsorbing any dropped colinear
+    atoms from the full atom pool, (3) extending the line along the raw
+    metal mask past the deep_core shrink boundary, (4) detecting bolt
+    onset via metal cross-section widening, (5) classifying tissue at
+    lateral offsets from the axis (air / brain / bone / metal) to locate
+    the bone↔brain interface, (6) applying rejection gates, and (7)
+    resolving group conflicts across accepted trajectories.
+
+    The library of electrode models acts as a recognizer (soft span
+    gate), not a generator. Contact placement is handled by a later
+    stage, not here.
     """
 
-    enabled: bool = True
-    families: tuple[str, ...] = ("DIXI",)
-    deep_anchor_search_mm: float = 5.0
-    deep_anchor_step_mm: float = 0.5
-    hit_hu_threshold: float = 1500.0
-    sample_radius_vox: int = 2
-    lateral_offset_mm: float = 2.5
-    min_lateral_drop_hu: float = 500.0
-    in_brain_min_depth_mm: float = 10.0
-    min_in_brain_contacts: int = 6
-    min_in_brain_hit_fraction: float = 0.70
-    conflict_radius_mm: float = 2.0
-    # Median HU along the contact-spanning axis segment must exceed this
-    # threshold. Real electrodes have very high median HU along their
-    # axis (because every voxel is metal or near-metal); false fits that
-    # accidentally hit bright voxels from other electrodes have low
-    # median HU because the axis passes through tissue between hits.
-    min_axis_segment_median_hu: float = 600.0
+    enabled: bool = field(
+        default=True,
+        metadata=_ui_meta(
+            "Enable Phase B",
+            minimum=0,
+            maximum=1,
+            control="bool",
+            description="Run the trajectory reconstruction stage after annulus rejection.",
+        ),
+    )
+    families: tuple[str, ...] = field(
+        default=("DIXI",),
+        metadata={"ui": False},
+    )
+
+    # --- Axis refinement -------------------------------------------------
+    axis_fit_max_residual_mm: float = field(
+        default=1.2,
+        metadata=_ui_meta(
+            "Axis fit max residual",
+            minimum=0.1,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description="Reject proposal if PCA line-fit median radial residual exceeds this.",
+        ),
+    )
+
+    # --- Colinear atom reabsorption --------------------------------------
+    reabsorb_radial_tol_mm: float = field(
+        default=1.5,
+        metadata=_ui_meta(
+            "Reabsorb radial tolerance",
+            minimum=0.1,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description="Max perpendicular distance from refined axis for an atom to be reabsorbed.",
+        ),
+    )
+    reabsorb_angle_tol_deg: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Reabsorb angle tolerance",
+            minimum=0.0,
+            maximum=30.0,
+            decimals=1,
+            suffix=" deg",
+            advanced=True,
+            description="Max angular deviation between reabsorbed atom axis and refined proposal axis.",
+        ),
+    )
+    reabsorb_axial_window_mm: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Reabsorb axial window",
+            minimum=0.0,
+            maximum=30.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description="Max axial distance beyond existing cluster extent for atom reabsorption.",
+        ),
+    )
+
+    # --- Metal-mask extension --------------------------------------------
+    extension_step_mm: float = field(
+        default=0.5,
+        metadata=_ui_meta(
+            "Extension step",
+            minimum=0.1,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description="Axial step size when walking the axis outward to extend via metal mask.",
+        ),
+    )
+    extension_tube_radius_mm: float = field(
+        default=1.5,
+        metadata=_ui_meta(
+            "Extension tube radius",
+            minimum=0.1,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description="Perpendicular sampling tube radius used to detect metal during extension.",
+        ),
+    )
+    extension_max_gap_mm: float = field(
+        default=3.0,
+        metadata=_ui_meta(
+            "Extension max gap",
+            minimum=0.0,
+            maximum=20.0,
+            decimals=2,
+            suffix=" mm",
+            description="Dark-interval tolerance allowed inside a continuing extension run.",
+        ),
+    )
+    extension_termination_gap_mm: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Extension termination gap",
+            minimum=0.0,
+            maximum=20.0,
+            decimals=2,
+            suffix=" mm",
+            description="Sustained empty run that terminates extension on a given end.",
+        ),
+    )
+    extension_head_distance_floor_mm: float = field(
+        default=-1.0,
+        metadata=_ui_meta(
+            "Extension head-distance floor",
+            minimum=-20.0,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            description="Extension stops when head_distance at the axis drops below this (crossing past the scalp into external air).",
+        ),
+    )
+
+    # --- Lateral-HU tissue classification (for bone↔brain interface) -----
+    lateral_hu_ring_radius_mm: float = field(
+        default=3.5,
+        metadata=_ui_meta(
+            "Lateral-HU ring radius",
+            minimum=1.0,
+            maximum=10.0,
+            decimals=2,
+            suffix=" mm",
+            description="Perpendicular offset where HU is sampled to classify tissue around the axis.",
+        ),
+    )
+    lateral_hu_ring_samples: int = field(
+        default=8,
+        metadata=_ui_meta(
+            "Lateral-HU ring samples",
+            minimum=3,
+            maximum=32,
+            control="int",
+            advanced=True,
+            description="Number of equally spaced points on the lateral HU ring.",
+        ),
+    )
+    hu_air_max: float = field(
+        default=-500.0,
+        metadata=_ui_meta(
+            "HU air max",
+            minimum=-1200.0,
+            maximum=0.0,
+            decimals=1,
+            suffix=" HU",
+            advanced=True,
+            description="Upper HU bound for the air class (sinus, external).",
+        ),
+    )
+    hu_brain_max: float = field(
+        default=150.0,
+        metadata=_ui_meta(
+            "HU brain max",
+            minimum=0.0,
+            maximum=500.0,
+            decimals=1,
+            suffix=" HU",
+            description="Upper HU bound for brain / soft-tissue / CSF class.",
+        ),
+    )
+    hu_bone_max: float = field(
+        default=1800.0,
+        metadata=_ui_meta(
+            "HU bone max",
+            minimum=200.0,
+            maximum=4000.0,
+            decimals=1,
+            suffix=" HU",
+            description="Upper HU bound for bone class (above this is metal-contaminated).",
+        ),
+    )
+    hu_classification_smoothing: int = field(
+        default=3,
+        metadata=_ui_meta(
+            "HU classification smoothing",
+            minimum=1,
+            maximum=11,
+            control="int",
+            advanced=True,
+            description="Consecutive-sample agreement window used when smoothing the tissue class walk.",
+        ),
+    )
+
+    # --- Rejection gates -------------------------------------------------
+    in_brain_min_depth_mm: float = field(
+        default=10.0,
+        metadata=_ui_meta(
+            "In-brain min depth",
+            minimum=0.0,
+            maximum=50.0,
+            decimals=2,
+            suffix=" mm",
+            description="Minimum hull distance (distance from air) for a sample to be treated as deep-in-brain.",
+        ),
+    )
+    min_intracranial_span_mm: float = field(
+        default=15.0,
+        metadata=_ui_meta(
+            "Minimum intracranial span",
+            minimum=0.0,
+            maximum=80.0,
+            decimals=2,
+            suffix=" mm",
+            description="Minimum contiguous brain-surrounded length required to accept a trajectory.",
+        ),
+    )
+    library_span_tolerance_mm: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Library span tolerance",
+            minimum=0.0,
+            maximum=30.0,
+            decimals=2,
+            suffix=" mm",
+            description="Tolerance around each library model span used as the soft recognizer gate.",
+        ),
+    )
+
+    # --- Group conflict --------------------------------------------------
+    axis_conflict_radius_mm: float = field(
+        default=1.5,
+        metadata=_ui_meta(
+            "Axis conflict radius",
+            minimum=0.0,
+            maximum=10.0,
+            decimals=2,
+            suffix=" mm",
+            description="Perpendicular radius within which two trajectories are considered to conflict.",
+        ),
+    )
 
 
 @dataclass(frozen=True)
