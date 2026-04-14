@@ -497,7 +497,7 @@ class DeepCoreModelFitConfig:
 
     # --- Axis refinement -------------------------------------------------
     axis_fit_max_residual_mm: float = field(
-        default=1.2,
+        default=1.8,
         metadata=_ui_meta(
             "Axis fit max residual",
             minimum=0.1,
@@ -592,6 +592,17 @@ class DeepCoreModelFitConfig:
             decimals=2,
             suffix=" mm",
             description="Sustained empty run that terminates extension on a given end.",
+        ),
+    )
+    intracranial_exit_head_distance_mm: float = field(
+        default=15.0,
+        metadata=_ui_meta(
+            "Intracranial exit head distance",
+            minimum=0.0,
+            maximum=30.0,
+            decimals=2,
+            suffix=" mm",
+            description="Head-distance threshold marking the shallow intracranial end (burr hole / dura / cortex exit).",
         ),
     )
     extension_head_distance_floor_mm: float = field(
