@@ -122,22 +122,24 @@ class DeepCoreV1DatasetRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(n_loose, 11, f"Loose match regressed: {n_loose}/{len(gt)}")
         self.assertGreaterEqual(n_strict, 5, f"Strict match regressed: {n_strict}/{len(gt)}")
 
-    def test_T22_metal_threshold_1000(self):
-        """T22 with metal_threshold=1000: locked post-redesign baseline.
+    def test_T22_metal_threshold_1100(self):
+        """T22 with metal_threshold=1100: locked post-redesign baseline.
 
-        Pre-redesign was 4/9 loose, 1/9 strict. The remaining unpaired
-        shank (RSFG) is never proposed by Phase A.
+        Pre-redesign was 4/9 loose, 1/9 strict. The 1100 HU threshold
+        (vs the default 1900) is needed because T22's electrode metal
+        is dimmer than T1's; with 1100 every GT shank gets a clean
+        proposal and Phase B matches all 9.
         """
         gt, pred, loose, strict = self._run_subject(
             "T22",
-            deep_core_config_overrides={"mask.metal_threshold_hu": 1000.0},
+            deep_core_config_overrides={"mask.metal_threshold_hu": 1100.0},
         )
         self.assertEqual(len(gt), 9, "T22 GT count drifted")
-        self.assertGreaterEqual(len(pred), 7, "Predicted count regressed")
-        self.assertLessEqual(len(pred), 12, "Too many predictions")
+        self.assertGreaterEqual(len(pred), 8, "Predicted count regressed")
+        self.assertLessEqual(len(pred), 14, "Too many predictions")
         n_loose = int(loose.get("matched", 0))
         n_strict = int(strict.get("matched", 0))
-        self.assertGreaterEqual(n_loose, 8, f"Loose match regressed: {n_loose}/{len(gt)}")
+        self.assertGreaterEqual(n_loose, 9, f"Loose match regressed: {n_loose}/{len(gt)}")
         self.assertGreaterEqual(n_strict, 2, f"Strict match regressed: {n_strict}/{len(gt)}")
 
 

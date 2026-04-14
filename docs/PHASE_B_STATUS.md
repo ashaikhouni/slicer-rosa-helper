@@ -82,7 +82,7 @@ Run with `/Users/ammar/miniforge3/envs/shankdetect/bin/python3 -m unittest tests
 |---|---|---|
 | T1 loose (12 GT) | 8 | **11** |
 | T1 strict (12 GT) | 3 | **5** |
-| T22 loose (9 GT) | 4 | **8** |
+| T22 loose (9 GT) | 4 | **9** (with `mask.metal_threshold_hu = 1100`) |
 | T22 strict (9 GT) | 1 | **2** |
 
 Helper unit tests: 18, all passing.
@@ -102,7 +102,7 @@ Helper unit tests: 18, all passing.
 ### Remaining unpaired
 
 - **T1 RAMC**: the trajectory IS predicted (`P03`, end_error 10.49mm) — it just fails the loose 10mm end_error gate by 0.5mm. Will be recovered when Phase C contact placement refines the shallow endpoint from `bolt_ras`.
-- **T22 RSFG**: never proposed by Phase A. Nothing for Phase B to do.
+- **T22 RSFG**: was never proposed by Phase A at the previous test config (`metal_threshold_hu = 1000`). Recovered by lowering `mask.metal_threshold_hu` to **1100** — at 1100 every T22 GT shank gets a clean Phase A proposal and Phase B matches 9/9 loose. The T22 regression test now uses 1100. **Do not lower the T1 threshold to 1100** — it regresses RPMC and RPT to nonsense angle errors because the T1 mask picks up too much noise at that threshold (T1's electrode metal is brighter than T22's, so the higher default cutoff is appropriate there).
 
 ## Config
 
