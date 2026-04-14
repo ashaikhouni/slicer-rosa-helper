@@ -584,7 +584,7 @@ class DeepCoreModelFitConfig:
         ),
     )
     extension_termination_gap_mm: float = field(
-        default=5.0,
+        default=10.0,
         metadata=_ui_meta(
             "Extension termination gap",
             minimum=0.0,
