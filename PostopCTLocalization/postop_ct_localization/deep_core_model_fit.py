@@ -221,14 +221,13 @@ def _fit_one_proposal(
         fit, metal_mask_kji, head_distance_map_kji, ras_to_ijk_fn, cfg
     )
 
-    # Step 5 — find the shallow intracranial endpoint using
-    # head_distance. Walk the axis from deep (``t_deep_ext``) to
-    # shallow (``t_shallow_ext``) and find where head_distance drops
-    # below ``intracranial_exit_head_distance_mm``. This works both
-    # for cortical entries (dura crossing) and burr-hole bolts
-    # (where the skull is surgically removed and HU classification
-    # can't see any bone at all). The lateral-HU classification is
-    # kept only for the ``brain_span`` rejection gate in Step 6.
+    # Step 5 — shallow intracranial endpoint via head_distance
+    # threshold. This is a calibration to typical bolt drive depths
+    # rather than a true physical signal — the actual contact
+    # placement that defines GT_end will be done in a Phase C stage
+    # and Phase B only needs to be in the right neighborhood. The
+    # bolt tip itself is emitted separately as ``bolt_ras`` below
+    # so Phase C can refine from it.
     step_mm = float(getattr(cfg, "extension_step_mm", 0.5))
     if t_shallow_ext - t_deep_ext < step_mm:
         return None
@@ -239,7 +238,7 @@ def _fit_one_proposal(
     hd_profile = axr.sample_head_distance_profile(
         fit, t_values, head_distance_map_kji, ras_to_ijk_fn
     )
-    exit_threshold = float(getattr(cfg, "intracranial_exit_head_distance_mm", 5.0))
+    exit_threshold = float(getattr(cfg, "intracranial_exit_head_distance_mm", 15.0))
     t_interface = axr.find_intracranial_exit_by_head_distance(
         t_values, hd_profile, threshold_mm=exit_threshold
     )
@@ -284,10 +283,12 @@ def _fit_one_proposal(
     t_end = float(t_interface)
     start_ras = fit.center + fit.axis * t_start
     end_ras = fit.center + fit.axis * t_end
+    bolt_ras = fit.center + fit.axis * float(t_shallow_ext)
 
     out = dict(prop)
     out["start_ras"] = [float(v) for v in start_ras]
     out["end_ras"] = [float(v) for v in end_ras]
+    out["bolt_ras"] = [float(v) for v in bolt_ras]
     out["axis_ras"] = [float(v) for v in fit.axis]
     out["span_mm"] = float(intracranial_span)
     out["intracranial_span_mm"] = float(intracranial_span)

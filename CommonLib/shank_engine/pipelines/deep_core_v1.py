@@ -649,6 +649,14 @@ def _make_pipeline_class():
                 }
                 if p.get("axis_ras") is not None:
                     t["axis_ras"] = [float(v) for v in p["axis_ras"]]
+                if p.get("bolt_ras") is not None:
+                    t["bolt_ras"] = [float(v) for v in p["bolt_ras"]]
+                if p.get("intracranial_span_mm") is not None:
+                    t["intracranial_span_mm"] = float(p["intracranial_span_mm"])
+                if p.get("bolt_extent_mm") is not None:
+                    t["bolt_extent_mm"] = float(p["bolt_extent_mm"])
+                if p.get("explained_atom_ids") is not None:
+                    t["explained_atom_ids"] = [int(v) for v in p["explained_atom_ids"]]
                 if p.get("annulus_mean_ct_hu") is not None:
                     t["annulus_mean_ct_hu"] = float(p["annulus_mean_ct_hu"])
                 if p.get("best_model_id") is not None:

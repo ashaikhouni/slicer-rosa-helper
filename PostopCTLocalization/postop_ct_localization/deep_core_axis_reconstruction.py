@@ -418,6 +418,51 @@ def sample_head_distance_profile(
     return out
 
 
+def find_brain_entry_from_outside(
+    classes: np.ndarray,
+    t_values: np.ndarray,
+    *,
+    smoothing_window: int = 3,
+    min_brain_run: int = 3,
+) -> float | None:
+    """Walk the lateral-HU class array from the SHALLOW end (highest
+    ``t``) toward the deep end and return the first sample where we
+    enter a sustained brain run.
+
+    "Brain entry from outside" is anatomically meaningful: walking
+    inward from the bolt tip, we pass through air → bolt/skull →
+    brain. The shallowest sample whose lateral ring is brain — and
+    that has at least ``min_brain_run`` more brain samples deeper
+    than it — marks the shank's entry into the intracranial brain
+    compartment. Air, bone, and metal samples shallower than this
+    point are skipped.
+
+    This avoids the calibrated head_distance threshold: we let the
+    surrounding tissue tell us where brain begins, instead of
+    assuming a fixed offset from the scalp.
+
+    Returns ``None`` if no sustained brain run is found.
+    """
+    if classes.size == 0:
+        return None
+    smoothed = _smooth_classes(np.asarray(classes, dtype=np.int8), smoothing_window)
+    t_arr = np.asarray(t_values, dtype=float).reshape(-1)
+    n = int(smoothed.size)
+    need = int(max(1, min_brain_run))
+    # Walk shallow → deep (high t → low t).
+    for idx in range(n - 1, -1, -1):
+        if int(smoothed[idx]) != BRAIN:
+            continue
+        # Require at least ``need`` brain samples at idx and deeper
+        # (lower indices, since classes are indexed deep→shallow by
+        # construction in classify_tissue_along_axis).
+        lo = max(0, idx - (need - 1))
+        window = smoothed[lo:idx + 1]
+        if int(np.count_nonzero(window == BRAIN)) >= need:
+            return float(t_arr[idx])
+    return None
+
+
 def find_intracranial_exit_by_head_distance(
     t_values: np.ndarray,
     head_distance_profile: np.ndarray,
