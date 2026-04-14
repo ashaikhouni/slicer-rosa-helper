@@ -605,6 +605,17 @@ class DeepCoreModelFitConfig:
             description="Head-distance threshold marking the shallow intracranial end (burr hole / dura / cortex exit).",
         ),
     )
+    scalp_exit_detect_head_distance_mm: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Scalp-exit detect head distance",
+            minimum=0.0,
+            maximum=20.0,
+            decimals=2,
+            suffix=" mm",
+            description="A metal-mask walk is considered to have reached the scalp if its sampled head_distance dropped below this threshold (rescues sparse-mask bolts).",
+        ),
+    )
     extension_head_distance_floor_mm: float = field(
         default=-1.0,
         metadata=_ui_meta(

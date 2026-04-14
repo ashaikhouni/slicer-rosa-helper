@@ -389,6 +389,7 @@ class ExtensionWalk:
     last_metal_t: float
     reason: str
     walked_mm: float
+    min_head_distance: float  # smallest hd value sampled along the walk
 
 
 def walk_metal_mask(
@@ -416,13 +417,14 @@ def walk_metal_mask(
     offsets = _tube_offsets(fit.axis, tube_radius, n_radial=6)
 
     if metal_mask_kji is None:
-        return ExtensionWalk(float(start_t), EXIT_GAP, 0.0)
+        return ExtensionWalk(float(start_t), EXIT_GAP, 0.0, float("inf"))
     t = float(start_t)
     last_metal_t = float(start_t)
     gap_run = 0.0
     max_walk_mm = 200.0
     walked = 0.0
     reason = EXIT_GAP
+    min_hd = float("inf")
     while walked < max_walk_mm:
         t = t + float(direction) * step
         walked += step
@@ -430,6 +432,8 @@ def walk_metal_mask(
         if hd == float("-inf"):
             reason = EXIT_VOLUME
             break
+        if hd < min_hd:
+            min_hd = hd
         if hd < floor:
             reason = EXIT_SCALP
             break
@@ -444,7 +448,7 @@ def walk_metal_mask(
         if gap_run >= term_gap:
             reason = EXIT_GAP
             break
-    return ExtensionWalk(float(last_metal_t), reason, float(walked))
+    return ExtensionWalk(float(last_metal_t), reason, float(walked), float(min_hd))
 
 
 def extend_axis_along_mask(
@@ -498,8 +502,18 @@ def orient_axis_by_scalp_exit(
     minus = walk_metal_mask(
         fit, fit.t_min, -1, metal_mask_kji, head_distance_map_kji, ras_to_ijk_fn, cfg
     )
-    plus_exits = plus.reason == EXIT_SCALP
-    minus_exits = minus.reason == EXIT_SCALP
+    # Scalp-exit detection: a walk "found the bolt" if either it
+    # explicitly terminated past the scalp (EXIT_SCALP) OR its
+    # exploration reached a head_distance below the scalp-detection
+    # threshold at any point along the walk. The latter rescues
+    # cases where the metal mask is sparse near the bolt entry: the
+    # walk terminates on a gap a few mm short of the skin, but the
+    # walk's footprint clearly passed through the scalp region.
+    scalp_detect = float(getattr(cfg, "scalp_exit_detect_head_distance_mm", 5.0))
+    plus_reached_scalp = plus.min_head_distance < scalp_detect
+    minus_reached_scalp = minus.min_head_distance < scalp_detect
+    plus_exits = plus.reason == EXIT_SCALP or plus_reached_scalp
+    minus_exits = minus.reason == EXIT_SCALP or minus_reached_scalp
     has_scalp_exit = plus_exits or minus_exits
     flip = False
     if plus_exits and minus_exits:
