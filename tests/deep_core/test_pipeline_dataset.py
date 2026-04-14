@@ -103,35 +103,42 @@ class DeepCoreV1DatasetRegressionTests(unittest.TestCase):
     def test_T1_default_config(self):
         """T1 with default Phase B config.
 
-        Baselines are temporarily loosened while Phase B is being
-        redesigned — see ``docs/PHASE_B_REDESIGN.md``. The model_fit
-        stage is currently a pass-through stub that does no axis
-        refinement, reabsorption, or rejection; refinement numbers
-        will come back up once the new axis-reconstruction helper lands
-        and the baselines will be re-locked at that point.
+        Locked at the post-redesign baseline (commit 18c1dde).
+        Pre-redesign was 8/12 loose, 3/12 strict; the redesign
+        delivered the LPMC/RPMC/LAMC/RHH/RCMN/RAI/LAI fixes that
+        were predicted in ``docs/PHASE_B_REDESIGN.md``. The single
+        remaining unpaired shank is RAMC, whose predicted trajectory
+        is borderline (end_error ~10.5mm — 0.5mm over the loose
+        gate); it will be recovered when a Phase C contact-placement
+        stage refines the shallow endpoint from the emitted
+        ``bolt_ras`` anchor.
         """
         gt, pred, loose, strict = self._run_subject("T1")
         self.assertEqual(len(gt), 12, "T1 GT count drifted")
-        # Pre-redesign baseline was 8/12 loose, 3/12 strict.
-        # With the stub pass-through we accept any non-zero matches
-        # just to verify the pipeline still produces trajectories.
         self.assertGreaterEqual(len(pred), 10, "Predicted count regressed")
-        self.assertLessEqual(len(pred), 20, "Too many predictions")
+        self.assertLessEqual(len(pred), 16, "Too many predictions")
         n_loose = int(loose.get("matched", 0))
-        self.assertGreaterEqual(n_loose, 3, f"Loose match implausibly low: {n_loose}/{len(gt)}")
+        n_strict = int(strict.get("matched", 0))
+        self.assertGreaterEqual(n_loose, 11, f"Loose match regressed: {n_loose}/{len(gt)}")
+        self.assertGreaterEqual(n_strict, 5, f"Strict match regressed: {n_strict}/{len(gt)}")
 
     def test_T22_metal_threshold_1000(self):
-        """T22 with metal_threshold=1000: locked Phase B baseline."""
+        """T22 with metal_threshold=1000: locked post-redesign baseline.
+
+        Pre-redesign was 4/9 loose, 1/9 strict. The remaining unpaired
+        shank (RSFG) is never proposed by Phase A.
+        """
         gt, pred, loose, strict = self._run_subject(
             "T22",
             deep_core_config_overrides={"mask.metal_threshold_hu": 1000.0},
         )
         self.assertEqual(len(gt), 9, "T22 GT count drifted")
-        # Locked baseline (Phase B): 9 GT, 8 predicted, 4/9 loose match
-        self.assertGreaterEqual(len(pred), 6, "Predicted count regressed")
+        self.assertGreaterEqual(len(pred), 7, "Predicted count regressed")
         self.assertLessEqual(len(pred), 12, "Too many predictions")
         n_loose = int(loose.get("matched", 0))
-        self.assertGreaterEqual(n_loose, 3, f"Loose match regressed: {n_loose}/{len(gt)}")
+        n_strict = int(strict.get("matched", 0))
+        self.assertGreaterEqual(n_loose, 8, f"Loose match regressed: {n_loose}/{len(gt)}")
+        self.assertGreaterEqual(n_strict, 2, f"Strict match regressed: {n_strict}/{len(gt)}")
 
 
 if __name__ == "__main__":

@@ -1,231 +1,167 @@
 # Deep Core Phase B Status — handoff doc
 
-Last updated: 2026-04-12
+Last updated: 2026-04-13.
+Replaces the previous template-matching status (commits c119c69 and earlier).
 
-## What is this document
+## What this document is
 
-You are Claude Code continuing work on the deep_core SEEG electrode detection module in the rosa_viewer project. The previous session implemented **Phase B: electrode-template group fitting**. Read this doc first, then `git log --oneline -15` for recent commits, then the files listed below.
+You are Claude Code continuing work on the `deep_core` SEEG electrode detection module in the `rosa_viewer` project. Phase B was redesigned in commits `cf455cb..18c1dde`. This doc tells you the current architecture, current numbers, and what to look at next. After reading it, run `git log --oneline -10` and `ls PostopCTLocalization/postop_ct_localization/deep_core_*.py` to orient.
 
 Memory files at `~/.claude/projects/-Users-ammar-Dropbox-rosa-viewer/memory/` have user profile and feedback.
 
 ## Phase B in one sentence
 
-Phase B replaces the geometric "walk metal until thick" extension stage with template matching: for each proposal axis, slide each library electrode model along the axis, place contacts according to the model's known offsets, and select the best-fitting (model, anchor) combination using group-level non-conflicting assignment.
+For each proposal coming out of annulus rejection, fit a PCA axis to its atom point cloud, prune outlier atoms whose points sit far off the line, reabsorb other colinear atoms from the full pool (no axial window), orient the axis so `+axis` points toward the bolt by metal-mask scalp-exit walking, extend along the metal mask in both directions, reject any fit whose axis doesn't physically reach the scalp, and emit an intracranial trajectory plus a `bolt_ras` anchor for downstream Phase C contact placement. Proposals are processed in a priority order and each accepted fit *claims* its atoms so later proposals can't reabsorb them — this is what prevents bridged proposals from surviving.
 
-## Files
+The library of electrode models is a soft recognizer (span gate), not a generator. No contacts are placed in Phase B; that is Phase C's job.
 
-**Core implementation:**
-- `CommonLib/shank_engine/pipelines/deep_core_v1.py`
-  - `DeepCoreV1Pipeline._run_model_fit()` — stage wrapper, loads library, calls `run_model_fit_group`
-  - `DeepCoreV1Pipeline._get_electrode_library()` — lazy-loads and caches the library on the pipeline instance
-  - `DeepCoreV1Pipeline.run()` — when `cfg.model_fit.enabled=True` (default), calls `_run_model_fit` instead of the legacy `_run_extension` + `_run_final_rejection`
-- `PostopCTLocalization/postop_ct_localization/deep_core_model_fit.py` — all model-fit algorithm logic
-  - `run_model_fit_group()` — entry point: generates hypotheses, greedy non-conflict assignment, returns accepted proposals
-  - `_hypotheses_for_proposal()` — per-proposal loop over models × shift positions
-  - `_sample_hu_at_ras()` — HU sampling with `reduction="max"` for box samples or `radius_vox=0` for point samples
-  - `_check_lateral_profile()` — validates each contact center is brighter than perimeter samples
-  - `_axis_segment_median_hu()` — samples HU densely along the axis segment; filters out "axis crosses tissue between random bright spots" false positives
-  - `_depth_at_ras()` — looks up head_distance_map_kji for in-brain classification
-  - `filter_models_by_family()` — filters library by ID prefix and `min_contacts`
+## Architecture
 
-**Config:**
-- `PostopCTLocalization/postop_ct_localization/deep_core_config.py`
-  - `DeepCoreModelFitConfig` — all Phase B parameters
-  - `DeepCoreConfig.model_fit: DeepCoreModelFitConfig`
-  - `DeepCoreMaskConfig.deep_core_shrink_mm: float = 20.0` (bumped from 15)
+### Files
 
-**Electrode library:**
-- `CommonLib/rosa_core/electrode_models.py` — `load_electrode_library()` returns dict with `"models"` list
-- `CommonLib/resources/electrodes/electrode_models.json` — 16 models: 9 DIXI + 7 PMT
-- Contact offsets are stored in `contact_center_offsets_from_tip_mm` (smallest offset = closest to physical tip = **deepest contact when implanted**)
+- `PostopCTLocalization/postop_ct_localization/deep_core_axis_reconstruction.py` — new helper module, pure numpy, no Slicer/vtk dependencies. All the per-fit primitives.
+  - `refine_axis_from_cloud(points_ras, seed_axis) -> AxisFit` — PCA line fit
+  - `prune_outlier_atoms(...)` — per-atom residual filter to defend against bridged proposals
+  - `reabsorb_colinear_atoms(fit, atom_pool, cfg, already_absorbed_ids)` — pulls colinear atoms by perpendicular distance only (no axial window — the whole point is to recover atoms outside the cluster)
+  - `walk_metal_mask(fit, start_t, direction, ...)` — extension walk along a perpendicular tube; tracks `last_metal_t`, termination `reason` (`exit_scalp`, `exit_gap`, `exit_volume`), and `min_head_distance` reached during the walk
+  - `orient_axis_by_scalp_exit(fit, ...) -> (fit_or_flipped, has_scalp_exit)` — flips axis so `+axis` is the bolt direction; returns has_scalp_exit=False when no walk reaches the scalp (used as a hard rejection gate)
+  - `classify_tissue_along_axis(fit, t_values, arr_kji, ras_to_ijk_fn, cfg)` — lateral HU ring classification (air/brain/bone/metal). Used for the `brain_span` rejection gate.
+  - `find_intracranial_exit_by_head_distance(...)` — current shallow endpoint helper (head_distance threshold, 15mm). Brittle; flagged for replacement.
+  - `find_brain_entry_from_outside(...)` — alternative tissue-based brain-entry helper. Currently unused by Phase B because the median ring classification picks brain too shallow at burr holes; included so a Phase C stage can combine it with bolt_ras and an axis-center HU walk.
+  - `library_span_match`, `library_model_contact_span_mm`, `library_model_first_contact_offset_mm` — library recognizer helpers
+- `PostopCTLocalization/postop_ct_localization/deep_core_model_fit.py` — entry point used by `deep_core_v1.py`.
+  - `run_model_fit_group(proposals, ..., support_atoms, blob_sample_points_ras)` — orchestration: priority sort, claim-based loop, conflict-free output
+  - `_fit_one_proposal(prop, ..., blocked_atom_ids)` — per-proposal pipeline: gather cloud → PCA fit → outlier prune → reabsorb → orient by scalp exit (hard gate) → extend → classify → find shallow interface → rejection gates → emit
+  - `_gather_initial_cloud(prop, atom_by_id, blob_sample_points_ras, blocked_atom_ids)` — cloud assembly from the proposal's atoms (filtering out claimed atoms) plus the proposal's tokenized blob points
+  - `filter_models_by_family(library, families, min_contacts)` — DIXI filter (kept for call-site compatibility)
+- `PostopCTLocalization/postop_ct_localization/deep_core_config.py` — `DeepCoreModelFitConfig` dataclass
+- `CommonLib/shank_engine/pipelines/deep_core_v1.py` — `_run_model_fit` stage wrapper, `_proposals_to_trajectories` surfaces `start_ras`/`end_ras`/`bolt_ras`/`intracranial_span_mm`/`bolt_extent_mm`/`explained_atom_ids`/`axis_ras`
+- `tests/deep_core/test_axis_reconstruction.py` — 18 unit tests for the helpers
+- `tests/deep_core/test_pipeline_dataset.py` — end-to-end regression on T1 and T22, baselines locked at the post-redesign numbers
 
-**Tests:**
-- `tests/deep_core/test_pipeline_dataset.py` — regression tests on T1 and T22 from the SEEG dataset
-- `tests/deep_core/test_annulus_sampler.py` — fast unit tests (pure Python)
+### Per-proposal fit pipeline (`_fit_one_proposal`)
 
-## Config defaults (DeepCoreModelFitConfig)
+1. **Gather initial cloud** from the proposal's `atom_id_list` (excluding `blocked_atom_ids` claimed by higher-priority fits) plus the proposal's tokenized blob points.
+2. **PCA fit** the cloud → `AxisFit(center, axis, residual_rms_mm, residual_median_mm, ...)`.
+3. **Outlier-atom prune**: for each atom in the proposal, compute the median perpendicular distance of its points from the current fit line. If the worst outlier is above `axis_fit_max_residual_mm` *and* substantially worse than the median, drop it and refit. Iterate until stable. This is what saves bridged proposals like RAMC where Phase A's chaining grabbed a stray atom from a parallel shank.
+4. **Residual gate**: reject if `residual_median_mm > axis_fit_max_residual_mm` (1.8mm).
+5. **Reabsorption**: sweep the full atom pool (minus claimed and minus initial), reabsorb any atom within `reabsorb_radial_tol_mm` (1.5mm) perpendicular of the line. For line atoms with a reliable own axis, also enforce the angular tolerance. **No axial window** — colinear contact atoms 30mm+ outside the cluster get pulled in (this is what fixes DIXI-15CM cases like LPMC).
+6. **Refit** on the combined cloud if the residual stays under `axis_fit_max_residual_mm`.
+7. **Cloud-extent override**: pull `fit.t_min`/`t_max` from the cloud projection bounds (slightly tighter than the PCA frame extent).
+8. **Orient by scalp exit**: walk both directions, flip axis so `+axis` is the direction whose walk reaches the scalp. **If neither walk reaches the scalp, reject the fit outright** — every real electrode has a bolt that crosses the skin, so an axis that stays inside brain in both directions is either not an electrode or is a bridged proposal whose tilted axis doesn't aim at any bolt.
+9. **Extend** in both directions; record `t_deep_ext` and `t_shallow_ext`.
+10. **Classify tissue** along `t_values = arange(t_deep_ext, t_shallow_ext, step_mm)` for the `brain_span` rejection gate.
+11. **Shallow interface**: walk `head_distance` from deep to shallow, find the first sample where it drops below `intracranial_exit_head_distance_mm` (15mm). This is `t_interface`. Brittle — see "Known weakness" below.
+12. **Rejection gates**:
+    - `intracranial_span = t_interface - t_deep_intra` must be ≥ `min_intracranial_span_mm` (15mm)
+    - `brain_span` (longest contiguous brain run) must be ≥ same threshold
+    - intracranial span must be within `[lib_min - tol, lib_max + tol]` (DIXI library, tol = 5mm). If over, **trim** to `lib_max + tol` rather than rejecting.
+13. **Library span match**: closest library model by total exploration length (informational only).
+14. **Emit**: `start_ras = center + axis * t_deep_intra`, `end_ras = center + axis * t_interface`, `bolt_ras = center + axis * t_shallow_ext`, plus axis, span, intracranial_span_mm, bolt_extent_mm, explained_atom_ids, best_model_id, axis residuals.
 
-```python
-enabled: bool = True
-families: tuple[str, ...] = ("DIXI",)           # DIXI only by default
-deep_anchor_search_mm: float = 5.0              # slide ±5mm from proposal's deep endpoint
-deep_anchor_step_mm: float = 0.5
-hit_hu_threshold: float = 1500.0                # contact "hit" if HU > this
-sample_radius_vox: int = 2                      # center sample box = 1mm radius
-lateral_offset_mm: float = 2.5                  # perimeter sample offset
-min_lateral_drop_hu: float = 500.0              # center must be this much brighter than perimeter
-in_brain_min_depth_mm: float = 10.0             # head_distance threshold for "in-brain"
-min_in_brain_contacts: int = 6                  # excludes DIXI-5AM; bolt safety
-min_in_brain_hit_fraction: float = 0.70         # 70% of in-brain contacts must hit
-conflict_radius_mm: float = 2.0                 # two fits can't share contacts within this distance
-min_axis_segment_median_hu: float = 600.0       # axis segment median HU floor
+### Claim-based assignment (`run_model_fit_group`)
+
+```
+ordered = sort proposals by (-len(atom_id_list), -span)
+claimed: set[int] = {}
+for prop in ordered:
+    fitted = _fit_one_proposal(prop, blocked_atom_ids=claimed)
+    if fitted is not None:
+        accepted.append(fitted)
+        claimed |= set(fitted.explained_atom_ids)
+return accepted  # no separate conflict resolution step
 ```
 
-## Algorithm (condensed)
+This replaces the segment-based perpendicular-distance conflict resolver from earlier iterations. The advantage: a long clean shank fits first, claims all its atoms, and a bridged proposal spanning that shank plus a neighbour now sees its shared atoms blocked, fails to reach a clean fit on the residual atoms, and is rejected by the scalp-exit gate.
 
-1. **Input**: proposals from the candidate generator (mix of line atoms and contact chains), each with `start_ras`, `end_ras`, approximate axis.
+## Current numbers
 
-2. **Per-proposal hypothesis generation** (`_hypotheses_for_proposal`):
-   - Determine the deeper endpoint using `head_distance_map_kji`; compute `shallow_axis` pointing from deep tip toward entry.
-   - For each eligible model in the family (contact_count ≥ 6 for DIXI):
-     - For each `shift_mm` in `[-5, +5]` step 0.5mm:
-       - Anchor the deepest contact at `deep_seed + shallow_axis * shift_mm`.
-       - Place all contacts at `deepest + delta * shallow_axis` where `delta = offset - min(offsets)`.
-       - For each contact position:
-         - Sample center HU (box, radius=2 vox, max reduction)
-         - Sample lateral HU (point samples at ±2.5mm in 2 perpendicular directions)
-         - Check in-brain (`head_distance ≥ 10mm`)
-         - "Hit" = in-brain AND center > 1500 HU AND `(center - max_lateral) ≥ 500 HU`
-       - Accept if ≥6 in-brain hits AND hit_fraction ≥ 0.70 AND axis_segment_median_HU ≥ 600
-     - Emit hypothesis dict with sort_key
+Run with `/Users/ammar/miniforge3/envs/shankdetect/bin/python3 -m unittest tests.deep_core.test_pipeline_dataset` from the helper root. The local Python venv lacks SimpleITK and vtk; you must use the `shankdetect` conda env for the dataset regression.
 
-3. **Group fitting** (`run_model_fit_group`):
-   - Sort all hypotheses across all proposals by `sort_key` descending:
-     - `(n_in_brain_hits, -model_span_mm, -contact_count, raw_hu_sum_in_brain)`
-   - Greedy loop:
-     - Skip if this proposal already has an accepted fit
-     - Skip if any predicted contact is within 2mm of an already-accepted contact
-     - Otherwise accept the fit and add its contacts to the claimed set
-   - Hard-reject proposals with no accepted fit.
+| Subject | Pre-redesign | Now |
+|---|---|---|
+| T1 loose (12 GT) | 8 | **11** |
+| T1 strict (12 GT) | 3 | **5** |
+| T22 loose (9 GT) | 4 | **8** |
+| T22 strict (9 GT) | 1 | **2** |
 
-4. **Output**: rewritten proposals with exact contact-center endpoints and `best_model_id` metadata. No extension or final_rejection stage runs after this (those are skipped when model_fit is enabled).
+Helper unit tests: 18, all passing.
 
-## Key design decisions
+### Plan-predicted fixes
 
-- **Group fitting, not per-proposal**: prevents two fits from claiming the same physical metal (parallel electrode case).
-- **Full-volume HU sampling, not mask-filtered**: lets the algorithm place contacts in the superficial 0-20mm zone where the candidate generator can't see (the deep_core_shrink_mm filter blocks it from the blob search but not from template sampling).
-- **In-brain restriction**: bolts (anchoring hardware that extends up to 40mm outside the skull) have zero in-brain extent, so requiring ≥6 in-brain contacts is the bolt-safety mechanism.
-- **Shortest-model tiebreak**: when two models fit equally well by hit count, prefer the shorter physical span (then fewer contacts). The user's explicit requirement: "use the shortest electrode that explains the in-brain portion of the electrode."
-- **Hard-reject unassigned**: no fallback to geometric extension. If no model fits, the proposal is dropped.
-- **Axis-segment median HU check**: prevents false positives where a proposal axis passes through tissue between sparse bright spots that happen to belong to *different* electrodes. A real electrode has bright metal along its entire contact-spanning segment.
+| Shank | Predicted fix | Status |
+|---|---|---|
+| LPMC (DIXI-15CM, 68mm) | Metal-mask extension finds the shallow 38mm of bright metal beyond the deep_core shrink rind | **Fixed** by reabsorption-without-axial-window pulling deep contact atoms into the cluster |
+| RPMC (DIXI-15CM) | Same pattern | **Fixed** same way |
+| LAMC (close to LCMN) | Smaller group-conflict radius lets it survive | **Fixed** by claim-based assignment + scalp-exit gate |
+| RAMC (drift in tip) | Endpoint from observed metal | **Borderline** — predicted with start=1.5mm, ang=1.8°, end=10.5mm (0.5mm over loose gate). Outlier-pruning recovered the axis; the residual end_error is the calibrated head_distance threshold mismatch. Phase C will fix it. |
+| RHH | Held over from session | **Fixed** by `min_head_distance` walk-tracking for scalp exit (rescues sparse-mask bolts) |
+| RCMN, RAI end errors | Side effect of head_distance threshold landing | **Fixed** for RCMN/RAI/LHH/LAI by switching from bone/brain HU interface to head_distance threshold |
+| P11 false positive | Library span gate + bone/brain gate should reject | **Fixed** (no false-positive rows in the per-shank tally) |
 
-## Current results (Phase B baseline, locked in regression tests)
+### Remaining unpaired
 
-Runtime environment: `conda activate shankdetect` (numpy + SimpleITK + shank_engine).
+- **T1 RAMC**: the trajectory IS predicted (`P03`, end_error 10.49mm) — it just fails the loose 10mm end_error gate by 0.5mm. Will be recovered when Phase C contact placement refines the shallow endpoint from `bolt_ras`.
+- **T22 RSFG**: never proposed by Phase A. Nothing for Phase B to do.
 
-### T1 (default config)
+## Config
 
-| Metric | Value |
-|---|---|
-| GT shanks | 12 |
-| Predicted | 12 |
-| Loose match (10mm tip / 25° / 20mm shallow) | 8/12 |
-| Strict match (4mm tip / 25° / 15mm shallow) | 3/12 |
+`DeepCoreModelFitConfig` in `deep_core_config.py`. The relevant knobs:
 
-Matched shanks have **angles <2°** (often <1°) and endpoint errors **1-7mm**. Best-fit models are mostly DIXI-18AM and DIXI-15AM.
+- `axis_fit_max_residual_mm` = 1.8 (was 1.2; bumped after empirical calibration on bridged-proposal residuals)
+- `reabsorb_radial_tol_mm` = 1.5
+- `reabsorb_angle_tol_deg` = 5.0 (only enforced for line atoms with `axis_reliable=True`)
+- `reabsorb_axial_window_mm` = 5.0 (**no longer enforced** — present for back-compat; safe to remove)
+- `extension_step_mm` = 0.5
+- `extension_tube_radius_mm` = 1.5
+- `extension_max_gap_mm` = 3.0
+- `extension_termination_gap_mm` = 5.0
+- `extension_head_distance_floor_mm` = -1.0
+- `scalp_exit_detect_head_distance_mm` = 5.0 (new — a walk "found the bolt" if its sampled head_distance dropped below this at any point)
+- `lateral_hu_ring_radius_mm` = 3.5
+- `lateral_hu_ring_samples` = 8
+- `hu_air_max` / `hu_brain_max` / `hu_bone_max` = -500 / 150 / 1800
+- `intracranial_exit_head_distance_mm` = 15.0 (**brittle calibration**, see below)
+- `min_intracranial_span_mm` = 15.0
+- `library_span_tolerance_mm` = 5.0
+- `axis_conflict_radius_mm` = 1.5 (**unused** — claim-based assignment replaced segment conflict resolution; safe to remove)
 
-### T22 (`mask.metal_threshold_hu=1000`)
+## Known weakness
 
-| Metric | Value |
-|---|---|
-| GT shanks | 9 |
-| Predicted | 8 |
-| Loose match | 4/9 |
-| Strict match | 0/9 |
+**`end_ras` is computed from a calibrated `head_distance` threshold (15mm).** This was empirically tuned to match where DIXI shallowest contacts land in T1/T22 (their head_distance is consistently 12–20mm), but it is not a physical signal — change electrode model, change drive depth, change subject head shape, and the 15mm calibration breaks.
 
-### Comparison to pre-Phase-B (geometric extension)
+The right replacement is to detect the shallowest contact directly via on-axis HU peaks (contact metal → 1900+ HU spikes spaced at known library offsets), use that to anchor the GT-side endpoint, AND emit the bolt anchor (`bolt_ras`, already done) so the contact-placement stage can refine. This is what Phase C should do. The helper `find_brain_entry_from_outside` is in place in the axis-reconstruction module ready to combine with a bolt-tip walk and an axis-center HU peak detector.
 
-| | Extension | Phase B | Delta |
-|---|---|---|---|
-| T1 loose | 11/12 | 8/12 | -3 |
-| T1 strict | 4/12 | 3/12 | -1 |
-| T22 loose | 7/9 | 4/9 | -3 |
-| T22 strict | 2/9 | 0/9 | -2 |
+The user has explicitly tagged this as Phase C work — Phase B is *good enough* in the current loose-gate evaluation as long as `end_ras` is in the right neighborhood and `bolt_ras` is accurate. Don't try to fix it again inside Phase B; the previous session burned multiple iterations on this and ended up reverting to the calibrated threshold.
 
-**Phase B scored slightly worse on loose match** because it's stricter about rejecting candidates with no clean model fit. Strict match is roughly flat. The *shape* of the errors improved (angles near-zero, endpoints anchored at real contacts) but some shanks are now missed entirely that the extension stage captured with wider tolerances.
+## What to look at next
 
-## Known issues / open questions
+In rough order of value:
 
-### Issue 1: Model selection ambiguity on line-appearance electrodes
+1. **Phase A bridged-proposal investigation** for RAMC: Phase A's `deep_core_candidate_generation.py` produces a 4-atom proposal `[90, 91, 92, 100]` where atom 100 is a stray from a neighbouring shank and atoms 90/91/92 are clean RAMC line atoms. Phase B's outlier prune now drops atom 100 cleanly, so this isn't blocking Phase B numbers — but it's worth fixing upstream so the proposal looks right in Slicer regardless.
+2. **Phase A coverage** for T22 RSFG: Phase A never proposes it. Outside Phase B's scope but a clear next target.
+3. **Phase C contact placement**: the cleanest path to closing the RAMC loose gap and eliminating the head_distance calibration. Inputs from Phase B: `start_ras`, `end_ras`, `bolt_ras`, `axis_ras`, `explained_atom_ids`, `best_model_id`. Algorithm: walk on-axis HU sampled at `extension_step_mm`, detect peaks above 1500 HU, fit them against library contact-offset patterns, output refined contact positions and corrected start/end.
+4. **Remove dead config fields**: `axis_conflict_radius_mm` and `reabsorb_axial_window_mm` are no longer enforced. Keep them if they're surfaced in the UI to avoid breaking saved configs; remove otherwise.
+5. **Helper module unit tests for the new pieces**: `prune_outlier_atoms`, `walk_metal_mask` termination reasons, `orient_axis_by_scalp_exit` flipping logic, `min_head_distance` rescue path. Currently only the original 18 tests cover the pre-prune/pre-claim helpers.
 
-When the CT shows a continuous bright wire (not discrete beads), DIXI-18AM and DIXI-15CM both score 18/18 and 15/15 respectively at the same anchor position. The sort key prefers DIXI-18AM because it has more hits, but the actual electrode might be DIXI-15CM (15 contacts, 4.5mm spacing vs DIXI-18AM's 18 contacts, 3.5mm spacing).
+## Probes that exist
 
-**Fix candidates:**
-- Sample at half-spacing positions (between predicted contacts) — for bead electrodes, between-contact HU is low; for line electrodes, it's high. Use this to choose between models with identical hit counts.
-- Explicit spacing estimation from the actual bright-voxel positions on the axis, matched to the closest model spacing.
-- Per-trajectory model hint from the user (they know the electrode type at implant time).
+In `tmp/` (root of `rosa_viewer`):
 
-### Issue 2: Loose-match recall dropped vs prior baseline
+- `tmp/probe_phase_b_eval.py` — runs T1 and T22 through the pipeline, prints per-shank `start_error`/`end_error`/`angle_deg` and a tally categorizing failures by which gate they trip. Use this as the primary tuning lens. Run with the shankdetect env Python.
+- `tmp/probe_rcmn.py` — prints per-shank axis-frame coordinates of GT vs predicted endpoints, lateral HU classification counts, head_distance profile along axis, scalp-exit walk reasons, orientation flip status. Edit the `for name in (...)` line at the bottom to target the shanks you care about.
+- `tmp/probe_rhh.py` — finds proposals "in the area" of a target shank (perp/angle thresholds), traces them through every gate and reports the first rejection reason. Optional deep-dive prints colinear atoms in the pool and the metal-mask density along the axis.
+- `tmp/probe_lpmc_atoms.py` — same idea, scoped to LPMC. Useful as a template for "list all atoms in proposal X plus all colinear atoms in the pool plus the metal density."
+- `tmp/calibrate_phase_b.py` — original calibration script from the design phase. Has plumbing for sweeping config knobs across the dataset.
 
-Phase B is stricter about rejecting candidates. Some real shanks that the extension stage matched loosely are now rejected because:
-- Not enough in-brain contacts in any model fit
-- Axis-segment median check fails (possibly over-strict at 600 HU)
+Don't be afraid to write new throwaway probes in `tmp/` — they're not committed and they're how the previous session resolved every single failure.
 
-**Fix candidates:**
-- Lower `min_in_brain_hit_fraction` from 0.70 → 0.60
-- Lower `min_axis_segment_median_hu` from 600 → 400
-- Relax the lateral drop check from 500 HU → 300 HU
-- Investigate specific missed shanks on T1 (LAMC, LPMC, RAMC, RPMC) to see which check is rejecting them
+## Things this session validated empirically — do not re-derive
 
-### Issue 3: Some shanks completely missing from candidates
-
-Phase B only refines existing candidates; it can't create new ones. The candidate generator has its own thresholds that may exclude real shanks (short electrodes, sparse blobs, wrong PCA axis). This is what Phase C would address.
-
-### Issue 4: T22 is worse than T1 and I don't know exactly why
-
-T22 uses a lower metal threshold (1000 vs 1900 HU) so blobs are larger and noisier. The DIXI-18CM model keeps winning in the sort even though DIXI-18AM should be the right answer for the actual electrodes. Probably related to Issue 1.
-
-## How to run and debug
-
-### Environment setup
-
-```bash
-conda activate shankdetect
-```
-
-### Run regression tests
-
-```bash
-cd /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper
-python3 -m unittest tests.deep_core.test_pipeline_dataset -v
-```
-
-Takes ~10 seconds. Expects `ROSA_SEEG_DATASET` env var or the default path `/Users/ammar/Dropbox/thalamus_subjects/seeg_localization`.
-
-### Run pipeline on one subject directly
-
-```bash
-PYTHONPATH=/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/CommonLib:/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/PostopCTLocalization:/Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper/tools:$PYTHONPATH \
-python3 tools/eval_seeg_localization.py \
-  --dataset-root /Users/ammar/Dropbox/thalamus_subjects/seeg_localization \
-  --out-dir /tmp/eval_output \
-  --pipeline-key deep_core_v1 \
-  --subjects T1
-```
-
-### Debug a specific proposal's fit
-
-Use the captured-proposal pattern: monkey-patch `pipe._run_model_fit` to capture its input, then call `_hypotheses_for_proposal` directly with the proposal and a single model. See session history for example scripts.
-
-### Disable model_fit (fall back to extension)
-
-Set `"model_fit.enabled": False` in the pipeline config dict. The old extension + final_rejection stages will run instead.
-
-## Useful session commands
-
-```bash
-# Show recent deep_core-related commits
-git log --oneline -20 -- PostopCTLocalization/postop_ct_localization/deep_core_* CommonLib/shank_engine/pipelines/deep_core_v1.py
-
-# Count deep_core module size
-wc -l PostopCTLocalization/postop_ct_localization/deep_core_*.py CommonLib/shank_engine/pipelines/deep_core_v1.py | sort -n
-
-# List all active shank_engine pipelines
-grep register_pipeline CommonLib/shank_engine/bootstrap.py
-```
-
-## Where things stand
-
-The architecture is clean. Phase B is implemented and running. It gets the **shape of the answer right** (angles, endpoint alignment) but doesn't yet win on strict-match recall because model selection isn't perfect and some proposals get dropped for lacking enough in-brain hits. The next session should focus on:
-
-1. Visually debugging specific failing cases with CT screenshots (that's why the user is switching to VS Code)
-2. Fixing the model-selection ambiguity (Issue 1) — probably by adding between-contact HU sampling
-3. Relaxing one or two of the validation thresholds to recover the loose-match recall that dropped
-
-## Don't forget
-
-- Don't break the regression tests — they encode the currently-locked baselines
-- The Phase B code lives in `deep_core_model_fit.py` (pure Python, no Slicer) — keep it that way so it stays testable
-- Respect the user's principle: **shortest electrode that explains the in-brain portion wins ties**. Don't introduce a "longest wins" rule without discussion.
-- Bolts can extend up to 40mm outward from the skull. The `min_in_brain_contacts = 6` floor is the bolt-safety mechanism — don't lower it casually.
-- The user's preferred workflow is **commits for every working milestone** so they can test in Slicer between changes. Don't pile up uncommitted work.
+- HU bands `[-500, 150, 1800]` cleanly separate air/brain/bone on T1. Defaults are correct.
+- `head_distance ≤ 0` reliably marks scalp exit into external air. `extension_head_distance_floor_mm = -1` gives a clean buffer.
+- `scalp_exit_detect_head_distance_mm = 5` is the right value for the walk-min-hd rescue. Below 5, it misses sparse bolts; above 5, it fires inside brain proper for some shanks.
+- Cross-section widening as a bolt-onset signal is unreliable across shanks (LPMC widens, LAI doesn't). Don't reintroduce it.
+- The PCA outlier-atom prune is a 2× factor over the median residual + an absolute floor at `axis_fit_max_residual_mm`. Tighter prunes drop legitimate atoms; looser prunes leave bridged proposals tilted.
+- Reabsorption with **no axial window** does not run away on T1/T22. The radial 1.5mm gate is sufficient because parallel shanks are typically 3–10mm apart in DIXI implants.
+- Priority sort by `-len(atom_id_list)` then `-span` is enough — no need for residual or fit-quality terms.
