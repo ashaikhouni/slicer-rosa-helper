@@ -143,6 +143,36 @@ def _fit_one_proposal(
     if fit is None:
         return None
     max_residual = float(getattr(cfg, "axis_fit_max_residual_mm", 1.2))
+
+    # Step 1.5 — outlier-atom pruning. If the proposal's atom_id_list
+    # bundles atoms from two parallel shanks (a bridged proposal), the
+    # initial PCA fit splits the difference. Drop atoms whose points
+    # sit far off the fit line and refit. This recovers RAMC-class
+    # cases where Phase A's chaining grabbed a stray atom from a
+    # neighbour. No-op when all atoms agree.
+    if len(initial_atom_list) >= 3:
+        kept_ids = axr.prune_outlier_atoms(
+            initial_atom_list, atom_by_id, fit, cfg, min_keep=2
+        )
+        if len(kept_ids) < len(initial_atom_list):
+            cloud_kept: list[np.ndarray] = []
+            for aid in kept_ids:
+                atom = atom_by_id.get(int(aid))
+                if atom is None:
+                    continue
+                pts = np.asarray(
+                    atom.get("support_points_ras") or [], dtype=float
+                ).reshape(-1, 3)
+                if pts.size:
+                    cloud_kept.append(pts)
+            if cloud_kept:
+                pruned_cloud = np.concatenate(cloud_kept, axis=0)
+                pruned_fit = axr.refine_axis_from_cloud(pruned_cloud, seed_axis=fit.axis)
+                if pruned_fit is not None and pruned_fit.residual_median_mm < fit.residual_median_mm:
+                    fit = pruned_fit
+                    initial_cloud = pruned_cloud
+                    initial_atom_list = kept_ids
+
     if fit.residual_median_mm > max_residual:
         return None
 

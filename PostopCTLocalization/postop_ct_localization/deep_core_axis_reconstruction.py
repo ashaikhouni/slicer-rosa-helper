@@ -214,6 +214,81 @@ def reabsorb_colinear_atoms(
     return out
 
 
+def atom_perp_to_line(
+    atom: dict[str, Any],
+    fit: AxisFit,
+) -> float:
+    """Median perpendicular distance of an atom's support points from
+    the fit line. Returns ``inf`` if the atom has no points."""
+    pts = np.asarray(atom.get("support_points_ras") or [], dtype=float).reshape(-1, 3)
+    if pts.shape[0] == 0:
+        return float("inf")
+    radial = _project_radial(pts, fit.center, fit.axis)
+    return float(np.median(radial))
+
+
+def prune_outlier_atoms(
+    atom_ids: list[int],
+    atom_by_id: dict[int, dict[str, Any]],
+    fit: AxisFit,
+    cfg: Any,
+    *,
+    perp_tol_mm: float | None = None,
+    min_keep: int = 2,
+) -> list[int]:
+    """Iteratively drop atoms whose points sit far off the fit line.
+
+    A bridged proposal — one whose ``atom_id_list`` mixes atoms from
+    two parallel shanks — produces a PCA fit that splits the difference
+    between the two lines. Each individual atom's points then sit
+    well off the resulting fit. By measuring per-atom perpendicular
+    distance and dropping the worst outlier (if it's substantially
+    above both an absolute threshold and the median), the fit can be
+    recovered to one of the two real shanks.
+
+    Returns the kept atom ID list. Refitting is the caller's job.
+    """
+    tol = float(perp_tol_mm) if perp_tol_mm is not None else float(
+        getattr(cfg, "axis_fit_max_residual_mm", 1.8)
+    )
+    keep = [int(a) for a in atom_ids]
+    while len(keep) > int(min_keep):
+        scores = []
+        for aid in keep:
+            atom = atom_by_id.get(int(aid))
+            if atom is None:
+                scores.append(float("inf"))
+                continue
+            scores.append(atom_perp_to_line(atom, fit))
+        if not scores:
+            break
+        worst_idx = int(np.argmax(scores))
+        worst = float(scores[worst_idx])
+        median = float(np.median(scores))
+        if worst <= tol:
+            break
+        if worst < median * 2.0 and worst < tol * 1.5:
+            break
+        keep.pop(worst_idx)
+        # Refit on remaining atoms' point clouds
+        cloud = []
+        for aid in keep:
+            atom = atom_by_id.get(int(aid))
+            if atom is None:
+                continue
+            pts = np.asarray(atom.get("support_points_ras") or [], dtype=float).reshape(-1, 3)
+            if pts.size:
+                cloud.append(pts)
+        if not cloud:
+            break
+        combined = np.concatenate(cloud, axis=0)
+        refined = refine_axis_from_cloud(combined, seed_axis=fit.axis)
+        if refined is None:
+            break
+        fit = refined
+    return keep
+
+
 def gather_atom_cloud(
     atom_pool: list[dict[str, Any]],
     atom_ids: Sequence[int],
