@@ -19,6 +19,7 @@ _DEEP_CORE_CONTROL_ATTRS = {
     "mask.hull_close_vox": "deepCoreHullCloseSpin",
     "mask.deep_core_shrink_mm": "deepCoreShrinkSpin",
     "mask.metal_threshold_hu": "deepCoreMetalThresholdSpin",
+    "mask.bolt_metal_threshold_hu": "deepCoreBoltMetalThresholdSpin",
     "mask.metal_grow_vox": "deepCoreMetalGrowSpin",
     "support.support_spacing_mm": "deepCoreSupportSpacingSpin",
     "support.component_min_elongation": "deepCoreComponentMinElongationSpin",
@@ -41,6 +42,24 @@ _DEEP_CORE_CONTROL_ATTRS = {
     "proposal.outward_support_min_depth_gain_mm": "deepCoreOutwardSupportMinDepthGainSpin",
     "internal.complex_seed_preferred_annulus_percentile": "deepCoreSeedPreferredAnnulusSpin",
     "internal.complex_seed_min_head_depth_mm": "deepCoreSeedMinHeadDepthSpin",
+    "model_fit.use_bolt_detection": "deepCoreUseBoltDetectionCheck",
+    "model_fit.bolt_bridge_radial_tol_mm": "deepCoreBoltBridgeRadialTolSpin",
+    "model_fit.bolt_endpoint_offset_mm": "deepCoreBoltEndpointOffsetSpin",
+    "bolt.enabled": "deepCoreBoltEnabledCheck",
+    "bolt.span_min_mm": "deepCoreBoltSpanMinSpin",
+    "bolt.span_max_mm": "deepCoreBoltSpanMaxSpin",
+    "bolt.inlier_tol_mm": "deepCoreBoltInlierTolSpin",
+    "bolt.min_inliers": "deepCoreBoltMinInliersSpin",
+    "bolt.fill_frac_min": "deepCoreBoltFillFracMinSpin",
+    "bolt.max_gap_mm": "deepCoreBoltMaxGapSpin",
+    "bolt.shell_min_mm": "deepCoreBoltShellMinSpin",
+    "bolt.shell_max_mm": "deepCoreBoltShellMaxSpin",
+    "bolt.axis_depth_delta_mm": "deepCoreBoltAxisDepthDeltaSpin",
+    "bolt.support_overlap_frac": "deepCoreBoltSupportOverlapSpin",
+    "bolt.collinear_angle_deg": "deepCoreBoltCollinearAngleSpin",
+    "bolt.collinear_perp_mm": "deepCoreBoltCollinearPerpSpin",
+    "bolt.max_lines": "deepCoreBoltMaxLinesSpin",
+    "bolt.n_samples": "deepCoreBoltNSamplesSpin",
 }
 
 class DeepCoreDebugWidgetMixin:
@@ -63,24 +82,33 @@ class DeepCoreDebugWidgetMixin:
         return result
 
     def _make_deep_core_numeric_control(self, field_spec):
-        if str(field_spec.control or "double") == "int":
+        control_kind = str(field_spec.control or "double")
+        if control_kind == "bool":
+            control = qt.QCheckBox()
+            control.setChecked(bool(field_spec.default))
+        elif control_kind == "int":
             control = qt.QSpinBox()
             control.setRange(int(field_spec.minimum), int(field_spec.maximum))
             control.setValue(int(field_spec.default))
+            if str(field_spec.suffix or ""):
+                control.setSuffix(str(field_spec.suffix))
         else:
             control = qt.QDoubleSpinBox()
             control.setRange(float(field_spec.minimum), float(field_spec.maximum))
             control.setDecimals(int(field_spec.decimals))
             control.setValue(float(field_spec.default))
-        if str(field_spec.suffix or ""):
-            control.setSuffix(str(field_spec.suffix))
+            if str(field_spec.suffix or ""):
+                control.setSuffix(str(field_spec.suffix))
         if str(field_spec.description or ""):
             control.setToolTip(str(field_spec.description))
         return control
 
     def _deep_core_control_value(self, field_spec):
         control = getattr(self, _DEEP_CORE_CONTROL_ATTRS[str(field_spec.path)])
-        if str(field_spec.control or "double") == "int":
+        control_kind = str(field_spec.control or "double")
+        if control_kind == "bool":
+            return bool(control.isChecked())
+        if control_kind == "int":
             return int(control.value)
         return float(control.value)
 
