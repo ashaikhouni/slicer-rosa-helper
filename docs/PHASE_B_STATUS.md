@@ -87,6 +87,82 @@ Run with `/Users/ammar/miniforge3/envs/shankdetect/bin/python3 -m unittest tests
 
 Helper unit tests: 18, all passing.  Bolt detection tests: 3, all passing.
 Dataset regression tests: 4 (baseline + bolt-enabled for T1 and T22), all passing.
+Deep_core_v2 dataset tests: 2 (T1 and T22 via the bolt-first pipeline),
+all passing.
+
+## Deep Core v2: bolt-first proof-of-concept (2026-04-15)
+
+A new ``deep_core_v2`` pipeline sits alongside v1 and demonstrates what
+a simpler "bolts are the only signal" architecture looks like. It
+inherits v1's mask and bolt-detection stages but skips Phase A
+proposal generation, the support atom stage, and the annulus rejection
+entirely. Every trajectory is fitted independently from a RANSAC bolt
+candidate.
+
+### Pipeline
+
+1. ``mask`` — reused from v1.
+2. ``bolt_detection`` — reused from v1.
+3. ``bolt_fit`` — new. For each bolt, ``deep_core_v2_fit`` walks the
+   axis inward from the bolt center through a **loose** metal mask
+   (``model_fit.v2_contact_hu = 400 HU``, ``v2_contact_max_gap_mm = 15``)
+   and reports the deepest sample still contiguous with the bolt. The
+   shallow endpoint is anchored to the bolt center via
+   ``model_fit.bolt_endpoint_offset_mm``. Validated against the
+   library span bounds; soft-trimmed if too long.
+
+The fit module also includes two experimental paths that can be
+selected via ``model_fit.v2_fit_mode``:
+  - ``"two_threshold"`` (default): the loose-walk path described above.
+  - ``"deepest_peak"``: builds a 1D max-HU profile along the axis with
+    a 5 mm disc perpendicular to it, then picks the deepest qualifying
+    peak as the deep tip. Similar recall to two_threshold on T1,
+    slightly better on T22, but noisier.
+  - ``"intensity_peaks"``: library-electrode-pattern matching on the
+    profile peaks. Ended up less robust than the two simpler modes
+    because contact spacing drifts ~0.25-0.5 mm per contact under
+    axis imprecision, pushing the alignment beyond the match tolerance
+    on longer DIXI models.
+
+### Current numbers
+
+| Subject | v1 (no bolts) | v1 + bolts | v2 (bolt-first) |
+|---|---|---|---|
+| T1 loose (12 GT) | 11 | **12** | 10 |
+| T1 strict (12 GT) | 5 | **7** | 3 |
+| T22 loose (9 GT) | 9 | **9** | 5 |
+| T22 strict (9 GT) | 2 | **2** | 0 |
+
+**v2 is strictly worse than v1+bolts on this dataset.** The architectural
+reason is that Phase A is the load-bearing recall mechanism on
+T22-style subjects where electrode contacts are dim (below ~1500 HU) —
+the bolt signal alone can't walk through the bolt-to-first-contact
+gap without Phase A's pre-extracted atom cloud. We verified this
+directly: v1 with ``use_bolt_detection=False`` on T22 gets 9/9 loose,
+which means T22's full recall is from Phase A, not from bolts.
+
+v2 is shipped as a proof-of-concept for the "bolts are the primary
+signal" architecture, suitable for subjects with bright, mask-continuous
+electrodes (T1-like). For production recall, use v1 with
+``model_fit.use_bolt_detection=True``.
+
+### Open problems for a future v2
+
+The 5 T22 shanks v2 misses all share the same failure mode: the
+bolt-anchored inward walk stops within ~15 mm of the bolt because
+the electrode contacts are below the loose metal threshold. Possible
+directions for a future iteration:
+
+- **Use the intensity profile directly instead of a thresholded mask.**
+  Track the deepest sample above a per-electrode adaptive floor (e.g.,
+  profile_max * 0.2) rather than a global HU threshold.
+- **Use the Frangi/Sato tubularity filter** as the primary signal
+  instead of HU thresholding. A 1.5 mm-scale line filter should light
+  up electrode shanks regardless of absolute HU.
+- **Fall back to Phase A when v2 fails.** Run v2 first, then for any
+  bolt whose fit was rejected, run Phase A restricted to the bolt's
+  deep_core shrink region, with the bolt's axis as a strong seed.
+  This would effectively be v1+bolts with bolt priority inverted.
 
 ## Bolt detection integration (2026-04-15)
 

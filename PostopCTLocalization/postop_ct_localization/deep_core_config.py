@@ -518,6 +518,146 @@ class DeepCoreModelFitConfig:
             ),
         ),
     )
+    # --- deep_core_v2 bolt-first fit knobs -------------------------------
+    v2_fit_mode: str = field(
+        default="two_threshold",
+        metadata={"ui": False},
+    )
+    v2_contact_hu: float = field(
+        default=400.0,
+        metadata=_ui_meta(
+            "v2 contact HU",
+            minimum=200.0,
+            maximum=2500.0,
+            decimals=0,
+            suffix=" HU",
+            advanced=True,
+            description=(
+                "Loose metal threshold used by v2 Approach A to walk"
+                " electrode contacts inward from the bolt."
+            ),
+        ),
+    )
+    v2_contact_probe_radius_mm: float = field(
+        default=2.5,
+        metadata=_ui_meta(
+            "v2 contact probe radius",
+            minimum=0.5,
+            maximum=6.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Radius of the lateral tube used to sample contacts along"
+                " the bolt axis for v2 Approach A."
+            ),
+        ),
+    )
+    v2_contact_max_gap_mm: float = field(
+        default=15.0,
+        metadata=_ui_meta(
+            "v2 contact max gap",
+            minimum=0.0,
+            maximum=25.0,
+            decimals=1,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Max contiguous non-metal gap tolerated while walking the"
+                " contacts inward from the bolt in v2 Approach A."
+            ),
+        ),
+    )
+    v2_profile_step_mm: float = field(
+        default=0.25,
+        metadata=_ui_meta(
+            "v2 profile step",
+            minimum=0.1,
+            maximum=1.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Axial sampling step for the intensity profile in v2"
+                " Approach B (intensity peaks)."
+            ),
+        ),
+    )
+    v2_profile_disc_radius_mm: float = field(
+        default=2.5,
+        metadata=_ui_meta(
+            "v2 profile disc radius",
+            minimum=1.0,
+            maximum=6.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Radius of the perpendicular disc used to compute the max"
+                " HU at each axial sample for v2 Approach B."
+            ),
+        ),
+    )
+    v2_profile_min_peak_sep_mm: float = field(
+        default=2.5,
+        metadata=_ui_meta(
+            "v2 profile min peak separation",
+            minimum=1.0,
+            maximum=10.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Minimum axial separation between detected peaks in the"
+                " v2 Approach B intensity profile."
+            ),
+        ),
+    )
+    v2_profile_peak_hu_floor: float = field(
+        default=800.0,
+        metadata=_ui_meta(
+            "v2 profile peak HU floor",
+            minimum=0.0,
+            maximum=3000.0,
+            decimals=0,
+            suffix=" HU",
+            advanced=True,
+            description=(
+                "Absolute HU floor for a profile sample to be considered"
+                " a peak in v2 Approach B."
+            ),
+        ),
+    )
+    v2_profile_peak_rel_frac: float = field(
+        default=0.35,
+        metadata=_ui_meta(
+            "v2 profile peak relative fraction",
+            minimum=0.1,
+            maximum=1.0,
+            decimals=2,
+            advanced=True,
+            description=(
+                "Minimum fraction of the profile max that a sample must"
+                " reach to qualify as a peak in v2 Approach B."
+            ),
+        ),
+    )
+    v2_profile_peak_match_tol_mm: float = field(
+        default=1.5,
+        metadata=_ui_meta(
+            "v2 profile peak match tolerance",
+            minimum=0.5,
+            maximum=5.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Tolerance for aligning library contact offsets to observed"
+                " peaks in v2 Approach B."
+            ),
+        ),
+    )
+
     bolt_endpoint_offset_mm: float = field(
         default=8.0,
         metadata=_ui_meta(
@@ -1016,6 +1156,15 @@ _UI_FIELD_ORDER = (
     "model_fit.use_bolt_detection",
     "model_fit.bolt_bridge_radial_tol_mm",
     "model_fit.bolt_endpoint_offset_mm",
+    "model_fit.v2_contact_hu",
+    "model_fit.v2_contact_probe_radius_mm",
+    "model_fit.v2_contact_max_gap_mm",
+    "model_fit.v2_profile_step_mm",
+    "model_fit.v2_profile_disc_radius_mm",
+    "model_fit.v2_profile_min_peak_sep_mm",
+    "model_fit.v2_profile_peak_hu_floor",
+    "model_fit.v2_profile_peak_rel_frac",
+    "model_fit.v2_profile_peak_match_tol_mm",
     "bolt.enabled",
     "bolt.span_min_mm",
     "bolt.span_max_mm",
