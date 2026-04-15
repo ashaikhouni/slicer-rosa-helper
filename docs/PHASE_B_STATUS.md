@@ -1,6 +1,6 @@
 # Deep Core Phase B Status — handoff doc
 
-Last updated: 2026-04-13.
+Last updated: 2026-04-15.
 Replaces the previous template-matching status (commits c119c69 and earlier).
 
 ## What this document is
@@ -78,14 +78,129 @@ This replaces the segment-based perpendicular-distance conflict resolver from ea
 
 Run with `/Users/ammar/miniforge3/envs/shankdetect/bin/python3 -m unittest tests.deep_core.test_pipeline_dataset` from the helper root. The local Python venv lacks SimpleITK and vtk; you must use the `shankdetect` conda env for the dataset regression.
 
-| Subject | Pre-redesign | Now |
-|---|---|---|
-| T1 loose (12 GT) | 8 | **11** |
-| T1 strict (12 GT) | 3 | **5** |
-| T22 loose (9 GT) | 4 | **9** (with `mask.metal_threshold_hu = 1100`) |
-| T22 strict (9 GT) | 1 | **2** |
+| Subject | Pre-redesign | Phase B only | Phase B + bolt detection |
+|---|---|---|---|
+| T1 loose (12 GT) | 8 | 11 | **12** |
+| T1 strict (12 GT) | 3 | 5 | **7** |
+| T22 loose (9 GT) | 4 | 9 (with `mask.metal_threshold_hu = 1100`) | **9** |
+| T22 strict (9 GT) | 1 | 2 | **2** |
 
-Helper unit tests: 18, all passing.
+Helper unit tests: 18, all passing.  Bolt detection tests: 3, all passing.
+Dataset regression tests: 4 (baseline + bolt-enabled for T1 and T22), all passing.
+
+## Bolt detection integration (2026-04-15)
+
+A new RANSAC-based **bolt detection** stage runs between `_run_mask` and
+`_run_support`. It finds the saturation-bright solid stainless-steel SEEG
+bolts as line segments in the CT, giving each electrode a per-shank anchor
+with a precise axis *before* Phase B sees the proposal.
+
+### What changed
+
+1. **`_run_mask`** now composes `hull_mask ∪ internal_air_mask` as the source
+   for `head_distance_map_kji`. `hull_mask_kji` is unchanged (cleaned structural
+   envelope); internal sinuses and other trapped air pockets are unioned in so
+   EDT measures depth from the *outer skin surface*, not from the nearest
+   sinus. Fixes the sinus-eats-shrink problem that was losing deep tips near
+   frontal/maxillary sinuses (T22 RGR symptom).
+2. **`_run_mask`** also emits a second metal mask `bolt_metal_mask_kji` at
+   `mask.bolt_metal_threshold_hu` (default **2000 HU**, higher than the regular
+   `metal_threshold_hu=1900` so contacts and bone chunks drop out, leaving only
+   saturation-bright bolt material).
+3. **`_run_bolt_detection`** is a new stage that runs
+   `postop_ct_localization.deep_core_bolt_ransac.find_bolt_candidates` on
+   `bolt_metal_mask_kji` to extract line candidates. It applies these gates:
+   - RANSAC line fit with span ∈ [10, 40] mm
+   - fill-fraction along the span ≥ 0.80 (contact trains with gaps fail)
+   - max contiguous gap ≤ 3 mm
+   - shallow shell: `head_distance` at center ∈ [−5, 35] mm (rejects deep
+     metal blobs and trapped calcifications)
+   - axis-depth gradient: probing inward along the axis must increase
+     `head_distance` by ≥ 8 mm (rejects dental/jaw metal that runs
+     parallel to the skin)
+   - support-overlap dedup (drops fragmented same-bolt candidates)
+   - collinear-along-axis dedup (drops same-electrode segments, keeping
+     the shallower one — the actual bolt)
+4. **`_run_model_fit`** accepts an optional `bolt_output` parameter. When
+   `model_fit.use_bolt_detection = True`, each bolt is turned into one
+   synthetic proposal:
+   - `bolt_bridged` if `reabsorb_colinear_atoms` finds support atoms within
+     `model_fit.bolt_bridge_radial_tol_mm` (default 2.5 mm) of the bolt axis
+   - `bolt_only` otherwise. The bolt inlier RAS points are appended to
+     `blob_sample_points_ras` and referenced via `token_indices`, so
+     `_gather_initial_cloud` builds a non-empty cloud even when no atoms
+     are colinear.
+5. **`run_model_fit_group`** uses a new priority tier:
+   `bolt_bridged > atoms_only > bolt_only`. Tier ties break by atom count
+   then cluster span (unchanged from before).
+
+The bolt stage is on by default (`bolt.enabled = True`). The model_fit
+integration is **off by default** (`model_fit.use_bolt_detection = False`)
+while we validate on more subjects. Both paths are covered by dataset
+regression tests.
+
+### Current numbers with bolt detection
+
+| Subject | Baseline (loose/strict) | With bolts (loose/strict) | Gain |
+|---|---|---|---|
+| T1 | 11/5 | **12/7** | **full recall**, RAMC recovered, +2 strict |
+| T22 | 9/2 | 9/2 | same (already full loose recall) |
+
+**Total across both: 21/21 loose, 9/21 strict** — up from 20/21 loose,
+7/21 strict with the baseline.
+
+**Two separate fixes were needed** inside `_fit_one_proposal` for the
+bolt integration to actually change outcomes:
+
+1. **Force the bolt axis onto the fit** after the cloud PCA and outlier
+   pruning. Without this, Phase B's PCA refit on the atom cloud (plus
+   reabsorbed atoms) overrides the bolt's precise RANSAC axis — the bolt
+   only serves as the initial PCA seed, which it then gets rotated away
+   from. With the forced axis, the bolt's ~0.5° RANSAC accuracy survives
+   into the extension and endpoint phases.
+2. **Bolt-anchored shallow endpoint**. `find_intracranial_exit_by_head_distance`
+   uses a global `intracranial_exit_head_distance_mm = 15.0` threshold
+   that lands different shanks on different subjects — T1's RAMC needed
+   ~13mm to pass the loose 10mm end_error gate, but T22 needed the full
+   15mm. No single global value works. For bolt-seeded proposals we now
+   anchor the shallow endpoint to the bolt center directly:
+   `t_interface = t_bolt_center - bolt_endpoint_offset_mm` (default 8mm,
+   insensitive in the 3–9mm range for the dataset). This replaces the
+   brittle per-subject calibration with a physical landmark.
+
+**T1 RAMC recovery**: under baseline, RAMC's predicted trajectory existed
+but failed the loose 10mm end_error gate by 0.49mm because the head_distance
+threshold landed slightly too shallow. The bolt anchor moves the endpoint
+inward by ~2mm, bringing end_error inside the tolerance.
+
+**T1 strict 5 → 7**: LCMN and one other borderline-strict shank are now
+passing the 4mm end_error gate thanks to the tighter bolt-anchored
+endpoint.
+
+**Prediction counts go up** (12 → 22 on T1, 9 → 17 on T22) because bolts
+emit their own proposals in parallel with Phase A. The priority tier
+`bolt_bridged > atoms_only > bolt_only` means bolt-sourced proposals
+run first and claim their atoms, after which the original Phase A
+proposals either fit on the remaining atoms or get rejected. The
+surplus predictions are the Phase A versions that had enough residual
+evidence to produce a separate fit; they're no worse than the bolt-sourced
+version in terms of accuracy.
+
+### Bolt detection performance
+
+- T1: ~4 s end-to-end (~11 700 voxels above 2000 HU; RANSAC dominates)
+- T22: ~1 s end-to-end (~1 700 voxels above 2000 HU)
+
+Bolt detection adds roughly `≤5 s` per subject for the default pipeline.
+The stage is pure numpy (RANSAC) plus SimpleITK only for the shell mask;
+it has no Slicer or vtk dependencies.
+
+### Probes
+
+- `tmp/probe_bolts_ransac_bolt.py` — the original design probe, still useful
+  for tuning gates and printing per-candidate diagnostics.
+- `tmp/probe_bolt_integration.py` — runs the full pipeline twice on T1/T22
+  (bolts off vs on) and reports per-shank hit diffs.
 
 ### Plan-predicted fixes
 

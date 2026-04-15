@@ -23,7 +23,11 @@ except ImportError:
     sitk = None
 
 from shank_core.blob_candidates import build_blob_labelmap, extract_blob_candidates
-from shank_core.masking import compute_head_distance_map_kji, largest_component_binary
+from shank_core.masking import (
+    build_outside_air_mask_kji,
+    compute_head_distance_map_kji,
+    largest_component_binary,
+)
 
 from ..contracts import DetectionContext, DetectionResult
 from ..pipelines.base import BaseDetectionPipeline
@@ -419,8 +423,23 @@ def _make_pipeline_class():
                 hull_lcc = sitk.BinaryMorphologicalClosing(hull_lcc, [int(mcfg.hull_close_vox)] * 3, sitk.sitkBall)
             hull_mask_kji = sitk.GetArrayFromImage(hull_lcc).astype(bool)
 
+            # head_distance source: hull ∪ internal-air. The hull gives us a
+            # cleaned structural envelope (robust to flood-fill leaks through
+            # foramina/orbits), while internal-air fills sinuses and other
+            # trapped air pockets so they don't eat the shrink from the inside.
+            outside_air_kji = build_outside_air_mask_kji(
+                arr_kji, air_threshold_hu=float(mcfg.hull_threshold_hu)
+            )
+            if np.count_nonzero(outside_air_kji) > 0:
+                air_mask_kji = arr_kji < float(mcfg.hull_threshold_hu)
+                internal_air_kji = np.logical_and(air_mask_kji, np.logical_not(outside_air_kji))
+                head_mask_for_edt = np.logical_or(hull_mask_kji, internal_air_kji)
+            else:
+                # Degenerate case (head fills the volume, no boundary air):
+                # fall back to hull-only EDT, matching legacy behavior.
+                head_mask_for_edt = hull_mask_kji
             head_distance_map_kji = np.asarray(
-                compute_head_distance_map_kji(hull_mask_kji, spacing_xyz=spacing_xyz),
+                compute_head_distance_map_kji(head_mask_for_edt, spacing_xyz=spacing_xyz),
                 dtype=np.float32,
             )
             deep_core_mask_kji = np.logical_and(
@@ -429,6 +448,9 @@ def _make_pipeline_class():
             )
 
             metal_mask_kji = np.asarray(arr_kji >= float(mcfg.metal_threshold_hu), dtype=bool)
+            bolt_metal_mask_kji = np.asarray(
+                arr_kji >= float(mcfg.bolt_metal_threshold_hu), dtype=bool
+            )
             metal_grown_mask_kji = metal_mask_kji.copy()
             if int(mcfg.metal_grow_vox) > 0:
                 metal_img = sitk.GetImageFromArray(metal_mask_kji.astype(np.uint8))
@@ -440,6 +462,7 @@ def _make_pipeline_class():
                 "hull_mask_kji": hull_mask_kji,
                 "deep_core_mask_kji": deep_core_mask_kji,
                 "metal_mask_kji": metal_mask_kji,
+                "bolt_metal_mask_kji": bolt_metal_mask_kji,
                 "metal_grown_mask_kji": metal_grown_mask_kji,
                 "deep_seed_raw_mask_kji": np.logical_and(metal_mask_kji, deep_core_mask_kji),
                 "deep_seed_mask_kji": np.logical_and(metal_grown_mask_kji, deep_core_mask_kji),
@@ -449,6 +472,61 @@ def _make_pipeline_class():
                     "hull_voxels": int(np.count_nonzero(hull_mask_kji)),
                     "deep_core_voxels": int(np.count_nonzero(deep_core_mask_kji)),
                     "metal_voxels": int(np.count_nonzero(metal_mask_kji)),
+                    "bolt_metal_voxels": int(np.count_nonzero(bolt_metal_mask_kji)),
+                },
+            }
+
+        # ---------------------------------------------------------------
+        # Bolt detection stage (RANSAC on saturation-bright metal)
+        # ---------------------------------------------------------------
+
+        def _run_bolt_detection(self, ctx: DetectionContext, mask: dict, cfg) -> dict[str, Any]:
+            from postop_ct_localization.deep_core_bolt_ransac import (
+                BoltRansacConfig,
+                find_bolt_candidates,
+            )
+
+            bcfg = cfg.bolt
+            if not bool(bcfg.enabled):
+                return {"candidates": [], "stats": {"enabled": False}}
+
+            arr_kji = np.asarray(ctx["arr_kji"], dtype=np.float32)
+            ijk_fn = ctx.get("ijk_kji_to_ras_fn")
+            ras_to_ijk_fn = ctx.get("ras_to_ijk_fn")
+            if ijk_fn is None or ras_to_ijk_fn is None:
+                return {"candidates": [], "stats": {"enabled": True, "error": "no coordinate fns"}}
+
+            ransac_cfg = BoltRansacConfig(
+                span_min_mm=float(bcfg.span_min_mm),
+                span_max_mm=float(bcfg.span_max_mm),
+                inlier_tol_mm=float(bcfg.inlier_tol_mm),
+                min_inliers=int(bcfg.min_inliers),
+                fill_frac_min=float(bcfg.fill_frac_min),
+                max_gap_mm=float(bcfg.max_gap_mm),
+                shell_min_mm=float(bcfg.shell_min_mm),
+                shell_max_mm=float(bcfg.shell_max_mm),
+                axis_depth_delta_mm=float(bcfg.axis_depth_delta_mm),
+                support_overlap_frac=float(bcfg.support_overlap_frac),
+                collinear_angle_deg=float(bcfg.collinear_angle_deg),
+                collinear_perp_mm=float(bcfg.collinear_perp_mm),
+                max_lines=int(bcfg.max_lines),
+                n_samples=int(bcfg.n_samples),
+            )
+
+            candidates = find_bolt_candidates(
+                arr_kji=arr_kji,
+                bolt_metal_mask_kji=mask["bolt_metal_mask_kji"],
+                head_distance_map_kji=mask["head_distance_map_kji"],
+                ijk_kji_to_ras_fn=ijk_fn,
+                ras_to_ijk_fn=ras_to_ijk_fn,
+                cfg=ransac_cfg,
+            )
+            return {
+                "candidates": candidates,
+                "stats": {
+                    "enabled": True,
+                    "n_candidates": len(candidates),
+                    "bolt_metal_voxels": int(mask.get("stats", {}).get("bolt_metal_voxels", 0)),
                 },
             }
 
@@ -590,10 +668,18 @@ def _make_pipeline_class():
                 self._electrode_library = lib
             return lib
 
-        def _run_model_fit(self, ctx, support, proposals, dc):
+        def _run_model_fit(self, ctx, support, proposals, dc, bolt_output=None, mask=None):
             """Phase B: trajectory reconstruction (axis refinement, extension,
             bone↔brain interface, rejection). See
-            ``docs/PHASE_B_REDESIGN.md``. Currently a pass-through stub.
+            ``docs/PHASE_B_REDESIGN.md``.
+
+            When ``model_fit.use_bolt_detection`` is set and ``bolt_output``
+            contains bolt candidates, each bolt is turned into one synthetic
+            proposal (``bolt_bridged`` when colinear support atoms are found,
+            otherwise ``bolt_only``) and merged into the proposal list. The
+            blob_sample_points_ras array is extended with the bolt inlier
+            points so bolt-only proposals still have a non-empty initial
+            cloud via ``token_indices``.
             """
             from postop_ct_localization.deep_core_model_fit import (
                 filter_models_by_family,
@@ -605,8 +691,97 @@ def _make_pipeline_class():
             models = filter_models_by_family(library, tuple(mfg.families))
 
             input_proposals = list(proposals.get("proposals") or [])
+            for p in input_proposals:
+                p.setdefault("source", "atoms_only")
+
             arr_kji = np.asarray(ctx["arr_kji"], dtype=float)
             ras_to_ijk_fn = ctx["ras_to_ijk_fn"]
+
+            blob_points = support.get("blob_sample_points_ras")
+            blob_points_arr = (
+                np.asarray(blob_points, dtype=float).reshape(-1, 3)
+                if blob_points is not None else np.zeros((0, 3), dtype=float)
+            )
+            support_atoms = list(support.get("support_atoms") or [])
+
+            bolt_stats = {"bolt_bridged": 0, "bolt_only": 0}
+            if bool(mfg.use_bolt_detection) and bolt_output is not None:
+                bolt_candidates = list(bolt_output.get("candidates") or [])
+                if bolt_candidates:
+                    from postop_ct_localization import deep_core_axis_reconstruction as axr
+
+                    # Reconstruct the bolt-metal point cloud once so we can
+                    # slice each bolt's inliers and add them to
+                    # ``blob_sample_points_ras``.
+                    bolt_metal_mask = None
+                    if mask is not None:
+                        bolt_metal_mask = mask.get("bolt_metal_mask_kji")
+                    if bolt_metal_mask is not None:
+                        ijk_fn = ctx.get("ijk_kji_to_ras_fn")
+                        idx = np.argwhere(np.asarray(bolt_metal_mask, dtype=bool))
+                        bolt_cloud = np.asarray(ijk_fn(idx.astype(float)), dtype=float)
+                    else:
+                        bolt_cloud = np.zeros((0, 3), dtype=float)
+
+                    new_blob_points = [blob_points_arr]
+                    next_tok_idx = int(blob_points_arr.shape[0])
+                    bridge_tol = float(getattr(mfg, "bolt_bridge_radial_tol_mm", 2.5))
+                    for bc in bolt_candidates:
+                        inlier_pts = bolt_cloud[bc.support_mask] if bolt_cloud.size else np.zeros((0, 3))
+                        if inlier_pts.shape[0] < 3:
+                            continue
+                        # Build an AxisFit so we can reuse the reabsorb helper
+                        # with the bolt's precise RANSAC axis as the seed.
+                        fit = axr.refine_axis_from_cloud(inlier_pts, seed_axis=bc.axis_ras)
+                        if fit is None:
+                            continue
+                        # Temporarily override the radial tolerance for the
+                        # bridge query so we pick up atoms a bit further from
+                        # the axis than the reabsorb default (2.5mm by default).
+                        class _Shim:
+                            pass
+                        shim = _Shim()
+                        shim.reabsorb_radial_tol_mm = bridge_tol
+                        shim.reabsorb_angle_tol_deg = float(
+                            getattr(mfg, "reabsorb_angle_tol_deg", 5.0)
+                        )
+                        atom_ids = axr.reabsorb_colinear_atoms(
+                            fit, support_atoms, shim, already_absorbed_ids=set()
+                        )
+
+                        # Stash bolt inlier points at the end of
+                        # blob_sample_points_ras and reference them via
+                        # token_indices. This is how Phase B's
+                        # _gather_initial_cloud receives extra cloud points
+                        # without touching support_atoms.
+                        token_start = next_tok_idx
+                        new_blob_points.append(inlier_pts)
+                        next_tok_idx += inlier_pts.shape[0]
+                        token_indices = list(range(token_start, next_tok_idx))
+
+                        source = "bolt_bridged" if atom_ids else "bolt_only"
+                        t_min = float(fit.t_min)
+                        t_max = float(fit.t_max)
+                        start_ras = fit.center + fit.axis * t_min
+                        end_ras = fit.center + fit.axis * t_max
+                        synth = {
+                            "source": source,
+                            "atom_id_list": [int(v) for v in atom_ids],
+                            "token_indices": token_indices,
+                            "axis_ras": [float(v) for v in fit.axis],
+                            "start_ras": [float(v) for v in start_ras],
+                            "end_ras": [float(v) for v in end_ras],
+                            "bolt_seed": True,
+                            "bolt_center_ras": [float(v) for v in bc.center_ras],
+                            "bolt_span_mm": float(bc.span_mm),
+                            "bolt_hd_center_mm": float(bc.hd_center_mm),
+                            "bolt_fill_frac": float(bc.fill_frac),
+                        }
+                        input_proposals.append(synth)
+                        bolt_stats[source] += 1
+
+                    if next_tok_idx > blob_points_arr.shape[0]:
+                        blob_points_arr = np.concatenate(new_blob_points, axis=0)
 
             result = run_model_fit_group(
                 proposals=input_proposals,
@@ -617,12 +792,14 @@ def _make_pipeline_class():
                 cfg=mfg,
                 metal_mask_kji=support.get("metal_mask_kji"),
                 hull_mask_kji=support.get("hull_mask_kji"),
-                support_atoms=list(support.get("support_atoms") or []),
-                blob_sample_points_ras=support.get("blob_sample_points_ras"),
+                support_atoms=support_atoms,
+                blob_sample_points_ras=blob_points_arr,
             )
             out = dict(proposals)
             out["proposals"] = list(result["accepted_proposals"])
-            out["model_fit_stats"] = dict(result.get("stats") or {})
+            stats_out = dict(result.get("stats") or {})
+            stats_out.update(bolt_stats)
+            out["model_fit_stats"] = stats_out
             return out
 
         # ---------------------------------------------------------------
@@ -688,6 +865,10 @@ def _make_pipeline_class():
                 mask = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="mask", fn=lambda: self._run_mask(ctx, cfg))
 
+                bolt = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
+                    stage_name="bolt_detection",
+                    fn=lambda: self._run_bolt_detection(ctx, mask, cfg))
+
                 support = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                     stage_name="support", fn=lambda: self._run_support(ctx, mask, cfg))
 
@@ -702,7 +883,8 @@ def _make_pipeline_class():
                 if cfg.model_fit.enabled:
                     proposals = self.run_stage(ctx=ctx, result=result, diagnostics=diag,
                         stage_name="model_fit",
-                        fn=lambda: self._run_model_fit(ctx, support, proposals, cfg))
+                        fn=lambda: self._run_model_fit(ctx, support, proposals, cfg,
+                                                        bolt_output=bolt, mask=mask))
                     # model_fit's group assignment + hard-reject already
                     # handles dedup and rejection; skip final_rejection.
                 else:
@@ -721,6 +903,7 @@ def _make_pipeline_class():
                 # Cache heavy data on self — NOT in result (sanitize_result
                 # would try to JSON-serialize numpy arrays).
                 self._last_mask_output = mask
+                self._last_bolt_output = bolt
                 self._last_support_output = support
                 self._last_proposal_payload = proposals
 

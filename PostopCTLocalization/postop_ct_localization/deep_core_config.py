@@ -127,6 +127,18 @@ class DeepCoreMaskConfig:
             description="Threshold used to define metal support voxels.",
         ),
     )
+    bolt_metal_threshold_hu: float = field(
+        default=2000.0,
+        metadata=_ui_meta(
+            "Bolt metal threshold",
+            minimum=1000.0,
+            maximum=5000.0,
+            decimals=1,
+            suffix=" HU",
+            description=("Higher threshold used to isolate saturation-bright bolt"
+                         " metal for the bolt RANSAC stage."),
+        ),
+    )
     metal_grow_vox: int = field(
         default=1,
         metadata=_ui_meta(
@@ -490,6 +502,55 @@ class DeepCoreModelFitConfig:
             description="Run the trajectory reconstruction stage after annulus rejection.",
         ),
     )
+    use_bolt_detection: bool = field(
+        default=False,
+        metadata=_ui_meta(
+            "Use bolt detection",
+            minimum=0,
+            maximum=1,
+            control="bool",
+            description=(
+                "When enabled, bolt candidates from the bolt_detection stage"
+                " are converted into synthetic proposals (bolt_bridged or"
+                " bolt_only) and merged with the atoms-only proposals coming"
+                " from Phase A. Bolt-sourced proposals get priority in the"
+                " claim-based assignment."
+            ),
+        ),
+    )
+    bolt_endpoint_offset_mm: float = field(
+        default=8.0,
+        metadata=_ui_meta(
+            "Bolt endpoint offset",
+            minimum=0.0,
+            maximum=30.0,
+            decimals=1,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "For bolt-seeded proposals, the shallow intracranial endpoint"
+                " is placed this far inward of the bolt center along the"
+                " fit axis. Replaces the per-subject head_distance threshold"
+                " calibration."
+            ),
+        ),
+    )
+    bolt_bridge_radial_tol_mm: float = field(
+        default=2.5,
+        metadata=_ui_meta(
+            "Bolt bridge radial tol",
+            minimum=0.5,
+            maximum=6.0,
+            decimals=2,
+            suffix=" mm",
+            advanced=True,
+            description=(
+                "Maximum perpendicular distance from the bolt axis for a"
+                " support atom to be considered colinear and reabsorbed into"
+                " a bolt-bridged proposal."
+            ),
+        ),
+    )
     families: tuple[str, ...] = field(
         default=("DIXI",),
         metadata={"ui": False},
@@ -747,6 +808,127 @@ class DeepCoreModelFitConfig:
 
 
 @dataclass(frozen=True)
+class DeepCoreBoltConfig:
+    """RANSAC-based bolt detection parameters (upstream of Phase B)."""
+
+    enabled: bool = field(
+        default=True,
+        metadata=_ui_meta(
+            "Bolt detection enabled",
+            minimum=0,
+            maximum=1,
+            control="bool",
+            description="Run the RANSAC bolt detection stage before Phase B.",
+        ),
+    )
+    span_min_mm: float = field(
+        default=10.0,
+        metadata=_ui_meta(
+            "Bolt span min", minimum=1.0, maximum=30.0, decimals=1,
+            suffix=" mm", description="Minimum axial span for a bolt candidate.",
+        ),
+    )
+    span_max_mm: float = field(
+        default=40.0,
+        metadata=_ui_meta(
+            "Bolt span max", minimum=5.0, maximum=80.0, decimals=1,
+            suffix=" mm", description="Maximum axial span for a bolt candidate.",
+        ),
+    )
+    inlier_tol_mm: float = field(
+        default=1.5,
+        metadata=_ui_meta(
+            "Bolt inlier tolerance", minimum=0.5, maximum=5.0, decimals=2,
+            suffix=" mm", description="Perpendicular tolerance for RANSAC inliers.",
+        ),
+    )
+    min_inliers: int = field(
+        default=15,
+        metadata=_ui_meta(
+            "Bolt min inliers", minimum=5, maximum=200, control="int",
+            description="Minimum voxel count for an accepted line.",
+        ),
+    )
+    fill_frac_min: float = field(
+        default=0.80,
+        metadata=_ui_meta(
+            "Bolt fill fraction", minimum=0.3, maximum=1.0, decimals=2,
+            description=("Fraction of sampled points along the span that must"
+                         " have a supporting metal voxel."),
+        ),
+    )
+    max_gap_mm: float = field(
+        default=3.0,
+        metadata=_ui_meta(
+            "Bolt max gap", minimum=0.5, maximum=10.0, decimals=1,
+            suffix=" mm", description="Longest allowed continuous gap along the span.",
+        ),
+    )
+    shell_min_mm: float = field(
+        default=-5.0,
+        metadata=_ui_meta(
+            "Bolt shell min", minimum=-20.0, maximum=10.0, decimals=1,
+            suffix=" mm", description="Lower bound on head_distance at the bolt center.",
+        ),
+    )
+    shell_max_mm: float = field(
+        default=35.0,
+        metadata=_ui_meta(
+            "Bolt shell max", minimum=5.0, maximum=60.0, decimals=1,
+            suffix=" mm", description="Upper bound on head_distance at the bolt center.",
+        ),
+    )
+    axis_depth_delta_mm: float = field(
+        default=8.0,
+        metadata=_ui_meta(
+            "Bolt axis-depth delta", minimum=0.0, maximum=30.0, decimals=1,
+            suffix=" mm",
+            description=("Minimum increase in head_distance when probing inward"
+                         " along the bolt axis. Rejects lines that run along the skin."),
+        ),
+    )
+    support_overlap_frac: float = field(
+        default=0.70,
+        metadata=_ui_meta(
+            "Bolt support overlap", minimum=0.3, maximum=1.0, decimals=2,
+            description=("Drop a candidate whose support voxels are this fraction"
+                         " contained in another accepted candidate."),
+        ),
+    )
+    collinear_angle_deg: float = field(
+        default=10.0,
+        metadata=_ui_meta(
+            "Bolt collinear angle", minimum=0.0, maximum=30.0, decimals=1,
+            suffix=" deg",
+            description=("Maximum axis angle (in degrees) for a collinear-dedup"
+                         " match when the two candidates share an electrode."),
+        ),
+    )
+    collinear_perp_mm: float = field(
+        default=5.0,
+        metadata=_ui_meta(
+            "Bolt collinear perp", minimum=0.0, maximum=15.0, decimals=1,
+            suffix=" mm",
+            description="Maximum perpendicular distance for a collinear-dedup match.",
+        ),
+    )
+    max_lines: int = field(
+        default=40,
+        metadata=_ui_meta(
+            "Bolt max lines", minimum=5, maximum=200, control="int",
+            description="Cap on the number of RANSAC lines to extract.",
+        ),
+    )
+    n_samples: int = field(
+        default=4000,
+        metadata=_ui_meta(
+            "Bolt RANSAC samples", minimum=200, maximum=20000, control="int",
+            description="RANSAC hypothesis count per iteration.",
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class DeepCoreConfig:
     """Top-level Deep Core configuration."""
 
@@ -756,6 +938,7 @@ class DeepCoreConfig:
     annulus: DeepCoreAnnulusConfig = field(default_factory=DeepCoreAnnulusConfig)
     internal: DeepCoreInternalConfig = field(default_factory=DeepCoreInternalConfig)
     model_fit: DeepCoreModelFitConfig = field(default_factory=DeepCoreModelFitConfig)
+    bolt: DeepCoreBoltConfig = field(default_factory=DeepCoreBoltConfig)
 
     def with_updates(self, updates: dict[str, Any]) -> "DeepCoreConfig":
         """Return a copy with dotted-path updates applied."""
@@ -776,7 +959,7 @@ class DeepCoreConfig:
         """Flatten nested config sections for logging/debugging."""
 
         out: dict[str, Any] = {}
-        for section_name in ("mask", "support", "proposal", "annulus", "internal", "model_fit"):
+        for section_name in ("mask", "support", "proposal", "annulus", "internal", "model_fit", "bolt"):
             section_obj = getattr(self, section_name)
             for f in fields(section_obj):
                 out[f"{section_name}.{f.name}"] = getattr(section_obj, f.name)
@@ -807,6 +990,7 @@ _UI_FIELD_ORDER = (
     "mask.hull_close_vox",
     "mask.deep_core_shrink_mm",
     "mask.metal_threshold_hu",
+    "mask.bolt_metal_threshold_hu",
     "mask.metal_grow_vox",
     "support.support_spacing_mm",
     "support.component_min_elongation",
@@ -829,6 +1013,24 @@ _UI_FIELD_ORDER = (
     "proposal.outward_support_min_depth_gain_mm",
     "internal.complex_seed_preferred_annulus_percentile",
     "internal.complex_seed_min_head_depth_mm",
+    "model_fit.use_bolt_detection",
+    "model_fit.bolt_bridge_radial_tol_mm",
+    "model_fit.bolt_endpoint_offset_mm",
+    "bolt.enabled",
+    "bolt.span_min_mm",
+    "bolt.span_max_mm",
+    "bolt.inlier_tol_mm",
+    "bolt.min_inliers",
+    "bolt.fill_frac_min",
+    "bolt.max_gap_mm",
+    "bolt.shell_min_mm",
+    "bolt.shell_max_mm",
+    "bolt.axis_depth_delta_mm",
+    "bolt.support_overlap_frac",
+    "bolt.collinear_angle_deg",
+    "bolt.collinear_perp_mm",
+    "bolt.max_lines",
+    "bolt.n_samples",
 )
 
 

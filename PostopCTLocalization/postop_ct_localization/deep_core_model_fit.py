@@ -144,15 +144,16 @@ def _fit_one_proposal(
         return None
     max_residual = float(getattr(cfg, "axis_fit_max_residual_mm", 1.2))
 
-    # Step 1.5 — outlier-atom pruning. If the proposal's atom_id_list
-    # bundles atoms from two parallel shanks (a bridged proposal), the
-    # initial PCA fit splits the difference. Drop atoms whose points
-    # sit far off the fit line and refit. This recovers RAMC-class
-    # cases where Phase A's chaining grabbed a stray atom from a
-    # neighbour. No-op when all atoms agree.
-    if len(initial_atom_list) >= 3:
+    # Step 1.5 — outlier-atom pruning by per-atom perpendicular
+    # distance. If the proposal's atom_id_list bundles atoms from
+    # two parallel shanks, the initial PCA fit splits the difference
+    # and each individual atom's points sit well off the line; drop
+    # the worst and refit. Allowed to go down to a single atom
+    # (``min_keep=1``) so 2-atom proposals can be salvaged when one
+    # atom is clean and the other is noise.
+    if len(initial_atom_list) >= 2:
         kept_ids = axr.prune_outlier_atoms(
-            initial_atom_list, atom_by_id, fit, cfg, min_keep=2
+            initial_atom_list, atom_by_id, fit, cfg, min_keep=1
         )
         if len(kept_ids) < len(initial_atom_list):
             cloud_kept: list[np.ndarray] = []
@@ -191,6 +192,34 @@ def _fit_one_proposal(
                 fit = refined
                 initial_cloud = combined
     explained_atom_ids = sorted(initial_atom_ids | set(int(v) for v in reabsorbed))
+
+    # Step 2.5 — bolt-axis override. For bolt-seeded proposals, the
+    # proposal's ``axis_ras`` came from a global RANSAC fit over the
+    # saturation-bright metal cloud and is typically much more accurate
+    # than the per-shank PCA axis (which is dominated by a handful of
+    # contact voxels and drifts under reabsorption). Force that axis
+    # onto the fit and recompute axial extent + residuals on the current
+    # cloud so downstream extension/classification steps use it.
+    if prop.get("bolt_seed") and prop.get("axis_ras") is not None:
+        forced = np.asarray(prop["axis_ras"], dtype=float).reshape(3)
+        fn = float(np.linalg.norm(forced))
+        if fn > 1e-6:
+            forced = forced / fn
+            # Preserve current orientation — scalp-exit step will flip
+            # later if needed.
+            if float(np.dot(forced, fit.axis)) < 0.0:
+                forced = -forced
+            centered = initial_cloud - fit.center.reshape(1, 3)
+            axial = (centered @ forced.reshape(3, 1)).reshape(-1)
+            lateral = centered - axial.reshape(-1, 1) * forced.reshape(1, 3)
+            radial = np.linalg.norm(lateral, axis=1)
+            fit.axis = forced
+            if axial.size:
+                fit.t_min = float(np.min(axial))
+                fit.t_max = float(np.max(axial))
+            if radial.size:
+                fit.residual_rms_mm = float(np.sqrt(np.mean(radial * radial)))
+                fit.residual_median_mm = float(np.median(radial))
 
     # Step 3 — metal profile (diagnostic only for now; the extension
     # step relies on the mask rather than this profile).
@@ -244,6 +273,22 @@ def _fit_one_proposal(
     )
     if t_interface is None:
         t_interface = float(t_shallow_ext)
+
+    # Bolt-anchored endpoint override. For bolt-seeded proposals, the
+    # calibrated head_distance threshold lands a few mm off on T1's
+    # RAMC and drifts inconsistently between subjects (T1 wants ~13mm,
+    # T22 wants ~15mm). The bolt itself is a physical landmark: the
+    # first shallow contact typically sits ``bolt_endpoint_offset_mm``
+    # inward of the bolt center, along the (scalp-exit-oriented) fit
+    # axis. Use that directly instead of the global threshold.
+    if prop.get("bolt_seed") and prop.get("bolt_center_ras") is not None:
+        bolt_center = np.asarray(prop["bolt_center_ras"], dtype=float).reshape(3)
+        t_bolt_center = float(np.dot(bolt_center - fit.center, fit.axis))
+        bolt_endpoint_offset = float(
+            getattr(cfg, "bolt_endpoint_offset_mm", 8.0)
+        )
+        t_interface_bolt = t_bolt_center - bolt_endpoint_offset
+        t_interface = float(t_interface_bolt)
 
     # Deep endpoint = the deepest observed metal voxel. Earlier
     # iterations tried to pin this to the deepest brain sample
@@ -415,7 +460,15 @@ def run_model_fit_group(
     # atoms are gone, and a bridged proposal spanning that shank plus
     # a neighbour will fail the scalp-exit gate with its remaining
     # atoms.
+    # Priority tiers by source: bolt_bridged (axis is clean AND we have atoms)
+    # fits first, then atoms_only (legacy Phase A proposals), then bolt_only
+    # (axis only, cloud may be thin). Within each tier, prefer proposals with
+    # more atoms then longer cluster span.
+    _SOURCE_RANK = {"bolt_bridged": 0, "atoms_only": 1, "bolt_only": 2}
+
     def _priority_key(prop: dict[str, Any]) -> tuple:
+        source = str(prop.get("source", "atoms_only"))
+        rank = _SOURCE_RANK.get(source, 1)
         atoms = list(prop.get("atom_id_list") or [])
         s = prop.get("start_ras")
         e = prop.get("end_ras")
@@ -427,7 +480,7 @@ def run_model_fit_group(
                     - np.asarray(s, dtype=float).reshape(3)
                 )
             )
-        return (-int(len(atoms)), -float(span))
+        return (rank, -int(len(atoms)), -float(span))
 
     ordered = sorted(list(proposals or []), key=_priority_key)
 

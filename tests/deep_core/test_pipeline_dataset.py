@@ -122,6 +122,56 @@ class DeepCoreV1DatasetRegressionTests(unittest.TestCase):
         self.assertGreaterEqual(n_loose, 11, f"Loose match regressed: {n_loose}/{len(gt)}")
         self.assertGreaterEqual(n_strict, 5, f"Strict match regressed: {n_strict}/{len(gt)}")
 
+    def test_T1_with_bolt_detection(self):
+        """T1 with model_fit.use_bolt_detection=True.
+
+        Bolt detection injects bolt-bridged / bolt-only proposals upstream of
+        Phase B and replaces the brittle head_distance-threshold shallow
+        endpoint calibration with a bolt-center-anchored endpoint. Locked-in
+        baseline: **12/12 loose (full recall!), ≥7/12 strict**. The default
+        (bolt-off) pipeline still sits at 11/12 loose / 5/12 strict, so the
+        bolt path is the only path that achieves full recall.
+        """
+        gt, pred, loose, strict = self._run_subject(
+            "T1",
+            deep_core_config_overrides={"model_fit.use_bolt_detection": True},
+        )
+        self.assertEqual(len(gt), 12, "T1 GT count drifted")
+        n_loose = int(loose.get("matched", 0))
+        n_strict = int(strict.get("matched", 0))
+        self.assertEqual(
+            n_loose, 12, f"Bolt-enabled loose match regressed: {n_loose}/{len(gt)}"
+        )
+        self.assertGreaterEqual(
+            n_strict, 7, f"Bolt-enabled strict match regressed: {n_strict}/{len(gt)}"
+        )
+
+    def test_T22_with_bolt_detection(self):
+        """T22 with bolt detection enabled.
+
+        Uses ``mask.metal_threshold_hu=1100`` and enables bolt detection.
+        Baseline: full 9/9 loose recall, 2/9 strict. The bolt path matches
+        the baseline; the main benefit is the shallow-endpoint fix on T1's
+        RAMC, not a T22 improvement (T22's calibration happened to already
+        hit 15mm cleanly under the head_distance threshold).
+        """
+        gt, pred, loose, strict = self._run_subject(
+            "T22",
+            deep_core_config_overrides={
+                "mask.metal_threshold_hu": 1100.0,
+                "model_fit.use_bolt_detection": True,
+            },
+        )
+        self.assertEqual(len(gt), 9, "T22 GT count drifted")
+        n_loose = int(loose.get("matched", 0))
+        n_strict = int(strict.get("matched", 0))
+        self.assertEqual(
+            n_loose, 9, f"Bolt-enabled loose match regressed: {n_loose}/{len(gt)}"
+        )
+        self.assertGreaterEqual(
+            n_strict, 2, f"Bolt-enabled strict match regressed: {n_strict}/{len(gt)}"
+        )
+
     def test_T22_metal_threshold_1100(self):
         """T22 with metal_threshold=1100: locked post-redesign baseline.
 
