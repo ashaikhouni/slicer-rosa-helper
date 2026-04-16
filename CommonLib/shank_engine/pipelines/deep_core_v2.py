@@ -32,6 +32,53 @@ class DeepCoreV2Pipeline(DeepCoreV1Pipeline):
     pipeline_id = "deep_core_v2"
     pipeline_version = "2.0.0"
 
+    @staticmethod
+    def _dedup_v2_trajectories(
+        trajectories, *, angle_deg=15.0, perp_mm=8.0,
+    ):
+        """Remove near-collinear duplicate trajectories, keeping the longer one."""
+        kept = []
+        for t in trajectories:
+            s = np.asarray(t["start_ras"], dtype=float)
+            e = np.asarray(t["end_ras"], dtype=float)
+            d = e - s
+            length = float(np.linalg.norm(d))
+            if length < 1e-6:
+                continue
+            axis = d / length
+            is_dup = False
+            for ki, k in enumerate(kept):
+                ks = np.asarray(k["start_ras"], dtype=float)
+                ke = np.asarray(k["end_ras"], dtype=float)
+                kd = ke - ks
+                klen = float(np.linalg.norm(kd))
+                if klen < 1e-6:
+                    continue
+                kaxis = kd / klen
+                cos = abs(float(np.dot(axis, kaxis)))
+                ang = float(np.degrees(np.arccos(min(1.0, cos))))
+                if ang > angle_deg:
+                    continue
+                mid = 0.5 * (s + e)
+                v = mid - ks
+                along = float(np.dot(v, kaxis))
+                perp = v - along * kaxis
+                pd = float(np.linalg.norm(perp))
+                # Reject if candidate midpoint projects outside the kept
+                # segment (with margin).  Prevents bilateral electrodes
+                # on opposite sides of the head from being merged.
+                margin = 0.5 * klen
+                if along < -margin or along > klen + margin:
+                    continue
+                if pd <= perp_mm:
+                    is_dup = True
+                    if length > klen:
+                        kept[ki] = t
+                    break
+            if not is_dup:
+                kept.append(t)
+        return kept
+
     def _run_bolt_fit(self, ctx, mask, bolt_output, cfg) -> dict[str, Any]:
         from postop_ct_localization import deep_core_v2_fit as v2fit
         from postop_ct_localization.deep_core_model_fit import filter_models_by_family
@@ -49,6 +96,7 @@ class DeepCoreV2Pipeline(DeepCoreV1Pipeline):
             arr_kji=arr_kji,
             head_distance_map_kji=head_distance_map_kji,
             ras_to_ijk_fn=ras_to_ijk_fn,
+            ijk_kji_to_ras_fn=ctx.get("ijk_kji_to_ras_fn"),
             library_models=models,
             cfg=mfg,
         )
@@ -85,7 +133,13 @@ class DeepCoreV2Pipeline(DeepCoreV1Pipeline):
                     fn=lambda: self._run_bolt_fit(ctx, mask, bolt, cfg),
                 )
 
-            result["trajectories"] = self._proposals_to_trajectories(proposals)
+            min_span = float(getattr(cfg.model_fit, "min_intracranial_span_mm", 15.0))
+            all_trajs = self._proposals_to_trajectories(proposals)
+            span_filtered = [
+                t for t in all_trajs
+                if float(t.get("intracranial_span_mm", t.get("span_mm", 0))) >= min_span
+            ]
+            result["trajectories"] = self._dedup_v2_trajectories(span_filtered)
 
             diag.set_count("proposal_count", len(result["trajectories"]))
             diag.set_count("atom_count", 0)

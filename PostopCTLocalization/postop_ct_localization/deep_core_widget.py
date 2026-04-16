@@ -194,6 +194,81 @@ class DeepCoreDebugWidgetMixin:
 
         self.deepCoreProposalDisplayModeCombo.currentIndexChanged.connect(self.onDeepCoreProposalDisplayModeChanged)
 
+    def _build_deep_core_v2_tab(self):
+        tab = qt.QWidget()
+        self.modeTabs.addTab(tab, "Deep Core v2")
+        form = qt.QFormLayout(tab)
+
+        help_text = qt.QLabel(
+            "Bolt-first pipeline: detect bolts via RANSAC on bright metal, "
+            "then fit electrode axes via cylinder RANSAC on intracranial contacts."
+        )
+        help_text.wordWrap = True
+        form.addRow(help_text)
+
+        button_row = qt.QHBoxLayout()
+        run_button = qt.QPushButton("Run Deep Core v2")
+        run_button.clicked.connect(self.onRunDeepCoreV2Clicked)
+        button_row.addWidget(run_button)
+        button_row.addStretch(1)
+        form.addRow(button_row)
+
+    def onRunDeepCoreV2Clicked(self):
+        volume_node = self.ctSelector.currentNode()
+        if volume_node is None:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
+            return
+        try:
+            config = self._deep_core_config_from_ui()
+            self.log("[deep-core-v2] running bolt-first pipeline...")
+            pipeline = self.logic.pipeline_registry.create_pipeline("deep_core_v2")
+            ctx = self.logic.build_deep_core_context(volume_node, config)
+            det_result = pipeline.run(ctx)
+            if det_result.get("status") == "error":
+                raise RuntimeError(det_result.get("error", {}).get("message", "unknown"))
+            trajectories = list(det_result.get("trajectories") or [])
+            self.log(f"[deep-core-v2] {len(trajectories)} trajectories detected")
+
+            self.logic.trajectory_scene.remove_preview_lines()
+            self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
+            nodes = self.logic.show_deep_core_proposals(
+                volume_node=volume_node, proposals=trajectories
+            ) or []
+            self._lastDeepCoreProposalNodes = nodes
+
+            if nodes:
+                rows = []
+                for node in nodes:
+                    traj = self.logic.trajectory_scene.trajectory_from_line_node("", node)
+                    if traj is None:
+                        continue
+                    rows.append(
+                        {
+                            "name": str(traj.get("name") or ""),
+                            "node_name": str(traj.get("node_name") or node.GetName() or ""),
+                            "node_id": str(traj.get("node_id") or node.GetID() or ""),
+                            "group": str(traj.get("group") or "autofit_preview"),
+                            "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
+                            "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
+                        }
+                    )
+                if rows:
+                    self.logic.publish_working_rows(
+                        rows,
+                        workflow_node=self.workflowNode,
+                        role="DeepCoreTrajectoryLines",
+                        source="postop_ct_deep_core",
+                    )
+                    self._set_workflow_active_source("deep_core")
+                    self._set_guided_source_combo("deep_core")
+                    self.onRefreshClicked()
+
+            self.log(f"[deep-core-v2] published {len(nodes)} trajectory lines to workflow")
+        except Exception as exc:
+            self.log(f"[deep-core-v2] error: {exc}")
+            import traceback; traceback.print_exc()
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
+
     def _deep_core_display_mode_key(self):
         return str(self.deepCoreProposalDisplayModeCombo.currentData or "all")
 

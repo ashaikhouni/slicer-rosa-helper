@@ -58,6 +58,13 @@ def _orient_bolt_axis_toward_scalp(
 
     hd_plus = hd(center_ras + 20.0 * axis_ras)
     hd_minus = hd(center_ras - 20.0 * axis_ras)
+    # Out-of-bounds (NaN) means outside the head → toward the scalp.
+    if not np.isfinite(hd_minus) and np.isfinite(hd_plus):
+        # -axis goes outside → -axis is scalp-ward → flip
+        return -axis_ras
+    if not np.isfinite(hd_plus) and np.isfinite(hd_minus):
+        # +axis goes outside → +axis is already scalp-ward → no flip
+        return axis_ras
     if np.isfinite(hd_plus) and np.isfinite(hd_minus) and hd_minus < hd_plus:
         return -axis_ras
     return axis_ras
@@ -152,6 +159,310 @@ def _find_deep_tip_by_contiguous_metal(
             if gap_run > max_gap_steps:
                 break
     return deepest_t
+
+
+def _ransac_line_fit(points, *, n_iter=2000, inlier_tol_mm=2.0, min_inliers=5,
+                     rng_seed=42, prior_axis=None, max_angle_deg=15.0):
+    n = points.shape[0]
+    if n < 2:
+        return np.array([0., 0., 1.]), points.mean(axis=0), np.ones(n, dtype=bool)
+    rng = np.random.default_rng(rng_seed)
+    best_n = 0
+    best_mask = np.zeros(n, dtype=bool)
+    best_axis = np.array([0., 0., 1.])
+    cos_limit = float(np.cos(np.radians(max_angle_deg))) if prior_axis is not None else 0.0
+    for _ in range(n_iter):
+        i, j = rng.choice(n, size=2, replace=False)
+        d = points[j] - points[i]
+        L = float(np.linalg.norm(d))
+        if L < 1.0:
+            continue
+        axis = d / L
+        if prior_axis is not None and abs(float(np.dot(axis, prior_axis))) < cos_limit:
+            continue
+        v = points - points[i]
+        proj = v @ axis
+        perp = v - np.outer(proj, axis)
+        dist = np.linalg.norm(perp, axis=1)
+        mask = dist < inlier_tol_mm
+        n_in = int(mask.sum())
+        if n_in > best_n:
+            best_n = n_in
+            best_mask = mask
+            best_axis = axis
+    if best_n >= min_inliers:
+        inliers = points[best_mask]
+        c = inliers.mean(axis=0)
+        X = inliers - c
+        cov = X.T @ X / max(1, X.shape[0] - 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        best_axis = eigvecs[:, int(np.argmax(eigvals))]
+        n = float(np.linalg.norm(best_axis))
+        if n > 1e-9:
+            best_axis = best_axis / n
+    center = points[best_mask].mean(axis=0) if best_n > 0 else points.mean(axis=0)
+    return best_axis, center, best_mask
+
+
+def _contiguous_deep_tip(proj_values, *, max_gap_mm=15.0, step_mm=1.0):
+    """Given sorted (ascending, i.e. deep→shallow) projection values of
+    inliers, find the deepest value still contiguous with the shallow end
+    under a gap tolerance. Returns the deepest t in the contiguous run.
+    """
+    if len(proj_values) == 0:
+        return None
+    vals = np.sort(proj_values)[::-1]  # shallow-first (most positive = most scalp-ward)
+    deepest = float(vals[0])
+    for i in range(1, len(vals)):
+        gap = float(vals[i - 1] - vals[i])
+        if gap > max_gap_mm:
+            break
+        deepest = float(vals[i])
+    return deepest
+
+
+def _density_trimmed_deep_tip(proj_values, *, bin_mm=5.0, min_bin_count=3,
+                               gap_tolerance=2):
+    """Walk inlier-projection bins shallow-to-deep and stop when density drops.
+
+    Bins with fewer than *min_bin_count* inliers are "sparse".  Up to
+    *gap_tolerance* consecutive sparse bins are bridged; the walk stops
+    once ``gap_tolerance + 1`` consecutive sparse bins are seen.
+
+    Returns the deepest inlier projection in the dense region, or
+    ``None`` if no dense region is found.
+    """
+    vals = np.asarray(proj_values, dtype=float)
+    if vals.size == 0:
+        return None
+
+    shallow_start = 5.0          # small margin above bolt center
+    deep_limit = float(vals.min()) - bin_mm
+    n_bins = max(1, int(np.ceil((shallow_start - deep_limit) / bin_mm)))
+
+    last_dense_edge = None
+    consecutive_sparse = 0
+    started = False
+
+    for i in range(n_bins):
+        shallow_edge = shallow_start - i * bin_mm
+        deep_edge = shallow_edge - bin_mm
+        count = int(np.sum((vals <= shallow_edge) & (vals > deep_edge)))
+
+        if count >= min_bin_count:
+            started = True
+            last_dense_edge = deep_edge
+            consecutive_sparse = 0
+        elif started:
+            consecutive_sparse += 1
+            if consecutive_sparse > gap_tolerance:
+                break
+
+    if last_dense_edge is None:
+        return None
+
+    dense_vals = vals[vals >= last_dense_edge]
+    if dense_vals.size == 0:
+        return None
+    return float(dense_vals.min())
+
+
+def _gather_bright_cylinder_ras(
+    center_ras, axis_inward, arr_kji, head_distance_map_kji, ras_to_ijk_fn,
+    *, radius_mm, depth_mm, hu_floor, hd_min_mm, step_mm=1.0,
+):
+    """Gather RAS positions of bright, intracranial voxels in a cylinder."""
+    offsets = _build_filled_disc_offsets(axis_inward, radius_mm)
+    n_steps = int(round(depth_mm / step_mm))
+    shape = arr_kji.shape
+    seen = set()
+    pts = []
+    for i in range(n_steps + 1):
+        t = float(i) * step_mm
+        c_pt = center_ras + t * axis_inward
+        for off in offsets:
+            pt = c_pt + off
+            ijk = np.asarray(ras_to_ijk_fn(pt), dtype=float)
+            kji = (int(round(ijk[2])), int(round(ijk[1])), int(round(ijk[0])))
+            if kji in seen:
+                continue
+            seen.add(kji)
+            if not (0 <= kji[0] < shape[0] and 0 <= kji[1] < shape[1] and 0 <= kji[2] < shape[2]):
+                continue
+            if arr_kji[kji[0], kji[1], kji[2]] >= hu_floor and head_distance_map_kji[kji[0], kji[1], kji[2]] >= hd_min_mm:
+                pts.append(pt.copy())
+    return np.asarray(pts, dtype=float).reshape(-1, 3) if pts else np.zeros((0, 3))
+
+
+def _fit_cylinder_ransac(
+    bolt,
+    fit: "axr.AxisFit",
+    arr_kji: np.ndarray,
+    head_distance_map_kji: np.ndarray,
+    ras_to_ijk_fn,
+    library_models: list[dict[str, Any]],
+    library_span_bounds: tuple[float, float],
+    cfg,
+    *,
+    ijk_kji_to_ras_fn=None,
+) -> dict[str, Any] | None:
+    """Exact port of probe_cylinder_fit: gather bright intracranial voxels
+    in a wide cylinder, RANSAC a line constrained to the bolt axis, use
+    inlier extent as trajectory endpoints."""
+    if ijk_kji_to_ras_fn is None:
+        return None
+
+    cyl_radius = float(getattr(cfg, "v2_cylinder_radius_mm", 10.0))
+    lib_min, lib_max = library_span_bounds
+    cyl_depth = float(getattr(cfg, "v2_cylinder_depth_mm",
+                               lib_max + 20.0 if lib_max > 0.0 else 150.0))
+    hu_floor = float(getattr(cfg, "v2_cylinder_hu_floor", 1000.0))
+    hd_min = float(getattr(cfg, "v2_cylinder_hd_min_mm", 3.0))
+    ransac_tol = float(getattr(cfg, "v2_ransac_inlier_tol_mm", 2.0))
+    ransac_max_angle = float(getattr(cfg, "v2_ransac_max_angle_deg", 15.0))
+    step_mm = float(getattr(cfg, "extension_step_mm", 0.5))
+
+    axis_scalp = fit.axis  # +axis = toward scalp
+    axis_deep = -axis_scalp
+    center = fit.center
+    shape = arr_kji.shape
+
+    # --- PCA refit on bolt-metal voxels in a wider tube (matches probe) ---
+    # Gather very bright voxels (bolt metal > 2000 HU) near the bolt
+    # center within a 2.5mm-radius tube and re-derive the axis via PCA.
+    half_span = float(bolt.span_mm) / 2.0 + 1.0
+    bolt_subvol_r = int(np.ceil(half_span + 5.0))
+    c_ijk_raw = np.asarray(ras_to_ijk_fn(center), dtype=float)
+    c_kji_int = np.array([int(round(c_ijk_raw[2])), int(round(c_ijk_raw[1])), int(round(c_ijk_raw[0]))])
+    bk0 = max(0, c_kji_int[0] - bolt_subvol_r)
+    bk1 = min(shape[0], c_kji_int[0] + bolt_subvol_r + 1)
+    bj0 = max(0, c_kji_int[1] - bolt_subvol_r)
+    bj1 = min(shape[1], c_kji_int[1] + bolt_subvol_r + 1)
+    bi0 = max(0, c_kji_int[2] - bolt_subvol_r)
+    bi1 = min(shape[2], c_kji_int[2] + bolt_subvol_r + 1)
+    bolt_sub = arr_kji[bk0:bk1, bj0:bj1, bi0:bi1]
+    bk, bj, bi = np.where(bolt_sub >= 2000.0)
+    if bk.size >= 8:
+        bolt_kji = np.stack([bk + bk0, bj + bj0, bi + bi0], axis=1).astype(float)
+        bolt_ras = np.asarray(ijk_kji_to_ras_fn(bolt_kji), dtype=float)
+        rel = bolt_ras - center
+        proj_b = rel @ axis_deep
+        perp_b = rel - np.outer(proj_b, axis_deep)
+        dist_b = np.linalg.norm(perp_b, axis=1)
+        in_tube = (dist_b < 2.5) & (np.abs(proj_b) < half_span)
+        if int(in_tube.sum()) >= 8:
+            tube_pts = bolt_ras[in_tube]
+            c_tube = tube_pts.mean(axis=0)
+            X = tube_pts - c_tube
+            cov = X.T @ X / max(1, X.shape[0] - 1)
+            eigvals, eigvecs = np.linalg.eigh(cov)
+            a_refit = eigvecs[:, int(np.argmax(eigvals))]
+            n = float(np.linalg.norm(a_refit))
+            if n > 1e-9:
+                a_refit = a_refit / n
+                if np.dot(a_refit, axis_scalp) < 0:
+                    a_refit = -a_refit
+                axis_scalp = a_refit
+                axis_deep = -axis_scalp
+                center = c_tube
+
+    # --- gather bright intracranial voxels in a wide cylinder ---
+    u = np.array([1.0, 0.0, 0.0])
+    if abs(float(np.dot(axis_deep, u))) > 0.9:
+        u = np.array([0.0, 1.0, 0.0])
+    v_perp = np.cross(axis_deep, u)
+    corners = []
+    for t in (0.0, cyl_depth):
+        for du in (-cyl_radius, cyl_radius):
+            for dv in (-cyl_radius, cyl_radius):
+                corners.append(center + t * axis_deep + du * u + dv * v_perp)
+    corners = np.stack(corners)
+    c_ijk = np.array([np.asarray(ras_to_ijk_fn(c), dtype=float) for c in corners])
+    c_kji = np.rint(np.stack([c_ijk[:, 2], c_ijk[:, 1], c_ijk[:, 0]], axis=1)).astype(int)
+    k_lo = max(0, int(c_kji[:, 0].min()) - 2)
+    k_hi = min(shape[0], int(c_kji[:, 0].max()) + 3)
+    j_lo = max(0, int(c_kji[:, 1].min()) - 2)
+    j_hi = min(shape[1], int(c_kji[:, 1].max()) + 3)
+    i_lo = max(0, int(c_kji[:, 2].min()) - 2)
+    i_hi = min(shape[2], int(c_kji[:, 2].max()) + 3)
+    if k_lo >= k_hi or j_lo >= j_hi or i_lo >= i_hi:
+        return None
+
+    subvol = arr_kji[k_lo:k_hi, j_lo:j_hi, i_lo:i_hi]
+    hd_sub = head_distance_map_kji[k_lo:k_hi, j_lo:j_hi, i_lo:i_hi]
+    bright_intra = (subvol >= hu_floor) & (hd_sub >= hd_min)
+    if not bright_intra.any():
+        return None
+
+    kk, jj, ii = np.where(bright_intra)
+    kji_abs = np.stack([kk + k_lo, jj + j_lo, ii + i_lo], axis=1).astype(float)
+    ras_pts = np.asarray(ijk_kji_to_ras_fn(kji_abs), dtype=float)
+
+    rel = ras_pts - center
+    proj = rel @ axis_deep
+    perp = rel - np.outer(proj, axis_deep)
+    perp_dist = np.linalg.norm(perp, axis=1)
+    in_cyl = (perp_dist <= cyl_radius) & (proj >= -5.0) & (proj <= cyl_depth)
+    cyl_pts = ras_pts[in_cyl]
+    if cyl_pts.shape[0] < 5:
+        return None
+
+    # --- RANSAC line fit constrained to bolt axis ---
+    fit_axis, _, inlier_mask = _ransac_line_fit(
+        cyl_pts, inlier_tol_mm=ransac_tol, min_inliers=5,
+        prior_axis=axis_deep, max_angle_deg=ransac_max_angle,
+    )
+    if int(inlier_mask.sum()) < 5:
+        return None
+
+    if np.dot(fit_axis, axis_scalp) < 0:
+        fit_axis = -fit_axis
+
+    new_fit = axr.AxisFit(
+        center=center, axis=fit_axis,
+        residual_rms_mm=0.0, residual_median_mm=0.0, elongation=1.0,
+        t_min=fit.t_min, t_max=fit.t_max,
+        point_count=int(inlier_mask.sum()),
+    )
+
+    # --- deep tip via density-binned walk (avoids contralateral bone) ---
+    inlier_pts = cyl_pts[inlier_mask]
+    n_inliers = int(inlier_mask.sum())
+    proj_in = (inlier_pts - center) @ fit_axis
+    if proj_in.size == 0 or float(proj_in.min()) >= 0.0:
+        return None
+
+    # FP bolts have very few inliers — real electrodes have 150+
+    # contact voxels within 2mm of a consistent line.
+    min_inliers = int(getattr(cfg, "v2_min_ransac_inliers", 150))
+    if n_inliers < min_inliers:
+        return None
+
+    density_bin = float(getattr(cfg, "v2_depth_trim_bin_mm", 5.0))
+    density_min = int(getattr(cfg, "v2_depth_trim_min_count", 3))
+    density_gap = int(getattr(cfg, "v2_depth_trim_gap_bins", 2))
+    t_deep_intra = _density_trimmed_deep_tip(
+        proj_in, bin_mm=density_bin, min_bin_count=density_min,
+        gap_tolerance=density_gap,
+    )
+    if t_deep_intra is None:
+        return None
+    bolt_offset = float(getattr(cfg, "v2_cylinder_bolt_offset_mm", 12.0))
+    t_interface = -bolt_offset
+    if t_interface <= t_deep_intra:
+        t_interface = min(0.0, t_deep_intra + 1.0)
+    intracranial_span = float(t_interface - t_deep_intra)
+
+    span_tol = float(getattr(cfg, "library_span_tolerance_mm", 5.0))
+    best_model_id, _ = axr.library_span_match(
+        intracranial_span, library_models, tolerance_mm=span_tol
+    )
+
+    return _emit_trajectory(
+        bolt, new_fit, t_deep_intra, t_interface,
+        intracranial_span, intracranial_span, best_model_id,
+        source="bolt_v2_cylinder",
+    )
 
 
 def _fit_two_threshold(
@@ -643,14 +954,12 @@ def fit_bolt_trajectory(
     arr_kji: np.ndarray,
     head_distance_map_kji: np.ndarray,
     ras_to_ijk_fn,
+    ijk_kji_to_ras_fn=None,
     library_models: list[dict[str, Any]],
     library_span_bounds: tuple[float, float],
     cfg,
 ) -> dict[str, Any] | None:
-    """Turn one bolt candidate into a trajectory dict (or ``None``).
-
-    Dispatches on ``cfg.v2_fit_mode`` (default ``"two_threshold"``).
-    """
+    """Turn one bolt candidate into a trajectory dict (or ``None``)."""
     axis = np.asarray(bolt.axis_ras, dtype=float).reshape(3)
     axis_n = float(np.linalg.norm(axis))
     if axis_n < 1e-9:
@@ -672,7 +981,13 @@ def fit_bolt_trajectory(
         point_count=int(bolt.n_inliers),
     )
 
-    mode = str(getattr(cfg, "v2_fit_mode", "deepest_peak")).strip().lower()
+    mode = str(getattr(cfg, "v2_fit_mode", "cylinder_ransac")).strip().lower()
+    if mode == "cylinder_ransac":
+        return _fit_cylinder_ransac(
+            bolt, fit, arr_kji, head_distance_map_kji, ras_to_ijk_fn,
+            library_models, library_span_bounds, cfg,
+            ijk_kji_to_ras_fn=ijk_kji_to_ras_fn,
+        )
     if mode == "intensity_peaks":
         return _fit_intensity_peaks(
             bolt, fit, arr_kji, head_distance_map_kji, ras_to_ijk_fn,
@@ -683,8 +998,6 @@ def fit_bolt_trajectory(
             bolt, fit, arr_kji, head_distance_map_kji, ras_to_ijk_fn,
             library_models, library_span_bounds, cfg,
         )
-    # Default: Approach C — deepest significant peak + bolt-anchored
-    # shallow end, no library matching.
     return _fit_deepest_peak(
         bolt, fit, arr_kji, head_distance_map_kji, ras_to_ijk_fn,
         library_models, library_span_bounds, cfg,
@@ -697,6 +1010,7 @@ def run_bolt_fit_group(
     arr_kji: np.ndarray,
     head_distance_map_kji: np.ndarray,
     ras_to_ijk_fn,
+    ijk_kji_to_ras_fn=None,
     library_models: list[dict[str, Any]],
     cfg,
 ) -> dict[str, Any]:
@@ -713,6 +1027,7 @@ def run_bolt_fit_group(
             arr_kji=arr_kji,
             head_distance_map_kji=head_distance_map_kji,
             ras_to_ijk_fn=ras_to_ijk_fn,
+            ijk_kji_to_ras_fn=ijk_kji_to_ras_fn,
             library_models=library_models,
             library_span_bounds=lib_bounds,
             cfg=cfg,

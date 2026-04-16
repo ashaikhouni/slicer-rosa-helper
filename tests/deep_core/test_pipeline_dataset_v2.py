@@ -2,21 +2,13 @@
 
 v2 drops Phase A proposal generation and the support/annulus stages.
 Every trajectory comes from a RANSAC bolt candidate whose axis is
-extended inward via a loose-threshold metal walk to find the deepest
-contact, and whose shallow endpoint is anchored to the bolt center
-via ``model_fit.bolt_endpoint_offset_mm``.
+refined via cylinder-gather + axis-constrained RANSAC, with depth
+trimmed by a density-binned walk to exclude contralateral bone.
 
-This is a **proof-of-concept** pipeline. It does not match v1+bolts'
-full recall because for dim-electrode subjects (like T22) the walk
-from the bolt can't bridge the bolt-to-contact gap on every shank.
-Baselines here reflect the current ceiling of the bolt-only path:
+Baselines reflect the cylinder_ransac fit mode with density trimming:
 
-  - T1:  loose >= 10/12
-  - T22: loose >=  5/9
-
-Users who need full recall should use v1 with
-``model_fit.use_bolt_detection=True`` (tested in
-``test_pipeline_dataset.py``).
+  - T1:  loose >= 11/12
+  - T22: loose >=  9/9
 """
 import os
 import sys
@@ -112,27 +104,26 @@ class DeepCoreV2DatasetRegressionTests(unittest.TestCase):
         return gt, pred, loose, strict
 
     def test_T1_bolt_first(self):
-        """T1 with deep_core_v2. Baseline: 10/12 loose."""
+        """T1 with deep_core_v2. Baseline: 11/12 loose.
+
+        The 1 remaining miss is RHH (end_error 11.7 mm, just over
+        the 10 mm threshold — visually correct, GT shallow end is
+        inaccurate).
+        """
         gt, pred, loose, strict = self._run_subject("T1")
         self.assertEqual(len(gt), 12, "T1 GT count drifted")
         n_loose = int(loose.get("matched", 0))
         self.assertGreaterEqual(
-            n_loose, 10, f"v2 loose match regressed: {n_loose}/{len(gt)}"
+            n_loose, 11, f"v2 loose match regressed: {n_loose}/{len(gt)}"
         )
 
     def test_T22_bolt_first(self):
-        """T22 with deep_core_v2. Baseline: 5/9 loose.
-
-        The 4 shanks v2 misses on T22 all have dim electrode contacts
-        that don't survive the loose metal mask at 400 HU with a 15 mm
-        gap tolerance. v1+bolts recovers them via Phase A's atom
-        proposals; v2 drops Phase A by design.
-        """
+        """T22 with deep_core_v2. Baseline: 9/9 loose."""
         gt, pred, loose, strict = self._run_subject("T22")
         self.assertEqual(len(gt), 9, "T22 GT count drifted")
         n_loose = int(loose.get("matched", 0))
         self.assertGreaterEqual(
-            n_loose, 5, f"v2 loose match regressed: {n_loose}/{len(gt)}"
+            n_loose, 9, f"v2 loose match regressed: {n_loose}/{len(gt)}"
         )
 
 

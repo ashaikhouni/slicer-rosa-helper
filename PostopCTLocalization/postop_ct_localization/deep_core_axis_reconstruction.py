@@ -227,6 +227,80 @@ def atom_perp_to_line(
     return float(np.median(radial))
 
 
+def _refit_subset(
+    keep: list[int],
+    atom_by_id: dict[int, dict[str, Any]],
+    seed_axis: np.ndarray,
+) -> AxisFit | None:
+    cloud = []
+    for aid in keep:
+        atom = atom_by_id.get(int(aid))
+        if atom is None:
+            continue
+        pts = np.asarray(atom.get("support_points_ras") or [], dtype=float).reshape(-1, 3)
+        if pts.size:
+            cloud.append(pts)
+    if not cloud:
+        return None
+    combined = np.concatenate(cloud, axis=0)
+    return refine_axis_from_cloud(combined, seed_axis=seed_axis)
+
+
+def prune_outliers_loo(
+    atom_ids: list[int],
+    atom_by_id: dict[int, dict[str, Any]],
+    fit: AxisFit,
+    cfg: Any,
+    *,
+    min_keep: int = 1,
+    good_residual_mm: float | None = None,
+    improvement_factor: float = 0.5,
+) -> tuple[list[int], AxisFit]:
+    """Greedy leave-one-out outlier pruning by refit residual.
+
+    At each iteration, try removing each remaining atom in turn,
+    refit on the rest, and keep the removal that gives the largest
+    residual drop. Stop when the current fit's residual is already
+    good (< ``good_residual_mm``), when no removal gives at least
+    ``1 - improvement_factor`` proportional improvement, or when
+    only ``min_keep`` atoms are left.
+
+    More robust than per-atom perpendicular distance pruning when the
+    bad atom contributes evenly to the combined fit (symmetric
+    bridges, 2-atom proposals where one atom is noise). The
+    perpendicular-distance approach fails on those because both
+    atoms get similar median perp values.
+
+    Returns ``(kept_ids, refit_fit)``.
+    """
+    tol = float(getattr(cfg, "axis_fit_max_residual_mm", 1.8))
+    good = float(good_residual_mm) if good_residual_mm is not None else 0.5 * tol
+    keep = [int(a) for a in atom_ids]
+    cur_fit = fit
+    while len(keep) > int(min_keep):
+        if cur_fit.residual_median_mm <= good:
+            break
+        best_subset: list[int] | None = None
+        best_fit: AxisFit | None = None
+        best_res = cur_fit.residual_median_mm
+        for i, _excluded in enumerate(keep):
+            subset = keep[:i] + keep[i + 1:]
+            test_fit = _refit_subset(subset, atom_by_id, cur_fit.axis)
+            if test_fit is None:
+                continue
+            if test_fit.residual_median_mm < best_res:
+                best_res = test_fit.residual_median_mm
+                best_subset = subset
+                best_fit = test_fit
+        if best_subset is None or best_fit is None:
+            break
+        if best_res >= cur_fit.residual_median_mm * improvement_factor:
+            break
+        keep = best_subset
+        cur_fit = best_fit
+    return keep, cur_fit
+
+
 def prune_outlier_atoms(
     atom_ids: list[int],
     atom_by_id: dict[int, dict[str, Any]],
@@ -234,17 +308,22 @@ def prune_outlier_atoms(
     cfg: Any,
     *,
     perp_tol_mm: float | None = None,
-    min_keep: int = 2,
+    min_keep: int = 1,
 ) -> list[int]:
     """Iteratively drop atoms whose points sit far off the fit line.
 
     A bridged proposal — one whose ``atom_id_list`` mixes atoms from
-    two parallel shanks — produces a PCA fit that splits the difference
-    between the two lines. Each individual atom's points then sit
-    well off the resulting fit. By measuring per-atom perpendicular
-    distance and dropping the worst outlier (if it's substantially
-    above both an absolute threshold and the median), the fit can be
-    recovered to one of the two real shanks.
+    two parallel shanks, or one clean atom with a stray noise atom —
+    produces a PCA fit that splits the difference between the two
+    lines. Each individual atom's points then sit well off the
+    resulting fit. By measuring per-atom perpendicular distance and
+    dropping the worst outlier when it's above the tolerance, the fit
+    can be recovered to one of the two real shanks.
+
+    Drops the worst atom whenever ``worst > tol`` (absolute rule),
+    which works for any cluster size including 2-atom proposals where
+    statistical outlier detection breaks down. Stops when ``worst <=
+    tol`` or when only ``min_keep`` atoms remain.
 
     Returns the kept atom ID list. Refitting is the caller's job.
     """
@@ -264,10 +343,7 @@ def prune_outlier_atoms(
             break
         worst_idx = int(np.argmax(scores))
         worst = float(scores[worst_idx])
-        median = float(np.median(scores))
         if worst <= tol:
-            break
-        if worst < median * 2.0 and worst < tol * 1.5:
             break
         keep.pop(worst_idx)
         # Refit on remaining atoms' point clouds

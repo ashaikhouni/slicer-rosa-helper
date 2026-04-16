@@ -520,7 +520,7 @@ class DeepCoreModelFitConfig:
     )
     # --- deep_core_v2 bolt-first fit knobs -------------------------------
     v2_fit_mode: str = field(
-        default="two_threshold",
+        default="cylinder_ransac",
         metadata={"ui": False},
     )
     v2_contact_hu: float = field(
