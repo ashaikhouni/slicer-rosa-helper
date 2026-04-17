@@ -142,24 +142,44 @@ RANSAC iterates 800× per line over a large voxel cloud. Each iteration does
 O(N) distance-to-line computation. Can optimize with early termination or
 smarter initial sampling.
 
-## Next-session idea (from Ammar, 2026-04-17)
+## Next-session plan (updated 2026-04-17 late)
 
-**Soft-tissue-context filter before RANSAC:**
+**Architecture target:** v2-style bolt-anchored pipeline with HU-agnostic
+detectors replacing the two HU-dependent stages:
 
-1. For each candidate voxel (high Frangi σ=1), check its neighborhood.
-   Accept only if surrounded by **soft tissue** (HU in normal tissue range).
-   Reject voxels surrounded by bone or air — rejects teeth, dense bone
-   artifacts, wires in air.
-2. **Exception for bolts**: partially surrounded by bone, strongly linear
-   at **high σ** with straight extent ≥ 15 mm. Could be a path to recover
-   bolts even on clipped CTs.
-3. Run RANSAC on filtered points.
-4. For voxel clusters that don't fit a line well: fall back to **ridge
-   tracking** to pick up gently curvy electrodes.
+- Bolt detection ← Frangi σ=2 + linearity ≥ 15 mm
+- Contact signal ← Frangi σ=1 + soft-tissue neighborhood filter inside brain
+- Pairing ← unchanged v2 cylinder-RANSAC on contact voxels within each
+  bolt's cylinder
+- Fallback ← v4-style RANSAC on contact voxels not claimed by any
+  bolt-linked trajectory (handles missed bolts)
 
-This combines the best of v3 and v4: RANSAC for the straight majority,
-ridge for curvy residuals, and anatomical context filter to kill FPs at the
-source.
+**But first, two diagnostic probes** — understand each signal in isolation
+before combining. Notes are on non-contrast CT, so vessels and dural
+sinuses don't appear (high-σ linearity is specific to bolts/shafts).
+
+### Probe A — `probe_bolt_recovery.py`
+
+Frangi σ=2 on raw CT (full volume, no mask). Threshold sweep
+{20, 40, 80} → connected components → PCA: require span ≥ 15 mm AND
+λ₂/λ₁ ≤ 0.05. Per GT: entry within 10 mm, axis within 15°.
+Report TP/FP per threshold. Answers: is a mask needed, or does linearity
+alone filter the skull?
+
+### Probe B — `probe_contact_recovery.py`
+
+Frangi σ=1 threshold ≥ 10 + soft-tissue filter (5 mm-radius neighborhood
+median HU ∈ [−50, 80]). Run **with and without** intracranial mask.
+Report inlier density along each GT axis + total unexplained voxels.
+Answers: is the soft-tissue filter alone enough to replace the mask?
+
+**Do not build an end-to-end detector in the diagnostic session.** Just
+produce the numbers and NIFTI outputs for Slicer inspection, then discuss
+with Ammar before designing v5.
+
+**Ammar's reasoning:** splitting into component probes lets us understand
+which signals are strong and which filters are redundant, so v5 can be
+designed with minimal parameter hacking.
 
 ## Ground rules
 
