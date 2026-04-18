@@ -1,197 +1,204 @@
 # deep_core_v2 Handoff
 
-Last updated: 2026-04-17. Probe files uncommitted on `main`, built on `d6e7d9b`.
+Last updated: 2026-04-17 (two-stage session).
 
-## What this document is
+## Current best detector: `probe_two_stage.py`
 
-You are Claude Code continuing work on SEEG shank detection. The v2
-cylinder-RANSAC pipeline (committed, `d6e7d9b`) works on high-dynamic-range
-CTs but fails entirely on **clipped CTs** (T2, T4) where HU saturates at
-3071 and bolt metal becomes indistinguishable from dense bone.
-
-This session produced a **new HU-agnostic detector probe** (`probe_detector_v4.py`)
-that solves the clipped-CT problem.
-
-## Orient first
-
-```bash
-cd /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper
-git log --oneline -5
-git status
-ls tests/deep_core/probe_detector_v4.py
-ls tests/deep_core/probe_periodicity.py
-ls tests/deep_core/probe_frangi_cc.py
-```
-
-## Committed state — v2 (d6e7d9b)
-
-Cylinder RANSAC + density-binned depth trimming. Works on high-DR CTs.
-
-- **T22: 9/9** (using shank TSV GT, different from ROSA CSV GT in this session)
-- **T1: 11/12** (RHH miss is GT inaccuracy)
-- **T2: 0/12**, **T4: 0/16** — bolt detection fails (HU saturation)
-
-See the `## Committed v2 state` section below for algorithm details.
-
-## This session — HU-agnostic detector (v4 probe)
-
-### Breakthrough result
+Two-stage LoG+Frangi detector. Achieves full recall on both T22 (clean) and
+T2 (clipped) in a few seconds — no HU thresholds, no scanner-specific
+tuning.
 
 | | T22 (clean) | T2 (clipped) |
 | --- | --- | --- |
-| v2 | 9/9 | 0/12 |
-| **v4 probe** | **8/8** (ROSA GT, 8 trajectories) | **11/12** |
+| recall | **8/8** | **12/12** |
+| FP | 21 | 22 |
+| runtime | 3.8 s | 9.5 s |
 
-Same detector, no HU thresholds. Only LPRG still missed on T2.
+Compare with the previous state:
 
-### Why RANSAC beat ridge tracking (v3 probe)
-
-Ridge tracking (v3) used local Hessian eigenvectors for axis direction.
-At σ=2 (needed to bridge inter-contact gaps), close-parallel electrodes
-merge in the Hessian → eigenvector averages their axes → tracking follows
-a line midway between two real electrodes.
-
-RANSAC fits a line globally through separated voxel clusters. Close-parallel
-electrodes give separate clusters in Frangi σ=1, so RANSAC finds two
-distinct lines. Immune to Hessian averaging.
+| method | T22 recall / FP | T2 recall / FP | T2 runtime |
+| --- | --- | --- | --- |
+| v2 (committed cylinder RANSAC) | 9/9 / low | 0/12 | — |
+| v4 probe (Frangi + intracranial + RANSAC) | 8/8 / 27 | 11/12 / 48 (LPRG missed) | 130 s |
+| **two-stage (this session)** | **8/8 / 21** | **12/12 / 22** | **9.5 s** |
 
 ### Pipeline
 
-All in `tests/deep_core/probe_detector_v4.py`:
+1. **Preprocessing**
+   - Hull mask (HU ≥ −500, close, fill, largest CC) and
+     `intracranial = head_distance ≥ 10 mm` from hull. Same as v4.
+   - Frangi σ=1 on raw CT (`ObjectnessMeasure`, objectDimension=1).
+   - Laplacian of Gaussian σ=1 on raw CT
+     (`LaplacianRecursiveGaussian`).
 
-1. **Mask**: `hull_mask` (HU ≥ −500, close+fill, largest CC) ∩ `head_distance ≥ 10 mm`
-   → intracranial ROI. HU-agnostic (air/tissue boundary is robust under clipping).
+2. **Stage 1 — blob-pitch (contacts with Dixi 3.5 mm periodicity)**
+   - Regional minima on LoG σ=1 with erode radius 2 voxels, then gate
+     `LoG ≤ −300`. One marker per contact local minimum (CC approach
+     fails here because a mega-CC absorbs the whole skull+electrode
+     chain on T2; regional minima don't suffer this).
+   - Enumerate blob pairs at distances `k × 3.5 mm ± 0.5 mm` for
+     `k ∈ {1, 2, 3}`. Allowing `k=2,3` handles occasional missed contacts.
+   - For each pair, walk both directions at local pitch
+     `seed_d / round(seed_d / 3.5)`. Multi-pitch search: try
+     `pitch_seed ± {0, ±0.1, ±0.2}` mm and keep the walk with most
+     inliers. A blob is an inlier if `perp ≤ 1.5 mm` and
+     `|proj − k·pitch| ≤ 0.7 mm`.
+   - Accept walks with `n_blobs ≥ 6` and `span ∈ [15, 90] mm`.
+   - Dedup: axis angle ≤ 3°, perp center distance ≤ 2 mm, span overlap
+     ≥ 30 %.
+   - FP gate: `amp_sum ≥ 6000` (sum of inlier LoG magnitudes). Real
+     shanks' LoG minima are strong; skull/bone spurious lines assemble
+     from weak blobs.
 
-2. **Frangi σ=1 (contact scale)**: `ObjectnessMeasure` on Gaussian-smoothed
-   CT. Enhances contact-sized tubes.
+3. **Stage 1 exclusion zone**
+   - For each accepted stage-1 line, mark a 3 mm-radius tube around it
+     in voxel space. Stage 2 will skip these voxels.
 
-3. **Voxel cloud**: threshold Frangi σ=1 ≥ 10 inside ROI.
+4. **Stage 2 — Frangi shaft fallback (pitch-unresolved shanks)**
+   - Some shanks (e.g. T2 RSAN) appear on CT as a continuous dark bar
+     with no visible contacts — the LoG of a uniform tube is flat in
+     the middle, so the contact-comb signature does not exist. Frangi
+     tube response, on the other hand, lights up for any locally-tubular
+     structure.
+   - Cloud = `Frangi σ=1 ≥ 30` ∩ `intracranial` ∩ `¬exclusion_zone`.
+     Higher Frangi threshold than stage 1 (10) keeps CCs thin so real
+     shafts don't merge with adjacent bone.
+   - 3D connected components on the cloud.
+   - Per CC: PCA in world-mm. Require
+     `30 ≤ n_vox ≤ 20,000`, `20 mm ≤ span ≤ 85 mm`, `perp_rms ≤ 3 mm`,
+     and `span / perp_rms ≥ 5`. The `span / perp_rms` geometric aspect
+     is robust to CC curvature (unlike λ₁/λ₂, which collapses to ~1 for
+     a gently curved tube).
+   - Axis = PC1, endpoints = center + [proj_min, proj_max] × PC1.
+   - No periodicity check (the whole point of stage 2 is that these
+     shanks lack periodicity).
 
-4. **Iterative RANSAC**:
-   - Weighted random 2-point samples, 800 iters per line
-   - Inlier tolerance 1 mm
-   - Min 40 inliers, span 20–85 mm, density ≥ 0.5 inliers/mm
-   - PCA refinement after best RANSAC candidate
-   - Span clipping if initial fit > 85 mm (slides window, keeps densest region)
-   - Exclusion radius 1.5 mm around accepted line
-   - Repeat until no line passes thresholds
-
-5. **Dedup**: merge tracks with axis angle < 5°, perp distance < 3 mm,
-   span overlap ≥ 40% (keeps longer).
-
-6. **Periodicity confirmation** (`probe_periodicity.py` derived):
-   - Cylindrical sample (r=1 mm, 8-point ring, max reducer) along track axis,
-     intra-brain only
-   - FFT in band 0.2–0.4 cycles/mm (pitch 2.5–5 mm)
-   - Accept if pitch ∈ [2.6, 4.8] mm AND SNR ≥ 2, OR track length ≥ 40 mm
-
-7. **Evaluation**: greedy 1-to-1 GT assignment (angle ≤ 10°, mid-d ≤ 8 mm).
+5. **Combine** stage 1 + stage 2 hypotheses. GT matching is greedy 1-to-1
+   (angle ≤ 10°, mid-distance ≤ 8 mm).
 
 ### How to run
 
 ```bash
-# v4 detector probe
+cd /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper
 /Users/ammar/miniforge3/envs/shankdetect/bin/python3 \
-  tests/deep_core/probe_detector_v4.py T22   # ~40s
+  tests/deep_core/probe_two_stage.py T22   # ~4 s
 /Users/ammar/miniforge3/envs/shankdetect/bin/python3 \
-  tests/deep_core/probe_detector_v4.py T2    # ~130s (RANSAC over large cloud)
-
-# Periodicity probe (shows 3.5 mm pitch detectable on both clean + clipped CTs)
-/Users/ammar/miniforge3/envs/shankdetect/bin/python3 \
-  tests/deep_core/probe_periodicity.py T22
+  tests/deep_core/probe_two_stage.py T2    # ~10 s
 ```
 
-### Output files
+## Session story (why two stages)
 
-- `/tmp/detected_{T22,T2}_v4.nii.gz` — accepted tracks as labeled tubes
-- `/tmp/frangi23_{T22,T2}.nii.gz` — multi-scale Frangi tube response
-- `/tmp/gm_{T22,T2}.nii.gz` — gradient magnitude volume
+The path to the current detector, compressed:
 
-Load alongside CT in Slicer for visual verification.
+1. **Probe A — `probe_bolt_recovery.py`.** Frangi σ=2 + linearity gate
+   gives at most 50 % bolt recall with FPs > TPs. Fails because (a) the
+   whole skull vault forms a thick non-linear mega-CC that absorbs bolts
+   adjacent to it, and (b) the "successful" matches are really shafts,
+   not bolts. σ=2 + linearity is not a bolt detector.
 
-### Supporting probes (same session)
+2. **Probe B — `probe_contact_recovery.py`.** Frangi σ=1 + 5 mm median-HU
+   ∈ [−50, 80] soft-tissue filter. Works on T22 (78 % in-tube pass rate);
+   **collapses on T2** (0.3 % in-tube). Not an HU saturation issue —
+   contact halos on T2 fill the 5 mm sphere with HU ~500 (p99 clipped at
+   3071 is irrelevant). Filter is scanner-dependent.
 
-| Probe | Purpose |
+3. **Probe C — `probe_periodicity_gate.py`.** Windowed FFT with
+   SNR ≥ 2 in the 2.5–5 mm pitch band accepts *every* RANSAC line — not
+   specific. Periodicity as currently parameterized does not discriminate.
+
+4. **Probe D — `probe_wide_smooth.py`.** Tested wide-Gaussian / p5-quantile
+   salvage for the T2 soft-tissue filter. Best variant (p5, 10 mm sphere)
+   recovers 16 % of T2 in-tube (vs 0.3 % baseline) but over-prunes T22
+   (drops from 78 % to 7.6 %). No scanner-universal filter.
+
+5. **Probe E — `probe_log_frangi.py`.** **LoG σ=1 gives a
+   scanner-universal contact signature.** Median LoG at in-GT-tube
+   voxels is −530 on both T22 and T2. Every in-tube voxel has LoG
+   ≤ −33 on both subjects. Halo-immune because LoG at σ=1 responds to
+   sharp peaks, which halos (being smooth) don't produce. Also tested
+   Frangi × |LoG| dot product — within a Frangi cloud, LoG does almost
+   all the work.
+
+6. **v5-LoG — `probe_detector_v5_log.py`.** Plug the LoG-gated cloud into
+   v4-style RANSAC. T22: 8/8 with 5 FPs (great). T2: **8/12 — worse than
+   v4** because threshold 300 drops a few weak contacts. LPRG still missed.
+
+7. **Probe F — `probe_log_oracle.py`.** Given the correct GT axis,
+   LoG + scipy.find_peaks finds clean Dixi 3.5 mm pitch on 17 of 20
+   shanks across both subjects (including **LPRG**: 11 peaks at exactly
+   3.5 mm). Remaining three are either short (LSAN, RSAN — too few
+   peaks) or partial-volume-fused (T22 L at 6 mm effective). **The signal
+   is everywhere; LPRG was never a signal problem — it was a
+   voxel-RANSAC axis-finding problem.**
+
+8. **Probe G — `probe_blob_pitch.py`.** Skip voxel RANSAC entirely. Run
+   pitch-constrained Hough over LoG regional-minima blobs — for each blob
+   pair within ~Dixi pitch, count other blobs at k·pitch positions on the
+   line. This directly uses the 3.5 mm prior to construct hypotheses, no
+   discretized accumulator needed. **Catches LPRG** (blob-space is 50×
+   smaller than voxel-space and has no between-electrode clumping to
+   steer RANSAC off-axis). Early version: T22 7/8 FP 4, T2 10/12 FP 26.
+   After multi-pitch-seed + perp_tol 1.5 mm + amp_sum gate: T22 8/8 FP 6,
+   T2 11/12 FP 12 (only RSAN missed).
+
+9. **Probe H — `probe_two_stage.py`.** RSAN on T2 has no resolvable
+   contacts — on CT it's a uniform dark bar, so LoG is flat along it,
+   so blob-pitch cannot work by physics. The right tool is the Frangi
+   tube detector. Stage 2 = Frangi CC + PCA on the residual cloud
+   after a 3 mm exclusion zone around stage-1 lines. Replaces iterative
+   RANSAC with direct geometric primitives (CC + PCA) — same detection
+   power, 30× faster. **Recovers RSAN at T2, gives 12/12 + 8/8.**
+
+The two-stage decomposition matches physical signal categories: shanks
+with pitch-visible contacts (LoG peaks) and shanks without (Frangi tubes).
+No single detector can cover both because the LoG of a continuous tube is
+zero in the middle by definition.
+
+## Known issues / next steps
+
+1. **Stage-2 FPs (~15 per subject).** Tubular CCs in skull/bone pass
+   the aspect filter. Tightening `span ≥ 25 mm` or `aspect_geom ≥ 8`
+   would cut most without losing RSAN (span 38, aspect ~41). A geometric
+   prior — require one endpoint within 15 mm of hull — is probably
+   a cleaner FP killer.
+2. **Stage-1 FPs (~10 per subject).** Also tunable; amp_sum threshold
+   is the main lever.
+3. **Pipeline integration.** `probe_two_stage.py` is standalone. Porting
+   into `PostopCTLocalization/.../deep_core_v2_fit.py` hasn't been done;
+   when porting, follow `feedback_probe_first.md` (port the probe logic
+   literally without adding extra filters).
+4. **Non-Dixi vendors.** The 3.5 mm pitch prior is Dixi-specific.
+   Ad-Tech (5 mm) and PMT (3.5–5 mm) would need a multi-pitch variant —
+   try k=1,2 pitch at both 3.5 and 5.0 in stage 1.
+
+## Probe inventory (this session)
+
+All under `tests/deep_core/`. Standalone, `shankdetect` env.
+
+| Probe | What it tests / shows |
 | --- | --- |
-| `probe_gm_bolt_entry.py` | Confirms GM survives HU clipping (T2 GM strength ≥ T22) |
-| `probe_gm_entry_points.py` | GM peaks cleanly at bolt-through-skull entry points |
-| `probe_frangi.py` | Multi-scale Frangi runs in ~1.5s; strong signal on both subjects |
-| `probe_frangi_cc.py` | Threshold + CC + linearity filter (superseded by v4) |
-| `probe_periodicity.py` | 3.5 mm Dixi contact pitch detectable on all 20 shanks (with cylindrical sampling, intra-brain only, band 0.2–0.4 cyc/mm) |
-| `probe_skeleton_branches.py` | Negative result: skeleton of skull+metal is sheet-dominated |
-| `probe_detector_v3.py` | Ridge tracking approach (v3); T22 7/8, T2 9/12 |
-
-## Known issues remaining
-
-### 1. LPRG (T2) still missed
-
-Closest v4 track has axis 19° off from GT. Probably same close-parallel
-failure even with RANSAC — possibly because LPRG's Frangi σ=1 voxels are
-not well-separated from a neighbor.
-
-### 2. Many false positives
-
-v4 on T22 produces 35 accepted tracks for 8 real electrodes; T2 has 59 for
-12. Likely skull folds, blood vessels, calcifications that pass periodicity
-and length thresholds. Not hurting recall but needs post-filtering before
-production.
-
-### 3. T2 runtime ~130 s
-
-RANSAC iterates 800× per line over a large voxel cloud. Each iteration does
-O(N) distance-to-line computation. Can optimize with early termination or
-smarter initial sampling.
-
-## Next-session plan (updated 2026-04-17 late)
-
-**Architecture target:** v2-style bolt-anchored pipeline with HU-agnostic
-detectors replacing the two HU-dependent stages:
-
-- Bolt detection ← Frangi σ=2 + linearity ≥ 15 mm
-- Contact signal ← Frangi σ=1 + soft-tissue neighborhood filter inside brain
-- Pairing ← unchanged v2 cylinder-RANSAC on contact voxels within each
-  bolt's cylinder
-- Fallback ← v4-style RANSAC on contact voxels not claimed by any
-  bolt-linked trajectory (handles missed bolts)
-
-**But first, two diagnostic probes** — understand each signal in isolation
-before combining. Notes are on non-contrast CT, so vessels and dural
-sinuses don't appear (high-σ linearity is specific to bolts/shafts).
-
-### Probe A — `probe_bolt_recovery.py`
-
-Frangi σ=2 on raw CT (full volume, no mask). Threshold sweep
-{20, 40, 80} → connected components → PCA: require span ≥ 15 mm AND
-λ₂/λ₁ ≤ 0.05. Per GT: entry within 10 mm, axis within 15°.
-Report TP/FP per threshold. Answers: is a mask needed, or does linearity
-alone filter the skull?
-
-### Probe B — `probe_contact_recovery.py`
-
-Frangi σ=1 threshold ≥ 10 + soft-tissue filter (5 mm-radius neighborhood
-median HU ∈ [−50, 80]). Run **with and without** intracranial mask.
-Report inlier density along each GT axis + total unexplained voxels.
-Answers: is the soft-tissue filter alone enough to replace the mask?
-
-**Do not build an end-to-end detector in the diagnostic session.** Just
-produce the numbers and NIFTI outputs for Slicer inspection, then discuss
-with Ammar before designing v5.
-
-**Ammar's reasoning:** splitting into component probes lets us understand
-which signals are strong and which filters are redundant, so v5 can be
-designed with minimal parameter hacking.
+| `probe_bolt_recovery.py` | σ=2 + linearity — fails for bolt detection |
+| `probe_contact_recovery.py` | soft-tissue filter — fails on T2 halos |
+| `probe_diagnose.py` | deep-dives on why Probes A/B fail |
+| `probe_periodicity_gate.py` | windowed FFT periodicity — not specific |
+| `probe_wide_smooth.py` | wide-kernel halo salvage — not scanner-universal |
+| `probe_log_frangi.py` | **LoG σ=1 is scanner-universal for contacts** |
+| `probe_detector_v5_log.py` | v4 RANSAC with LoG cloud — T22 big win, T2 tradeoff |
+| `probe_log_oracle.py` | **Given correct axis, LoG + find_peaks hits 17/20 shanks** |
+| `probe_blob_pitch.py` | Stage 1: pitch-constrained Hough on LoG regional minima |
+| `probe_two_stage.py` | **Current best: blob-pitch + Frangi shaft fallback** |
 
 ## Ground rules
 
-- Don't touch v1 or v2 pipelines. They work for clean CTs and tests in
-  `tests/deep_core/test_pipeline_dataset.py` / `test_pipeline_dataset_v2.py`
-  are locked in.
-- v4 probe is standalone — not yet integrated into pipeline. Integration
-  happens after the next-session idea is evaluated.
-- Use `shankdetect` conda env for anything needing SimpleITK.
-- ROSA GT for T22 is at
-  `contact_label_dataset/rosa_helper_import/T22/ROSA_Contacts_final_trajectory_points.csv`
-  (user edited, preferred over shank TSV).
+- v1/v2 pipelines are committed and gated by `test_pipeline_dataset.py` /
+  `test_pipeline_dataset_v2.py`. Don't touch them.
+- Probes are standalone; they don't go through the `deep_core` pipeline.
+- Port to the pipeline only after confirming numbers match the probe
+  (see `feedback_probe_first.md`).
+- Use `shankdetect` conda env.
+- ROSA GT for T22: `contact_label_dataset/rosa_helper_import/T22/
+  ROSA_Contacts_final_trajectory_points.csv`. T2 uses the shank TSV via
+  `load_ground_truth_shanks`.
 
 ## Committed v2 state (for reference)
 
