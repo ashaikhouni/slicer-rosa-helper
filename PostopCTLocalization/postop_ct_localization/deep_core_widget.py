@@ -301,20 +301,47 @@ class DeepCoreDebugWidgetMixin:
         button_row.addStretch(1)
         form.addRow(button_row)
 
+        # Inline progress UI so the user sees live feedback without
+        # having to scroll to the status text panel.  The detector
+        # emits ~12 checkpoint messages; setting max to 12 gives a
+        # sensible determinate bar.  The status label shows the
+        # latest message verbatim.
+        self.contactPitchProgressBar = qt.QProgressBar()
+        self.contactPitchProgressBar.setRange(0, 12)
+        self.contactPitchProgressBar.setValue(0)
+        self.contactPitchProgressBar.setTextVisible(True)
+        self.contactPitchProgressBar.setFormat("step %v / %m")
+        form.addRow("Progress:", self.contactPitchProgressBar)
+        self.contactPitchStatusLabel = qt.QLabel("idle")
+        self.contactPitchStatusLabel.wordWrap = True
+        form.addRow("Status:", self.contactPitchStatusLabel)
+
     def onRunContactPitchV1Clicked(self):
         volume_node = self.ctSelector.currentNode()
         if volume_node is None:
             qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
             return
+        # Reset inline progress UI at the top of the tab so the user
+        # can see it without scrolling.
+        self.contactPitchProgressBar.setValue(0)
+        self.contactPitchStatusLabel.setText("starting…")
+        try:
+            slicer.app.processEvents()
+        except Exception:
+            pass
         try:
             self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
             pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
             ctx = self.logic.build_deep_core_context(volume_node, config=None)
 
             # Live progress: forward each pipeline checkpoint to the
-            # status panel + pump Qt events so the UI repaints during
-            # the ~10–20 s detection (otherwise it appears hung).
+            # inline progress bar + status label + pump Qt events so
+            # the UI repaints during the ~10–20 s detection.
             def _progress(msg):
+                self.contactPitchStatusLabel.setText(str(msg))
+                cur = int(self.contactPitchProgressBar.value)
+                mx = int(self.contactPitchProgressBar.maximum)
+                self.contactPitchProgressBar.setValue(min(cur + 1, mx))
                 self.log(f"[contact-pitch-v1]   {msg}")
                 try:
                     slicer.app.processEvents()
@@ -371,8 +398,16 @@ class DeepCoreDebugWidgetMixin:
                     self.onRefreshClicked()
 
             self.log(f"[contact-pitch-v1] published {len(nodes)} trajectory lines to workflow")
+            # Finalize progress UI on success.
+            self.contactPitchProgressBar.setValue(self.contactPitchProgressBar.maximum)
+            self.contactPitchStatusLabel.setText(
+                f"done — {len(trajectories)} trajectories "
+                f"(stage1={counts.get('stage1_count', 0)}, "
+                f"stage2={counts.get('stage2_count', 0)})"
+            )
         except Exception as exc:
             self.log(f"[contact-pitch-v1] error: {exc}")
+            self.contactPitchStatusLabel.setText(f"error: {exc}")
             import traceback; traceback.print_exc()
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
 
