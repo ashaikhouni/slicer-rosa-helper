@@ -310,6 +310,18 @@ class DeepCoreDebugWidgetMixin:
             self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
             pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
             ctx = self.logic.build_deep_core_context(volume_node, config=None)
+
+            # Live progress: forward each pipeline checkpoint to the
+            # status panel + pump Qt events so the UI repaints during
+            # the ~10–20 s detection (otherwise it appears hung).
+            def _progress(msg):
+                self.log(f"[contact-pitch-v1]   {msg}")
+                try:
+                    slicer.app.processEvents()
+                except Exception:
+                    pass
+            ctx["logger"] = _progress
+
             det_result = pipeline.run(ctx)
             if det_result.get("status") == "error":
                 raise RuntimeError(det_result.get("error", {}).get("message", "unknown"))

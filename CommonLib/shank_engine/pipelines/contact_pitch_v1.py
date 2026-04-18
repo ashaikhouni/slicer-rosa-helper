@@ -93,8 +93,13 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
         from postop_ct_localization import contact_pitch_v1_fit as cpfit
 
         img, ijk_to_ras, ras_to_ijk = self._load_image_and_matrices(ctx)
+        # Forward ctx['logger'] (set by Slicer widget) so the detector
+        # can report stage progress; otherwise the call blocks for 10–20 s
+        # with no feedback and the UI looks frozen.
+        progress_logger = ctx.get("logger")
         trajectories, features = cpfit.run_two_stage_detection(
             img, ijk_to_ras, ras_to_ijk, return_features=True,
+            progress_logger=progress_logger,
         )
         self._last_feature_arrays = features
         stage1 = sum(1 for t in trajectories if t.get("source") == "stage1")

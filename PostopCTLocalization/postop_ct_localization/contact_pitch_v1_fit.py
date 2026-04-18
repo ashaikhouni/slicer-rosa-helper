@@ -1008,7 +1008,7 @@ def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
 
 
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
-                             return_features=False):
+                             return_features=False, progress_logger=None):
     """Run the full two-stage detector on a SITK image.
 
     Args:
@@ -1018,35 +1018,54 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         return_features: if True, return (trajectories, feature_arrays)
             where feature_arrays is a dict with the LoG, Frangi, hull
             head-distance, intracranial and hull arrays (KJI-order).
+        progress_logger: optional callable(message: str) invoked at each
+            major checkpoint. The Slicer widget passes a callback that
+            updates the status panel and runs `app.processEvents()` so
+            the UI doesn't appear hung during the ~10–20 s detection.
 
     Returns:
         list[dict] or (list[dict], dict): trajectories list (always) and
         optionally a feature_arrays dict for debugging / visualization.
     """
+    def _log(msg):
+        if progress_logger is not None:
+            try:
+                progress_logger(msg)
+            except Exception:
+                pass
+
     ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
     ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     import SimpleITK as sitk
+    _log("preprocessing: hull, head-distance, intracranial mask…")
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
     hull, intracranial, dist_arr = build_masks(img)
+    _log("preprocessing: LoG σ=1…")
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
+    _log("preprocessing: Frangi σ=1…")
     frangi_s1 = frangi_single(img, sigma=FRANGI_STAGE1_SIGMA)
     kji_to_ras = _kji_to_ras_fn_from_matrix(ijk_to_ras_mat)
 
+    _log("stage 1: blob-pitch walker (this is the slow step)…")
     stage1_lines, _pts_blobs = run_stage1(
         log1, kji_to_ras, dist_arr, ras_to_ijk_mat,
     )
+    _log(f"stage 1: {len(stage1_lines)} candidate lines after walk + arbitrate + extend")
     excl = compute_exclusion_mask(
         frangi_s1.shape, stage1_lines, ras_to_ijk_mat,
     )
+    _log("stage 2: Frangi shaft fallback…")
     stage2_lines, _cc_arr = run_stage2(
         frangi_s1, intracranial, excl, img.GetSpacing(),
         dist_arr, ijk_to_ras_mat, ras_to_ijk_mat,
     )
+    _log(f"stage 2: {len(stage2_lines)} candidate lines")
 
-    # Bolt detection — run once over the LoG cloud.
+    _log("bolt extraction…")
     bolts, bolt_mask = extract_bolt_candidates(
         log1, dist_arr, ijk_to_ras_mat, img.GetSpacing(),
     )
+    _log(f"bolt extraction: {len(bolts)} bolt candidates")
 
     def _assemble(l, source):
         rec = dict(
@@ -1093,6 +1112,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])
         return rec
 
+    _log("anchoring + length/air filters…")
     anchored: list[dict[str, Any]] = []
     for l in stage1_lines:
         rec = _anchor_or_reject(_assemble(l, "stage1"))
@@ -1102,6 +1122,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         rec = _anchor_or_reject(_assemble(l, "stage2"))
         if rec is not None:
             anchored.append(rec)
+    _log(f"anchoring: {len(anchored)} survived")
 
     # Sort: prefer stage1 over stage2, then longer length. Stage1 is
     # pitch-confirmed; stage2 is a geometric fallback. Dedup keeps the
@@ -1111,6 +1132,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                 -float(rec.get("length_mm", 0.0)))
     anchored.sort(key=_sort_key)
     anchored = _dedup_trajectories(anchored)
+    _log(f"final dedup: {len(anchored)} trajectories")
 
     # Convert to JSON-safe dicts (tuples of floats).
     trajectories: list[dict[str, Any]] = []
