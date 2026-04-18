@@ -1,5 +1,12 @@
 # deep_core_v2 Handoff
 
+> **Superseded for general use by `contact_pitch_v1`.** See
+> `CONTACT_PITCH_V1_HANDOFF.md`. The two-stage probe documented here
+> evolved into the production `contact_pitch_v1` pipeline (with bolt
+> anchor, ownership arbitration, deep-end walk, length / air filters).
+> `deep_core_v2` (cylinder-RANSAC, bolt-first) remains in the
+> registry for backward compatibility.
+
 Last updated: 2026-04-17 (two-stage session).
 
 ## Current best detector: `probe_two_stage.py`

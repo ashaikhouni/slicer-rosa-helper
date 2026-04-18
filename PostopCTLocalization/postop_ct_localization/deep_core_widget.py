@@ -213,6 +213,157 @@ class DeepCoreDebugWidgetMixin:
         button_row.addStretch(1)
         form.addRow(button_row)
 
+    def _register_contact_pitch_feature_volumes(self, reference_volume_node, features):
+        """Register LoG / Frangi / head-distance / masks / bolts as Slicer
+        scalar volumes named ``<CT>_ContactPitch_<feature>`` so they can
+        be inspected in the 3D + slice views.
+        """
+        if not features or reference_volume_node is None:
+            return
+        base = reference_volume_node.GetName() or "ContactPitch"
+        feature_labels = (
+            ("log_sigma1", "LoG_sigma1", True),
+            ("frangi_sigma1", "Frangi_sigma1", True),
+            ("head_distance", "HeadDistance_mm", True),
+            ("intracranial", "IntracranialMask", False),
+            ("hull", "HullMask", False),
+            ("bolt_mask", "BoltMask", False),
+        )
+        registered = []
+        for key, label, percentile_wl in feature_labels:
+            arr = features.get(key)
+            if arr is None:
+                continue
+            try:
+                node = self.logic._update_scalar_volume_from_array(
+                    reference_volume_node, f"{base}_ContactPitch_{label}", arr,
+                )
+            except Exception as exc:
+                self.log(f"[contact-pitch-v1] skipped feature {label}: {exc}")
+                continue
+            if node is None:
+                continue
+            if percentile_wl and np is not None:
+                self._set_percentile_window_level(node, arr)
+            registered.append(label)
+        if registered:
+            self.log(f"[contact-pitch-v1] feature volumes: {', '.join(registered)}")
+
+    @staticmethod
+    def _set_percentile_window_level(node, array):
+        """Override auto-W/L with a [2, 98] percentile-based window so
+        signed-float feature volumes (LoG, Frangi, head-distance) show
+        useful contrast instead of being crushed by outliers.
+        """
+        if np is None or node is None:
+            return
+        try:
+            finite = np.asarray(array, dtype=float)
+            finite = finite[np.isfinite(finite)]
+            if finite.size < 100:
+                return
+            p2, p98 = np.percentile(finite, [2.0, 98.0])
+            window = float(p98 - p2)
+            level = 0.5 * float(p98 + p2)
+            if window <= 1e-6:
+                return
+            display = node.GetDisplayNode()
+            if display is None:
+                return
+            try:
+                display.AutoWindowLevelOff()
+            except Exception:
+                pass
+            display.SetWindow(window)
+            display.SetLevel(level)
+        except Exception:
+            pass
+
+    def _build_contact_pitch_v1_tab(self):
+        tab = qt.QWidget()
+        self.modeTabs.addTab(tab, "Contact Pitch v1")
+        form = qt.QFormLayout(tab)
+
+        help_text = qt.QLabel(
+            "Direct shank detection (no bolt stage). Stage 1: LoG \u03c3=1 "
+            "regional-minima blobs + Dixi 3.5 mm pitch walk. Stage 2: Frangi "
+            "tube fallback (CC + PCA) for shanks without resolvable contacts. "
+            "Trajectories are tagged stage1/stage2 and span the detected "
+            "contact range (not bolt entry to deep tip)."
+        )
+        help_text.wordWrap = True
+        form.addRow(help_text)
+
+        button_row = qt.QHBoxLayout()
+        run_button = qt.QPushButton("Run Contact Pitch v1")
+        run_button.clicked.connect(self.onRunContactPitchV1Clicked)
+        button_row.addWidget(run_button)
+        button_row.addStretch(1)
+        form.addRow(button_row)
+
+    def onRunContactPitchV1Clicked(self):
+        volume_node = self.ctSelector.currentNode()
+        if volume_node is None:
+            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
+            return
+        try:
+            self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
+            pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
+            ctx = self.logic.build_deep_core_context(volume_node, config=None)
+            det_result = pipeline.run(ctx)
+            if det_result.get("status") == "error":
+                raise RuntimeError(det_result.get("error", {}).get("message", "unknown"))
+            trajectories = list(det_result.get("trajectories") or [])
+            counts = det_result.get("diagnostics", {}).get("counts", {})
+            self.log(
+                f"[contact-pitch-v1] {len(trajectories)} trajectories "
+                f"(stage1={counts.get('stage1_count', 0)}, "
+                f"stage2={counts.get('stage2_count', 0)})"
+            )
+
+            features = getattr(pipeline, "_last_feature_arrays", None) or {}
+            self._register_contact_pitch_feature_volumes(volume_node, features)
+
+            self.logic.trajectory_scene.remove_preview_lines()
+            self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
+            nodes = self.logic.show_deep_core_proposals(
+                volume_node=volume_node, proposals=trajectories
+            ) or []
+            self._lastDeepCoreProposalNodes = nodes
+
+            if nodes:
+                rows = []
+                for node in nodes:
+                    traj = self.logic.trajectory_scene.trajectory_from_line_node("", node)
+                    if traj is None:
+                        continue
+                    rows.append(
+                        {
+                            "name": str(traj.get("name") or ""),
+                            "node_name": str(traj.get("node_name") or node.GetName() or ""),
+                            "node_id": str(traj.get("node_id") or node.GetID() or ""),
+                            "group": str(traj.get("group") or "autofit_preview"),
+                            "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
+                            "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
+                        }
+                    )
+                if rows:
+                    self.logic.publish_working_rows(
+                        rows,
+                        workflow_node=self.workflowNode,
+                        role="DeepCoreTrajectoryLines",
+                        source="postop_ct_contact_pitch",
+                    )
+                    self._set_workflow_active_source("deep_core")
+                    self._set_guided_source_combo("deep_core")
+                    self.onRefreshClicked()
+
+            self.log(f"[contact-pitch-v1] published {len(nodes)} trajectory lines to workflow")
+        except Exception as exc:
+            self.log(f"[contact-pitch-v1] error: {exc}")
+            import traceback; traceback.print_exc()
+            qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
+
     def onRunDeepCoreV2Clicked(self):
         volume_node = self.ctSelector.currentNode()
         if volume_node is None:

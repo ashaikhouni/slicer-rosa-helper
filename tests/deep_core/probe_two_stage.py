@@ -40,10 +40,38 @@ from probe_detector_v4 import (  # noqa: E402
 )
 
 FALLBACK_EXCLUSION_MM = 3.0
+# Stage-2 shank-reach prior: real shanks enter through the skull so their
+# shallowest CC voxel sits near the intracranial boundary (dist ~10 mm from
+# hull surface) AND their deep tip reaches well into the brain. Sulcal /
+# vessel tubular FPs sit right on the cortex and never get deep. Require:
+#   dist_min ≤ HULL_ENDPOINT_MAX_MM (one end near hull)
+#   dist_max ≥ DEEP_TIP_MIN_MM     (other end deep in brain)
+HULL_ENDPOINT_MAX_MM = 15.0
+DEEP_TIP_MIN_MM = 25.0
 
 
-def run_stage1(img, log1):
-    """Run blob-pitch v2 on LoG sigma=1. Returns (lines, blobs_kji)."""
+def hull_signed_distance(img, hull_arr):
+    """Signed distance in mm from the hull surface (inside positive).
+    Matches the head-distance field used by build_masks internally."""
+    import SimpleITK as sitk
+    hull_sitk = sitk.GetImageFromArray(hull_arr.astype(np.uint8))
+    hull_sitk.CopyInformation(img)
+    dist = sitk.SignedMaurerDistanceMap(
+        hull_sitk, insideIsPositive=True, squaredDistance=False,
+        useImageSpacing=True,
+    )
+    return sitk.GetArrayFromImage(dist).astype(np.float32)
+
+
+def run_stage1(img, log1, dist_arr=None, ras_to_ijk_mat=None,
+               deep_tip_min_mm=DEEP_TIP_MIN_MM):
+    """Run blob-pitch v2 on LoG sigma=1. Returns (lines, blobs_kji).
+
+    If dist_arr + ras_to_ijk_mat are provided, apply the deep-tip prior:
+    drop lines whose deepest inlier blob has head_distance < deep_tip_min_mm.
+    Real shanks' distal contacts sit deep in brain; skull-/bone-assembled
+    spurious lines have all inliers at head_distance ≤ 0.
+    """
     blobs = bp.extract_blobs(log1, img, threshold=300.0)
     to_ras = bp.kji_to_ras_fn(img)
     pts_ras = np.array([to_ras(b["kji"]) for b in blobs])
@@ -70,6 +98,27 @@ def run_stage1(img, log1):
     hyps.sort(key=lambda h: -h["n_blobs"])
     lines = bp.dedup_lines(hyps)
     lines = [l for l in lines if l.get("amp_sum", 0.0) >= 6000.0]
+
+    if dist_arr is not None and ras_to_ijk_mat is not None:
+        K, J, I = dist_arr.shape
+        kept = []
+        for l in lines:
+            inlier_ras = pts_c[l["inlier_idx"]]
+            h = np.concatenate([inlier_ras, np.ones((inlier_ras.shape[0], 1))],
+                               axis=1)
+            ijk = (ras_to_ijk_mat @ h.T).T[:, :3]
+            ii = np.clip(np.round(ijk[:, 0]).astype(int), 0, I - 1)
+            jj = np.clip(np.round(ijk[:, 1]).astype(int), 0, J - 1)
+            kk = np.clip(np.round(ijk[:, 2]).astype(int), 0, K - 1)
+            inlier_dists = dist_arr[kk, jj, ii]
+            d_max = float(inlier_dists.max())
+            d_min = float(inlier_dists.min())
+            l["dist_min_mm"] = d_min
+            l["dist_max_mm"] = d_max
+            if d_max < deep_tip_min_mm:
+                continue
+            kept.append(l)
+        lines = kept
     return lines, pts_c
 
 
@@ -105,7 +154,8 @@ def compute_exclusion_mask(cloud_mask_shape, lines_ras, ijk_to_ras_mat,
 
 
 def run_stage2(frangi_s1, intracranial_mask, exclusion_mask, spacing_xyz,
-               frangi_thr=30.0):
+               dist_arr=None, hull_endpoint_max_mm=HULL_ENDPOINT_MAX_MM,
+               deep_tip_min_mm=DEEP_TIP_MIN_MM, frangi_thr=30.0):
     """Fast shaft detector: CC + PCA on residual Frangi cloud. Instead of
     RANSAC, we rely on the fact that a continuous dark shaft (e.g. RSAN)
     with contacts invisible on CT shows up as a single elongated CC in the
@@ -167,6 +217,16 @@ def run_stage2(frangi_s1, intracranial_mask, exclusion_mask, spacing_xyz,
         aspect_geom = span / max(perp_rms, 1e-3)
         if aspect_geom < 5.0:
             continue
+        if dist_arr is not None:
+            cc_dist_min = float(dist_arr[kk, jj, ii].min())
+            cc_dist_max = float(dist_arr[kk, jj, ii].max())
+            if cc_dist_min > hull_endpoint_max_mm:
+                continue
+            if cc_dist_max < deep_tip_min_mm:
+                continue
+        else:
+            cc_dist_min = float("nan")
+            cc_dist_max = float("nan")
         aspect = l1 / max(l2, 1e-6)
         # Build polyline in kji space
         kji_pts = np.stack([kk, jj, ii], axis=1).astype(np.float64)
@@ -186,6 +246,8 @@ def run_stage2(frangi_s1, intracranial_mask, exclusion_mask, spacing_xyz,
             "n_inliers": n_vox,
             "axis": kji_axis, "center": kji_c,
             "aspect": aspect,
+            "dist_min_mm": cc_dist_min,
+            "dist_max_mm": cc_dist_max,
         })
     return lines, cc_arr
 
@@ -242,19 +304,21 @@ def run(subject_id):
 
     t0 = time.time()
     hull, intracranial = build_masks(img)
+    dist_arr = hull_signed_distance(img, hull)
     log1 = bp.log_sigma(img, sigma_mm=1.0)
     frangi_s1 = frangi_single(img, sigma=1.0)
+    ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
+    ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+    ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     print(f"# preprocessing ({time.time()-t0:.1f}s)")
 
     # --- Stage 1: blob-pitch ---
     t0 = time.time()
-    stage1_lines, pts_blobs = run_stage1(img, log1)
+    stage1_lines, pts_blobs = run_stage1(
+        img, log1, dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat,
+    )
     print(f"# stage 1 blob-pitch lines: {len(stage1_lines)}  "
           f"({time.time()-t0:.1f}s)")
-
-    ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
-    ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
-    ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
 
     # --- Stage 2: Frangi fallback on exclusion-zoned cloud ---
     t0 = time.time()
@@ -265,7 +329,8 @@ def run(subject_id):
           f"({time.time()-t0:.1f}s)")
     t0 = time.time()
     stage2_lines, stage2_cc_arr = run_stage2(
-        frangi_s1, intracranial, excl, img.GetSpacing()
+        frangi_s1, intracranial, excl, img.GetSpacing(),
+        dist_arr=dist_arr,
     )
     print(f"# stage 2 Frangi lines: {len(stage2_lines)}  "
           f"({time.time()-t0:.1f}s)")
@@ -284,6 +349,8 @@ def run(subject_id):
             length_mm=l["length_mm"],
             n_inliers=l["n_inliers"],
             polyline_kji=l["polyline_kji"], polyline_ras=pts_ras,
+            dist_min_mm=l.get("dist_min_mm", float("nan")),
+            dist_max_mm=l.get("dist_max_mm", float("nan")),
         ))
 
     # Stage-2 is specifically for pitch-less shanks, so we do NOT apply a
@@ -303,10 +370,14 @@ def run(subject_id):
     combined = []
     for s in stage1_lines:
         combined.append(dict(start_ras=s["start_ras"], end_ras=s["end_ras"],
-                             source="stage1"))
+                             source="stage1",
+                             dist_min_mm=s.get("dist_min_mm", float("nan")),
+                             dist_max_mm=s.get("dist_max_mm", float("nan"))))
     for s in stage2_accepted:
         combined.append(dict(start_ras=s["start_ras"], end_ras=s["end_ras"],
-                             source="stage2"))
+                             source="stage2",
+                             dist_min_mm=s.get("dist_min_mm", float("nan")),
+                             dist_max_mm=s.get("dist_max_mm", float("nan"))))
 
     gt = load_gt(subject_id)
     matches = match_tracks_to_gt(combined, gt)
@@ -347,6 +418,24 @@ def run(subject_id):
     )
     print(f"\n# breakdown:  stage1 {stage1_matched} matched + {stage1_fp} FP"
           f"  |  stage2 {stage2_matched} matched + {stage2_fp} FP")
+
+    matched_idx = {mm["track_index"] for mm in matches if mm["matched"]}
+    print("\n# stage1 hull-dist (min_mm -> max_mm):")
+    for i, c in enumerate(combined):
+        if c["source"] != "stage1":
+            continue
+        tp = "TP" if i in matched_idx else "FP"
+        dmin = c.get("dist_min_mm", float("nan"))
+        dmax = c.get("dist_max_mm", float("nan"))
+        print(f"  {tp}  dist=[{dmin:5.1f},{dmax:5.1f}] mm")
+    print("\n# stage2 hull-dist (min_mm -> max_mm):")
+    for i, c in enumerate(combined):
+        if c["source"] != "stage2":
+            continue
+        tp = "TP" if i in matched_idx else "FP"
+        dmin = c.get("dist_min_mm", float("nan"))
+        dmax = c.get("dist_max_mm", float("nan"))
+        print(f"  {tp}  dist=[{dmin:5.1f},{dmax:5.1f}] mm")
 
 
 if __name__ == "__main__":
