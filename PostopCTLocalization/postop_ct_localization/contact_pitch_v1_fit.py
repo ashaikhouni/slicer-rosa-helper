@@ -133,10 +133,15 @@ AIR_SAMPLE_COUNT = 25
 # Post-anchor length bounds. Real SEEG = ~25–80 mm shank + ~15–25 mm
 # bolt protrusion. Catches stage-2 venous-sinus / vessel false positives
 # (>130 mm) and short skull-base hardware FPs (<45 mm).
-MIN_POST_ANCHOR_LEN_MM = 35.0   # short superficial depths (~20 mm
-                                 # intracranial + ~15 mm bolt). Any
-                                 # shorter is almost certainly skull-
-                                 # base hardware or fragment FPs.
+MIN_POST_ANCHOR_LEN_MM = 30.0   # short superficial depths (~20 mm
+                                 # intracranial + ~10–15 mm bolt). PMT
+                                 # bolts run ~12 mm so AMC099 L_5 lands
+                                 # at 34 mm total; a 35 mm floor
+                                 # rejected it by 0.5 mm. Real 5-contact
+                                 # shanks have ≥ 15 mm intracranial, and
+                                 # the walker's 5-blob floor + avg-pitch
+                                 # gate block fragment / hardware FPs
+                                 # that might slip under a 30 mm cap.
 MAX_POST_ANCHOR_LEN_MM = 130.0
 
 # Cross-stage dedup (applied AFTER bolt anchoring).
