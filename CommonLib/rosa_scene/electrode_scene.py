@@ -270,6 +270,18 @@ class ElectrodeSceneService:
             raise ValueError("Zero-length trajectory vector")
         return [a[0] / n, a[1] / n, a[2] / n]
 
+    def _slice_widget_aspect(self, slice_widget):
+        """Return width/height of the slice viewport, or 1.0 as fallback."""
+        try:
+            view = slice_widget.sliceView()
+            w = float(view.width)
+            h = float(view.height)
+            if h > 0:
+                return w / h
+        except Exception:
+            pass
+        return 1.0
+
     def _tube_polydata(self, p0, p1, radius_mm, sides=24):
         """Build capped tube polydata between two 3D points."""
         line = vtk.vtkLineSource()
@@ -407,15 +419,23 @@ class ElectrodeSceneService:
         ----------
         focus : str
             One of: ``entry`` (start point), ``target`` (end point), ``midpoint``.
+            Ignored when ``mode='long'``: the long-axis view always
+            centers on the trajectory midpoint and sizes its field of
+            view to cover the full entry→target span (1.2× margin) so
+            the whole shank is visible instead of clipped to one end.
         """
         direction = self._vunit(self._vsub(end_ras, start_ras))
-        focus_key = str(focus or "entry").strip().lower()
-        if focus_key == "target":
-            center = list(end_ras)
-        elif focus_key == "midpoint":
+        mode = (mode or "long").lower()
+        if mode == "long":
             center = self._vmul(self._vadd(start_ras, end_ras), 0.5)
         else:
-            center = list(start_ras)
+            focus_key = str(focus or "entry").strip().lower()
+            if focus_key == "target":
+                center = list(end_ras)
+            elif focus_key == "midpoint":
+                center = self._vmul(self._vadd(start_ras, end_ras), 0.5)
+            else:
+                center = list(start_ras)
 
         up = [0.0, 0.0, 1.0]
         if abs(self._vdot(direction, up)) > 0.9:
@@ -424,7 +444,6 @@ class ElectrodeSceneService:
         x_axis = self._vunit(self._vcross(up, direction))
         y_axis = self._vunit(self._vcross(direction, x_axis))
 
-        mode = (mode or "long").lower()
         if mode == "down":
             normal = direction
             transverse = y_axis
@@ -458,6 +477,17 @@ class ElectrodeSceneService:
             slice_node.JumpSliceByOffsetting(center[0], center[1], center[2])
         if hasattr(slice_node, "JumpSliceByCentering"):
             slice_node.JumpSliceByCentering(center[0], center[1], center[2])
+
+        if mode == "long":
+            length_mm = float(self._vnorm(self._vsub(end_ras, start_ras)))
+            if length_mm > 1e-3:
+                fov_h = length_mm * 1.2
+                aspect = self._slice_widget_aspect(slice_widget)
+                fov_v = fov_h / aspect if aspect > 1e-3 else fov_h * 0.5
+                try:
+                    slice_node.SetFieldOfView(float(fov_h), float(fov_v), 1.0)
+                except Exception:
+                    pass
 
     def jump_slice_views_to_point(self, point_ras, slice_views=("Red", "Yellow", "Green")):
         """Jump one or more slice views to the given RAS point without changing orientation."""

@@ -23,11 +23,15 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_core import (
+    candidate_ids_for_vendors,
     compute_qc_metrics,
+    detect_contacts_on_axis,
     electrode_length_mm,
     generate_contacts,
     load_electrode_library,
+    lps_to_ras_point,
     model_map,
+    ras_contacts_to_contact_records,
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
@@ -82,6 +86,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        self.lastPeakDriftFlags = []
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -317,6 +322,17 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         defaults_row.addWidget(self.applyModelAllButton)
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
+
+        # Model-driven: synthesize contacts at the assigned electrode
+        # model's nominal offsets along the fitted line.
+        # Peak-driven: sample LoG sigma=1 along the axis, pick peaks,
+        # match to the library, emit contacts at the detected peak
+        # positions. Falls back to model-driven per-trajectory when
+        # the axis doesn't produce enough peaks to resolve a model.
+        self.detectionModeCombo = qt.QComboBox()
+        self.detectionModeCombo.addItem("Model-driven (nominal)", "model_driven")
+        self.detectionModeCombo.addItem("Peak-driven (CT peaks)", "peak_driven")
+        form.addRow("Detection mode", self.detectionModeCombo)
 
         self.contactsNodeNameEdit = qt.QLineEdit("ROSA_Contacts")
         form.addRow("Output node prefix", self.contactsNodeNameEdit)
@@ -777,6 +793,276 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
 
+    def _selected_detection_mode(self):
+        data = self.detectionModeCombo.currentData
+        value = data() if callable(data) else data
+        return str(value or "model_driven").strip().lower()
+
+    def _resolve_postop_ct_node(self):
+        """Return the PostopCT volume node (workflow role) or None."""
+        nodes = self.workflowState.role_nodes(
+            "PostopCT", workflow_node=self.workflowNode,
+        )
+        return nodes[0] if nodes else None
+
+    def _resolve_log_volume_node(self, ct_node):
+        """Look up the Auto-Fit-stashed ``<CT>_ContactPitch_LoG_sigma1``
+        volume node in the scene if it exists, matching by base name of
+        ``ct_node``. Returns None when missing.
+        """
+        if ct_node is None:
+            return None
+        base = ct_node.GetName() or ""
+        if not base:
+            return None
+        candidate_name = f"{base}_ContactPitch_LoG_sigma1"
+        found = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+        for node in found:
+            if node.GetName() == candidate_name:
+                return node
+        return None
+
+    def _compute_log_volume_from_ct(self, ct_node):
+        """Compute LoG sigma=1 on the CT node's image data, in memory."""
+        import numpy as np
+        import SimpleITK as sitk
+        arr_kji = slicer.util.arrayFromVolume(ct_node)
+        if arr_kji is None:
+            raise RuntimeError("CT volume has no array data")
+        img = sitk.GetImageFromArray(np.asarray(arr_kji, dtype=np.float32))
+        spacing = [0.0, 0.0, 0.0]
+        ct_node.GetSpacing(spacing)
+        img.SetSpacing(tuple(float(s) for s in spacing))
+        log_img = sitk.LaplacianRecursiveGaussian(img, sigma=1.0)
+        return sitk.GetArrayFromImage(log_img).astype(np.float32)
+
+    def _ras_to_ijk_matrix_np(self, volume_node):
+        """Return the 4x4 RAS→IJK matrix of a scalar volume as numpy."""
+        import numpy as np
+        m = vtk.vtkMatrix4x4()
+        volume_node.GetRASToIJKMatrix(m)
+        out = np.zeros((4, 4), dtype=float)
+        for i in range(4):
+            for j in range(4):
+                out[i, j] = m.GetElement(i, j)
+        return out
+
+    def _candidate_ids_from_default_combo(self):
+        """Return the electrode ids matching the vendor token of the
+        ``defaultModelCombo`` text, or all ids when the combo is blank.
+        Gives a lightweight vendor filter without adding more UI.
+        """
+        default = widget_current_text(self.defaultModelCombo).strip()
+        if not default:
+            return candidate_ids_for_vendors(
+                self.modelsById, vendors=["DIXI", "PMT", "AdTech"],
+            )
+        vendor = default.split("-", 1)[0]
+        return candidate_ids_for_vendors(self.modelsById, vendors=[vendor])
+
+    def _generate_contacts_peak_driven(self, trajectories, assignments, log_context):
+        """Peak-driven contact detection path. Returns
+        ``(contacts, peak_fit_by_traj, updated_assignments)``.
+
+        For each trajectory:
+          1. Resolve the CT volume + LoG volume (precomputed by Auto
+             Fit, or computed here via SITK).
+          2. Convert trajectory LPS endpoints to RAS.
+          3. Run ``detect_contacts_on_axis`` restricted to the user-
+             assigned model when one is set; otherwise let the engine
+             choose the best-matching library model.
+          4. Emit contact records at the detected peak positions;
+             fall back to the model-driven nominal-offset synthesis
+             when the engine rejects the fit.
+        """
+        ct_node = self._resolve_postop_ct_node()
+        if ct_node is None:
+            raise ValueError(
+                "PostopCT volume not available in the workflow — peak-driven "
+                "mode needs the CT to sample. Assign it via the Focus view "
+                "selectors or run Auto Fit first."
+            )
+        log_node = self._resolve_log_volume_node(ct_node)
+        if log_node is not None:
+            import numpy as np
+            log_arr = np.asarray(slicer.util.arrayFromVolume(log_node))
+            self.log(
+                f"[contacts:{log_context}] reusing LoG volume '{log_node.GetName()}'"
+            )
+        else:
+            self.log(
+                f"[contacts:{log_context}] no cached LoG volume — computing sigma=1 on CT"
+            )
+            log_arr = self._compute_log_volume_from_ct(ct_node)
+        ras_to_ijk = self._ras_to_ijk_matrix_np(ct_node)
+
+        candidate_ids = self._candidate_ids_from_default_combo()
+        assignment_by_name = {
+            row.get("trajectory", ""): row for row in assignments.get("assignments", [])
+        }
+        contacts = []
+        peak_fit_by_traj = {}
+        fallback_names = []
+        for traj in trajectories:
+            name = traj.get("name", "")
+            row = assignment_by_name.get(name)
+            tip_at = (row.get("tip_at") if row else "target") or "target"
+            assigned_model = (row.get("model_id") if row else "") or ""
+            start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+            end_lps = traj.get("end") or [0.0, 0.0, 0.0]
+            # Trajectories travel from entry → target; the deep tip is
+            # the target end by convention (same as model-driven mode).
+            entry_ras = lps_to_ras_point(list(start_lps))
+            target_ras = lps_to_ras_point(list(end_lps))
+            try:
+                result = detect_contacts_on_axis(
+                    start_ras=entry_ras,
+                    end_ras=target_ras,
+                    log_volume_kji=log_arr,
+                    ras_to_ijk_mat=ras_to_ijk,
+                    models_by_id=self.modelsById,
+                    candidate_ids=candidate_ids,
+                    restrict_to_model_id=assigned_model or None,
+                )
+            except Exception as exc:
+                self.log(
+                    f"[contacts:{log_context}] peak fit failed for {name}: {exc}"
+                )
+                result = None
+
+            peak_fit_by_traj[name] = result
+            if result is not None and result.model_id:
+                records = ras_contacts_to_contact_records(
+                    result, traj, tip_at_for_schema=tip_at,
+                )
+                if row is not None:
+                    # Engine may have chosen a different model than
+                    # the combo — reflect that in the stored
+                    # assignment so downstream consumers see the
+                    # winner.
+                    row["model_id"] = result.model_id
+                contacts.extend(records)
+                self.log(
+                    f"[contacts:{log_context}] {name}: peak fit {result.model_id} "
+                    f"({result.n_matched}/{result.n_model_slots} peaks, "
+                    f"mean res {result.mean_residual_mm:.2f} mm)"
+                )
+                continue
+
+            # Fallback: synthesize at the user-assigned model's nominal
+            # offsets. Require an assigned model to fall back; empty
+            # means the user hasn't picked anything for this row.
+            reason = (
+                result.rejected_reason
+                if result is not None
+                else "engine_error"
+            )
+            fallback_names.append(f"{name} ({reason})")
+            if not assigned_model:
+                continue
+            fallback = generate_contacts(
+                [traj], self.modelsById,
+                {"schema_version": "1.0", "assignments": [row]} if row else {
+                    "schema_version": "1.0",
+                    "assignments": [{
+                        "trajectory": name,
+                        "model_id": assigned_model,
+                        "tip_at": tip_at,
+                        "tip_shift_mm": 0.0,
+                        "xyz_offset_mm": [0.0, 0.0, 0.0],
+                    }],
+                },
+            )
+            for rec in fallback:
+                rec["peak_detected"] = False  # nominal
+            contacts.extend(fallback)
+
+        if fallback_names:
+            self.log(
+                f"[contacts:{log_context}] peak→nominal fallback for: "
+                + ", ".join(fallback_names)
+            )
+        return contacts, peak_fit_by_traj, assignments
+
+    def _sync_model_combos_from_assignments(self, assignments):
+        """Push assignment model_id back into the row model combos so
+        the user sees which model the engine picked in peak-driven mode.
+        """
+        by_name = {
+            row.get("trajectory", ""): row.get("model_id", "")
+            for row in assignments.get("assignments", [])
+        }
+        for row_index in range(self.contactTable.rowCount):
+            traj_item = self.contactTable.item(row_index, 1)
+            if traj_item is None:
+                continue
+            model_id = by_name.get(traj_item.text(), "")
+            if not model_id:
+                continue
+            combo = self.contactTable.cellWidget(row_index, 3)
+            if combo is None:
+                continue
+            idx = combo.findText(model_id)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+    def _compute_peak_vs_nominal_drift(self, peak_fit_by_traj,
+                                        trajectories_by_name, assignments,
+                                        drift_threshold_mm=1.0):
+        """Compute per-slot drift between peak-detected positions and
+        the same model's nominal positions along the assigned axis.
+
+        Returns a list of dicts (one per trajectory) with keys:
+          trajectory, model_id, max_drift_mm, mean_drift_mm,
+          n_slots_above_threshold, n_slots_detected.
+        """
+        import numpy as np
+        assignment_by_name = {
+            row.get("trajectory", ""): row for row in assignments.get("assignments", [])
+        }
+        out = []
+        for name, result in peak_fit_by_traj.items():
+            if result is None or not result.model_id:
+                continue
+            traj = trajectories_by_name.get(name)
+            row = assignment_by_name.get(name)
+            if traj is None or row is None:
+                continue
+            nominal = generate_contacts([traj], self.modelsById, {
+                "schema_version": "1.0",
+                "assignments": [{
+                    "trajectory": name,
+                    "model_id": result.model_id,
+                    "tip_at": row.get("tip_at", "target"),
+                    "tip_shift_mm": 0.0,
+                    "xyz_offset_mm": [0.0, 0.0, 0.0],
+                }],
+            })
+            # nominal positions are LPS; peak positions are RAS.
+            # Convert both to the same frame by flipping the peak ones.
+            drift = []
+            for idx, (peak_ras, detected) in enumerate(zip(
+                result.positions_ras, result.peak_detected,
+            )):
+                if not detected or idx >= len(nominal):
+                    continue
+                peak_lps = lps_to_ras_point(list(peak_ras))
+                nom_lps = nominal[idx]["position_lps"]
+                d = float(np.linalg.norm(
+                    np.asarray(peak_lps) - np.asarray(nom_lps)
+                ))
+                drift.append(d)
+            drift_arr = np.asarray(drift, dtype=float) if drift else np.array([])
+            out.append({
+                "trajectory": name,
+                "model_id": result.model_id,
+                "max_drift_mm": float(drift_arr.max()) if drift_arr.size else 0.0,
+                "mean_drift_mm": float(drift_arr.mean()) if drift_arr.size else 0.0,
+                "n_slots_above_threshold": int((drift_arr > drift_threshold_mm).sum()),
+                "n_slots_detected": int(drift_arr.size),
+            })
+        return out
+
     def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
         selected_rows = [row for row in range(self.contactTable.rowCount) if self._row_is_selected(row)]
         if not selected_rows:
@@ -799,7 +1085,24 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             if item:
                 ordered_names.append(item.text())
         selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
-        contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
+
+        mode = self._selected_detection_mode()
+        if mode == "peak_driven":
+            contacts, peak_fit_by_traj, assignments = self._generate_contacts_peak_driven(
+                trajectories=selected_trajectories,
+                assignments=assignments,
+                log_context=log_context,
+            )
+            self._sync_model_combos_from_assignments(assignments)
+            self.lastAssignments = assignments
+            self.lastPeakDriftFlags = self._compute_peak_vs_nominal_drift(
+                peak_fit_by_traj=peak_fit_by_traj,
+                trajectories_by_name=traj_map,
+                assignments=assignments,
+            )
+        else:
+            contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
+            self.lastPeakDriftFlags = []
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
         contact_nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(
@@ -851,6 +1154,15 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
+        if self.lastPeakDriftFlags:
+            for row in self.lastPeakDriftFlags:
+                flag = "⚠ drift>1mm" if row["n_slots_above_threshold"] > 0 else "ok"
+                self.log(
+                    f"[peak-vs-nominal:{log_context}] {row['trajectory']} "
+                    f"model={row['model_id']} max={row['max_drift_mm']:.2f} mm "
+                    f"mean={row['mean_drift_mm']:.2f} mm "
+                    f"n={row['n_slots_detected']} {flag}"
+                )
         if self.lastQCMetricsRows:
             self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
         self._refresh_summary()
