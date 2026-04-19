@@ -42,8 +42,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.modelIds = []
         self.loadedTrajectories = []
         self.assignmentMap = {}
-        self.candidatesLPS = np.empty((0, 3), dtype=float) if np is not None else []
-        self.fitResults = {}
         self._syncingGuidedSourceCombo = False
         self._pendingGuidedFollow = False
         self._updatingGuidedTable = False
@@ -137,53 +135,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         actions_row.addStretch(1)
         form.addRow(actions_row)
 
-    @staticmethod
-    def _build_hu_threshold_selector(default_hu=1800.0):
-        """Return a slider+spinbox pair for HU threshold selection."""
-        holder = qt.QWidget()
-        row = qt.QHBoxLayout(holder)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-
-        slider = qt.QSlider(qt.Qt.Horizontal)
-        slider.setRange(-1200, 4000)
-        slider.setSingleStep(1)
-        slider.setPageStep(50)
-        slider.setValue(int(round(float(default_hu))))
-
-        spin = qt.QDoubleSpinBox()
-        spin.setRange(-1200.0, 4000.0)
-        spin.setDecimals(1)
-        spin.setSingleStep(1.0)
-        spin.setSuffix(" HU")
-        spin.setValue(float(default_hu))
-
-        def _slider_to_spin(value):
-            if abs(float(spin.value) - float(value)) < 1e-6:
-                return
-            block = spin.blockSignals(True)
-            try:
-                spin.setValue(float(value))
-            finally:
-                spin.blockSignals(block)
-
-        def _spin_to_slider(value):
-            target = int(round(float(value)))
-            if int(slider.value) == target:
-                return
-            block = slider.blockSignals(True)
-            try:
-                slider.setValue(target)
-            finally:
-                slider.blockSignals(block)
-
-        slider.valueChanged.connect(_slider_to_spin)
-        spin.valueChanged.connect(_spin_to_slider)
-
-        row.addWidget(slider, 1)
-        row.addWidget(spin, 0)
-        return holder, slider, spin
-
     def _load_electrode_library(self):
         try:
             data = load_electrode_library()
@@ -197,8 +148,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.log(f"[electrodes] loaded {len(self.modelIds)} models")
 
     @staticmethod
-
-    @staticmethod
     def _clean_table_text(value, default=""):
         """Normalize MRML table text cells that may include wrapped quotes."""
         if value is None:
@@ -209,8 +158,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
             text = text[1:-1].strip()
         return text or default
-
-    @classmethod
 
     @classmethod
     def _safe_float(cls, value, default=0.0):
@@ -229,16 +176,6 @@ class PostopCTLocalizationWidgetBaseMixin:
                 return float(text.strip(" \"'"))
             except Exception:
                 return float(default)
-
-    @staticmethod
-
-    @staticmethod
-    def _optional_float_from_text(text):
-        """Parse optional float value from text; empty string -> None."""
-        raw = str(text or "").strip()
-        if not raw:
-            return None
-        return float(raw)
 
     def _assignment_map_from_workflow(self):
         amap = {}
@@ -402,8 +339,7 @@ class PostopCTLocalizationWidgetBaseMixin:
     def _refresh_summary(self):
         self.summaryLabel.setText(
             f"working trajectories={len(self.loadedTrajectories)}, "
-            f"assignments={len(self.assignmentMap)}, "
-            f"candidate points={(len(self.candidatesLPS) if np is None else int(getattr(self.candidatesLPS, 'shape', [0])[0]))}"
+            f"assignments={len(self.assignmentMap)}"
         )
 
     def onRefreshClicked(self):
@@ -419,6 +355,8 @@ class PostopCTLocalizationWidgetBaseMixin:
         )
         self.assignmentMap = self._assignment_map_from_workflow()
         self._populate_guided_trajectory_table()
+        if hasattr(self, "_refresh_guided_seed_source_combo"):
+            self._refresh_guided_seed_source_combo()
         self._apply_guided_source_visibility(source_key)
         self._apply_primary_slice_layers()
         self._refresh_summary()

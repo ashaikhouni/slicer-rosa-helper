@@ -195,6 +195,17 @@ class PostopCTLocalizationLogicBaseMixin:
         trajectories.sort(key=lambda item: item.get("name", ""))
         return trajectories
 
+    def count_trajectories_by_source(self, source_key, workflow_node=None):
+        """Cheap count of trajectories available under one source key.
+
+        Used by Guided Fit to populate its seed-source dropdown with
+        ``"<Label> (<N>)"`` entries without loading every trajectory's
+        markup node.
+        """
+        return len(
+            self.collect_trajectories_by_source(source_key, workflow_node=workflow_node)
+        )
+
     def collect_trajectories_by_source(self, source_key="working", workflow_node=None):
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         source = str(source_key or "working").strip().lower()

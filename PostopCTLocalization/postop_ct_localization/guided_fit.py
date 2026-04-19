@@ -1,34 +1,34 @@
-import json
-import os
+"""Guided Fit widget: snap planned/seeded trajectories to the imaged
+shank using the LoG-based engine in :mod:`guided_fit_engine`.
 
+Seed sources come from the workflow: Auto Fit, Imported ROSA,
+Imported External, Manual, Planned ROSA. A dropdown at the top of the
+tab lists each source with its current trajectory count so the user
+knows what's available before fitting.
+"""
 try:
     import numpy as np
 except ImportError:
     np = None
 
-try:
-    import SimpleITK as sitk
-except ImportError:
-    sitk = None
+from __main__ import qt, slicer
 
-from __main__ import ctk, qt, slicer, vtk
+from rosa_core import trajectory_length_mm
 
-from rosa_core import (
-    load_electrode_library,
-    lps_to_ras_point,
-    model_map,
-    suggest_model_id_for_trajectory,
-    trajectory_length_mm,
+from . import guided_fit_engine as gfe
+
+
+# Seed sources the Guided Fit tab offers. Excludes "working" and
+# "guided_fit" — neither is a sensible seed (working is a merged view;
+# guided_fit is the *output* of this tab, not its input).
+_GUIDED_SEED_SOURCES = (
+    ("auto_fit", "Auto Fit"),
+    ("imported_rosa", "Imported ROSA"),
+    ("imported_external", "Imported External"),
+    ("manual", "Manual (scene)"),
+    ("planned_rosa", "Planned ROSA"),
 )
-from rosa_core.contact_fit import fit_electrode_axis_and_tip
-from rosa_scene import ElectrodeSceneService, LayoutService, TrajectoryFocusController, TrajectorySceneService
-from shank_core.blob_candidates import build_blob_labelmap, extract_blob_candidates
-from shank_core.masking import build_preview_masks, compute_head_distance_map_kji, largest_component_binary
-from shank_engine import PipelineRegistry, register_builtin_pipelines
-from rosa_workflow import WorkflowPublisher, WorkflowState
-from rosa_workflow.workflow_registry import table_to_dict_rows
 
-from .constants import GUIDED_SOURCE_OPTIONS
 
 class GuidedFitWidgetMixin:
     def _build_guided_fit_tab(self):
@@ -36,66 +36,69 @@ class GuidedFitWidgetMixin:
         self.modeTabs.addTab(tab, "Guided Fit")
         form = qt.QFormLayout(tab)
 
-        threshold_widget, guided_threshold_slider, guided_threshold_spin = self._build_hu_threshold_selector(
-            default_hu=600.0
-        )
-        self.guidedThresholdSlider = guided_threshold_slider
-        self.guidedThresholdSpin = guided_threshold_spin
-
-        self.guidedHeadThresholdSpin = qt.QDoubleSpinBox()
-        self.guidedHeadThresholdSpin.setRange(-1200.0, 500.0)
-        self.guidedHeadThresholdSpin.setDecimals(1)
-        self.guidedHeadThresholdSpin.setValue(-500.0)
-        self.guidedHeadThresholdSpin.setSuffix(" HU")
-
-        self.guidedMinDepthSpin = qt.QDoubleSpinBox()
-        self.guidedMinDepthSpin.setRange(0.0, 100.0)
-        self.guidedMinDepthSpin.setDecimals(2)
-        self.guidedMinDepthSpin.setValue(5.0)
-        self.guidedMinDepthSpin.setSuffix(" mm")
-
-        self.guidedMaxDepthSpin = qt.QDoubleSpinBox()
-        self.guidedMaxDepthSpin.setRange(0.0, 300.0)
-        self.guidedMaxDepthSpin.setDecimals(2)
-        self.guidedMaxDepthSpin.setValue(220.0)
-        self.guidedMaxDepthSpin.setSuffix(" mm")
-
         guided_info = qt.QLabel(
-            "Adaptive guided fit: threshold, ROI, and sparse-support retries are automatic."
+            "Snap seeded trajectories to the actual imaged shank using "
+            "LoG \u03c3=1 blobs inside a cylindrical ROI around each seed "
+            "axis. Same scanner-agnostic signal as Auto Fit."
         )
         guided_info.wordWrap = True
         form.addRow(guided_info)
 
-        detectRow = qt.QHBoxLayout()
-        self.detectCandidatesButton = qt.QPushButton("Detect Candidates")
-        self.detectCandidatesButton.clicked.connect(self.onDetectCandidatesClicked)
-        detectRow.addWidget(self.detectCandidatesButton)
-        self.resetWindowButton = qt.QPushButton("Reset CT Window")
-        self.resetWindowButton.clicked.connect(self.onResetCTWindowClicked)
-        detectRow.addWidget(self.resetWindowButton)
-        detectRow.addStretch(1)
-        form.addRow(detectRow)
+        # Seed-source dropdown. Entries are "<Label> (<N>)" and the
+        # current ``ActiveTrajectorySource`` drives the shared table
+        # below the tabs, so picking a source here also updates what
+        # the user sees checked.
+        self.guidedSeedSourceCombo = qt.QComboBox()
+        self.guidedSeedSourceCombo.setToolTip(
+            "Trajectory source to use as the seed for guided fit. "
+            "Each entry shows the number of trajectories currently "
+            "published under that source."
+        )
+        self.guidedSeedSourceCombo.currentIndexChanged.connect(
+            self.onGuidedSeedSourceChanged
+        )
+        form.addRow("Seed source:", self.guidedSeedSourceCombo)
 
+        self.guidedRefreshSeedsButton = qt.QPushButton("Refresh seed counts")
+        self.guidedRefreshSeedsButton.clicked.connect(
+            self.onGuidedRefreshSeedsClicked
+        )
+        form.addRow(self.guidedRefreshSeedsButton)
+
+        # Fit knobs. Defaults match the engine's defaults.
         self.guidedRoiRadiusSpin = qt.QDoubleSpinBox()
         self.guidedRoiRadiusSpin.setRange(1.0, 6.0)
         self.guidedRoiRadiusSpin.setDecimals(2)
-        self.guidedRoiRadiusSpin.setValue(5.0)
+        self.guidedRoiRadiusSpin.setSingleStep(0.25)
+        self.guidedRoiRadiusSpin.setValue(float(gfe.DEFAULT_ROI_RADIUS_MM))
         self.guidedRoiRadiusSpin.setSuffix(" mm")
+        self.guidedRoiRadiusSpin.setToolTip(
+            "Perpendicular distance from the seed axis within which "
+            "LoG blobs are accepted for the PCA fit."
+        )
+        form.addRow("ROI radius:", self.guidedRoiRadiusSpin)
 
         self.guidedMaxAngleSpin = qt.QDoubleSpinBox()
-        self.guidedMaxAngleSpin.setRange(1.0, 25.0)
+        self.guidedMaxAngleSpin.setRange(1.0, 30.0)
         self.guidedMaxAngleSpin.setDecimals(1)
-        self.guidedMaxAngleSpin.setValue(12.0)
+        self.guidedMaxAngleSpin.setValue(float(gfe.DEFAULT_MAX_ANGLE_DEG))
         self.guidedMaxAngleSpin.setSuffix(" deg")
+        self.guidedMaxAngleSpin.setToolTip(
+            "Maximum tilt of the fitted axis vs the seed axis."
+        )
+        form.addRow("Max axis tilt:", self.guidedMaxAngleSpin)
 
-        self.guidedMaxDepthShiftSpin = qt.QDoubleSpinBox()
-        self.guidedMaxDepthShiftSpin.setRange(1.0, 50.0)
-        self.guidedMaxDepthShiftSpin.setDecimals(1)
-        self.guidedMaxDepthShiftSpin.setValue(2.0)
-        self.guidedMaxDepthShiftSpin.setSuffix(" mm")
-
-        self.guidedFitModeCombo = qt.QComboBox()
-        self.guidedFitModeCombo.addItem("Deep-anchored (v2)", "deep_anchor_v2")
+        self.guidedMaxLateralShiftSpin = qt.QDoubleSpinBox()
+        self.guidedMaxLateralShiftSpin.setRange(0.5, 20.0)
+        self.guidedMaxLateralShiftSpin.setDecimals(2)
+        self.guidedMaxLateralShiftSpin.setValue(
+            float(gfe.DEFAULT_MAX_LATERAL_SHIFT_MM)
+        )
+        self.guidedMaxLateralShiftSpin.setSuffix(" mm")
+        self.guidedMaxLateralShiftSpin.setToolTip(
+            "Maximum lateral shift of the fitted midpoint vs the seed midpoint."
+        )
+        form.addRow("Max lateral shift:", self.guidedMaxLateralShiftSpin)
 
         fitRow = qt.QHBoxLayout()
         self.fitSelectedButton = qt.QPushButton("Fit Checked")
@@ -104,12 +107,81 @@ class GuidedFitWidgetMixin:
         self.fitAllButton = qt.QPushButton("Fit All")
         self.fitAllButton.clicked.connect(self.onFitAllClicked)
         fitRow.addWidget(self.fitAllButton)
-        self.applyFitButton = qt.QPushButton("Apply Fit to Trajectories")
-        self.applyFitButton.clicked.connect(self.onApplyFitClicked)
-        self.applyFitButton.setEnabled(False)
-        self.applyFitButton.setVisible(False)
-        fitRow.addWidget(self.applyFitButton)
+        fitRow.addStretch(1)
         form.addRow(fitRow)
+
+        self.guidedFitStatusLabel = qt.QLabel("idle")
+        self.guidedFitStatusLabel.wordWrap = True
+        form.addRow("Status:", self.guidedFitStatusLabel)
+
+    # ---- Seed-source combo --------------------------------------------
+
+    def _refresh_guided_seed_source_combo(self):
+        """Populate the Guided Fit seed combo with ``<Label> (<N>)``
+        entries and preserve the user's current selection when possible.
+        """
+        if not hasattr(self, "guidedSeedSourceCombo"):
+            return
+        prev_key = ""
+        try:
+            prev_key = str(self.guidedSeedSourceCombo.currentData or "").strip().lower()
+        except Exception:
+            prev_key = ""
+        self.guidedSeedSourceCombo.blockSignals(True)
+        try:
+            self.guidedSeedSourceCombo.clear()
+            for key, label in _GUIDED_SEED_SOURCES:
+                try:
+                    count = int(self.logic.count_trajectories_by_source(
+                        key, workflow_node=self.workflowNode,
+                    ))
+                except Exception:
+                    count = 0
+                self.guidedSeedSourceCombo.addItem(f"{label} ({count})", key)
+                # Disable empty sources so the user can only pick real seeds.
+                if count == 0:
+                    idx = self.guidedSeedSourceCombo.count - 1
+                    model_item = self.guidedSeedSourceCombo.model().item(idx)
+                    if model_item is not None:
+                        model_item.setEnabled(False)
+            # Reinstate previous selection; if it's empty/unavailable,
+            # default to the first non-empty source.
+            restored = False
+            if prev_key:
+                idx = self.guidedSeedSourceCombo.findData(prev_key)
+                if idx >= 0:
+                    self.guidedSeedSourceCombo.setCurrentIndex(idx)
+                    restored = True
+            if not restored:
+                for idx in range(self.guidedSeedSourceCombo.count):
+                    model_item = self.guidedSeedSourceCombo.model().item(idx)
+                    if model_item is None or model_item.isEnabled():
+                        self.guidedSeedSourceCombo.setCurrentIndex(idx)
+                        break
+        finally:
+            self.guidedSeedSourceCombo.blockSignals(False)
+
+    def _selected_guided_seed_source(self):
+        data = self.guidedSeedSourceCombo.currentData
+        return str(data or "").strip().lower()
+
+    def onGuidedSeedSourceChanged(self, _idx):
+        """When the user picks a seed source, drive the shared
+        trajectory table + source combo to match so the table below
+        shows the seeds the user is about to fit.
+        """
+        key = self._selected_guided_seed_source()
+        if not key:
+            return
+        self._set_workflow_active_source(key)
+        self._set_guided_source_combo(key)
+        self.onRefreshClicked()
+
+    def onGuidedRefreshSeedsClicked(self):
+        self._refresh_guided_seed_source_combo()
+        self.onRefreshClicked()
+
+    # ---- Table helpers (unchanged) ------------------------------------
 
     def _populate_guided_trajectory_table(self):
         self._updatingGuidedTable = True
@@ -146,208 +218,175 @@ class GuidedFitWidgetMixin:
         row = int(item.row())
         if row < 0 or row >= len(self.loadedTrajectories):
             return
-
-        old_name = str(item.data(qt.Qt.UserRole) or self.loadedTrajectories[row].get("name", "")).strip()
         new_name = str(item.text() or "").strip()
-        if not old_name:
+        traj = self.loadedTrajectories[row]
+        old_name = str(traj.get("name", "")).strip()
+        if not new_name or new_name == old_name:
             return
-        if not new_name:
-            self._renamingGuidedTrajectory = True
-            item.setText(old_name)
+        self._renamingGuidedTrajectory = True
+        try:
+            ok = bool(self.logic.rename_trajectory(traj.get("node_id", ""), new_name))
+        finally:
             self._renamingGuidedTrajectory = False
-            return
-        if new_name == old_name:
-            return
-
-        for r in range(self.guidedTrajectoryTable.rowCount):
-            if r == row:
-                continue
-            other = self.guidedTrajectoryTable.item(r, 1)
-            if other and str(other.text() or "").strip().lower() == new_name.lower():
-                self._renamingGuidedTrajectory = True
+        if ok:
+            traj["name"] = new_name
+            item.setData(qt.Qt.UserRole, new_name)
+            self.log(f"[guided] renamed {old_name} → {new_name}")
+            self.onRefreshClicked()
+        else:
+            self._updatingGuidedTable = True
+            try:
                 item.setText(old_name)
-                self._renamingGuidedTrajectory = False
-                qt.QMessageBox.warning(
-                    slicer.util.mainWindow(),
-                    "Postop CT Localization",
-                    f"Trajectory name '{new_name}' already exists.",
-                )
-                return
+            finally:
+                self._updatingGuidedTable = False
 
-        node_id = self.loadedTrajectories[row].get("node_id", "")
-        if not self.logic.rename_trajectory(node_id=node_id, new_name=new_name):
-            self._renamingGuidedTrajectory = True
-            item.setText(old_name)
-            self._renamingGuidedTrajectory = False
+    def _checked_guided_trajectory_names(self):
+        names = []
+        for row in range(int(self.guidedTrajectoryTable.rowCount)):
+            cell = self.guidedTrajectoryTable.cellWidget(row, 0)
+            if cell is not None and bool(cell.isChecked()):
+                item = self.guidedTrajectoryTable.item(row, 1)
+                names.append(str(item.text() if item else "").strip())
+        return [n for n in names if n]
+
+    def onRemoveCheckedClicked(self):
+        names = self._checked_guided_trajectory_names()
+        if not names:
+            qt.QMessageBox.information(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                "Check at least one trajectory to remove.",
+            )
+            return
+        source_key = self._selected_guided_source_key()
+        removed = self.logic.remove_trajectories_by_name(names, source_key=source_key)
+        self.log(f"[guided] removed {removed} trajectories from source '{source_key}'")
+        self.onRefreshClicked()
+
+    # ---- Fitting ------------------------------------------------------
+
+    def _guided_fit_volume_matrices(self, volume_node):
+        """Return (sitk_image, ijk_to_ras, ras_to_ijk) for the volume.
+
+        Builds an SITK image from the array so the LoG pipeline works
+        in Slicer regardless of whether the volume has an on-disk path.
+        """
+        import SimpleITK as sitk
+        arr_kji = np.asarray(
+            slicer.util.arrayFromVolume(volume_node), dtype=np.float32
+        )
+        img = sitk.GetImageFromArray(arr_kji)
+        img.SetSpacing(tuple(float(v) for v in volume_node.GetSpacing()))
+
+        try:
+            import vtk
+        except ImportError:
+            from __main__ import vtk
+        m = vtk.vtkMatrix4x4()
+        volume_node.GetIJKToRASMatrix(m)
+        ijk_to_ras = np.array([
+            [float(m.GetElement(r, c)) for c in range(4)] for r in range(4)
+        ], dtype=float)
+        m2 = vtk.vtkMatrix4x4()
+        volume_node.GetRASToIJKMatrix(m2)
+        ras_to_ijk = np.array([
+            [float(m2.GetElement(r, c)) for c in range(4)] for r in range(4)
+        ], dtype=float)
+        return img, ijk_to_ras, ras_to_ijk
+
+    def _fit_names(self, names):
+        volume_node = self.ctSelector.currentNode()
+        if volume_node is None:
             qt.QMessageBox.warning(
                 slicer.util.mainWindow(),
                 "Postop CT Localization",
-                f"Failed to rename trajectory '{old_name}'.",
+                "Select a CT volume.",
             )
             return
-
-        self.loadedTrajectories[row]["name"] = new_name
-        item.setData(qt.Qt.UserRole, new_name)
-        self.log(f"[trajectory] renamed {old_name} -> {new_name}")
-        self._refresh_summary()
-        self._schedule_guided_follow()
-
-    def onDetectCandidatesClicked(self):
-        volume_node = self.ctSelector.currentNode()
-        if volume_node is None:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
+        traj_map = {traj["name"]: traj for traj in self.loadedTrajectories}
+        targets = [traj_map[n] for n in names if n in traj_map]
+        if not targets:
+            self.log("[guided] nothing to fit (check at least one seed)")
             return
-        threshold = float(self.guidedThresholdSpin.value)
+
+        self.guidedFitStatusLabel.setText("preprocessing LoG / hull …")
         try:
-            detect_payload = self.logic.extract_threshold_candidates_lps(
-                volume_node=volume_node,
-                threshold=threshold,
-                head_mask_threshold_hu=float(self.guidedHeadThresholdSpin.value),
-                min_metal_depth_mm=float(self.guidedMinDepthSpin.value),
-                max_metal_depth_mm=float(self.guidedMaxDepthSpin.value),
-            )
+            slicer.app.processEvents()
+        except Exception:
+            pass
+
+        try:
+            img, ijk_to_ras, ras_to_ijk = self._guided_fit_volume_matrices(volume_node)
+            features = gfe.compute_features(img, ras_to_ijk)
         except Exception as exc:
-            self.log(f"[guided] detect error: {exc}")
-            qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
+            self.log(f"[guided] preprocessing failed: {exc}")
+            qt.QMessageBox.critical(
+                slicer.util.mainWindow(), "Postop CT Localization", str(exc),
+            )
+            self.guidedFitStatusLabel.setText(f"error: {exc}")
             return
-        points_lps = np.asarray(detect_payload["points_lps"], dtype=float)
-        used_threshold = float(detect_payload.get("threshold_hu") or threshold)
-        self.candidatesLPS = points_lps
-        self.fitResults = {}
-        self.applyFitButton.setEnabled(False)
+
+        roi_mm = float(self.guidedRoiRadiusSpin.value)
+        max_angle = float(self.guidedMaxAngleSpin.value)
+        max_lat = float(self.guidedMaxLateralShiftSpin.value)
 
         self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
-        self._apply_primary_slice_layers()
-        self.guidedThresholdSpin.setValue(used_threshold)
-        self.logic.apply_ct_window_from_threshold(volume_node, threshold=used_threshold)
-        n = int(points_lps.shape[0]) if np is not None else len(points_lps)
-        self.log(f"[guided] detected {n} candidate points at threshold {used_threshold:.1f}")
-        self._refresh_summary()
+        self.logic.trajectory_scene.remove_preview_lines(node_prefix="Guided_")
 
-    def onResetCTWindowClicked(self):
-        volume_node = self.ctSelector.currentNode()
-        if volume_node is None:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "Select a CT volume.")
-            return
-        self.logic.reset_ct_window(volume_node)
-        self.log("[guided] CT window reset")
-
-    def _assignment_for_trajectory(self, traj):
-        row = self.assignmentMap.get(traj["name"])
-        if row and row.get("model_id") in self.modelsById:
-            return row
-        model_id = suggest_model_id_for_trajectory(
-            trajectory=traj,
-            models_by_id=self.modelsById,
-            model_ids=self.modelIds,
-            tolerance_mm=5.0,
-        )
-        if not model_id:
-            # Model-free guided fit: still allow trajectory axis/depth fitting.
-            return {
-                "trajectory": traj["name"],
-                "model_id": "",
-                "tip_at": "target",
-                "tip_shift_mm": 0.0,
-                "xyz_offset_mm": [0.0, 0.0, 0.0],
-            }
-        return {
-            "trajectory": traj["name"],
-            "model_id": model_id,
-            "tip_at": "target",
-            "tip_shift_mm": 0.0,
-            "xyz_offset_mm": [0.0, 0.0, 0.0],
-        }
-
-    def _fit_names(self, names):
-        if np is not None and int(self.candidatesLPS.shape[0]) == 0:
-            raise ValueError("No CT candidates. Run 'Detect Candidates' first.")
-
-        traj_map = {traj["name"]: traj for traj in self.loadedTrajectories}
-        success = 0
         applied_nodes = []
-        self.logic.trajectory_scene.remove_preview_lines(node_prefix="AutoFit_")
-        for name in names:
-            traj = traj_map.get(name)
-            if traj is None:
-                self.log(f"[guided] {name}: skipped (missing trajectory)")
+        success = 0
+        for traj in targets:
+            name = str(traj.get("name", ""))
+            start_ras = traj.get("start") or [0.0, 0.0, 0.0]
+            end_ras = traj.get("end") or [0.0, 0.0, 0.0]
+            # The trajectory records store RAS already (via
+            # trajectory_from_line_node); no LPS conversion needed.
+            try:
+                fit = gfe.fit_trajectory(
+                    planned_start_ras=start_ras,
+                    planned_end_ras=end_ras,
+                    features=features,
+                    ijk_to_ras_mat=ijk_to_ras,
+                    ras_to_ijk_mat=ras_to_ijk,
+                    roi_radius_mm=roi_mm,
+                    max_angle_deg=max_angle,
+                    max_lateral_shift_mm=max_lat,
+                )
+            except Exception as exc:
+                self.log(f"[guided] {name}: fit crashed ({exc})")
                 continue
-            assignment = self._assignment_for_trajectory(traj)
-            if assignment is None:
-                self.log(f"[guided] {name}: skipped (no electrode model)")
-                continue
-            model = self.modelsById.get(assignment["model_id"])
-            offsets = model["contact_center_offsets_from_tip_mm"] if model else []
-            fit = None
-            roi_values = []
-            for roi_mm in (float(self.guidedRoiRadiusSpin.value), 8.0, 10.0):
-                if any(abs(roi_mm - existing) < 1e-6 for existing in roi_values):
-                    continue
-                roi_values.append(roi_mm)
-            for roi_mm in roi_values:
-                fit = fit_electrode_axis_and_tip(
-                    candidate_points_lps=self.candidatesLPS,
-                    planned_entry_lps=traj["start"],
-                    planned_target_lps=traj["end"],
-                    contact_offsets_mm=offsets,
-                    tip_at=assignment.get("tip_at", "target"),
-                    roi_radius_mm=float(roi_mm),
-                    max_angle_deg=float(self.guidedMaxAngleSpin.value),
-                    max_depth_shift_mm=float(self.guidedMaxDepthShiftSpin.value),
-                    fit_mode=str(self.guidedFitModeCombo.currentData or "deep_anchor_v2"),
-                )
-                fit["roi_radius_mm_attempted"] = float(roi_mm)
-                if bool(fit.get("success")):
-                    break
-                reason = str(fit.get("reason") or "").lower()
-                sparse_failure = (
-                    "too few" in reason
-                    or "no candidate" in reason
-                    or "no compact clusters" in reason
-                    or int(fit.get("points_in_roi") or 0) < 300
-                )
-                if not sparse_failure:
-                    break
-            if fit.get("success"):
-                self.fitResults[name] = fit
-                start_ras = lps_to_ras_point(fit["entry_lps"])
-                end_ras = lps_to_ras_point(fit["target_lps"])
-                existing = self.logic.trajectory_scene.find_line_by_group_and_name(name, "guided_fit")
-                node = self.logic.trajectory_scene.create_or_update_trajectory_line(
-                    name=name,
-                    start_ras=start_ras,
-                    end_ras=end_ras,
-                    node_id=None if existing is None else existing.GetID(),
-                    node_name=f"Guided_{name}",
-                    group="guided_fit",
-                    origin="postop_ct_guided_fit",
-                )
-                applied_nodes.append(node)
-                success += 1
+
+            if not bool(fit.get("success")):
                 self.log(
-                    "[guided] {name}: mode={m} angle={a:.2f} deg depth={s:.2f} mm lateral={l:.2f} mm residual={r:.2f} mm".format(
-                        name=name,
-                        m=str(fit.get("fit_mode_used") or ""),
-                        a=float(fit.get("angle_deg", 0.0)),
-                        s=float(fit.get("tip_shift_mm", 0.0)),
-                        l=float(fit.get("lateral_shift_mm", 0.0)),
-                        r=float(fit.get("residual_mm", 0.0)),
-                    )
+                    f"[guided] {name}: failed ({fit.get('reason', 'unknown')})"
                 )
-                if str(fit.get("fit_mode_used") or "") == "deep_anchor_v2":
-                    self.log(
-                        "[guided] {name}: anchor={src} source={source} mode={mode} morph={morph} terminal_cluster={cluster} candidates={count}".format(
-                            name=name,
-                            src=str(fit.get("deep_anchor_source") or ""),
-                            source=str(fit.get("terminal_blob_source") or ""),
-                            mode=str(fit.get("terminal_anchor_mode") or ""),
-                            morph=str(fit.get("local_terminal_morphology") or ""),
-                            cluster=str(fit.get("terminal_blob_selected_cluster_id") or ""),
-                            count=int(fit.get("terminal_blob_candidate_count") or 0),
-                        )
-                    )
-            else:
-                self.log(f"[guided] {name}: failed ({fit.get('reason', 'unknown')})")
+                continue
+
+            existing = self.logic.trajectory_scene.find_line_by_group_and_name(
+                name, "guided_fit",
+            )
+            node = self.logic.trajectory_scene.create_or_update_trajectory_line(
+                name=name,
+                start_ras=fit["start_ras"],
+                end_ras=fit["end_ras"],
+                node_id=None if existing is None else existing.GetID(),
+                node_name=f"Guided_{name}",
+                group="guided_fit",
+                origin="postop_ct_guided_fit",
+            )
+            applied_nodes.append(node)
+            success += 1
+            self.log(
+                "[guided] {name}: angle={a:.2f}° lat={l:.2f} mm n={n} "
+                "len={L:.1f} mm".format(
+                    name=name,
+                    a=float(fit.get("angle_deg", 0.0)),
+                    l=float(fit.get("lateral_shift_mm", 0.0)),
+                    n=int(fit.get("n_inliers", 0)),
+                    L=float(fit.get("length_mm", 0.0)),
+                )
+            )
+
         if applied_nodes:
             self.workflowPublisher.publish_nodes(
                 role="GuidedFitTrajectoryLines",
@@ -364,21 +403,21 @@ class GuidedFitWidgetMixin:
                 workflow_node=self.workflowNode,
             )
             self.logic.trajectory_scene.place_trajectory_nodes_in_hierarchy(
-                context_id=self.workflowState.context_id(workflow_node=self.workflowNode),
+                context_id=self.workflowState.context_id(
+                    workflow_node=self.workflowNode
+                ),
                 nodes=applied_nodes,
             )
             self.logic.trajectory_scene.show_only_groups(["guided_fit"])
             self._set_workflow_active_source("guided_fit")
             self._set_guided_source_combo("guided_fit")
-            self.log(f"[guided] applied fitted trajectories: {len(applied_nodes)}")
-            self.log(
-                "[contacts] guided trajectories updated. Use module 'Contacts & Trajectory View' "
-                "with source 'Guided Fit' to generate contacts and QC."
-            )
+            self._refresh_guided_seed_source_combo()
+            self.log(f"[guided] applied {len(applied_nodes)} trajectories")
             self.onRefreshClicked()
 
-        self.applyFitButton.setEnabled(False)
-        self.log(f"[guided] fitted {success}/{len(names)} trajectories")
+        self.guidedFitStatusLabel.setText(
+            f"done — fitted {success}/{len(targets)} seeds"
+        )
 
     def onFitSelectedClicked(self):
         names = self._checked_guided_trajectory_names()
@@ -389,55 +428,21 @@ class GuidedFitWidgetMixin:
                 "Check at least one trajectory in the table.",
             )
             return
-        try:
-            self._fit_names(names)
-        except Exception as exc:
-            self.log(f"[guided] error: {exc}")
-            qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
+        self._fit_names(names)
 
     def onFitAllClicked(self):
-        names = [traj["name"] for traj in self.loadedTrajectories]
+        names = [str(traj.get("name", "")) for traj in self.loadedTrajectories]
+        names = [n for n in names if n]
         if not names:
-            qt.QMessageBox.warning(slicer.util.mainWindow(), "Postop CT Localization", "No trajectories available.")
-            return
-        try:
-            self._fit_names(names)
-        except Exception as exc:
-            self.log(f"[guided] error: {exc}")
-            qt.QMessageBox.critical(slicer.util.mainWindow(), "Postop CT Localization", str(exc))
-
-    def onApplyFitClicked(self):
-        qt.QMessageBox.information(
-            slicer.util.mainWindow(),
-            "Postop CT Localization",
-            "Guided fit is now applied directly when you click 'Fit Selected' or 'Fit All'.",
-        )
-
-    def _checked_guided_trajectory_names(self):
-        names = []
-        for row in range(self.guidedTrajectoryTable.rowCount):
-            check = self.guidedTrajectoryTable.cellWidget(row, 0)
-            if check is None or not bool(check.checked):
-                continue
-            item = self.guidedTrajectoryTable.item(row, 1)
-            if item is None:
-                continue
-            name = str(item.text() or "").strip()
-            if name:
-                names.append(name)
-        return names
-
-    def onRemoveCheckedClicked(self):
-        names = self._checked_guided_trajectory_names()
-        if not names:
-            qt.QMessageBox.warning(
+            qt.QMessageBox.information(
                 slicer.util.mainWindow(),
                 "Postop CT Localization",
-                "Check at least one trajectory to remove.",
+                "No seed trajectories loaded.",
             )
             return
-        removed = self.logic.remove_trajectories_by_name(names=names, source_key=self._selected_guided_source_key())
-        for name in names:
-            self.fitResults.pop(name, None)
-        self.log(f"[trajectory] removed {removed}/{len(names)} trajectories")
-        self.onRefreshClicked()
+        self._fit_names(names)
+
+    # ``onApplyFitClicked`` and ``onDetectCandidatesClicked`` existed
+    # under the legacy HU-threshold guided-fit flow. They no longer
+    # have targets; kept as no-ops only if older code paths still
+    # reference them (they don't after this rewrite).

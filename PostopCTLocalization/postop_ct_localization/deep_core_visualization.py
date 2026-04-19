@@ -1005,61 +1005,6 @@ class DeepCoreVisualizationLogicMixin:
                 out[r, c] = float(vtk_matrix4x4.GetElement(r, c))
         return out
 
-    def extract_threshold_candidates_lps(
-        self,
-        volume_node,
-        threshold,
-        head_mask_threshold_hu=-500.0,
-        min_metal_depth_mm=5.0,
-        max_metal_depth_mm=220.0,
-        head_mask_method="outside_air",
-    ):
-        arr = slicer.util.arrayFromVolume(volume_node)  # K,J,I
-        spacing_xyz = tuple(float(v) for v in volume_node.GetSpacing())
-        used_threshold = float(threshold)
-        best_preview = None
-        best_count = -1
-        while True:
-            preview = build_preview_masks(
-                arr_kji=np.asarray(arr, dtype=float),
-                spacing_xyz=spacing_xyz,
-                threshold=float(used_threshold),
-                use_head_mask=True,
-                build_head_mask=True,
-                head_mask_threshold_hu=float(head_mask_threshold_hu),
-                head_mask_method=str(head_mask_method),
-                head_gate_erode_vox=1,
-                head_gate_dilate_vox=1,
-                head_gate_margin_mm=0.0,
-                min_metal_depth_mm=float(min_metal_depth_mm),
-                max_metal_depth_mm=float(max_metal_depth_mm),
-                include_debug_masks=False,
-            )
-            count = int(preview.get("depth_kept_count") or 0)
-            if count > best_count:
-                best_preview = preview
-                best_count = count
-            if count >= 300000 or used_threshold <= 500.0 + 1e-6:
-                break
-            used_threshold = max(500.0, used_threshold - 50.0)
-        preview = best_preview if best_preview is not None else {}
-        idx = np.argwhere(np.asarray(preview.get("metal_depth_pass_mask_kji"), dtype=bool))
-        if idx.size == 0:
-            return {"points_lps": np.empty((0, 3), dtype=float), "threshold_hu": float(used_threshold)}
-        n = idx.shape[0]
-        ijk_h = np.ones((n, 4), dtype=float)
-        ijk_h[:, 0] = idx[:, 2]
-        ijk_h[:, 1] = idx[:, 1]
-        ijk_h[:, 2] = idx[:, 0]
-        m_vtk = vtk.vtkMatrix4x4()
-        volume_node.GetIJKToRASMatrix(m_vtk)
-        m = self._vtk_matrix_to_numpy(m_vtk)
-        ras = (ijk_h @ m.T)[:, :3]
-        lps = ras.copy()
-        lps[:, 0] *= -1.0
-        lps[:, 1] *= -1.0
-        return {"points_lps": lps, "threshold_hu": float(used_threshold)}
-
     def show_volume_in_all_slice_views(self, volume_node):
         if volume_node is None:
             return
@@ -1093,21 +1038,6 @@ class DeepCoreVisualizationLogicMixin:
                     slice_node.JumpSliceByCentering(cx, cy, cz)
                 except Exception:
                     pass
-
-    def apply_ct_window_from_threshold(self, volume_node, threshold):
-        display = volume_node.GetDisplayNode()
-        if display is None:
-            return
-        lower = float(threshold) - 250.0
-        upper = float(threshold) + 2200.0
-        display.AutoWindowLevelOff()
-        display.SetWindow(max(upper - lower, 1.0))
-        display.SetLevel((upper + lower) * 0.5)
-
-    def reset_ct_window(self, volume_node):
-        display = volume_node.GetDisplayNode()
-        if display is not None:
-            display.AutoWindowLevelOn()
 
     def reset_standard_slice_views(self):
         lm = slicer.app.layoutManager()
