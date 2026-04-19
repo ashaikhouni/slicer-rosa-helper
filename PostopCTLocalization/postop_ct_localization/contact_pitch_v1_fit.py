@@ -74,14 +74,22 @@ DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
 DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
                                 # top-of-skull depths (T21 L_8/L_9/L_13)
                                 # only reach ~15-20 mm intracranial.
-DEEP_TIP_SHORT_SPAN_MM = 45.0   # ``span_mm`` threshold below which
-                                # we treat a line as short and use
-                                # DEEP_TIP_MIN_SHORT_MM. Covers the
-                                # n=8 span=44 walker over-extensions
-                                # of real short superficial shanks
-                                # (T21 L_8-style). Sinus / vessel
-                                # tubes tend to span 60+ mm so they
-                                # still hit the strict floor.
+DEEP_TIP_SHORT_SPAN_MM = 45.0   # ``original_span_mm`` threshold below
+                                # which we consider a walker line a
+                                # short-line candidate. Covers n=8
+                                # span=44 walker over-extensions of
+                                # real short superficial shanks
+                                # (T21 L_8-style).
+DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
+                                # Additional gate: short-rule only
+                                # applies if the walker line's
+                                # average inter-contact gap stays
+                                # within physically plausible SEEG
+                                # pitch (Dixi 3.5 / PMT 3.97–4.43
+                                # mm). A 5-blob line spanning 37 mm
+                                # = 9 mm avg gap is either a
+                                # cross-shank bridge or a mis-pitch
+                                # fit — strict 30 mm floor applies.
 # Air-sinus rejection: along the intracranial portion of every trajectory
 # (skull_entry → deep tip), sample CT HU at AIR_SAMPLE_COUNT points;
 # if more than AIR_FRAC_MAX of those samples are below AIR_HU_THRESHOLD
@@ -883,13 +891,18 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         # walker line past the short-span threshold (T21 L_13 went
         # 19→46 mm this way). The pre-extend span is what the walker
         # actually locked onto, so it's the honest "is this short?"
-        # signal for the deep-tip rule.
-        span_mm = float(l.get("original_span_mm", l.get("span_mm", 0.0)))
-        min_dist = (
-            DEEP_TIP_MIN_SHORT_MM
-            if span_mm <= DEEP_TIP_SHORT_SPAN_MM
-            else DEEP_TIP_MIN_MM
+        # signal for the deep-tip rule. Additional average-pitch gate
+        # rejects short walker lines whose inter-contact gap is too
+        # wide to be a real SEEG electrode — those are usually
+        # cross-shank bridges sneaking in via MAX_INLIER_GAP_MM slack.
+        orig_span = float(l.get("original_span_mm", l.get("span_mm", 0.0)))
+        n_blobs = max(2, int(l.get("n_blobs", 0)))
+        avg_pitch = orig_span / (n_blobs - 1) if n_blobs > 1 else float("inf")
+        is_short = (
+            orig_span <= DEEP_TIP_SHORT_SPAN_MM
+            and avg_pitch <= DEEP_TIP_SHORT_MAX_AVG_PITCH_MM
         )
+        min_dist = DEEP_TIP_MIN_SHORT_MM if is_short else DEEP_TIP_MIN_MM
         if l["dist_max_mm"] < min_dist:
             continue
         l["start_ras"], l["end_ras"] = _orient_shallow_to_deep(
