@@ -36,10 +36,15 @@ PITCH_TOL_MM = 0.5
 PERP_TOL_MM = 1.5
 AX_TOL_MM = 0.7
 MAX_K_STEPS = 20
-MIN_BLOBS_PER_LINE = 6
-MIN_LINE_SPAN_MM = 15.0
+MIN_BLOBS_PER_LINE = 5          # 5-contact short superficial depth
+                                 # electrodes (ASF, short frontal/parietal
+                                 # families) have exactly 5 visible
+                                 # contacts — a floor of 6 silently drops
+                                 # them. See T21 L_8/L_9/L_13.
+MIN_LINE_SPAN_MM = 12.0          # 5 × 3.5 mm pitch ≈ 14 mm nominal; leave
+                                 # slack for sub-pitch drift.
 MAX_LINE_SPAN_MM = 90.0
-AMP_SUM_MIN = 6000.0
+AMP_SUM_MIN = 5000.0             # 5 contacts × ~1000 amp each.
 # Maximum allowed gap between consecutive inlier contacts along the
 # axis. The walker trims single stray outliers whose gap to the rest
 # exceeds this, then rejects any line whose remaining internal gap still
@@ -64,9 +69,19 @@ STAGE2_MIN_ASPECT_GEOM = 5.0
 
 FALLBACK_EXCLUSION_MM = 3.0
 HULL_ENDPOINT_MAX_MM = 15.0
-DEEP_TIP_MIN_MM = 30.0   # bumped from 25 — many sinus / skull-base FPs
-                         # have inliers barely past the intracranial
-                         # boundary (dist_max 25–28 mm).
+DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
+                                # sinus / skull-base tube FPs hide).
+DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
+                                # top-of-skull depths (T21 L_8/L_9/L_13)
+                                # only reach ~15-20 mm intracranial.
+DEEP_TIP_SHORT_SPAN_MM = 45.0   # ``span_mm`` threshold below which
+                                # we treat a line as short and use
+                                # DEEP_TIP_MIN_SHORT_MM. Covers the
+                                # n=8 span=44 walker over-extensions
+                                # of real short superficial shanks
+                                # (T21 L_8-style). Sinus / vessel
+                                # tubes tend to span 60+ mm so they
+                                # still hit the strict floor.
 # Air-sinus rejection: along the intracranial portion of every trajectory
 # (skull_entry → deep tip), sample CT HU at AIR_SAMPLE_COUNT points;
 # if more than AIR_FRAC_MAX of those samples are below AIR_HU_THRESHOLD
@@ -80,7 +95,10 @@ AIR_SAMPLE_COUNT = 25
 # Post-anchor length bounds. Real SEEG = ~25–80 mm shank + ~15–25 mm
 # bolt protrusion. Catches stage-2 venous-sinus / vessel false positives
 # (>130 mm) and short skull-base hardware FPs (<45 mm).
-MIN_POST_ANCHOR_LEN_MM = 45.0
+MIN_POST_ANCHOR_LEN_MM = 35.0   # short superficial depths (~20 mm
+                                 # intracranial + ~15 mm bolt). Any
+                                 # shorter is almost certainly skull-
+                                 # base hardware or fragment FPs.
 MAX_POST_ANCHOR_LEN_MM = 130.0
 
 # Cross-stage dedup (applied AFTER bolt anchoring).
@@ -473,9 +491,12 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     )
 
 
-MIN_BLOBS_POST_ARBITRATION = 5  # looser floor after arbitration, which
+MIN_BLOBS_POST_ARBITRATION = 4  # looser floor after arbitration, which
                                 # can legitimately shave 1–2 blobs from a
-                                # real electrode sharing boundary contacts
+                                # real electrode sharing boundary contacts.
+                                # One below MIN_BLOBS_PER_LINE so a
+                                # 5-contact shank can survive a single
+                                # arbitrated contact without being killed.
 
 
 def _refit_line_from_inliers(line, pts_c, amps_c, min_blobs=MIN_BLOBS_PER_LINE):
@@ -833,8 +854,12 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         lines = _dedup_stage1_lines(lines)
 
     # Deep-tip prior: real shanks' deepest inlier sits ≥ DEEP_TIP_MIN_MM
-    # head-distance from hull. Skull-/bone-assembled spurious lines have
-    # every inlier at head_distance ≤ 0.
+    # head-distance from hull. Skull-/bone-assembled spurious lines
+    # have every inlier at head_distance ≤ 0. Short lines (inlier
+    # span ≤ DEEP_TIP_SHORT_SPAN_MM) use the relaxed 15 mm threshold
+    # so superficial top-of-skull depths (T21 L_8 / L_9 / L_13) are
+    # not dropped; longer lines keep the strict 30 mm floor to
+    # continue killing sinus / skull-base tube FPs.
     K, J, I = dist_arr.shape
     kept = []
     for l in lines:
@@ -848,7 +873,13 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         inlier_dists = dist_arr[kk, jj, ii]
         l["dist_min_mm"] = float(inlier_dists.min())
         l["dist_max_mm"] = float(inlier_dists.max())
-        if l["dist_max_mm"] < DEEP_TIP_MIN_MM:
+        span_mm = float(l.get("span_mm", 0.0))
+        min_dist = (
+            DEEP_TIP_MIN_SHORT_MM
+            if span_mm <= DEEP_TIP_SHORT_SPAN_MM
+            else DEEP_TIP_MIN_MM
+        )
+        if l["dist_max_mm"] < min_dist:
             continue
         l["start_ras"], l["end_ras"] = _orient_shallow_to_deep(
             l["start_ras"], l["end_ras"], dist_arr, ras_to_ijk_mat,
