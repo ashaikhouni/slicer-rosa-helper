@@ -6,8 +6,7 @@ Stages:
      hull distance + LoG + Frangi), stage-1 blob-pitch, and stage-2
      Frangi shaft fallback.
 
-Orthogonal to the bolt-first ``deep_core_v2`` pipeline: this detector
-locates shanks directly from the CT using a Dixi 3.5 mm pitch prior on
+Locates shanks directly from the CT using a Dixi 3.5 mm pitch prior on
 LoG regional-minima blobs (stage 1) with a Frangi shaft fallback for
 pitch-unresolved shanks (stage 2). Every trajectory is emitted with a
 ``source`` tag ("stage1" or "stage2") for easy debugging.

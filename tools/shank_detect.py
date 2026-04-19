@@ -61,8 +61,8 @@ def _add_common_mask_args(parser):
 def _add_detection_args(parser):
     parser.add_argument(
         "--pipeline-key",
-        default="blob_ransac_v1",
-        help="Detection engine pipeline key (default: blob_ransac_v1).",
+        default="contact_pitch_v1",
+        help="Detection engine pipeline key (default: contact_pitch_v1).",
     )
     parser.add_argument(
         "--run-id",
@@ -87,7 +87,7 @@ def _add_detection_args(parser):
         "--use-distance-mask-for-blob-candidates",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Use metal depth-pass mask for blob candidate extraction (blob_em_v2).",
+        help="Use metal depth-pass mask for blob candidate extraction (legacy blob pipelines).",
     )
     parser.add_argument("--enable-rescue-pass", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--rescue-min-inliers-scale", type=float, default=0.6)

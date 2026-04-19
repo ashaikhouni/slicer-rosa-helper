@@ -579,7 +579,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Evaluate SEEG shank detection against the localization dataset")
     p.add_argument("--dataset-root", required=True, help="Path to seeg_localization root")
     p.add_argument("--out-dir", required=True, help="Directory for evaluation outputs")
-    p.add_argument("--pipeline-key", default="blob_ransac_v1", help="Detection pipeline key")
+    p.add_argument("--pipeline-key", default="contact_pitch_v1", help="Detection pipeline key")
     p.add_argument("--subjects", default="", help="Comma-separated subject ids to evaluate (default: all in manifest)")
     p.add_argument("--match-distance-mm", type=float, default=4.0, help="Maximum deep-end error for a match.")
     p.add_argument("--match-start-mm", type=float, default=15.0, help="Maximum shallow-end/start error for a match.")

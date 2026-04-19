@@ -9,8 +9,8 @@ refinement, crossing-tip retreat, and multi-pitch walker with
 auto-detect.
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
-postop CT. Replaces the bolt-first `deep_core_v2` for general use; v2
-remains in the registry for backward compatibility.
+postop CT. The sole detection pipeline now that the legacy
+`deep_core_v*` and `blob_*` pipelines have been retired.
 
 | subject | matched / GT | FP |
 | --- | --- | --- |

@@ -56,7 +56,7 @@ class PostopCTLocalizationLogicBaseMixin:
         keys = list(self.pipeline_registry.keys())
         if not keys:
             return ""
-        preferred = "blob_ransac_v1"
+        preferred = "contact_pitch_v1"
         return preferred if preferred in keys else str(keys[0])
 
     def available_de_novo_pipelines(self):
@@ -83,6 +83,21 @@ class PostopCTLocalizationLogicBaseMixin:
                 }
             )
         return entries
+
+    def build_detection_context(self, volume_node):
+        """Build a minimal ``DetectionContext`` dict for ``contact_pitch_v1``.
+
+        The pipeline only needs ``arr_kji``, ``spacing_xyz``, and the
+        Slicer ``volume_node`` (to pull the true IJK↔RAS matrices). All
+        other keys are left to the caller to add (e.g. pitch strategy,
+        vendors, logger).
+        """
+        return {
+            "run_id": f"contact_pitch_{volume_node.GetName()}",
+            "arr_kji": np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float),
+            "spacing_xyz": tuple(float(v) for v in volume_node.GetSpacing()),
+            "extras": {"volume_node": volume_node},
+        }
 
     def register_postop_ct(self, volume_node, workflow_node=None):
         self.workflow_publish.register_volume(

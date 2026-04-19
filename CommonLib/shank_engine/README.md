@@ -207,23 +207,21 @@ registry = get_default_registry()
 register_builtin_pipelines(registry)
 
 # List available pipelines
-registry.keys()  # ['blob_consensus_v1', 'blob_em_v2', ...]
+registry.keys()  # ['contact_pitch_v1']
 
 # Run by name
-result = registry.run("blob_em_v2", ctx)
+result = registry.run("contact_pitch_v1", ctx)
 
 # Or create and configure
-pipeline = registry.create_pipeline("de_novo_seed_extend_v2")
+pipeline = registry.create_pipeline("contact_pitch_v1")
 result = pipeline.run(ctx)
 ```
 
 ## Registered Pipelines
 
-| Key | Class | Strategy |
-|-----|-------|----------|
-| `blob_ransac_v1` | `BlobRansacV1Pipeline` | Legacy shank_core RANSAC adapter (default) |
-| `blob_em_v2` | `BlobEMV2Pipeline` | EM-based blob assignment and refinement |
-| `deep_core_v1` | `DeepCoreV1Pipeline` | Deep-core mask + support atom + graph proposals |
+| Key                | Class                    | Strategy                                                                                       |
+|--------------------|--------------------------|------------------------------------------------------------------------------------------------|
+| `contact_pitch_v1` | `ContactPitchV1Pipeline` | Direct-shank SEEG detector: LoG regional-minima + pitch walker + Frangi fallback + bolt anchor |
 
 ## Adding a New Pipeline
 

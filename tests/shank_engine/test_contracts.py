@@ -21,7 +21,7 @@ from shank_engine import (  # noqa: E402
 class ContractsTests(unittest.TestCase):
     def test_default_result_has_required_sections(self):
         out = default_result(
-            pipeline_id="blob_ransac_v1",
+            pipeline_id="contact_pitch_v1",
             pipeline_version="1.0.0",
             run_id="run-1",
             status="ok",
@@ -34,7 +34,7 @@ class ContractsTests(unittest.TestCase):
 
     def test_sanitize_result_is_json_serializable(self):
         out = default_result(
-            pipeline_id="blob_ransac_v1",
+            pipeline_id="contact_pitch_v1",
             pipeline_version="1.0.0",
             run_id="run-2",
             status="ok",
@@ -49,7 +49,7 @@ class ContractsTests(unittest.TestCase):
 
     def test_schema_coercion_adds_warning(self):
         out = default_result(
-            pipeline_id="blob_ransac_v1",
+            pipeline_id="contact_pitch_v1",
             pipeline_version="1.0.0",
             run_id="run-3",
             status="ok",
@@ -64,7 +64,7 @@ class ContractsTests(unittest.TestCase):
 
     def test_strict_schema_raises(self):
         out = default_result(
-            pipeline_id="blob_ransac_v1",
+            pipeline_id="contact_pitch_v1",
             pipeline_version="1.0.0",
             run_id="run-4",
             status="ok",

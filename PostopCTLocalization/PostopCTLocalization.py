@@ -46,7 +46,8 @@ def _reload_local_support_modules():
 
 _reload_local_support_modules()
 
-from postop_ct_localization.deep_core_debug import DeepCoreDebugLogicMixin, DeepCoreDebugWidgetMixin
+from postop_ct_localization.deep_core_visualization import DeepCoreVisualizationLogicMixin
+from postop_ct_localization.deep_core_widget import ContactPitchV1WidgetMixin
 from postop_ct_localization.de_novo import DeNovoLogicMixin, DeNovoWidgetMixin
 from postop_ct_localization.gui import PostopCTLocalizationWidgetBaseMixin
 from postop_ct_localization.guided_fit import GuidedFitWidgetMixin
@@ -72,12 +73,12 @@ class PostopCTLocalization(ScriptedLoadableModule):
 class PostopCTLocalizationWidget(
     PostopCTLocalizationWidgetBaseMixin,
     GuidedFitWidgetMixin,
-    DeepCoreDebugWidgetMixin,
+    ContactPitchV1WidgetMixin,
     DeNovoWidgetMixin,
     ManualFitWidgetMixin,
     ScriptedLoadableModuleWidget,
 ):
-    """Widget exposing guided-fit, deep-core debug, manual, and de novo workflows."""
+    """Widget exposing guided-fit, Auto Fit (contact_pitch_v1), and manual workflows."""
 
     def _create_logic(self):
         return PostopCTLocalizationLogic()
@@ -85,7 +86,7 @@ class PostopCTLocalizationWidget(
 
 class PostopCTLocalizationLogic(
     PostopCTLocalizationLogicBaseMixin,
-    DeepCoreDebugLogicMixin,
+    DeepCoreVisualizationLogicMixin,
     DeNovoLogicMixin,
     ScriptedLoadableModuleLogic,
 ):
