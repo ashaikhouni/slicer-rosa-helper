@@ -85,8 +85,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.modeTabs.currentChanged.connect(self.onModeTabChanged)
         self.layout.addWidget(self.modeTabs)
         self._build_guided_fit_tab()
-        self._build_deep_core_debug_tab()
-        self._build_deep_core_v2_tab()
         self._build_contact_pitch_v1_tab()
         self._build_de_novo_mode_tabs()
         self._build_manual_fit_tab()
