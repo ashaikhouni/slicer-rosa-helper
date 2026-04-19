@@ -20,6 +20,7 @@ from __main__ import qt, slicer
 
 from rosa_core import lps_to_ras_point, trajectory_length_mm
 
+from . import contact_pitch_v1_fit as cpfit
 from . import guided_fit_engine as gfe
 
 
@@ -81,8 +82,10 @@ class GuidedFitWidgetMixin:
         # shared trajectory table below the tabs, so the user can see
         # at a glance which trajectories the Fit buttons will act on.
         self.guidedSeedTable = qt.QTableWidget()
-        self.guidedSeedTable.setColumnCount(3)
-        self.guidedSeedTable.setHorizontalHeaderLabels(["Fit", "Name", "Length (mm)"])
+        self.guidedSeedTable.setColumnCount(4)
+        self.guidedSeedTable.setHorizontalHeaderLabels(
+            ["Fit", "Name", "Length (mm)", "Status"]
+        )
         self.guidedSeedTable.horizontalHeader().setStretchLastSection(True)
         self.guidedSeedTable.verticalHeader().setVisible(False)
         self.guidedSeedTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
@@ -145,6 +148,12 @@ class GuidedFitWidgetMixin:
         # Seed cache. Only trajectories for the currently-selected seed
         # source are held here. Fit buttons iterate this list.
         self._guidedSeedTrajectories = []
+        # Per-seed fit status keyed as
+        # ``self._guidedSeedStatusBySource[source_key][seed_name] =
+        # (ok: bool, reason: str)``. Survives table refreshes so the
+        # ✓/✗ markers stay visible after a fit run; cleared only when
+        # the user picks a different seed source.
+        self._guidedSeedStatusBySource = {}
 
     # ---- Seed source combo + seed list --------------------------------
 
@@ -224,7 +233,30 @@ class GuidedFitWidgetMixin:
             length_item = qt.QTableWidgetItem(f"{trajectory_length_mm(traj):.2f}")
             self.guidedSeedTable.setItem(row, 2, length_item)
 
+            status_item = qt.QTableWidgetItem("—")
+            status_item.setTextAlignment(qt.Qt.AlignCenter)
+            self.guidedSeedTable.setItem(row, 3, status_item)
+
+        # Re-apply any remembered statuses from a prior fit of this
+        # seed source so the ✓ / ✗ markers survive a table rebuild.
+        stash = self._guidedSeedStatusBySource.get(key) or {}
+        if stash:
+            for row, traj in enumerate(seeds):
+                entry = stash.get(str(traj.get("name", "")))
+                if entry is None:
+                    continue
+                ok, reason = entry
+                self._paint_status_cell(row, ok, reason)
+
     def onGuidedSeedSourceChanged(self, _idx):
+        # Switching to a different seed source invalidates the prior
+        # fit statuses we might have shown for the previous source;
+        # clear them so stale markers don't bleed across sources.
+        current = self._selected_guided_seed_source()
+        if current:
+            for key in list(self._guidedSeedStatusBySource.keys()):
+                if key != current:
+                    self._guidedSeedStatusBySource.pop(key, None)
         self._refresh_guided_seed_table()
 
     def onGuidedRefreshSeedsClicked(self):
@@ -365,7 +397,44 @@ class GuidedFitWidgetMixin:
             np.asarray(lps_to_ras_point(end), dtype=float),
         )
 
-    def _fit_seeds(self, seeds):
+    def _paint_status_cell(self, seed_index, ok, reason=""):
+        """Draw the ✓ / ✗ into the Status cell of one seed row."""
+        if seed_index < 0 or seed_index >= int(self.guidedSeedTable.rowCount):
+            return
+        item = self.guidedSeedTable.item(seed_index, 3)
+        if item is None:
+            item = qt.QTableWidgetItem()
+            self.guidedSeedTable.setItem(seed_index, 3, item)
+        item.setTextAlignment(qt.Qt.AlignCenter)
+        if ok:
+            item.setText("\u2713")
+            item.setForeground(qt.QBrush(qt.QColor(40, 160, 60)))
+            item.setToolTip("Fitted")
+        else:
+            item.setText("\u2717")
+            item.setForeground(qt.QBrush(qt.QColor(200, 50, 50)))
+            item.setToolTip(str(reason or "fit rejected"))
+
+    def _set_seed_status(self, seed_index, ok, reason=""):
+        """Update the Status cell AND remember the outcome so it
+        survives table refreshes until the seed source changes.
+        """
+        self._paint_status_cell(seed_index, ok, reason)
+        key = self._selected_guided_seed_source()
+        if not key or seed_index < 0:
+            return
+        if seed_index >= len(self._guidedSeedTrajectories):
+            return
+        name = str(self._guidedSeedTrajectories[seed_index].get("name", ""))
+        if not name:
+            return
+        stash = self._guidedSeedStatusBySource.setdefault(key, {})
+        stash[name] = (bool(ok), str(reason or ""))
+
+    def _fit_seeds(self, seed_rows):
+        """``seed_rows`` is a list of (row_index, trajectory) tuples so
+        we can write results back to the table in the matching cells.
+        """
         volume_node = self.ctSelector.currentNode()
         if volume_node is None:
             qt.QMessageBox.warning(
@@ -374,9 +443,11 @@ class GuidedFitWidgetMixin:
                 "Select a CT volume.",
             )
             return
-        if not seeds:
+        if not seed_rows:
             self.log("[guided] nothing to fit (check at least one seed)")
             return
+
+        seed_source_key = self._selected_guided_seed_source()
 
         self.guidedFitStatusLabel.setText("preprocessing LoG / hull / bolts …")
         try:
@@ -402,9 +473,17 @@ class GuidedFitWidgetMixin:
         self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
         self.logic.trajectory_scene.remove_preview_lines(node_prefix="Guided_")
 
-        applied_nodes = []
-        success = 0
-        for traj in seeds:
+        # Reset remembered statuses for this seed source so a fresh fit
+        # run paints an accurate per-row picture (no stale ✓/✗).
+        if seed_source_key:
+            self._guidedSeedStatusBySource.pop(seed_source_key, None)
+
+        # Two-phase: first collect fit records, then run crossing-tip
+        # retreat across all records, then emit the scene nodes with
+        # the post-retreat geometry. Mirrors Auto Fit's flow.
+        fit_records = []
+        missed_names = []
+        for row, traj in seed_rows:
             name = str(traj.get("name", "")) or "?"
             seed_start, seed_end = self._seed_start_end_ras(traj)
             try:
@@ -420,37 +499,75 @@ class GuidedFitWidgetMixin:
                 )
             except Exception as exc:
                 self.log(f"[guided] {name}: fit crashed ({exc})")
+                self._set_seed_status(row, False, f"crash: {exc}")
+                missed_names.append(name)
                 continue
 
             if not bool(fit.get("success")):
-                self.log(
-                    f"[guided] {name}: failed ({fit.get('reason', 'unknown')})"
-                )
+                reason = str(fit.get("reason", "unknown"))
+                self.log(f"[guided] {name}: failed ({reason})")
+                self._set_seed_status(row, False, reason)
+                missed_names.append(name)
                 continue
 
-            # Render the line from skull_entry → deep_tip so downstream
-            # modules (Contacts & Trajectory View) compute trajectory
-            # length as intracranial, mirroring Auto Fit.
             if "skull_entry_ras" in fit:
-                line_start = fit["skull_entry_ras"]
+                line_start = np.asarray(fit["skull_entry_ras"], dtype=float)
             else:
-                line_start = fit["start_ras"]
-            line_end = fit["end_ras"]
+                line_start = np.asarray(fit["start_ras"], dtype=float)
+            line_end = np.asarray(fit["end_ras"], dtype=float)
+
+            fit_records.append({
+                "name": name,
+                "seed_row": row,
+                "fit": fit,
+                # start_ras / end_ras are the keys _retreat_crossing_tips
+                # reads and writes. Using skull_entry as the shallow end
+                # and deep tip as the deep end keeps the line colinear
+                # with the intracranial segment.
+                "start_ras": line_start,
+                "end_ras": line_end,
+            })
+
+        # Crossing-tip retreat across all fitted records. Walks any
+        # deep tip that sits within 2 mm of another fitted segment
+        # back along its own axis until clearance is restored AND the
+        # retreated tip sits on a real contact peak, matching Auto
+        # Fit's post-refinement retreat. Without this pass, two
+        # crossing seeds fit independently can have their tips land
+        # inside each other's contact tubes.
+        if fit_records:
+            try:
+                cpfit._retreat_crossing_tips(
+                    fit_records,
+                    log_arr=features["log"],
+                    ras_to_ijk_mat=ras_to_ijk,
+                    logger=self.log,
+                )
+            except Exception as exc:
+                self.log(f"[guided] crossing-tip retreat failed: {exc}")
+
+        applied_nodes = []
+        for rec in fit_records:
+            name = rec["name"]
+            row = rec["seed_row"]
+            fit = rec["fit"]
+            line_start = rec["start_ras"]
+            line_end = rec["end_ras"]
 
             existing = self.logic.trajectory_scene.find_line_by_group_and_name(
                 name, "guided_fit",
             )
             node = self.logic.trajectory_scene.create_or_update_trajectory_line(
                 name=name,
-                start_ras=line_start,
-                end_ras=line_end,
+                start_ras=[float(v) for v in line_start],
+                end_ras=[float(v) for v in line_end],
                 node_id=None if existing is None else existing.GetID(),
                 node_name=f"Guided_{name}",
                 group="guided_fit",
                 origin="postop_ct_guided_fit",
             )
             applied_nodes.append(node)
-            success += 1
+            self._set_seed_status(row, True)
             anchored = "bolt" if fit.get("bolt_anchored") else "no-bolt"
             self.log(
                 "[guided] {n}: angle={a:.2f}°  lat={l:.2f} mm  "
@@ -459,10 +576,13 @@ class GuidedFitWidgetMixin:
                     a=float(fit.get("angle_deg", 0.0)),
                     l=float(fit.get("lateral_shift_mm", 0.0)),
                     ni=int(fit.get("n_inliers", 0)),
-                    L=float(fit.get("length_mm", 0.0)),
+                    L=float(np.linalg.norm(line_end - line_start)),
                     anc=anchored,
                 )
             )
+
+        fitted = len(applied_nodes)
+        total = len(seed_rows)
 
         if applied_nodes:
             self.workflowPublisher.publish_nodes(
@@ -485,16 +605,33 @@ class GuidedFitWidgetMixin:
                 ),
                 nodes=applied_nodes,
             )
-            self.logic.trajectory_scene.show_only_groups(["guided_fit"])
+            # When some seeds missed, show BOTH the fitted group and
+            # the original seed-source group so the user can see at
+            # a glance which planned lines didn't get snapped (they
+            # render in the seed source's color; fits render cyan).
+            if missed_names and seed_source_key:
+                groups = ["guided_fit", seed_source_key]
+            else:
+                groups = ["guided_fit"]
+            self.logic.trajectory_scene.show_only_groups(groups)
             self._set_workflow_active_source("guided_fit")
             self._set_guided_source_combo("guided_fit")
             self._refresh_guided_seed_source_combo()
-            self.log(f"[guided] applied {len(applied_nodes)} trajectories")
+            self.log(f"[guided] applied {fitted} trajectories")
             self.onRefreshClicked()
 
-        self.guidedFitStatusLabel.setText(
-            f"done — fitted {success}/{len(seeds)} seeds"
-        )
+        if missed_names:
+            preview = ", ".join(missed_names[:6])
+            if len(missed_names) > 6:
+                preview += f", …(+{len(missed_names) - 6})"
+            self.guidedFitStatusLabel.setText(
+                f"done — fitted {fitted}/{total}; missed: {preview}"
+            )
+            self.log(f"[guided] missed {len(missed_names)}/{total}: {preview}")
+        else:
+            self.guidedFitStatusLabel.setText(
+                f"done — fitted {fitted}/{total} seeds"
+            )
 
     def onFitSelectedClicked(self):
         rows = self._checked_guided_seed_indices()
@@ -505,16 +642,16 @@ class GuidedFitWidgetMixin:
                 "Check at least one seed trajectory.",
             )
             return
-        seeds = [self._guidedSeedTrajectories[r] for r in rows]
-        self._fit_seeds(seeds)
+        seed_rows = [(r, self._guidedSeedTrajectories[r]) for r in rows]
+        self._fit_seeds(seed_rows)
 
     def onFitAllClicked(self):
-        seeds = list(self._guidedSeedTrajectories)
-        if not seeds:
+        seed_rows = list(enumerate(self._guidedSeedTrajectories))
+        if not seed_rows:
             qt.QMessageBox.information(
                 slicer.util.mainWindow(),
                 "Postop CT Localization",
                 "No seed trajectories. Pick a source with a non-zero count.",
             )
             return
-        self._fit_seeds(seeds)
+        self._fit_seeds(seed_rows)
