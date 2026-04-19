@@ -74,12 +74,19 @@ DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
 DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
                                 # top-of-skull depths (T21 L_8/L_9/L_13)
                                 # only reach ~15-20 mm intracranial.
-DEEP_TIP_SHORT_SPAN_MM = 45.0   # ``original_span_mm`` threshold below
+DEEP_TIP_SHORT_SPAN_MM = 60.0   # ``original_span_mm`` threshold below
                                 # which we consider a walker line a
-                                # short-line candidate. Covers n=8
-                                # span=44 walker over-extensions of
-                                # real short superficial shanks
-                                # (T21 L_8-style).
+                                # short-line candidate. Covers T21
+                                # L_8-style 5-contact superficial
+                                # shanks AND full-length 13-16 contact
+                                # lateral shanks (AMC099 L_10 has true
+                                # span 45 mm; walker over-extension
+                                # brings it to 54 mm). The avg-pitch ≤
+                                # 7 mm gate is what actually keeps
+                                # sinus / vessel FPs out; span is just
+                                # a sanity cap. Raised from 45 → 60 to
+                                # recover laterally-placed electrodes
+                                # with dist_max < 30 mm.
 DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
                                 # Additional gate: short-rule only
                                 # applies if the walker line's
