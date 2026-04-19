@@ -54,17 +54,44 @@ class PostopCTLocalizationLogicBaseMixin:
     def build_detection_context(self, volume_node):
         """Build a minimal ``DetectionContext`` dict for ``contact_pitch_v1``.
 
-        The pipeline only needs ``arr_kji``, ``spacing_xyz``, and the
-        Slicer ``volume_node`` (to pull the true IJK↔RAS matrices). All
-        other keys are left to the caller to add (e.g. pitch strategy,
-        vendors, logger).
+        When the volume has a storage node pointing at a readable NIfTI,
+        populate ``ctx['ct']`` with the file path so the pipeline reads
+        via ``sitk.ReadImage`` — the identical path the CLI regression
+        uses. This sidesteps two sources of drift between Slicer and
+        CLI runs on the same file:
+
+          * ``slicer.util.arrayFromVolume`` returning a re-scaled /
+            re-oriented copy of the NIfTI voxel data (scl_slope/scl_inter
+            handling, axis reorientation).
+          * ``volume_node.GetIJKToRASMatrix`` returning a matrix that
+            Slicer may have flipped to a canonical RAS diagonal on load.
+
+        ``arr_kji`` / ``spacing_xyz`` stay on the context as a fallback
+        for any consumer that expects them (and for volumes that don't
+        have an on-disk source, e.g. scene-authored scalar volumes).
         """
-        return {
+        from types import SimpleNamespace
+
+        ct_ref = None
+        try:
+            storage = volume_node.GetStorageNode()
+            src = storage.GetFileName() if storage is not None else ""
+            if src and os.path.exists(src):
+                ct_ref = SimpleNamespace(
+                    volume_id=volume_node.GetName(), path=str(src),
+                )
+        except Exception:
+            ct_ref = None
+
+        ctx: dict = {
             "run_id": f"contact_pitch_{volume_node.GetName()}",
             "arr_kji": np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float),
             "spacing_xyz": tuple(float(v) for v in volume_node.GetSpacing()),
             "extras": {"volume_node": volume_node},
         }
+        if ct_ref is not None:
+            ctx["ct"] = ct_ref
+        return ctx
 
     def register_postop_ct(self, volume_node, workflow_node=None):
         self.workflow_publish.register_volume(

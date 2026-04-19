@@ -214,15 +214,17 @@ BOLT_BASE_MAX_DIST_MM = 10.0        # skull_entry_ras (= bolt base, the
 # auto detector returns ≈ 3.3 mm; the surrounding ±0.5 mm tolerance in
 # the walker absorbs the sub-bin localization bias.
 PITCH_STRATEGY_PITCHES_MM = {
-    "dixi":  (3.5,),
-    "pmt":   (3.5, 3.97, 4.43),
-    "mixed": (3.5, 3.97, 4.43),
+    "dixi":    (3.5,),
+    "pmt_35":  (3.5,),           # PMT 2102-XX-091 family — same pitch as Dixi
+    "pmt":     (3.5, 3.97, 4.43),
+    "mixed":   (3.5, 3.97, 4.43),
 }
 PITCH_STRATEGY_VENDORS = {
-    "dixi":  ("Dixi",),
-    "pmt":   ("PMT",),
-    "mixed": ("Dixi", "PMT"),
-    "auto":  ("Dixi", "PMT", "AdTech"),
+    "dixi":    ("Dixi",),
+    "pmt_35":  ("PMT",),
+    "pmt":     ("PMT",),
+    "mixed":   ("Dixi", "PMT"),
+    "auto":    ("Dixi", "PMT", "AdTech"),
 }
 
 PITCH_AUTO_MIN_MM = 2.5
@@ -786,37 +788,83 @@ def _extend_deep_end(line, pts_c, amps_c, claimed_blobs,
 
 
 def _dedup_stage1_lines(lines):
-    if len(lines) < 2:
-        return lines
-    keep = [True] * len(lines)
-    for i in range(len(lines)):
-        if not keep[i]:
+    """Remove near-duplicate stage-1 walker hypotheses.
+
+    For every (i, j), i < j, a duplicate requires all three of:
+      * axis angle ≤ STAGE1_DEDUP_ANGLE_DEG
+      * perpendicular center offset ≤ STAGE1_DEDUP_PERP_MM
+      * overlap / shorter ≥ STAGE1_DEDUP_OVERLAP_FRAC (shorter > 1e-6)
+
+    When a pair qualifies: if ``n_blobs[i] >= n_blobs[j]`` drop j,
+    else drop i (and i stops comparing). A dropped line cannot trigger
+    further drops — this is what stops every subset being collapsed to
+    a single survivor. Returns surviving lines in the input order.
+
+    Vectorized: O(N²) pairwise matrices + a Python loop with numpy
+    inner ops, replacing the original pure-Python double loop that
+    took 5 s/call on ~1500 hypotheses (AMC099).
+    """
+    n = len(lines)
+    if n < 2:
+        return list(lines)
+
+    axes = np.stack([np.asarray(l["axis"], dtype=float) for l in lines])
+    centers = np.stack([np.asarray(l["center"], dtype=float) for l in lines])
+    span_lo = np.array([float(l["span_lo"]) for l in lines])
+    span_hi = np.array([float(l["span_hi"]) for l in lines])
+    n_blobs = np.array([int(l["n_blobs"]) for l in lines])
+
+    dots = np.clip(np.abs(axes @ axes.T), 0.0, 1.0)
+    ang_ok = np.degrees(np.arccos(dots)) <= STAGE1_DEDUP_ANGLE_DEG
+
+    # par[i, j] = (centers[j] - centers[i]) · axes[i]
+    M = axes @ centers.T
+    axes_dot_center = np.einsum("ik,ik->i", axes, centers)
+    par = M - axes_dot_center[:, None]
+
+    # perp²[i, j] = |centers[j] - centers[i]|² - par[i, j]²
+    C2 = np.einsum("ik,ik->i", centers, centers)
+    cc = centers @ centers.T
+    d2 = C2[:, None] + C2[None, :] - 2.0 * cc
+    perp_sq = np.maximum(0.0, d2 - par * par)
+    perp_ok = perp_sq <= (STAGE1_DEDUP_PERP_MM * STAGE1_DEDUP_PERP_MM)
+
+    b_lo = par + span_lo[None, :]
+    b_hi = par + span_hi[None, :]
+    a_lo = span_lo[:, None]
+    a_hi = span_hi[:, None]
+    overlap = np.maximum(0.0, np.minimum(a_hi, b_hi) - np.maximum(a_lo, b_lo))
+    a_len = (span_hi - span_lo)[:, None]
+    b_len = (span_hi - span_lo)[None, :]
+    shorter = np.minimum(a_len, b_len)
+    safe_shorter = np.where(shorter > 1e-6, shorter, 1.0)
+    frac = overlap / safe_shorter
+    overlap_ok = (shorter > 1e-6) & (frac >= STAGE1_DEDUP_OVERLAP_FRAC)
+
+    hit = ang_ok & perp_ok & overlap_ok
+    np.fill_diagonal(hit, False)
+
+    alive = np.ones(n, dtype=bool)
+    for i in range(n):
+        if not alive[i]:
             continue
-        a = lines[i]
-        for j in range(i + 1, len(lines)):
-            if not keep[j]:
-                continue
-            b = lines[j]
-            ang = float(np.degrees(np.arccos(
-                np.clip(abs(np.dot(a["axis"], b["axis"])), 0, 1))))
-            if ang > STAGE1_DEDUP_ANGLE_DEG:
-                continue
-            dv = b["center"] - a["center"]
-            par = dv @ a["axis"]
-            perp = dv - par * a["axis"]
-            perp_d = float(np.linalg.norm(perp))
-            if perp_d > STAGE1_DEDUP_PERP_MM:
-                continue
-            b_lo = par + b["span_lo"]; b_hi = par + b["span_hi"]
-            overlap = max(0.0, min(a["span_hi"], b_hi) - max(a["span_lo"], b_lo))
-            shorter = min(a["span_hi"] - a["span_lo"], b["span_hi"] - b["span_lo"])
-            if shorter > 1e-6 and overlap / shorter >= STAGE1_DEDUP_OVERLAP_FRAC:
-                if a["n_blobs"] >= b["n_blobs"]:
-                    keep[j] = False
-                else:
-                    keep[i] = False
-                    break
-    return [lines[i] for i in range(len(lines)) if keep[i]]
+        row = hit[i].copy()
+        row[: i + 1] = False
+        row &= alive
+        if not row.any():
+            continue
+        # Original branch: a.n_blobs >= b.n_blobs → kill j; else kill
+        # i and break. Under callers' pre-sort by -n_blobs the second
+        # branch is unreachable, but handle it for general safety: if
+        # any surviving j in ``row`` has strictly more blobs than i,
+        # the original would break at the first such j and leave later
+        # j's untouched — so i dies and no further kills from i.
+        if np.any(row & (n_blobs > n_blobs[i])):
+            alive[i] = False
+            continue
+        alive[row] = False
+
+    return [lines[i] for i in range(n) if alive[i]]
 
 
 def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
@@ -1623,6 +1671,24 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     import SimpleITK as sitk
     _log("preprocessing: hull, head-distance, intracranial mask…")
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
+    # Input fingerprint — lets us compare Slicer vs CLI runs byte-for-byte.
+    # If Slicer returns a different trajectory count, the most common
+    # causes are (a) HU rescaling (NIfTI scl_slope/scl_inter applied
+    # differently) and (b) IJK→RAS matrix mismatch; this trace exposes both.
+    try:
+        _sp = img.GetSpacing()
+        _dg = [ijk_to_ras_mat[i, i] for i in range(3)]
+        _org = [ijk_to_ras_mat[i, 3] for i in range(3)]
+        _log(
+            f"input fingerprint: shape={ct_arr_kji.shape} "
+            f"HU[min/mean/max]={ct_arr_kji.min():.1f}/"
+            f"{ct_arr_kji.mean():.1f}/{ct_arr_kji.max():.1f} "
+            f"spacing={tuple(f'{s:.4f}' for s in _sp)} "
+            f"ijk2ras_diag={tuple(f'{d:+.4f}' for d in _dg)} "
+            f"origin={tuple(f'{o:+.2f}' for o in _org)}"
+        )
+    except Exception:
+        pass
     hull, intracranial, dist_arr = build_masks(img)
     _log("preprocessing: LoG σ=1…")
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
@@ -1923,6 +1989,25 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         if "skull_entry_ras" in rec:
             out["skull_entry_ras"] = [float(x) for x in rec["skull_entry_ras"]]
         trajectories.append(out)
+
+    # Per-trajectory fingerprint — compact trace makes it easy to diff
+    # Slicer-run results against a CLI run to spot which specific
+    # trajectory disappeared / shifted when subject-level totals don't match.
+    try:
+        _log(f"trajectory summary ({len(trajectories)} kept):")
+        for _i, _t in enumerate(trajectories):
+            _se = _t.get("skull_entry_ras") or _t.get("start_ras") or [0.0, 0.0, 0.0]
+            _en = _t.get("end_ras") or [0.0, 0.0, 0.0]
+            _src = str(_t.get("source") or "?")
+            _n = int(_t.get("n_inliers") or 0)
+            _sp = float(_t.get("contact_span_mm") or 0.0)
+            _log(
+                f"  [{_i:02d}] src={_src} n={_n} span={_sp:.1f}mm "
+                f"skull_entry=({_se[0]:+.1f},{_se[1]:+.1f},{_se[2]:+.1f}) "
+                f"deep_tip=({_en[0]:+.1f},{_en[1]:+.1f},{_en[2]:+.1f})"
+            )
+    except Exception:
+        pass
 
     if return_features:
         features = {

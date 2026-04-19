@@ -105,14 +105,16 @@ class ContactPitchV1WidgetMixin:
 
         # Pitch strategy controls both the walker's candidate pitches
         # and the manufacturer filter for the electrode-type suggestion.
-        # "Dixi" runs the legacy single 3.5 mm walker. "PMT" adds
-        # PMT's 3.97 mm (16B) and 4.43 mm (16C) variants. "Mixed"
-        # unions Dixi + PMT. "Auto-detect" estimates pitch from the
-        # intracranial blob cloud's mutual-NN histogram before stage 1
-        # runs — useful when the manufacturer is unknown or mixed.
+        # "Dixi" runs the legacy single 3.5 mm walker. "PMT 2102-XX-091"
+        # is the same 3.5 mm walker but with PMT vendor suggestions —
+        # the 2102-08/10/12/14/16-091 family all share Dixi's 3.5 mm
+        # pitch. "PMT (all)" adds PMT-16B (3.97 mm) / 16C (4.43 mm).
+        # "Mixed" unions Dixi + PMT. "Auto-detect" estimates pitch from
+        # the intracranial blob cloud's mutual-NN histogram.
         self.contactPitchStrategyCombo = qt.QComboBox()
         for label, key in (
             ("Dixi (3.5 mm)", "dixi"),
+            ("PMT 2102-XX-091 (3.5 mm)", "pmt_35"),
             ("PMT (3.5 / 3.97 / 4.43 mm)", "pmt"),
             ("Mixed Dixi + PMT", "mixed"),
             ("Auto-detect pitch", "auto"),
@@ -142,10 +144,11 @@ class ContactPitchV1WidgetMixin:
     # here so the widget can log sensible messages without importing
     # the fit module.
     _CONTACT_PITCH_STRATEGY_VENDORS = {
-        "dixi":  ("Dixi",),
-        "pmt":   ("PMT",),
-        "mixed": ("Dixi", "PMT"),
-        "auto":  ("Dixi", "PMT", "AdTech"),
+        "dixi":    ("Dixi",),
+        "pmt_35":  ("PMT",),
+        "pmt":     ("PMT",),
+        "mixed":   ("Dixi", "PMT"),
+        "auto":    ("Dixi", "PMT", "AdTech"),
     }
 
     def _selected_contact_pitch_strategy(self):

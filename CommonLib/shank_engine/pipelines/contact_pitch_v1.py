@@ -57,12 +57,14 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
     def _load_image_and_matrices(self, ctx: DetectionContext):
         """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4).
 
-        In CLI runs ``ctx.ct.path`` is set and SITK reads the file with
-        real origin/direction. In Slicer the path may be absent; build
-        the SITK image from ``arr_kji`` (spacing is all the physical
-        filters need) but pull the true IJK↔RAS matrices from the
-        Slicer volume node in ``ctx.extras.volume_node`` so trajectories
-        come out in patient RAS instead of the volume-grid frame.
+        When ``ctx['ct'].path`` is set (CLI runs, and Slicer runs where
+        the volume has an on-disk NIfTI storage node), SITK reads the
+        file and the file's own sform → ijk_to_ras is used. This gives
+        CLI parity for both paths.
+
+        Otherwise (scene-authored volumes, or volumes with no storage
+        node), fall back to ``arr_kji`` + spacing and pull the matrix
+        from the Slicer volume node in ``ctx.extras.volume_node``.
         """
         import SimpleITK as sitk
         from shank_core.io import image_ijk_ras_matrices
@@ -71,11 +73,16 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
         ct_path = getattr(ct, "path", None) if ct is not None else None
         if ct_path:
             img = sitk.ReadImage(str(ct_path))
-        else:
-            arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
-            img = sitk.GetImageFromArray(arr)
-            img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
+            ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
+            return (
+                img,
+                np.asarray(ijk_to_ras, dtype=float),
+                np.asarray(ras_to_ijk, dtype=float),
+            )
 
+        arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
         volume_node = (ctx.get("extras") or {}).get("volume_node")
         if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
             ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
