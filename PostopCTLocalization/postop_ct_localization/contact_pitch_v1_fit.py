@@ -128,7 +128,22 @@ BOLT_MIN_TUBE_VOXELS = 15            # min CC voxels in tube to accept bolt
 BOLT_MAX_INWARD_ALONG_MM = 30.0     # bolt may extend up to this far past
                                     # the shallowest contact (CCs often
                                     # include bolt + first few contacts)
-BOLT_SEARCH_OUTWARD_MM = 120.0      # max outward distance to look
+BOLT_SEARCH_OUTWARD_MM = 60.0       # max outward distance (mm) from
+                                    # the walker's shallow contact
+                                    # within which a bolt CC can be
+                                    # accepted. Real SEEG bolts
+                                    # protrude ~15-40 mm past the
+                                    # skull; combined with ~15 mm
+                                    # between shallowest contact and
+                                    # skull, a 60 mm reach covers
+                                    # every realistic case. Was 120
+                                    # mm — that let the anchor grab
+                                    # a far-away cross-shank bolt
+                                    # and assemble a cross-brain
+                                    # "trajectory" out of a short
+                                    # walker fragment plus a
+                                    # distant bolt (T1 stage-1 #19
+                                    # became a 120 mm FP this way).
 BOLT_SHALLOW_HULL_PROX_MM = 15.0    # shallowest tube voxel must reach
                                     # at least this far from hull. The
                                     # bolt CC itself must touch the hull
