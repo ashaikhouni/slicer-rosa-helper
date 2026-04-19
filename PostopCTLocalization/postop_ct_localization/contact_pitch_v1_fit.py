@@ -1205,6 +1205,11 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
 
     if best is None:
         return None, None, None
+    # Stash the in-tube voxel count so callers that try both
+    # orientations (shallow→deep ambiguity for trajectories whose
+    # endpoints have similar hull distance) can compare strength.
+    best = dict(best)
+    best["tube_n_vox"] = int(best_n)
     return best_shallow, best_entry, best
 
 
@@ -1614,9 +1619,32 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     # real electrode. Then apply length and air-sinus filters; both
     # catch stage-2 false positives that look nothing like real shanks.
     def _anchor_or_reject(rec):
-        new_start, skull_entry, bolt = anchor_trajectory_to_bolt(
+        # ``_orient_shallow_to_deep`` upstream uses hull head-distance
+        # to pick which endpoint is the shallow one, but that's
+        # ambiguous for trajectories whose deep tip sits in a deep
+        # sulcus as close to its local hull surface as the bolt side
+        # (T22 LGR: orbital-floor tip is ~10 mm from hull, skull-top
+        # bolt is ~15 mm from hull — orientation flipped). Let the
+        # bolt CC decide by trying both orientations and keeping the
+        # one whose bolt anchor has more tube voxels. Falls back to
+        # either non-None result when only one orientation anchors.
+        fwd = anchor_trajectory_to_bolt(
             rec["start_ras"], rec["end_ras"], bolts,
         )
+        bwd = anchor_trajectory_to_bolt(
+            rec["end_ras"], rec["start_ras"], bolts,
+        )
+        fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
+        bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
+        if bwd_n > fwd_n:
+            # Orientation was wrong; flip before writing results back.
+            rec["start_ras"], rec["end_ras"] = (
+                np.asarray(rec["end_ras"], dtype=float),
+                np.asarray(rec["start_ras"], dtype=float),
+            )
+            new_start, skull_entry, bolt = bwd
+        else:
+            new_start, skull_entry, bolt = fwd
         if new_start is None:
             return None
         rec["start_ras"] = np.asarray(new_start, dtype=float)
