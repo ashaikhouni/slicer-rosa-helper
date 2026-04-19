@@ -67,7 +67,7 @@ class GuidedFitWidgetMixin:
 
         # Fit knobs. Defaults match the engine's defaults.
         self.guidedRoiRadiusSpin = qt.QDoubleSpinBox()
-        self.guidedRoiRadiusSpin.setRange(1.0, 6.0)
+        self.guidedRoiRadiusSpin.setRange(1.0, 10.0)
         self.guidedRoiRadiusSpin.setDecimals(2)
         self.guidedRoiRadiusSpin.setSingleStep(0.25)
         self.guidedRoiRadiusSpin.setValue(float(gfe.DEFAULT_ROI_RADIUS_MM))

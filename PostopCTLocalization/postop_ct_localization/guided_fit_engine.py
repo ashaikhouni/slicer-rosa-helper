@@ -29,14 +29,20 @@ import numpy as np
 from . import contact_pitch_v1_fit as cpfit
 
 
-DEFAULT_ROI_RADIUS_MM = 2.5
+DEFAULT_ROI_RADIUS_MM = 5.0
 DEFAULT_MAX_ANGLE_DEG = 12.0
-DEFAULT_MAX_LATERAL_SHIFT_MM = 5.0
+DEFAULT_MAX_LATERAL_SHIFT_MM = 6.0
 DEFAULT_MIN_INLIERS = 4
 # End-pad along the planned axis: keep blobs up to this far past the
 # planned entry/target so the detected extent isn't clipped by a
 # slightly short plan.
 AXIS_END_PAD_MM = 8.0
+# Guided fit trusts the planned/seeded end more than Auto Fit does,
+# so the deep-end refinement is bounded to a small extension. This
+# still rescues merged-contact shafts (T2 RAI-style) without letting
+# the walker thread into brain-tissue LoG peaks 30+ mm past the
+# real tip (seen on T2 LAI with the default 40 mm bound).
+DEEP_REFINE_MAX_EXTEND_MM = 5.0
 
 
 def _unit(v):
@@ -186,10 +192,14 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
 
     # Axis-directed deep-end refinement: walk outward from the deep
     # tip along the fit axis, extending as long as LoG stays strong.
+    # Bounded to ``DEEP_REFINE_MAX_EXTEND_MM`` — guided fit has a
+    # strong axis + endpoint prior so the refinement only needs to
+    # rescue merged-contact shafts, not re-detect the tip from scratch.
     rec = {"start_ras": shallow_ras, "end_ras": deep_ras}
     try:
         refined_end = cpfit._refine_deep_end_via_axis_log(
             rec, features["log"], np.asarray(ras_to_ijk_mat, dtype=float),
+            max_extend_mm=DEEP_REFINE_MAX_EXTEND_MM,
         )
         if refined_end is not None:
             deep_ras = np.asarray(refined_end, dtype=float)
