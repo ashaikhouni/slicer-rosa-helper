@@ -46,20 +46,10 @@ TRAJECTORY_GROUP_CONFIG = {
         "locked": False,
         "point_labels": True,
     },
-    "de_novo": {
-        "role": "DeNovoTrajectoryLines",
-        "folder": "DeNovo",
-        "prefix": "DeNovo_",
-        "display_color": (0.2, 0.95, 0.45),
-        "selected_color": (0.45, 1.0, 0.6),
-        "line_thickness": 0.42,
-        "locked": False,
-        "point_labels": True,
-    },
-    "deep_core": {
-        "role": "DeepCoreTrajectoryLines",
-        "folder": "DeepCore",
-        "prefix": "DeepCore_",
+    "auto_fit": {
+        "role": "AutoFitTrajectoryLines",
+        "folder": "AutoFit",
+        "prefix": "AutoFit_",
         "display_color": (0.10, 0.85, 0.95),
         "selected_color": (0.30, 0.95, 1.0),
         "line_thickness": 0.42,
@@ -75,16 +65,6 @@ TRAJECTORY_GROUP_CONFIG = {
         "line_thickness": 0.42,
         "locked": False,
         "point_labels": True,
-    },
-    "autofit_preview": {
-        "role": "",
-        "folder": "Preview",
-        "prefix": "AutoFit_",
-        "display_color": (0.2, 0.8, 1.0),
-        "selected_color": (0.2, 0.8, 1.0),
-        "line_thickness": 0.4,
-        "locked": False,
-        "point_labels": False,
     },
 }
 
@@ -119,14 +99,10 @@ class TrajectorySceneService:
             return "planned_rosa"
         if name.startswith("Guided_"):
             return "guided_fit"
-        if name.startswith("DeNovo_"):
-            return "de_novo"
-        if name.startswith("DeepCore_"):
-            return "deep_core"
         if name.startswith("Ext_"):
             return "imported_external"
         if name.startswith("AutoFit_"):
-            return "autofit_preview"
+            return "auto_fit"
         return DEFAULT_GROUP
 
     def logical_name_from_node(self, node):
@@ -299,11 +275,16 @@ class TrajectorySceneService:
         return out
 
     def remove_preview_lines(self, trajectory_names=None, node_prefix="AutoFit_"):
-        """Remove preview line markups from scene."""
+        """Remove Auto Fit preview line markups from scene.
+
+        Called by the Auto Fit widget before publishing a new detection
+        run; clears the previous run's output plus any legacy preview
+        nodes that share ``node_prefix``.
+        """
         nodes = list(slicer.util.getNodesByClass("vtkMRMLMarkupsLineNode"))
         if trajectory_names is None:
             for node in nodes:
-                if self.infer_group_from_node(node) == "autofit_preview":
+                if self.infer_group_from_node(node) == "auto_fit":
                     slicer.mrmlScene.RemoveNode(node)
                     continue
                 node_name = (node.GetName() or "").lower()
@@ -414,8 +395,6 @@ class TrajectorySceneService:
             if node.GetNumberOfControlPoints() < 2:
                 continue
             group = self.infer_group_from_node(node)
-            if group == "autofit_preview":
-                continue
             if group == "planned_rosa" and group_filter is None:
                 continue
             if group_filter is not None and group not in group_filter:

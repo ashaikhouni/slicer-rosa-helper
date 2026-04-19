@@ -336,9 +336,9 @@ class DeepCoreVisualizationLogicMixin:
                 start_ras=start_ras,
                 end_ras=end_ras,
                 node_id=None,
-                group="autofit_preview",
-                origin="deep_core_debug",
-                node_name=f"DeepCore_{family}_{idx:02d}",
+                group="auto_fit",
+                origin="contact_pitch_v1",
+                node_name=f"AutoFit_{family}_{idx:02d}",
             )
             node.SetAttribute("Rosa.DeepCoreProposalFamily", family)
             node.SetAttribute("Rosa.DeepCoreProposalScore", f"{float(proposal.get('score', 0.0)):.3f}")

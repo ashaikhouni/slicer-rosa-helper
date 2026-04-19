@@ -288,7 +288,7 @@ class ContactPitchV1WidgetMixin:
                         "name": str(traj.get("name") or ""),
                         "node_name": str(traj.get("node_name") or node.GetName() or ""),
                         "node_id": str(traj.get("node_id") or node.GetID() or ""),
-                        "group": str(traj.get("group") or "autofit_preview"),
+                        "group": str(traj.get("group") or "auto_fit"),
                         "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
                         "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
                     }
@@ -304,11 +304,11 @@ class ContactPitchV1WidgetMixin:
                     self.logic.publish_working_rows(
                         rows,
                         workflow_node=self.workflowNode,
-                        role="DeepCoreTrajectoryLines",
-                        source="postop_ct_contact_pitch",
+                        role="AutoFitTrajectoryLines",
+                        source="postop_ct_auto_fit",
                     )
-                    self._set_workflow_active_source("deep_core")
-                    self._set_guided_source_combo("deep_core")
+                    self._set_workflow_active_source("auto_fit")
+                    self._set_guided_source_combo("auto_fit")
                     self.onRefreshClicked()
 
             self.log(f"[contact-pitch-v1] published {len(nodes)} trajectory lines to workflow")

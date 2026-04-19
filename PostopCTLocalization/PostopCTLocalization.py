@@ -48,7 +48,6 @@ _reload_local_support_modules()
 
 from postop_ct_localization.deep_core_visualization import DeepCoreVisualizationLogicMixin
 from postop_ct_localization.deep_core_widget import ContactPitchV1WidgetMixin
-from postop_ct_localization.de_novo import DeNovoLogicMixin, DeNovoWidgetMixin
 from postop_ct_localization.gui import PostopCTLocalizationWidgetBaseMixin
 from postop_ct_localization.guided_fit import GuidedFitWidgetMixin
 from postop_ct_localization.logic_common import PostopCTLocalizationLogicBaseMixin
@@ -65,8 +64,9 @@ class PostopCTLocalization(ScriptedLoadableModule):
         self.parent.dependencies = []
         self.parent.contributors = ["Ammar Shaikhouni", "Codex"]
         self.parent.helpText = (
-            "Unified postop CT localization: Guided Fit (planned trajectories) and "
-            "De Novo Detect (CT-only)."
+            "Unified postop CT localization: Auto Fit (contact_pitch_v1 "
+            "CT-only detector), Guided Fit (planned trajectories), and "
+            "Manual Fit."
         )
 
 
@@ -74,11 +74,10 @@ class PostopCTLocalizationWidget(
     PostopCTLocalizationWidgetBaseMixin,
     GuidedFitWidgetMixin,
     ContactPitchV1WidgetMixin,
-    DeNovoWidgetMixin,
     ManualFitWidgetMixin,
     ScriptedLoadableModuleWidget,
 ):
-    """Widget exposing guided-fit, Auto Fit (contact_pitch_v1), and manual workflows."""
+    """Widget exposing Auto Fit (contact_pitch_v1), Guided Fit, and Manual Fit."""
 
     def _create_logic(self):
         return PostopCTLocalizationLogic()
@@ -87,7 +86,6 @@ class PostopCTLocalizationWidget(
 class PostopCTLocalizationLogic(
     PostopCTLocalizationLogicBaseMixin,
     DeepCoreVisualizationLogicMixin,
-    DeNovoLogicMixin,
     ScriptedLoadableModuleLogic,
 ):
     """Logic composed from workflow-specific mixins."""

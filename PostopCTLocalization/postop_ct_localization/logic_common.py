@@ -28,7 +28,7 @@ from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 
-from .constants import DE_NOVO_MODE_SPECS, GUIDED_SOURCE_OPTIONS
+from .constants import GUIDED_SOURCE_OPTIONS
 
 class PostopCTLocalizationLogicBaseMixin:
     def __init__(self):
@@ -50,39 +50,6 @@ class PostopCTLocalizationLogicBaseMixin:
         )
         self.pipeline_registry = PipelineRegistry()
         register_builtin_pipelines(self.pipeline_registry)
-        self.default_de_novo_pipeline_key = self._resolve_default_de_novo_pipeline_key()
-
-    def _resolve_default_de_novo_pipeline_key(self):
-        keys = list(self.pipeline_registry.keys())
-        if not keys:
-            return ""
-        preferred = "contact_pitch_v1"
-        return preferred if preferred in keys else str(keys[0])
-
-    def available_de_novo_pipelines(self):
-        """Return display metadata for registered de novo engine pipelines."""
-        entries = []
-        for key in self.pipeline_registry.keys():
-            display_name = key
-            scaffold = False
-            expose_in_ui = True
-            try:
-                pipeline = self.pipeline_registry.create_pipeline(key)
-                display_name = str(getattr(pipeline, "display_name", key) or key)
-                scaffold = bool(getattr(pipeline, "scaffold", False))
-                expose_in_ui = bool(getattr(pipeline, "expose_in_ui", True))
-            except Exception:
-                pass
-            if not expose_in_ui:
-                continue
-            entries.append(
-                {
-                    "key": str(key),
-                    "display_name": display_name,
-                    "scaffold": scaffold,
-                }
-            )
-        return entries
 
     def build_detection_context(self, volume_node):
         """Build a minimal ``DetectionContext`` dict for ``contact_pitch_v1``.
@@ -194,15 +161,14 @@ class PostopCTLocalizationLogicBaseMixin:
         """Delete trajectories by logical name from current scene/source scope."""
         source = str(source_key or "working").strip().lower()
         allowed_groups = {
-            "working": {"imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"},
+            "working": {"imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"},
             "imported_rosa": {"imported_rosa"},
             "imported_external": {"imported_external"},
             "manual": {"manual"},
             "guided_fit": {"guided_fit"},
-            "deep_core": {"autofit_preview"},
-            "de_novo": {"de_novo"},
+            "auto_fit": {"auto_fit"},
             "planned_rosa": {"planned_rosa"},
-        }.get(source, {"imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"})
+        }.get(source, {"imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"})
 
         target_names = {str(name).strip() for name in (names or []) if str(name).strip()}
         if not target_names:
@@ -238,7 +204,7 @@ class PostopCTLocalizationLogicBaseMixin:
             if trajectories:
                 return trajectories
             rows = self.trajectory_scene.collect_working_trajectory_rows(
-                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"]
+                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"]
             )
             fallback = []
             for row in rows:
@@ -255,8 +221,7 @@ class PostopCTLocalizationLogicBaseMixin:
             "imported_rosa": "ImportedTrajectoryLines",
             "imported_external": "ImportedExternalTrajectoryLines",
             "guided_fit": "GuidedFitTrajectoryLines",
-            "deep_core": "DeepCoreTrajectoryLines",
-            "de_novo": "DeNovoTrajectoryLines",
+            "auto_fit": "AutoFitTrajectoryLines",
             "planned_rosa": "PlannedTrajectoryLines",
         }
         if source in role_map:
@@ -326,117 +291,6 @@ class PostopCTLocalizationLogicBaseMixin:
         volume_node.GetIJKToRASMatrix(m_vtk)
         m = self._vtk_matrix_to_numpy(m_vtk)
         return (m @ center_ijk)[:3]
-
-    @staticmethod
-
-    @staticmethod
-    def _electrode_prior_support_params(models_by_id):
-        """Derive axial-support sampling priors from loaded electrode model geometry."""
-        if not isinstance(models_by_id, dict) or not models_by_id:
-            return {}
-        diameters = []
-        contact_lengths = []
-        pitches = []
-        gaps = []
-        total_lengths = []
-        for model in list(models_by_id.values()):
-            if not isinstance(model, dict):
-                continue
-            try:
-                diameters.append(float(model.get("diameter_mm")))
-            except Exception:
-                pass
-            try:
-                contact_lengths.append(float(model.get("contact_length_mm")))
-            except Exception:
-                pass
-            offsets = model.get("contact_center_offsets_from_tip_mm")
-            if isinstance(offsets, (list, tuple)) and len(offsets) >= 2:
-                vals = []
-                for off in offsets:
-                    try:
-                        vals.append(float(off))
-                    except Exception:
-                        pass
-                vals = sorted(vals)
-                for i in range(1, len(vals)):
-                    d = float(vals[i] - vals[i - 1])
-                    if d > 0.0:
-                        pitches.append(d)
-                try:
-                    contact_len = float(model.get("contact_length_mm"))
-                    if contact_len > 0.0:
-                        for p in pitches[-max(1, len(vals) - 1) :]:
-                            gaps.append(max(0.0, float(p) - contact_len))
-                except Exception:
-                    pass
-            try:
-                total_lengths.append(float(model.get("total_exploration_length_mm")))
-            except Exception:
-                pass
-
-        if not diameters:
-            return {}
-        diameter_mm = float(np.median(np.asarray(diameters, dtype=float)))
-        contact_length_mm = float(np.median(np.asarray(contact_lengths, dtype=float))) if contact_lengths else 2.0
-        pitch_mm = float(np.median(np.asarray(pitches, dtype=float))) if pitches else 3.5
-        gap_mm = float(np.median(np.asarray(gaps, dtype=float))) if gaps else max(0.0, pitch_mm - contact_length_mm)
-        spacing_mm = float(max(1.0, contact_length_mm + gap_mm if gap_mm > 0.0 else pitch_mm))
-        max_exploration_mm = float(np.max(np.asarray(total_lengths, dtype=float))) if total_lengths else 60.0
-        max_samples = int(np.clip(np.ceil(max_exploration_mm / max(spacing_mm, 1e-3)) + 2, 12, 48))
-        return {
-            "electrode_prior_diameter_mm": diameter_mm,
-            "electrode_prior_contact_length_mm": contact_length_mm,
-            "electrode_prior_pitch_mm": pitch_mm,
-            "electrode_prior_gap_mm": gap_mm,
-            "electrode_prior_contact_separation_mm": spacing_mm,
-            "electrode_prior_max_exploration_mm": max_exploration_mm,
-            "axial_support_spacing_mm": spacing_mm,
-            "axial_support_window_mm": float(max(contact_length_mm, 0.75 * spacing_mm)),
-            "axial_support_min_diameter_mm": float(max(0.4, 0.5 * diameter_mm)),
-            "axial_support_max_diameter_mm": float(max(2.5, 3.0 * diameter_mm)),
-            "axial_support_min_aspect_ratio": 2.0,
-            "axial_support_min_length_mm": float(max(3.0, 1.5 * spacing_mm)),
-            "axial_support_max_samples_per_blob": max_samples,
-            "axial_support_min_window_voxels": 3,
-        }
-
-    def upsert_detected_lines(self, lines, replace_existing=True):
-        existing_rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["de_novo"])
-        if bool(replace_existing):
-            for row in existing_rows:
-                node = slicer.mrmlScene.GetNodeByID(row["node_id"])
-                if node is not None:
-                    slicer.mrmlScene.RemoveNode(node)
-            existing_rows = []
-
-        existing_names = [row["name"] for row in existing_rows]
-        names = self._next_side_names(lines, existing_names=existing_names, midline_x_ras=0.0)
-        new_rows = list(existing_rows)
-        for i, line in enumerate(lines):
-            name = names[i]
-            node_name = self.trajectory_scene.build_node_name(name, "de_novo")
-            node = self.trajectory_scene.create_or_update_trajectory_line(
-                name=name,
-                start_ras=line["start_ras"],
-                end_ras=line["end_ras"],
-                node_id=None,
-                group="de_novo",
-                origin="postop_ct_denovo",
-                node_name=node_name,
-            )
-            new_rows.append(
-                {
-                    "name": name,
-                    "node_name": node.GetName() or node_name,
-                    "node_id": node.GetID(),
-                    "group": "de_novo",
-                    "start_ras": [float(line["start_ras"][0]), float(line["start_ras"][1]), float(line["start_ras"][2])],
-                    "end_ras": [float(line["end_ras"][0]), float(line["end_ras"][1]), float(line["end_ras"][2])],
-                }
-            )
-        new_rows.sort(key=lambda r: r["name"])
-        return new_rows
 
     def publish_working_rows(self, rows, workflow_node=None, role="WorkingTrajectoryLines", source="postop_ct_localization"):
         nodes = []

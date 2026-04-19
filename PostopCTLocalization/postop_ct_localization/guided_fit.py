@@ -28,7 +28,7 @@ from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 
-from .constants import DE_NOVO_MODE_SPECS, GUIDED_SOURCE_OPTIONS
+from .constants import GUIDED_SOURCE_OPTIONS
 
 class GuidedFitWidgetMixin:
     def _build_guided_fit_tab(self):

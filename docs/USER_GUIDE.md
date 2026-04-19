@@ -53,14 +53,20 @@ Coordinate metadata (set in UI):
 
 ## `01 Postop CT Localization`
 
-Two modes:
-- Guided Fit: refine existing trajectories using postop CT
-- De Novo Detect: detect trajectories directly from CT metal artifacts
+Three modes:
+
+- Auto Fit: detect trajectories directly from the postop CT
+  (`contact_pitch_v1` pipeline; the production CT-only detector)
+- Guided Fit: refine existing (planned) trajectories using the postop CT
+- Manual Fit: adopt trajectories drawn by hand in the scene
 
 Key behavior:
-- Trajectories are grouped by source (`guided_fit`, `de_novo`, etc.).
-- Outputs publish to shared workflow roles.
-- Active trajectory source is shared with Contacts module.
+
+- Trajectories are grouped by source (`auto_fit`, `guided_fit`, `manual`,
+  `imported_rosa`, `imported_external`, `planned_rosa`).
+- Outputs publish to shared workflow roles (`AutoFitTrajectoryLines`,
+  `GuidedFitTrajectoryLines`, `ManualTrajectoryLines`, ...).
+- Active trajectory source is shared with the Contacts module.
 
 ## `02 Contacts & Trajectory View`
 

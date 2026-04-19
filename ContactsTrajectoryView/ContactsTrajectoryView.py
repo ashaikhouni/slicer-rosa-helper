@@ -46,8 +46,7 @@ TRAJECTORY_SOURCE_OPTIONS = [
     ("imported_external", "Imported External"),
     ("manual", "Manual (scene)"),
     ("guided_fit", "Guided Fit"),
-    ("deep_core", "Deep Core"),
-    ("de_novo", "De Novo"),
+    ("auto_fit", "Auto Fit"),
     ("planned_rosa", "Planned ROSA"),
 ]
 
@@ -248,10 +247,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             return "imported_rosa"
         if self._role_has_nodes("GuidedFitTrajectoryLines"):
             return "guided_fit"
-        if self._role_has_nodes("DeepCoreTrajectoryLines"):
-            return "deep_core"
-        if self._role_has_nodes("DeNovoTrajectoryLines"):
-            return "de_novo"
+        if self._role_has_nodes("AutoFitTrajectoryLines"):
+            return "auto_fit"
         if self._role_has_nodes("ImportedExternalTrajectoryLines"):
             return "imported_external"
         if self._role_has_nodes("PlannedTrajectoryLines"):
@@ -716,13 +713,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _apply_source_visibility(self, source_key):
         key = str(source_key or "working").strip().lower()
         group_map = {
-            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"],
+            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"],
             "imported_rosa": ["imported_rosa"],
             "imported_external": ["imported_external"],
             "manual": ["manual"],
             "guided_fit": ["guided_fit"],
-            "deep_core": ["autofit_preview"],
-            "de_novo": ["de_novo"],
+            "auto_fit": ["auto_fit"],
             "planned_rosa": ["planned_rosa"],
         }
         groups = group_map.get(key, group_map["working"])
@@ -1093,7 +1089,7 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             if trajectories:
                 return trajectories
             rows = self.trajectory_scene.collect_working_trajectory_rows(
-                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"]
+                groups=["imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"]
             )
             fallback = []
             for row in rows:
@@ -1110,10 +1106,8 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             return self._collect_trajectories_from_role("ImportedTrajectoryLines", workflow_node=wf)
         if source == "guided_fit":
             return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
-        if source == "deep_core":
-            return self._collect_trajectories_from_role("DeepCoreTrajectoryLines", workflow_node=wf)
-        if source == "de_novo":
-            return self._collect_trajectories_from_role("DeNovoTrajectoryLines", workflow_node=wf)
+        if source == "auto_fit":
+            return self._collect_trajectories_from_role("AutoFitTrajectoryLines", workflow_node=wf)
         if source == "imported_external":
             return self._collect_trajectories_from_role("ImportedExternalTrajectoryLines", workflow_node=wf)
         if source == "planned_rosa":

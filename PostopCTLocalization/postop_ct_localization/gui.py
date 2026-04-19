@@ -28,7 +28,7 @@ from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 
-from .constants import DE_NOVO_MODE_SPECS, GUIDED_SOURCE_OPTIONS
+from .constants import GUIDED_SOURCE_OPTIONS
 
 class PostopCTLocalizationWidgetBaseMixin:
     def setup(self):
@@ -49,10 +49,7 @@ class PostopCTLocalizationWidgetBaseMixin:
         self._updatingGuidedTable = False
         self._renamingGuidedTrajectory = False
         self._syncingModeTabs = False
-        self._lastDeepCoreDebugResult = None
         self._lastDeepCoreProposalResult = None
-        self._deNovoControlsByPipeline = {}
-        self._deNovoTabIndexByPipeline = {}
 
         form = qt.QFormLayout()
         self.layout.addLayout(form)
@@ -63,7 +60,7 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.ctSelector.addEnabled = False
         self.ctSelector.removeEnabled = False
         self.ctSelector.setMRMLScene(slicer.mrmlScene)
-        self.ctSelector.setToolTip("Postop CT used for guided fit / de novo detection.")
+        self.ctSelector.setToolTip("Postop CT used for Auto Fit / Guided Fit.")
         self.ctSelector.currentNodeChanged.connect(self.onCtSelectorChanged)
         form.addRow("Postop CT", self.ctSelector)
 
@@ -86,7 +83,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.layout.addWidget(self.modeTabs)
         self._build_guided_fit_tab()
         self._build_contact_pitch_v1_tab()
-        self._build_de_novo_mode_tabs()
         self._build_manual_fit_tab()
         self._build_shared_trajectory_ui()
 
@@ -198,11 +194,6 @@ class PostopCTLocalizationWidgetBaseMixin:
             self.modelIds = []
             self.log(f"[electrodes] failed to load model library: {exc}")
             return
-        if hasattr(self, "_populate_deep_core_model_family_combo"):
-            try:
-                self._populate_deep_core_model_family_combo()
-            except Exception:
-                pass
         self.log(f"[electrodes] loaded {len(self.modelIds)} models")
 
     @staticmethod
@@ -359,57 +350,6 @@ class PostopCTLocalizationWidgetBaseMixin:
             return
         self.workflowNode.SetParameter("ActiveTrajectorySource", str(source_key or "").strip().lower())
 
-    def _workflow_de_novo_pipeline_key(self):
-        if self.workflowNode is None:
-            return ""
-        return str(self.workflowNode.GetParameter("DeNovoPipelineKey") or "").strip()
-
-    def _set_workflow_de_novo_pipeline_key(self, pipeline_key):
-        if self.workflowNode is None:
-            return
-        self.workflowNode.SetParameter("DeNovoPipelineKey", str(pipeline_key or "").strip())
-
-    def _pipeline_key_for_current_mode_tab(self):
-        """Return de novo pipeline key implied by current mode tab, or empty for non-de-novo tabs."""
-        current_idx = int(self.modeTabs.currentIndex)
-        for pipeline_key, tab_idx in self._deNovoTabIndexByPipeline.items():
-            if int(tab_idx) == current_idx:
-                return str(pipeline_key)
-        return ""
-
-    def _set_mode_tab_for_pipeline(self, pipeline_key):
-        """Select the de novo tab associated with `pipeline_key` when available."""
-        idx = self._deNovoTabIndexByPipeline.get(str(pipeline_key or "").strip())
-        if idx is None or int(idx) == int(self.modeTabs.currentIndex):
-            return
-        self._syncingModeTabs = True
-        try:
-            self.modeTabs.setCurrentIndex(int(idx))
-        finally:
-            self._syncingModeTabs = False
-
-    def _controls_for_pipeline(self, pipeline_key):
-        """Resolve the control bundle for a pipeline key with deterministic fallback."""
-        key = str(pipeline_key or "").strip()
-        controls = self._deNovoControlsByPipeline.get(key)
-        if controls is not None:
-            return controls
-        default_controls = self._deNovoControlsByPipeline.get(self.logic.default_de_novo_pipeline_key)
-        if default_controls is not None:
-            return default_controls
-        for bundle in self._deNovoControlsByPipeline.values():
-            return bundle
-        raise RuntimeError("No de novo control bundles were initialized.")
-
-    def _sync_de_novo_pipeline_from_workflow(self):
-        """Keep mode tabs synchronized with workflow-persisted de novo pipeline selection."""
-        key = self._workflow_de_novo_pipeline_key()
-        if not key:
-            key = self.logic.default_de_novo_pipeline_key
-            self._set_workflow_de_novo_pipeline_key(key)
-        if self._pipeline_key_for_current_mode_tab():
-            self._set_mode_tab_for_pipeline(key)
-
     def _set_guided_source_combo(self, source_key):
         idx = self.guidedSourceCombo.findData(str(source_key or "").strip().lower())
         if idx < 0 or idx == self.guidedSourceCombo.currentIndex:
@@ -435,10 +375,8 @@ class PostopCTLocalizationWidgetBaseMixin:
             return "imported_rosa"
         if self._role_has_nodes("GuidedFitTrajectoryLines"):
             return "guided_fit"
-        if self._role_has_nodes("DeepCoreTrajectoryLines"):
-            return "deep_core"
-        if self._role_has_nodes("DeNovoTrajectoryLines"):
-            return "de_novo"
+        if self._role_has_nodes("AutoFitTrajectoryLines"):
+            return "auto_fit"
         if self._role_has_nodes("ImportedExternalTrajectoryLines"):
             return "imported_external"
         if self._role_has_nodes("PlannedTrajectoryLines"):
@@ -450,13 +388,12 @@ class PostopCTLocalizationWidgetBaseMixin:
     def _apply_guided_source_visibility(self, source_key):
         key = str(source_key or "working").strip().lower()
         group_map = {
-            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "deep_core", "de_novo", "autofit_preview"],
+            "working": ["imported_rosa", "imported_external", "manual", "guided_fit", "auto_fit"],
             "imported_rosa": ["imported_rosa"],
             "imported_external": ["imported_external"],
             "manual": ["manual"],
             "guided_fit": ["guided_fit"],
-            "deep_core": ["autofit_preview"],
-            "de_novo": ["de_novo"],
+            "auto_fit": ["auto_fit"],
             "planned_rosa": ["planned_rosa"],
         }
         groups = group_map.get(key, group_map["working"])
@@ -472,11 +409,9 @@ class PostopCTLocalizationWidgetBaseMixin:
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
         self._sync_ct_selector_from_workflow()
-        self._sync_threshold_ranges_from_ct()
         if not self._workflow_active_source():
             self._set_workflow_active_source(self._default_source_when_unset())
         self._sync_guided_source_from_workflow()
-        self._sync_de_novo_pipeline_from_workflow()
         source_key = self._selected_guided_source_key()
         self.loadedTrajectories = self.logic.collect_trajectories_by_source(
             source_key=source_key,
@@ -501,7 +436,6 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
         self.logic.layout_service.sanitize_focus_layout_state()
         self._sync_ct_selector_from_workflow()
-        self._sync_threshold_ranges_from_ct()
         self._apply_primary_slice_layers()
         self._schedule_guided_follow()
 
@@ -512,12 +446,8 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.onRefreshClicked()
 
     def onModeTabChanged(self, _idx):
-        """Persist de novo pipeline choice when switching between voxel/blob mode tabs."""
-        if self._syncingModeTabs:
-            return
-        pipeline_key = self._pipeline_key_for_current_mode_tab()
-        if pipeline_key:
-            self._set_workflow_de_novo_pipeline_key(pipeline_key)
+        """No per-tab state to persist after the de-novo mode tabs were removed."""
+        return
 
     def onApplyFocusLayoutClicked(self):
         self.logic.layout_service.sanitize_focus_layout_state()
@@ -528,12 +458,10 @@ class PostopCTLocalizationWidgetBaseMixin:
         self._schedule_guided_follow()
 
     def onCtSelectorChanged(self, node):
-        """Update display layers and threshold ranges when CT selection changes."""
-        self._lastDeepCoreDebugResult = None
+        """Update display layers when CT selection changes."""
         self._lastDeepCoreProposalResult = None
         self.logic.trajectory_scene.remove_preview_lines()
         self._apply_primary_slice_layers()
-        self._sync_threshold_ranges_from_ct(node)
 
     def onGuidedTrajectoryTableCellClicked(self, _row, _col):
         self._schedule_guided_follow()
