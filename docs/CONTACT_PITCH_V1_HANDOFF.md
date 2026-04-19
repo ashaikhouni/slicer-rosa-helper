@@ -1,6 +1,8 @@
 # contact_pitch_v1 Handoff
 
-Last updated: 2026-04-18.
+Last updated: 2026-04-19. Electrode-model suggestion (manufacturer-
+filtered) + intracranial length + deep-end refinement + crossing-tip
+retreat added this session.
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
 postop CT. Replaces the bolt-first `deep_core_v2` for general use; v2
@@ -117,6 +119,50 @@ hull surface. Required for every accepted trajectory.
   `skull_entry → end`; reject if >50 % are below −300 HU. Real shanks
   through ventricles top out around 35 % air; sinus tubes run >70 %.
 
+### 6. Axis-directed deep-end refinement
+
+After bolt anchor + dedup, re-sample LoG σ=1 along each trajectory's
+axis past `end_ras` in 0.5 mm steps. Push the deep tip out to the
+last on-axis position with `LoG ≤ −300`; stop after 3 mm of weak
+signal. Fixes cases where the 3-D regional-minima extractor missed
+deep contacts because the per-contact wells merged into a single
+long bright LoG CC (T2 RAI's 4 deep contacts, for instance — deep
+end went from along=58.5 mm back up to 77.0 mm, matching GT within
+1.5 mm). Walks strictly on the original axis; curving / off-axis
+snap drifted adjacent shanks' midpoints in testing.
+
+### 7. Crossing-tip retreat
+
+Final cleanup that runs once every trajectory's deep end has been
+refined. For each trajectory whose tip sits within
+`PERP_TOL_MM + 0.5 = 2.0 mm` of another trajectory's segment (using
+proper segment-to-point distance, not infinite-line projection),
+walk the tip back along the trajectory's own axis until two
+conditions are both satisfied:
+
+1. perpendicular clearance from **every** other segment ≥ 2.0 mm, AND
+2. on-axis `|LoG| ≥ 300` — the retreated tip sits on a real contact
+   peak instead of floating in the gap past the last contact.
+
+Bounded by `MIN_POST_ANCHOR_LEN_MM`; if retreating that far would
+shrink the trajectory below the floor, the tip is left alone and
+logged. Tuned on T1 where X05 / X08 cross at ~19° near the midline
+with 1.1 mm closest approach — X05's tip was overshooting into X08's
+contacts by ~11 mm, now retreated to land on X05's last real contact.
+
+### 8. Post-detection electrode suggestion
+
+Every stage-1 and stage-2 trajectory gets a `suggested_model_id`
+stamped onto it via `classify_by_count_and_span` →
+`suggest_shortest_covering_model`: shortest electrode in the selected
+manufacturers whose `total_exploration_length_mm + 10 mm ≥
+intracranial_length_mm`. The 10 mm absorbs the dura margin between
+`skull_entry_ras` (inside the dura band) and the first real contact.
+
+Suggestion is advisory — the Contacts & Trajectory View module reads
+it via `Rosa.BestModelId` on the line node to pre-populate its
+"Electrode Model" dropdown, and the user can override.
+
 ## Slicer integration
 
 - Pipeline ID: `contact_pitch_v1`. Class
@@ -124,17 +170,29 @@ hull surface. Required for every accepted trajectory.
   `CommonLib/shank_engine/pipelines/contact_pitch_v1.py`. Detector
   logic lives in
   `PostopCTLocalization/postop_ct_localization/contact_pitch_v1_fit.py`.
-- Widget tab: **Contact Pitch v1** (next to Deep Core v2). Single
-  "Run" button — uses the currently-selected CT, no config needed.
+- Widget tab: **Contact Pitch v1** (next to Deep Core v2). "Run
+  Contact Pitch v1" button + a **Manufacturers** row of checkboxes
+  (Dixi / PMT / AdTech, derived from the bundled electrode library;
+  default Dixi). The checkboxes filter the electrode-model
+  suggestion — no effect on detection itself.
+- Line nodes are rendered **skull_entry → deep tip** (not bolt tip
+  → deep tip). The bolt-tip RAS is still kept as ``bolt_tip_ras`` on
+  the trajectory dict for any consumer that needs it. This means
+  downstream modules such as **Contacts & Trajectory View** compute
+  `trajectory_length_mm` as the intracranial length, matching what
+  clinicians expect.
+- Each trajectory line node carries `Rosa.BestModelId` +
+  `Rosa.BestModelScore` attributes populated by the suggestion step.
+  The **Contacts & Trajectory View** module's "Electrode Model"
+  dropdown reads these to pre-populate its default assignments.
 - After a run, six feature volumes are added to the scene
   (`<CT>_ContactPitch_*`) with percentile-based window/level so
   signed-float volumes (LoG, Frangi, head-distance) display with
   useful contrast.
 - The visualizer prefers `skull_entry_ras` from the trajectory dict
   (set by the bolt anchor as the bone→brain transition) over the
-  legacy annulus-gradient estimate, so the red marker now sits at the
-  dura on every line instead of jumping between air→skin and
-  bolt→bone.
+  legacy annulus-gradient estimate, so the red marker sits at the
+  dura on every line.
 
 ## Key files
 
@@ -147,18 +205,37 @@ hull surface. Required for every accepted trajectory.
 | `PostopCTLocalization/postop_ct_localization/deep_core_visualization.py` | Honors `skull_entry_ras` for the red marker |
 | `tests/deep_core/test_pipeline_dataset_contact_pitch_v1.py` | Regression test |
 
+## Key constants (end of fit module)
+
+| Name | Value | Role |
+| --- | --- | --- |
+| `MAX_INLIER_GAP_MM` | 22.0 | Walker rejects an inlier chain with any internal gap greater than this. Caps at ~6 missed Dixi contacts + 1 BM/CM insulation jump, prevents cross-shank bridges (T2 X07 RAMC↔LAMC bridge killed). |
+| `AXIS_REFINE_STEP_MM` | 0.5 | Step size for the deep-end axis-LoG walk. |
+| `AXIS_REFINE_MAX_MM` | 40.0 | Upper bound on how far refinement can extend past the original `end_ras`. |
+| `AXIS_REFINE_MIN_ABS` | 300.0 | Same as `LOG_BLOB_THRESHOLD`. Considers "on a contact" when `abs(LoG) ≥ this`. |
+| `AXIS_REFINE_MISS_MM` | 3.0 | Consecutive mm of weak LoG signal → stop walking. |
+| `CROSSING_TIP_CLEARANCE_MM` | 2.0 | Post-refinement retreat clearance. `PERP_TOL_MM (1.5) + 0.5` safety margin. |
+| `CROSSING_RETREAT_STEP_MM` | 0.5 | Retreat step size. |
+
 ## Known issues / next steps
 
-1. **Library-aware pitch walker.** Stage 1 hardcodes Dixi 3.5 mm.
-   PMT-16C runs at 4.43 mm and DIXI-BM/CM have 9–13 mm insulation
-   gaps between groups. A UI dropdown for electrode family, plus a
-   library-driven walker, would generalize beyond Dixi.
+1. **Post-retreat re-extension.** If trajectory A was never retreated
+   but trajectory B (A's neighbour) was, A's deep end might now have
+   free space where it previously was blocked. Not currently
+   re-extended. Relevant when two crossing shanks have different
+   real lengths and only one overshoots.
 2. **Skip stage 2 when stage 1 covers everything.** Stage 2 only
    exists for shanks like T2 RSAN that lack visible contacts. On
    subjects whose shanks all show contacts (T1, T3, most), Frangi
    adds no recall and only generates FPs that we then filter out.
    A "stage-2 needed?" check would save ~1–2 s and a class of FPs.
-3. **`shallow_err` always reports the bolt-tip distance from the
+3. **PMT-16B / PMT-16C pitch (3.97 / 4.43 mm).** Walker still uses
+   the single Dixi 3.5 mm pitch. The manufacturer checkboxes only
+   affect the suggestion, not detection. If PMT-16B/C electrodes
+   appear in practice, the walker will likely miss or misplace
+   their contacts. Not an issue for current Dixi-only clinical
+   inventory.
+4. **`shallow_err` always reports the bolt-tip distance from the
    GT entry**. The GT entry is the bone→brain interface; my start
    is the bolt outer end. Tests use `skull_entry_ras` for the
    shallow-side comparison instead — that's the right point to

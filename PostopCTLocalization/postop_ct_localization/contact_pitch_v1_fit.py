@@ -43,11 +43,12 @@ AMP_SUM_MIN = 6000.0
 # Maximum allowed gap between consecutive inlier contacts along the
 # axis. The walker trims single stray outliers whose gap to the rest
 # exceeds this, then rejects any line whose remaining internal gap still
-# exceeds it. Set to a high value (effectively off) here — blob
-# ownership arbitration (not yet implemented) is the cleaner fix for
-# cross-shank bridges. Pre-trim threshold still prunes the worst stray
-# blobs to keep the axis clean for bolt anchoring.
-MAX_INLIER_GAP_MM = 999.0
+# exceeds it. 22 mm allows up to ~6 consecutive missed contacts at the
+# 3.5 mm Dixi pitch, and 1 insulation jump on BM (9 mm) or CM (13 mm)
+# families. Higher values let the walker bridge contacts from two
+# separate electrodes into a single cross-midline line (seen on T2 X07
+# where a 6-blob line joined RAMC and LAMC), so we cap here.
+MAX_INLIER_GAP_MM = 22.0
 
 STAGE1_DEDUP_ANGLE_DEG = 3.0
 STAGE1_DEDUP_PERP_MM = 2.0
@@ -444,17 +445,26 @@ def _extend_deep_end(line, pts_c, amps_c, claimed_blobs,
                       perp_tol_mm=2.5,
                       max_extra=20,
                       max_outer_iter=4):
-    """Walk outward from the current deepest inlier, snapping to unclaimed
-    blobs within ``max_gap_mm`` of the previous contact along the axis.
-    Refits the axis after each pass and re-runs until no more blobs
-    can be added — this lets the axis "snake" along a slightly curved
-    or off-line electrode and pick up contacts that would have been
-    just outside the original PCA axis's tube.
+    """Walk outward from the current deepest **and** shallowest inliers,
+    snapping to unclaimed blobs within ``max_gap_mm`` of the last contact
+    along the axis. Refits the axis after each pass and re-runs until no
+    more blobs can be added — this lets the axis "snake" along a slightly
+    curved or off-line electrode and pick up contacts that would have
+    been just outside the original PCA axis's tube.
 
-    The 10 mm gap covers up to ~3 missed 3.5 mm-pitch contacts OR a
-    DIXI-BM 9 mm insulation jump. Tighter "4 mm at the brain tip"
-    behavior emerges naturally because the deepest contacts on real
-    electrodes ARE close-spaced.
+    ``max_gap_mm`` of 14 mm covers ~3 missed 3.5 mm-pitch contacts or a
+    BM 9 mm insulation jump. Tighter "4 mm at the brain tip" behaviour
+    emerges naturally because deep contacts on real electrodes ARE
+    close-spaced.
+
+    Walking both directions matters: when the initial walker locks onto
+    the middle of an electrode (for instance because arbitration stripped
+    its tip contacts or because the first seed pair was mid-shank) a deep-
+    only extension will undershoot the deep tip by however much the
+    shallow side was already short. Symmetric extension fixes this — one
+    pass grabs whichever contacts the initial line missed, the refit
+    recenters the axis, and the next outer iteration can chase the other
+    side.
     """
     for _outer in range(max_outer_iter):
         # Walk in the shallow -> deep direction. After every refit the
@@ -481,6 +491,7 @@ def _extend_deep_end(line, pts_c, amps_c, claimed_blobs,
         perp_all = np.linalg.norm(
             diffs_all - np.outer(along_all, axis), axis=1,
         )
+        # Deep-side walk.
         deep_proj = float(((pts_c[inliers] - center) @ axis).max())
         for _ in range(max_extra):
             candidate_mask = (
@@ -497,6 +508,27 @@ def _extend_deep_end(line, pts_c, amps_c, claimed_blobs,
             inliers.append(best)
             claimed_blobs.add(best)
             deep_proj = float(along_all[best])
+        # Shallow-side walk. ``shallow_proj`` tracks the shallowest
+        # inlier; candidates sit at a smaller ``along``, closer to the
+        # bolt. Bolt blobs naturally end up here — that is fine since
+        # they will be rejected by the bolt-anchor step downstream if
+        # they do not belong on this shank.
+        shallow_proj = float(((pts_c[inliers] - center) @ axis).min())
+        for _ in range(max_extra):
+            candidate_mask = (
+                (along_all < shallow_proj)
+                & (shallow_proj - along_all <= max_gap_mm)
+                & (perp_all <= perp_tol_mm)
+            )
+            cand = [int(bi) for bi in np.where(candidate_mask)[0]
+                    if int(bi) not in claimed_blobs
+                    and int(bi) not in set(inliers)]
+            if not cand:
+                break
+            best = max(cand, key=lambda bi: float(amps_c[bi]))
+            inliers.append(best)
+            claimed_blobs.add(best)
+            shallow_proj = float(along_all[best])
         if len(inliers) == n_pre:
             break  # converged
         line["inlier_idx"] = sorted(inliers)
@@ -940,6 +972,206 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
     return best_shallow, best_entry, best
 
 
+# ---- Deep-end axis refinement ----------------------------------------
+
+# Axis-directed refinement thresholds. ``|LoG| >= AXIS_REFINE_MIN_ABS``
+# is what we consider "on a contact / bright shaft"; once that signal
+# drops below the threshold for ``AXIS_REFINE_MISS_MM`` consecutive mm
+# along the axis, the shank has ended. Tuned on T2 RAI where the deep
+# 4 contacts merge into one LoG CC and only show up as a 1-D oscillation
+# along the axis.
+AXIS_REFINE_STEP_MM = 0.5
+AXIS_REFINE_MAX_MM = 40.0    # never extend further than this past end_ras
+AXIS_REFINE_MIN_ABS = 300.0  # match LOG_BLOB_THRESHOLD (contact signal)
+AXIS_REFINE_MISS_MM = 3.0    # 3 mm of LoG above -threshold → stop
+
+# Post-refinement crossing-tip retreat. If a deep tip ends up inside
+# another trajectory's contact-acceptance tube (perp ≤ this), the
+# refinement has walked past the real electrode end into the neighbour's
+# contacts. Retreat the tip along its own axis until the perp clearance
+# is at least this. 2.0 mm = walker's PERP_TOL_MM (1.5) + 0.5 mm safety
+# margin, so a tip outside this is unambiguously not inside any other
+# shank's blob-acceptance radius.
+CROSSING_TIP_CLEARANCE_MM = 2.0
+CROSSING_RETREAT_STEP_MM = 0.5
+
+
+def _min_perp_to_other_segments(p, segs, skip_idx):
+    """Minimum perpendicular distance from point ``p`` to any other
+    segment in ``segs`` (skipping the one at ``skip_idx``). Uses
+    segment-to-point distance (clamped along-projection), not infinite
+    line, so crossing shanks compare only where they actually live.
+    """
+    best = float("inf")
+    for i, seg in enumerate(segs):
+        if i == skip_idx:
+            continue
+        v = p - seg["s"]
+        along = float(v @ seg["a"])
+        along_c = max(0.0, min(seg["L"], along))
+        proj = seg["s"] + along_c * seg["a"]
+        d = float(np.linalg.norm(p - proj))
+        if d < best:
+            best = d
+    return best
+
+
+def _retreat_crossing_tips(anchored,
+                             log_arr=None,
+                             ras_to_ijk_mat=None,
+                             clearance_mm=CROSSING_TIP_CLEARANCE_MM,
+                             step_mm=CROSSING_RETREAT_STEP_MM,
+                             min_length_mm=MIN_POST_ANCHOR_LEN_MM,
+                             contact_abs_log=AXIS_REFINE_MIN_ABS,
+                             logger=None):
+    """For every trajectory whose deep tip sits inside another's
+    contact-acceptance tube (perp < ``clearance_mm`` from another
+    segment), walk the tip back along its own axis until
+
+    1. clearance from every other segment is ≥ ``clearance_mm``; AND
+    2. the retreated tip sits on a real contact peak
+       (``|LoG| ≥ contact_abs_log`` at the on-axis sample) — so it
+       snaps to the deep edge of the last detected contact rather than
+       floating in the empty gap past it.
+
+    Aborts on a given trajectory if retreat would shrink it below
+    ``min_length_mm``.
+    """
+    segs = []
+    for rec in anchored:
+        s = np.asarray(rec.get("start_ras"), dtype=float)
+        e = np.asarray(rec.get("end_ras"), dtype=float)
+        d = e - s
+        L = float(np.linalg.norm(d))
+        if L < 1e-6:
+            segs.append(None)
+            continue
+        segs.append({"rec": rec, "s": s, "e": e, "a": d / L, "L": L})
+
+    have_log = log_arr is not None and ras_to_ijk_mat is not None
+    if have_log:
+        K, J, I = log_arr.shape
+
+        def _log_at(p):
+            h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
+            ijk = (ras_to_ijk_mat @ h)[:3]
+            i = int(np.clip(round(ijk[0]), 0, I - 1))
+            j = int(np.clip(round(ijk[1]), 0, J - 1))
+            k = int(np.clip(round(ijk[2]), 0, K - 1))
+            return float(log_arr[k, j, i])
+    else:
+        def _log_at(p):
+            return -float("inf")  # disables the contact-snap rule
+
+    for i, seg in enumerate(segs):
+        if seg is None:
+            continue
+        rec = seg["rec"]
+        e = seg["e"]; a = seg["a"]; s = seg["s"]; L = seg["L"]
+        clearance = _min_perp_to_other_segments(e, segs, i)
+        if clearance >= clearance_mm:
+            continue
+        # Retreat along -a step-by-step until both clearance is
+        # restored AND the retreated tip sits on a real contact peak.
+        # Bound the retreat so the trajectory doesn't shrink below
+        # MIN_POST_ANCHOR_LEN_MM, which would make the bolt anchor
+        # inconsistent with the rest of the gating.
+        max_retreat = max(0.0, L - min_length_mm)
+        n_steps = int(max_retreat / step_mm)
+        retreated_mm = 0.0
+        new_end = e
+        for step in range(1, n_steps + 1):
+            dist = step * step_mm
+            candidate = e - dist * a
+            if _min_perp_to_other_segments(candidate, segs, i) < clearance_mm:
+                continue  # still inside another shank's tube
+            if have_log and _log_at(candidate) > -contact_abs_log:
+                continue  # off a contact — keep retreating to snap to blob edge
+            new_end = candidate
+            retreated_mm = dist
+            break
+        if retreated_mm > 0.0:
+            rec["end_ras"] = new_end
+            rec["length_mm"] = float(np.linalg.norm(new_end - s))
+            # Update segment cache so subsequent trajectories see the
+            # retreated tip (their clearance check against ``i`` uses
+            # the shrunken segment — a fairer starting point).
+            d_new = new_end - s
+            L_new = float(np.linalg.norm(d_new))
+            if L_new > 1e-6:
+                segs[i] = {"rec": rec, "s": s, "e": new_end,
+                           "a": d_new / L_new, "L": L_new}
+            if logger is not None:
+                try:
+                    logger(
+                        f"  retreated tip {i}: {retreated_mm:.1f} mm "
+                        f"(clearance {clearance:.2f} → "
+                        f"{_min_perp_to_other_segments(new_end, segs, i):.2f} mm, "
+                        f"snapped to contact peak)"
+                    )
+                except Exception:
+                    pass
+        elif logger is not None:
+            try:
+                logger(
+                    f"  tip {i} crosses another shank (clearance "
+                    f"{clearance:.2f} mm) but cannot retreat without "
+                    f"shrinking below {min_length_mm} mm; left alone"
+                )
+            except Exception:
+                pass
+
+
+def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
+                                    step_mm=AXIS_REFINE_STEP_MM,
+                                    max_extend_mm=AXIS_REFINE_MAX_MM,
+                                    min_abs_log=AXIS_REFINE_MIN_ABS,
+                                    miss_mm=AXIS_REFINE_MISS_MM):
+    """Walk strictly along the axis outward from ``end_ras`` sampling
+    LoG; return the RAS point of the deepest on-axis position that still
+    sees strong contact signal, or ``None`` if no extension is warranted.
+
+    The stopping rule is ``miss_mm`` consecutive millimetres of LoG
+    above ``−min_abs_log``. Contacts oscillate the LoG down to ≤ −500
+    every 3.5 mm; a clean miss-run of a few mm means the real electrode
+    has ended. Walking stays on the original axis — curving or
+    off-axis snapping accumulated drift and shifted midpoints onto
+    adjacent structures in testing.
+    """
+    start = np.asarray(rec.get("start_ras"), dtype=float)
+    end = np.asarray(rec.get("end_ras"), dtype=float)
+    d = end - start
+    L = float(np.linalg.norm(d))
+    if L < 1e-3:
+        return None
+    axis = d / L
+    K, J, I = log_arr.shape
+    n_steps = int(max_extend_mm / step_mm)
+    miss_steps_allowed = max(1, int(miss_mm / step_mm))
+    last_hit = end.copy()
+    consecutive_miss = 0
+    saw_any_hit = False
+    for s in range(1, n_steps + 1):
+        p = end + s * step_mm * axis
+        h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        i = int(np.clip(round(ijk[0]), 0, I - 1))
+        j = int(np.clip(round(ijk[1]), 0, J - 1))
+        k = int(np.clip(round(ijk[2]), 0, K - 1))
+        v = float(log_arr[k, j, i])
+        if v <= -min_abs_log:
+            last_hit = p
+            saw_any_hit = True
+            consecutive_miss = 0
+        else:
+            consecutive_miss += 1
+            if consecutive_miss >= miss_steps_allowed:
+                break
+    if not saw_any_hit:
+        return None
+    return last_hit
+
+
 # ---- Cross-stage dedup -----------------------------------------------
 
 def _dedup_trajectories(trajectories,
@@ -1008,7 +1240,8 @@ def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
 
 
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
-                             return_features=False, progress_logger=None):
+                             return_features=False, progress_logger=None,
+                             suggestion_vendors=None):
     """Run the full two-stage detector on a SITK image.
 
     Args:
@@ -1081,6 +1314,12 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         )
         if source == "stage1":
             rec["amp_sum"] = float(l.get("amp_sum", 0.0))
+            # Preserve the pre-anchor inlier span — the actual distance
+            # between the shallowest and deepest detected contacts. The
+            # post-anchor ``length_mm`` overwrites this with the
+            # bolt-tip → deep-tip length, so downstream classifiers
+            # need this field to see the true contact span.
+            rec["contact_span_mm"] = float(l.get("span_mm", 0.0))
         return rec
 
     # Anchor each candidate to a bolt BEFORE dedup. No bolt == not a
@@ -1134,6 +1373,107 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     anchored = _dedup_trajectories(anchored)
     _log(f"final dedup: {len(anchored)} trajectories")
 
+    # Axis-directed deep-end refinement. The 3D regional-minima blob
+    # extractor misses contacts when the per-contact LoG wells merge
+    # into one continuous CC (seen on T2 X06 / RAI, where the deep 3–4
+    # contacts sit inside a single long bright shaft and don't produce
+    # distinct 3D minima). Sample the LoG profile 1-dimensionally along
+    # the trajectory axis and push ``end_ras`` out to the last real
+    # contact peak. Stage-2 trajectories share the problem (they are
+    # explicitly the no-per-contact case) so we refine both.
+    for rec in anchored:
+        new_end = _refine_deep_end_via_axis_log(
+            rec, log1, ras_to_ijk_mat,
+        )
+        if new_end is not None:
+            rec["end_ras"] = new_end
+            # length_mm follows the post-anchor bolt_tip→deep_tip
+            # convention. Re-measure now that end_ras moved.
+            rec["length_mm"] = float(
+                np.linalg.norm(
+                    np.asarray(rec["end_ras"]) - np.asarray(rec["start_ras"])
+                )
+            )
+
+    # Crossing-tip retreat: after all trajectories have been extended,
+    # pull back any tip that lives inside another's contact-acceptance
+    # tube. Runs only at the final stage so every axis has settled
+    # before we decide which tip is the intruder. Passing the LoG
+    # volume lets the retreat additionally snap the pulled-back tip to
+    # the deep edge of the last real contact instead of floating in the
+    # gap between contacts.
+    _log("crossing-tip retreat…")
+    _retreat_crossing_tips(
+        anchored,
+        log_arr=log1,
+        ras_to_ijk_mat=ras_to_ijk_mat,
+        logger=_log,
+    )
+
+    # Intracranial-only length (skull entry → deep tip). The existing
+    # ``length_mm`` is bolt-tip → deep-tip and includes ~15–25 mm of bolt
+    # protrusion outside the skull; downstream displays/clinical reporting
+    # want the part that actually sits inside the brain.
+    for rec in anchored:
+        entry = np.asarray(
+            rec.get("skull_entry_ras", rec.get("start_ras")),
+            dtype=float,
+        )
+        end = np.asarray(rec["end_ras"], dtype=float)
+        rec["intracranial_length_mm"] = float(np.linalg.norm(end - entry))
+
+    # Suggested electrode model per stage-1 trajectory. Uses the
+    # pre-anchor contact span + inlier count against the library,
+    # filtered by the caller's ``suggestion_vendors`` selection (or
+    # all known vendors when not specified). Advisory only — downstream
+    # modules such as Contacts & Trajectory View do the actual contact
+    # fitting and the user can override this suggestion.
+    vendors_for_suggest = tuple(suggestion_vendors) if suggestion_vendors is not None \
+        else tuple(VENDOR_ID_PREFIXES.keys())
+    if not vendors_for_suggest:
+        _log("no vendors selected; skipping electrode suggestions")
+        _models = []
+    else:
+        try:
+            from rosa_core.electrode_models import load_electrode_library
+            _library = load_electrode_library()
+            _models = list(_library.get("models") or [])
+        except Exception as exc:
+            _log(f"electrode library load failed ({exc}); no suggestions emitted")
+            _models = []
+    if _models:
+        n_suggested = 0
+        for rec in anchored:
+            # Shortest electrode that covers the intracranial length is
+            # a more robust primary signal than walker-inlier count/span:
+            # it is anchored on skull_entry→deep_tip geometry, which the
+            # bolt anchor produces reliably even when the walker misses
+            # contacts (e.g. the T22-X02 case where the walker stopped
+            # at 7/15 contacts but the intracranial length still
+            # reflects the real 15CM shank). Same rule for stage-1 and
+            # stage-2 — only their input metric differs in practice.
+            intra = float(rec.get("intracranial_length_mm") or 0.0)
+            if intra < 5.0:
+                continue
+            best = suggest_shortest_covering_model(
+                intra, _models, vendors=vendors_for_suggest,
+            )
+            if best is None:
+                continue
+            rec["suggested_model_id"] = str(best["model_id"])
+            rec["suggested_model_method"] = "shortest_covering"
+            rec["suggested_model_length_mm"] = float(best["model_length_mm"])
+            rec["suggested_model_gap_mm"] = float(best["gap_mm"])
+            # Score proxy: how snug the fit is — smaller is tighter.
+            # (Mostly for logging/tie-break; Contacts & Trajectory View
+            # only reads ``best_model_id`` to populate its dropdown.)
+            rec["suggested_model_score"] = float(abs(best["gap_mm"]))
+            n_suggested += 1
+        _log(
+            f"suggested electrodes: {n_suggested} trajectories "
+            f"(vendors={'+'.join(vendors_for_suggest)})"
+        )
+
     # Convert to JSON-safe dicts (tuples of floats).
     trajectories: list[dict[str, Any]] = []
     for rec in anchored:
@@ -1155,3 +1495,111 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         }
         return trajectories, features
     return trajectories
+
+
+# ---- Post-detection electrode classification -------------------------
+
+VENDOR_ID_PREFIXES = {"Dixi": "DIXI-", "PMT": "PMT-"}
+
+
+def _vendor_prefixes(vendors):
+    return tuple(
+        VENDOR_ID_PREFIXES[v] for v in (vendors or ()) if v in VENDOR_ID_PREFIXES
+    )
+
+
+def suggest_shortest_covering_model(intracranial_length_mm, models,
+                                     vendors=("Dixi",),
+                                     dura_tolerance_mm=10.0):
+    """Pick the shortest electrode whose full exploration span plus a
+    dura tolerance covers the given intracranial length.
+
+    ``intracranial_length_mm`` is ``|skull_entry_ras − end_ras|`` — the
+    distance from the bone/dura band (where ``skull_entry_ras`` is
+    placed) to the detected deep tip. Because ``skull_entry_ras`` sits
+    inside the skull/dura band (``head_distance ≤ 10 mm``) rather than
+    exactly at the first contact, the observed length overstates the
+    electrode's active length by roughly 5–10 mm of soft-tissue margin.
+    ``dura_tolerance_mm`` absorbs that offset so a 15CM (70 mm active
+    length) still matches a 76 mm observed intracranial span.
+
+    Primary rule: smallest ``total_exploration_length_mm`` for which
+    ``total + dura_tolerance_mm ≥ intracranial_length_mm``.
+
+    Returns ``{"model_id", "model_length_mm", "gap_mm"}`` or ``None``
+    if no model is long enough (or no vendor selected).
+    """
+    prefixes = _vendor_prefixes(vendors)
+    if not prefixes:
+        return None
+    L = float(intracranial_length_mm)
+    tol = float(dura_tolerance_mm)
+    best = None
+    for model in models:
+        mid = str(model.get("id") or "")
+        if not mid.startswith(prefixes):
+            continue
+        total = model.get("total_exploration_length_mm")
+        if total is None:
+            offsets = model.get("contact_center_offsets_from_tip_mm") or []
+            if len(offsets) < 2:
+                continue
+            total = float(offsets[-1]) - float(offsets[0])
+        total = float(total)
+        if total + tol < L:
+            continue
+        if best is None or total < best["model_length_mm"]:
+            best = {
+                "model_id": mid,
+                "model_length_mm": total,
+                "gap_mm": total - L,
+            }
+    return best
+
+
+def classify_by_count_and_span(n_observed, span_observed_mm,
+                                models, vendors=("Dixi",),
+                                count_weight_mm=3.5):
+    """Pick the electrode model best explained by an observed
+    (contact-count, span) pair.
+
+    Score = ``|N_model − n_observed| * count_weight_mm +
+    |span_model − span_observed_mm|``. ``count_weight_mm=3.5`` means
+    1 missing contact is worth ~1 pitch of span error, so models
+    that match on count dominate.
+
+    ``span_model = offsets[-1] − offsets[0]``, the tip-contact-to-deep-
+    contact span (NOT the full electrode exploration length).
+
+    ``vendors`` filters models by vendor-id prefix ("Dixi" → "DIXI-",
+    "PMT" → "PMT-"). Models outside the prefix set are skipped.
+
+    Returns ``{"model_id", "score", "count_err", "span_err"}`` or
+    ``None`` if no candidate survives the vendor filter.
+    """
+    prefixes = _vendor_prefixes(vendors)
+    if not prefixes:
+        return None
+    best = None
+    for model in models:
+        mid = str(model.get("id") or "")
+        if not mid.startswith(prefixes):
+            continue
+        offsets = model.get("contact_center_offsets_from_tip_mm") or []
+        if len(offsets) < 2:
+            continue
+        n_model = int(model.get("contact_count") or len(offsets))
+        span_model = float(offsets[-1]) - float(offsets[0])
+        count_err = abs(int(n_observed) - n_model)
+        span_err = abs(float(span_observed_mm) - span_model)
+        score = count_err * float(count_weight_mm) + span_err
+        if best is None or score < best["score"]:
+            best = {
+                "model_id": mid,
+                "score": float(score),
+                "count_err": int(count_err),
+                "span_err": float(span_err),
+                "n_model": n_model,
+                "span_model_mm": span_model,
+            }
+    return best

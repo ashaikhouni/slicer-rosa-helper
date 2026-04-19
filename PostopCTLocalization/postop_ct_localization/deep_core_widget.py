@@ -301,6 +301,24 @@ class DeepCoreDebugWidgetMixin:
         button_row.addStretch(1)
         form.addRow(button_row)
 
+        # Manufacturer filter for the electrode-type suggestion. Detection
+        # itself is unchanged; only the ``suggested_model_id`` stamped on
+        # each trajectory line is affected. User can mix manufacturers or
+        # tick none to skip suggestions entirely. Vendors are derived
+        # from the bundled electrode library so new entries appear
+        # automatically.
+        self.contactPitchVendorChecks = {}
+        vendor_row = qt.QHBoxLayout()
+        vendors = self._discover_contact_pitch_vendors()
+        default_on = {"Dixi"}
+        for vendor in vendors:
+            box = qt.QCheckBox(vendor)
+            box.setChecked(vendor in default_on)
+            self.contactPitchVendorChecks[vendor] = box
+            vendor_row.addWidget(box)
+        vendor_row.addStretch(1)
+        form.addRow("Manufacturers:", vendor_row)
+
         # Inline progress UI so the user sees live feedback without
         # having to scroll to the status text panel.  The detector
         # emits ~12 checkpoint messages; setting max to 12 gives a
@@ -315,6 +333,48 @@ class DeepCoreDebugWidgetMixin:
         self.contactPitchStatusLabel = qt.QLabel("idle")
         self.contactPitchStatusLabel.wordWrap = True
         form.addRow("Status:", self.contactPitchStatusLabel)
+
+    # Map from vendor label shown in the UI to the model-id prefix it
+    # corresponds to in ``electrode_models.json``. Keep this mapping here
+    # rather than extracting a raw prefix list so the UI stays clean even
+    # if library entries grow id suffixes like "DIXI-"/"PMT-" etc.
+    _CONTACT_PITCH_VENDOR_LABEL_BY_PREFIX = {
+        "DIXI-": "Dixi",
+        "PMT-": "PMT",
+        "AD-": "AdTech",
+        "ADTECH-": "AdTech",
+    }
+
+    def _discover_contact_pitch_vendors(self):
+        """Return the sorted list of manufacturer labels present in the
+        bundled electrode library. Unknown prefixes fall back to the
+        token before the first ``-`` capitalized."""
+        try:
+            from rosa_core.electrode_models import load_electrode_library
+            library = load_electrode_library()
+        except Exception:
+            return ["Dixi", "PMT"]
+        found = set()
+        for model in library.get("models") or []:
+            mid = str(model.get("id") or "")
+            label = None
+            for prefix, candidate in self._CONTACT_PITCH_VENDOR_LABEL_BY_PREFIX.items():
+                if mid.startswith(prefix):
+                    label = candidate
+                    break
+            if label is None and "-" in mid:
+                label = mid.split("-", 1)[0].title()
+            if label:
+                found.add(label)
+        ordered = sorted(found, key=lambda s: s.lower())
+        return ordered or ["Dixi", "PMT"]
+
+    def _selected_contact_pitch_vendors(self):
+        vendors = []
+        for label, box in (self.contactPitchVendorChecks or {}).items():
+            if box.isChecked():
+                vendors.append(label)
+        return tuple(vendors)
 
     def onRunContactPitchV1Clicked(self):
         volume_node = self.ctSelector.currentNode()
@@ -333,6 +393,12 @@ class DeepCoreDebugWidgetMixin:
             self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
             pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
             ctx = self.logic.build_deep_core_context(volume_node, config=None)
+            # Forward the manufacturer-filter selection so the fit module
+            # only emits suggested electrode ids from the chosen vendors.
+            # Empty selection → no suggestions (advisory field stays blank).
+            ctx["contact_pitch_v1_vendors"] = list(
+                self._selected_contact_pitch_vendors()
+            )
 
             # Live progress: forward each pipeline checkpoint to the
             # inline progress bar + status label + pump Qt events so
@@ -365,27 +431,113 @@ class DeepCoreDebugWidgetMixin:
 
             self.logic.trajectory_scene.remove_preview_lines()
             self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)
+            # Render the line from skull_entry → deep_tip (the
+            # intracranial portion only) so downstream modules such as
+            # Contacts & Trajectory View compute trajectory length as
+            # intracranial rather than bolt-tip-to-deep-tip. Keep the
+            # original bolt-tip endpoint as an extra field for any
+            # consumer that still wants it.
+            render_trajectories = []
+            for t in trajectories:
+                r = dict(t)
+                se = r.get("skull_entry_ras")
+                if se is not None and len(list(se)) >= 3:
+                    r["bolt_tip_ras"] = list(r.get("start_ras") or [])
+                    r["start_ras"] = [float(v) for v in list(se)[:3]]
+                render_trajectories.append(r)
             nodes = self.logic.show_deep_core_proposals(
-                volume_node=volume_node, proposals=trajectories
+                volume_node=volume_node, proposals=render_trajectories
             ) or []
             self._lastDeepCoreProposalNodes = nodes
 
+            # Stamp the per-trajectory electrode suggestion onto each
+            # line node (when present) so downstream modules such as
+            # Contacts & Trajectory View can pick up a default
+            # electrode model to fit against. Order of ``nodes`` mirrors
+            # the ``trajectories`` list produced by the pipeline.
+            suggestion_log = []
+            n_suggested = 0
+            for idx, node in enumerate(nodes):
+                if idx >= len(trajectories):
+                    break
+                traj = trajectories[idx]
+                suggested = str(traj.get("suggested_model_id") or "")
+                node_name = node.GetName()
+                n_obs = int(traj.get("n_inliers") or 0)
+                span_mm = float(traj.get("contact_span_mm") or 0.0)
+                intra_mm = float(traj.get("intracranial_length_mm") or 0.0)
+                source = str(traj.get("source") or "unknown")
+                if suggested:
+                    try:
+                        # Rosa.BestModelId is the attribute read by
+                        # trajectory_scene.trajectory_from_line_node and
+                        # consumed by the Contacts & Trajectory View
+                        # module's "Electrode Model" dropdown as
+                        # ``traj["best_model_id"]``. Set it so our
+                        # suggestion populates that dropdown.
+                        node.SetAttribute("Rosa.BestModelId", suggested)
+                        score = float(traj.get("suggested_model_score") or 0.0)
+                        node.SetAttribute("Rosa.BestModelScore", f"{score:.3f}")
+                        method = str(traj.get("suggested_model_method") or "")
+                        if method:
+                            node.SetAttribute("Rosa.SuggestedElectrodeMethod", method)
+                    except Exception:
+                        pass
+                    method_str = str(traj.get("suggested_model_method") or "")
+                    method_tag = f" [{method_str}]" if method_str else ""
+                    suggestion_log.append(
+                        f"  {node_name}: {suggested}{method_tag} "
+                        f"(src={source}, n={n_obs}, span={span_mm:.1f} mm, "
+                        f"intracranial={intra_mm:.1f} mm)"
+                    )
+                    n_suggested += 1
+                else:
+                    # Classification now runs for every trajectory
+                    # (stage-1 and stage-2) via the intracranial-length
+                    # shortest-covering rule. Missing suggestions mean
+                    # either the vendor filter is empty or no model in
+                    # the chosen vendors is long enough to cover the
+                    # observed intracranial length.
+                    if not self._selected_contact_pitch_vendors():
+                        reason = "no manufacturer ticked"
+                    elif intra_mm < 5.0:
+                        reason = "intracranial length too short"
+                    else:
+                        reason = "no model in selected vendors covers intracranial length"
+                    suggestion_log.append(
+                        f"  {node_name}: \u2014 ({reason}; "
+                        f"src={source}, intracranial={intra_mm:.1f} mm)"
+                    )
+            if suggestion_log:
+                self.log(
+                    f"[contact-pitch-v1] suggested electrodes: "
+                    f"{n_suggested}/{len(nodes)}"
+                )
+                for line in suggestion_log:
+                    self.log(line)
+
             if nodes:
                 rows = []
-                for node in nodes:
+                for ni, node in enumerate(nodes):
                     traj = self.logic.trajectory_scene.trajectory_from_line_node("", node)
                     if traj is None:
                         continue
-                    rows.append(
-                        {
-                            "name": str(traj.get("name") or ""),
-                            "node_name": str(traj.get("node_name") or node.GetName() or ""),
-                            "node_id": str(traj.get("node_id") or node.GetID() or ""),
-                            "group": str(traj.get("group") or "autofit_preview"),
-                            "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
-                            "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
-                        }
-                    )
+                    row = {
+                        "name": str(traj.get("name") or ""),
+                        "node_name": str(traj.get("node_name") or node.GetName() or ""),
+                        "node_id": str(traj.get("node_id") or node.GetID() or ""),
+                        "group": str(traj.get("group") or "autofit_preview"),
+                        "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
+                        "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
+                    }
+                    if ni < len(trajectories):
+                        det = trajectories[ni]
+                        suggested = str(det.get("suggested_model_id") or "")
+                        if suggested:
+                            row["suggested_model_id"] = suggested
+                        if det.get("intracranial_length_mm") is not None:
+                            row["intracranial_length_mm"] = float(det["intracranial_length_mm"])
+                    rows.append(row)
                 if rows:
                     self.logic.publish_working_rows(
                         rows,
