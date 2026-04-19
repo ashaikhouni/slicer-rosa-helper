@@ -122,6 +122,115 @@ BOLT_BASE_MAX_DIST_MM = 10.0        # skull_entry_ras (= bolt base, the
                                     # tip instead.
 
 
+# ---- Pitch strategy + auto-detection ---------------------------------
+
+# Candidate electrode-pitch set per UI strategy. The walker runs once
+# per pitch in this set; hypotheses across pitches are unioned before
+# dedup/arbitration so multi-family cases (e.g. Dixi + PMT on the
+# same scan) get both families detected without the user picking a
+# single pitch.
+#
+# For the "auto" strategy, pitches are estimated at runtime from the
+# intracranial blob cloud's mutual-NN distance distribution (see
+# ``detect_pitch_from_intracranial_blobs``). On a clean Dixi case the
+# auto detector returns ≈ 3.3 mm; the surrounding ±0.5 mm tolerance in
+# the walker absorbs the sub-bin localization bias.
+PITCH_STRATEGY_PITCHES_MM = {
+    "dixi":  (3.5,),
+    "pmt":   (3.5, 3.97, 4.43),
+    "mixed": (3.5, 3.97, 4.43),
+}
+PITCH_STRATEGY_VENDORS = {
+    "dixi":  ("Dixi",),
+    "pmt":   ("PMT",),
+    "mixed": ("Dixi", "PMT"),
+    "auto":  ("Dixi", "PMT", "AdTech"),
+}
+
+PITCH_AUTO_MIN_MM = 2.5
+PITCH_AUTO_MAX_MM = 6.0
+
+
+def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
+                                           min_mm=PITCH_AUTO_MIN_MM,
+                                           max_mm=PITCH_AUTO_MAX_MM):
+    """Estimate electrode pitch from the mutual-nearest-neighbour
+    distances of the intracranial blob cloud.
+
+    Mutual-NN pairs (A's 1-NN is B AND B's 1-NN is A) are dominated by
+    same-shank adjacent contacts, so their distribution peaks at the
+    true electrode pitch. Non-mutual neighbours (cross-shank, bolt→
+    contact, noise) don't show up in this distribution. Empirical
+    centroid tends to sit ~0.2 mm low of the nominal pitch (partial-
+    volume localization bias) — within the walker's ±0.5 mm tolerance.
+
+    Returns a list with the detected pitch, or an empty list when the
+    blob cloud is too sparse or the histogram is flat.
+    """
+    if pts_c is None or len(pts_c) < 10:
+        return []
+    pts_arr = np.asarray(pts_c, dtype=float)
+    hd = np.array([
+        _sample_dist_at_ras(dist_arr, ras_to_ijk_mat, p) for p in pts_arr
+    ])
+    pts_ic = pts_arr[hd >= INTRACRANIAL_MIN_DISTANCE_MM]
+    if pts_ic.shape[0] < 10:
+        return []
+    D = np.sqrt(np.sum((pts_ic[:, None, :] - pts_ic[None, :, :]) ** 2, axis=2))
+    np.fill_diagonal(D, np.inf)
+    nn_idx = np.argmin(D, axis=1)
+    mutual_dists = []
+    seen = set()
+    for i in range(pts_ic.shape[0]):
+        j = int(nn_idx[i])
+        if int(nn_idx[j]) == i:
+            key = (min(i, j), max(i, j))
+            if key in seen:
+                continue
+            seen.add(key)
+            mutual_dists.append(float(D[i, j]))
+    if len(mutual_dists) < 5:
+        return []
+    m = np.asarray(mutual_dists)
+    m = m[(m >= min_mm) & (m <= max_mm)]
+    if m.size < 5:
+        return []
+    bins = np.arange(min_mm, max_mm + 0.25, 0.25)
+    hist, edges = np.histogram(m, bins=bins)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    if hist.max() <= 0:
+        return []
+    peak_idx = int(np.argmax(hist))
+    peak_mm = float(centers[peak_idx])
+    window = np.abs(centers - peak_mm) <= 0.6
+    denom = float(np.sum(hist[window]))
+    if denom <= 0:
+        return []
+    centroid = float(np.sum(centers[window] * hist[window]) / denom)
+    return [round(centroid, 2)]
+
+
+def resolve_pitches_for_strategy(strategy, pts_c=None,
+                                    dist_arr=None, ras_to_ijk_mat=None):
+    """Map a UI ``strategy`` string to a concrete tuple of walker
+    pitches. Falls back to the Dixi default when auto-detection fails
+    or the strategy is unrecognised.
+    """
+    key = str(strategy or "dixi").lower()
+    if key in PITCH_STRATEGY_PITCHES_MM:
+        return PITCH_STRATEGY_PITCHES_MM[key]
+    if key == "auto":
+        if pts_c is None or dist_arr is None or ras_to_ijk_mat is None:
+            return (PITCH_MM,)
+        detected = detect_pitch_from_intracranial_blobs(
+            pts_c, dist_arr, ras_to_ijk_mat,
+        )
+        if detected:
+            return tuple(detected)
+        return (PITCH_MM,)
+    return (PITCH_MM,)
+
+
 # ---- Preprocessing ----------------------------------------------------
 
 def build_masks(img):
@@ -234,19 +343,19 @@ def _walk_with_pitch(axis, anchor, pts, amps, pitch, perp_tol, ax_tol, max_k):
     return dict(inliers=inliers, pitch=pitch, n_inliers=len(inliers))
 
 
-def _walk_line(seed_idx, neighbor_idx, pts, amps):
+def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     p0 = pts[seed_idx]
     p1 = pts[neighbor_idx]
     seed_d = float(np.linalg.norm(p1 - p0))
-    k_seed = max(1, int(round(seed_d / PITCH_MM)))
+    k_seed = max(1, int(round(seed_d / pitch_mm)))
     pitch_seed = seed_d / k_seed
-    if not (PITCH_MM - PITCH_TOL_MM <= pitch_seed <= PITCH_MM + PITCH_TOL_MM):
+    if not (pitch_mm - PITCH_TOL_MM <= pitch_seed <= pitch_mm + PITCH_TOL_MM):
         return None
     axis = (p1 - p0) / seed_d
     best = None
     for dp in (-0.2, -0.1, 0.0, 0.1, 0.2):
         pitch_try = pitch_seed + dp
-        if not (PITCH_MM - PITCH_TOL_MM <= pitch_try <= PITCH_MM + PITCH_TOL_MM):
+        if not (pitch_mm - PITCH_TOL_MM <= pitch_try <= pitch_mm + PITCH_TOL_MM):
             continue
         r = _walk_with_pitch(axis, p0, pts, amps, pitch_try,
                              PERP_TOL_MM, AX_TOL_MM, MAX_K_STEPS)
@@ -397,12 +506,16 @@ def _arbitrate_blob_ownership(stage1_lines, pts_c, amps_c):
     return kept
 
 
-def _second_pass_orphan_walker(existing_lines, pts_c, amps_c):
+def _second_pass_orphan_walker(existing_lines, pts_c, amps_c,
+                                 pitches_mm=(PITCH_MM,)):
     """Re-run the pitch walker on blobs not claimed by any surviving
     line. Recovers electrodes whose only first-pass hypothesis was a
     bridging line that got dropped by arbitration (e.g. T22 L_1).
     Returns NEW lines (may be empty); they still need to pass the
     standard amp_sum / dist / bolt-anchor gates downstream.
+
+    ``pitches_mm`` is the set of candidate electrode pitches to walk.
+    Defaults to the legacy single Dixi 3.5 mm pitch.
     """
     claimed: set[int] = set()
     for l in existing_lines:
@@ -414,23 +527,24 @@ def _second_pass_orphan_walker(existing_lines, pts_c, amps_c):
 
     orphan_pts = pts_c[orphan_idx]
     orphan_amps = amps_c[orphan_idx]
-    N = orphan_pts.shape[0]
     dist = np.sqrt(np.sum((orphan_pts[:, None, :] - orphan_pts[None, :, :]) ** 2, axis=2))
-    pair_mask = np.zeros_like(dist, dtype=bool)
-    for mult in (1, 2, 3):
-        lo = mult * PITCH_MM - PITCH_TOL_MM
-        hi = mult * PITCH_MM + PITCH_TOL_MM
-        pair_mask |= (dist >= lo) & (dist <= hi)
-    iu, ju = np.where(np.triu(pair_mask, k=1))
 
     new_hyps: list[dict[str, Any]] = []
-    for pi, pj in zip(iu, ju):
-        h = _walk_line(int(pi), int(pj), orphan_pts, orphan_amps)
-        if h is None:
-            continue
-        # Remap orphan-local indices back to original pts_c indices.
-        h["inlier_idx"] = [int(orphan_idx[i]) for i in h["inlier_idx"]]
-        new_hyps.append(h)
+    for pitch in pitches_mm:
+        pair_mask = np.zeros_like(dist, dtype=bool)
+        for mult in (1, 2, 3):
+            lo = mult * pitch - PITCH_TOL_MM
+            hi = mult * pitch + PITCH_TOL_MM
+            pair_mask |= (dist >= lo) & (dist <= hi)
+        iu, ju = np.where(np.triu(pair_mask, k=1))
+        for pi, pj in zip(iu, ju):
+            h = _walk_line(int(pi), int(pj), orphan_pts, orphan_amps,
+                            pitch_mm=pitch)
+            if h is None:
+                continue
+            h["inlier_idx"] = [int(orphan_idx[i]) for i in h["inlier_idx"]]
+            h["seed_pitch_mm"] = float(pitch)
+            new_hyps.append(h)
     if not new_hyps:
         return []
     new_hyps.sort(key=lambda h: -h["n_blobs"])
@@ -573,11 +687,20 @@ def _dedup_stage1_lines(lines):
     return [lines[i] for i in range(len(lines)) if keep[i]]
 
 
-def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat):
+def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
+                pitches_mm=None):
     """Blob-pitch detector on the LoG σ=1 field.
     Returns (lines, pts_c) where pts_c are the contact-sized blob RAS
     positions used for stage-1 exclusion construction downstream.
+
+    ``pitches_mm`` is a sequence of candidate electrode pitches. One
+    walker pass runs per pitch; hypotheses across pitches are unioned
+    before dedup / arbitration. Default is the legacy single
+    ``[PITCH_MM]`` (Dixi 3.5 mm).
     """
+    if pitches_mm is None or len(tuple(pitches_mm)) == 0:
+        pitches_mm = (PITCH_MM,)
+    pitches_mm = tuple(float(p) for p in pitches_mm)
     blobs = extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD)
     if not blobs:
         return [], np.empty((0, 3), dtype=float)
@@ -591,18 +714,23 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat):
         return [], pts_c
 
     dist = np.sqrt(np.sum((pts_c[:, None, :] - pts_c[None, :, :]) ** 2, axis=2))
-    pair_mask = np.zeros_like(dist, dtype=bool)
-    for mult in (1, 2, 3):
-        lo = mult * PITCH_MM - PITCH_TOL_MM
-        hi = mult * PITCH_MM + PITCH_TOL_MM
-        pair_mask |= (dist >= lo) & (dist <= hi)
-    iu, ju = np.where(np.triu(pair_mask, k=1))
 
+    # Run one seed-pair + walker pass per candidate pitch, then union
+    # hypotheses. Near-duplicates (same shank found at two pitches)
+    # are killed by the subsequent ``_dedup_stage1_lines`` call.
     hyps = []
-    for pi, pj in zip(iu, ju):
-        h = _walk_line(int(pi), int(pj), pts_c, amps_c)
-        if h is not None:
-            hyps.append(h)
+    for pitch in pitches_mm:
+        pair_mask = np.zeros_like(dist, dtype=bool)
+        for mult in (1, 2, 3):
+            lo = mult * pitch - PITCH_TOL_MM
+            hi = mult * pitch + PITCH_TOL_MM
+            pair_mask |= (dist >= lo) & (dist <= hi)
+        iu, ju = np.where(np.triu(pair_mask, k=1))
+        for pi, pj in zip(iu, ju):
+            h = _walk_line(int(pi), int(pj), pts_c, amps_c, pitch_mm=pitch)
+            if h is not None:
+                h["seed_pitch_mm"] = float(pitch)
+                hyps.append(h)
     hyps.sort(key=lambda h: -h["n_blobs"])
     # Dedup near-duplicate walker hypotheses FIRST (same physical
     # electrode from different seed pairs). Amp_sum gate next, so
@@ -634,7 +762,9 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat):
     # surviving line after arbitration + deep-end extension). Recovers
     # electrodes whose first-pass hypothesis was a bridging line that
     # arbitration killed.
-    second_pass_lines = _second_pass_orphan_walker(lines, pts_c, amps_c)
+    second_pass_lines = _second_pass_orphan_walker(
+        lines, pts_c, amps_c, pitches_mm=pitches_mm,
+    )
     if second_pass_lines:
         # Extend deep ends on second-pass lines too.
         for nl in second_pass_lines:
@@ -1241,7 +1371,9 @@ def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
 
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                              return_features=False, progress_logger=None,
-                             suggestion_vendors=None):
+                             suggestion_vendors=None,
+                             pitch_strategy=None,
+                             pitches_mm=None):
     """Run the full two-stage detector on a SITK image.
 
     Args:
@@ -1279,9 +1411,50 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     frangi_s1 = frangi_single(img, sigma=FRANGI_STAGE1_SIGMA)
     kji_to_ras = _kji_to_ras_fn_from_matrix(ijk_to_ras_mat)
 
-    _log("stage 1: blob-pitch walker (this is the slow step)…")
+    # Resolve walker pitches from the caller's strategy. Explicit
+    # ``pitches_mm`` override takes precedence (used by unit tests and
+    # power users). Otherwise fall back to strategy lookup — "auto"
+    # auto-detects pitch from the intracranial blob cloud here so
+    # stage-1 sees the right pitches from its first pass.
+    if pitches_mm is not None and len(tuple(pitches_mm)) > 0:
+        resolved_pitches = tuple(float(p) for p in pitches_mm)
+    elif pitch_strategy is not None:
+        strat_key = str(pitch_strategy).lower()
+        if strat_key == "auto":
+            _log("auto-detect pitch: extracting blobs…")
+            _blobs_preview = extract_blobs(log1, threshold=LOG_BLOB_THRESHOLD)
+            _pts_preview = (
+                np.array([kji_to_ras(b["kji"]) for b in _blobs_preview])
+                if _blobs_preview
+                else np.empty((0, 3), dtype=float)
+            )
+            if _pts_preview.shape[0] > 0:
+                _n_vox_preview = np.array(
+                    [b["n_vox"] for b in _blobs_preview], dtype=int,
+                )
+                _pts_c_preview = _pts_preview[_n_vox_preview <= LOG_BLOB_MAX_VOXELS]
+            else:
+                _pts_c_preview = _pts_preview
+            resolved_pitches = resolve_pitches_for_strategy(
+                "auto",
+                pts_c=_pts_c_preview,
+                dist_arr=dist_arr,
+                ras_to_ijk_mat=ras_to_ijk_mat,
+            )
+            _log(
+                f"auto-detect pitch: using {[f'{p:.2f}' for p in resolved_pitches]} mm"
+            )
+        else:
+            resolved_pitches = resolve_pitches_for_strategy(strat_key)
+    else:
+        resolved_pitches = (PITCH_MM,)
+
+    _log(
+        f"stage 1: blob-pitch walker — pitches={[f'{p:.2f}' for p in resolved_pitches]} mm"
+    )
     stage1_lines, _pts_blobs = run_stage1(
         log1, kji_to_ras, dist_arr, ras_to_ijk_mat,
+        pitches_mm=resolved_pitches,
     )
     _log(f"stage 1: {len(stage1_lines)} candidate lines after walk + arbitrate + extend")
     excl = compute_exclusion_mask(
@@ -1428,8 +1601,15 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     # all known vendors when not specified). Advisory only — downstream
     # modules such as Contacts & Trajectory View do the actual contact
     # fitting and the user can override this suggestion.
-    vendors_for_suggest = tuple(suggestion_vendors) if suggestion_vendors is not None \
-        else tuple(VENDOR_ID_PREFIXES.keys())
+    if suggestion_vendors is not None:
+        vendors_for_suggest = tuple(suggestion_vendors)
+    elif pitch_strategy is not None:
+        strat_key = str(pitch_strategy).lower()
+        vendors_for_suggest = PITCH_STRATEGY_VENDORS.get(
+            strat_key, tuple(VENDOR_ID_PREFIXES.keys()),
+        )
+    else:
+        vendors_for_suggest = tuple(VENDOR_ID_PREFIXES.keys())
     if not vendors_for_suggest:
         _log("no vendors selected; skipping electrode suggestions")
         _models = []

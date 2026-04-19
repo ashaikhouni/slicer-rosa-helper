@@ -97,14 +97,19 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
         # can report stage progress; otherwise the call blocks for 10–20 s
         # with no feedback and the UI looks frozen.
         progress_logger = ctx.get("logger")
-        # Manufacturer filter for the electrode-type suggestion. Absent
-        # (CLI / tests) → the detector defaults to all vendors, so the
-        # regression baseline is unaffected.
+        # Pitch strategy + manufacturer filter from the Slicer widget.
+        # ``pitch_strategy`` drives both the set of walker pitches and
+        # the suggestion vendor filter; ``vendors`` can override the
+        # latter. Both are optional — CLI / tests don't set them, so
+        # the detector defaults to the legacy Dixi-only walker and the
+        # full-library suggestion, preserving the regression baseline.
         vendors = ctx.get("contact_pitch_v1_vendors")
+        pitch_strategy = ctx.get("contact_pitch_v1_pitch_strategy")
         trajectories, features = cpfit.run_two_stage_detection(
             img, ijk_to_ras, ras_to_ijk, return_features=True,
             progress_logger=progress_logger,
             suggestion_vendors=vendors,
+            pitch_strategy=pitch_strategy,
         )
         self._last_feature_arrays = features
         stage1 = sum(1 for t in trajectories if t.get("source") == "stage1")

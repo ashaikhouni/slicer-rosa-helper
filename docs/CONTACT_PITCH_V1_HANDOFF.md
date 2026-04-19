@@ -2,7 +2,7 @@
 
 Last updated: 2026-04-19. Electrode-model suggestion (manufacturer-
 filtered) + intracranial length + deep-end refinement + crossing-tip
-retreat added this session.
+retreat + multi-pitch walker with auto-detect added this session.
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
 postop CT. Replaces the bolt-first `deep_core_v2` for general use; v2
@@ -34,13 +34,30 @@ inspection (`<CT>_ContactPitch_LoG_sigma1`, `..._Frangi_sigma1`,
 - **Frangi σ=1** (`ObjectnessMeasure`, objectDimension=1). Used only
   by stage 2 (shaft fallback).
 
-### 2. Stage 1 — blob-pitch (Dixi 3.5 mm prior)
+### 2. Stage 1 — blob-pitch (multi-pitch, default 3.5 mm Dixi)
+
+The walker runs once per candidate pitch in ``pitches_mm`` and unions
+the resulting hypotheses before dedup/arbitration. The pitch set
+comes from the UI's **Pitch strategy** combo:
+
+| Strategy | Walker pitches (mm) | Suggestion vendors |
+| --- | --- | --- |
+| Dixi (default) | 3.5 | Dixi |
+| PMT | 3.5 / 3.97 / 4.43 | PMT |
+| Mixed Dixi + PMT | 3.5 / 3.97 / 4.43 | Dixi + PMT |
+| Auto-detect pitch | mutual-NN peak from intracranial blob cloud | Dixi + PMT + AdTech |
+
+``detect_pitch_from_intracranial_blobs`` computes mutual-nearest-
+neighbour distances across the intracranial blob cloud and returns
+the centroid of the dominant mode in `[2.5, 6.0] mm`. Empirically
+yields `~3.3 mm` on clean Dixi CTs (true 3.5, small partial-volume
+low-bias absorbed by the walker's `±0.5 mm` tolerance).
 
 1. **Regional minima** on LoG σ=1 (SITK `GrayscaleErode` radius 2),
    threshold `LoG ≤ −300`. One marker per contact, even when the skull
    metal is connected through a mega-CC.
-2. Enumerate blob pairs at distances `k · 3.5 mm ± 0.5 mm` for
-   `k ∈ {1, 2, 3}`.
+2. For each pitch in the strategy, enumerate blob pairs at distances
+   `k · pitch ± 0.5 mm` for `k ∈ {1, 2, 3}`.
 3. For each pair, walk both directions with `pitch_seed ± {0, ±0.1,
    ±0.2}`. Inliers: `perp ≤ 1.5 mm`, `|proj − k·pitch| ≤ 0.7 mm`.
    Accept walks with `≥ 6 blobs` and `span ∈ [15, 90] mm`.
@@ -171,10 +188,10 @@ it via `Rosa.BestModelId` on the line node to pre-populate its
   logic lives in
   `PostopCTLocalization/postop_ct_localization/contact_pitch_v1_fit.py`.
 - Widget tab: **Contact Pitch v1** (next to Deep Core v2). "Run
-  Contact Pitch v1" button + a **Manufacturers** row of checkboxes
-  (Dixi / PMT / AdTech, derived from the bundled electrode library;
-  default Dixi). The checkboxes filter the electrode-model
-  suggestion — no effect on detection itself.
+  Contact Pitch v1" button + a **Pitch strategy** combo that controls
+  both the walker's candidate pitches and the suggestion vendor
+  filter in one setting (see "Stage 1 — blob-pitch" table). Default
+  is Dixi.
 - Line nodes are rendered **skull_entry → deep tip** (not bolt tip
   → deep tip). The bolt-tip RAS is still kept as ``bolt_tip_ras`` on
   the trajectory dict for any consumer that needs it. This means
@@ -219,22 +236,24 @@ it via `Rosa.BestModelId` on the line node to pre-populate its
 
 ## Known issues / next steps
 
-1. **Post-retreat re-extension.** If trajectory A was never retreated
+1. **Auto-detect pitch has a ~0.2 mm low bias** (mutual-NN centroid
+   reports 3.31 mm on a true 3.5 mm Dixi case). Within the walker's
+   ±0.5 mm tolerance so detection mostly works, but on T2 one shank
+   was lost at the band edge (11/12 instead of 12/12). Mitigations:
+   widen `PITCH_TOL_MM` in auto mode, or snap detected pitch to the
+   nearest known library pitch (3.5 / 3.97 / 4.43) if the centroid
+   falls within ~0.3 mm. Default remains Dixi so the regression
+   baseline is not impacted.
+2. **Post-retreat re-extension.** If trajectory A was never retreated
    but trajectory B (A's neighbour) was, A's deep end might now have
    free space where it previously was blocked. Not currently
    re-extended. Relevant when two crossing shanks have different
    real lengths and only one overshoots.
-2. **Skip stage 2 when stage 1 covers everything.** Stage 2 only
+3. **Skip stage 2 when stage 1 covers everything.** Stage 2 only
    exists for shanks like T2 RSAN that lack visible contacts. On
    subjects whose shanks all show contacts (T1, T3, most), Frangi
    adds no recall and only generates FPs that we then filter out.
    A "stage-2 needed?" check would save ~1–2 s and a class of FPs.
-3. **PMT-16B / PMT-16C pitch (3.97 / 4.43 mm).** Walker still uses
-   the single Dixi 3.5 mm pitch. The manufacturer checkboxes only
-   affect the suggestion, not detection. If PMT-16B/C electrodes
-   appear in practice, the walker will likely miss or misplace
-   their contacts. Not an issue for current Dixi-only clinical
-   inventory.
 4. **`shallow_err` always reports the bolt-tip distance from the
    GT entry**. The GT entry is the bone→brain interface; my start
    is the bolt outer end. Tests use `skull_entry_ras` for the

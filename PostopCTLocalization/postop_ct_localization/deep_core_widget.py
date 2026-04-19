@@ -301,23 +301,29 @@ class DeepCoreDebugWidgetMixin:
         button_row.addStretch(1)
         form.addRow(button_row)
 
-        # Manufacturer filter for the electrode-type suggestion. Detection
-        # itself is unchanged; only the ``suggested_model_id`` stamped on
-        # each trajectory line is affected. User can mix manufacturers or
-        # tick none to skip suggestions entirely. Vendors are derived
-        # from the bundled electrode library so new entries appear
-        # automatically.
-        self.contactPitchVendorChecks = {}
-        vendor_row = qt.QHBoxLayout()
-        vendors = self._discover_contact_pitch_vendors()
-        default_on = {"Dixi"}
-        for vendor in vendors:
-            box = qt.QCheckBox(vendor)
-            box.setChecked(vendor in default_on)
-            self.contactPitchVendorChecks[vendor] = box
-            vendor_row.addWidget(box)
-        vendor_row.addStretch(1)
-        form.addRow("Manufacturers:", vendor_row)
+        # Pitch strategy controls both the walker's candidate pitches
+        # and the manufacturer filter for the electrode-type suggestion.
+        # "Dixi" runs the legacy single 3.5 mm walker. "PMT" adds
+        # PMT's 3.97 mm (16B) and 4.43 mm (16C) variants. "Mixed"
+        # unions Dixi + PMT. "Auto-detect" estimates pitch from the
+        # intracranial blob cloud's mutual-NN histogram before stage 1
+        # runs — useful when the manufacturer is unknown or mixed.
+        self.contactPitchStrategyCombo = qt.QComboBox()
+        for label, key in (
+            ("Dixi (3.5 mm)", "dixi"),
+            ("PMT (3.5 / 3.97 / 4.43 mm)", "pmt"),
+            ("Mixed Dixi + PMT", "mixed"),
+            ("Auto-detect pitch", "auto"),
+        ):
+            self.contactPitchStrategyCombo.addItem(label, key)
+        self.contactPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi
+        self.contactPitchStrategyCombo.setToolTip(
+            "Walker pitch set + suggestion vendor filter. Detection "
+            "results are identical across strategies that share the "
+            "same pitch set; only the suggested electrode model id "
+            "differs."
+        )
+        form.addRow("Pitch strategy:", self.contactPitchStrategyCombo)
 
         # Inline progress UI so the user sees live feedback without
         # having to scroll to the status text panel.  The detector
@@ -334,47 +340,25 @@ class DeepCoreDebugWidgetMixin:
         self.contactPitchStatusLabel.wordWrap = True
         form.addRow("Status:", self.contactPitchStatusLabel)
 
-    # Map from vendor label shown in the UI to the model-id prefix it
-    # corresponds to in ``electrode_models.json``. Keep this mapping here
-    # rather than extracting a raw prefix list so the UI stays clean even
-    # if library entries grow id suffixes like "DIXI-"/"PMT-" etc.
-    _CONTACT_PITCH_VENDOR_LABEL_BY_PREFIX = {
-        "DIXI-": "Dixi",
-        "PMT-": "PMT",
-        "AD-": "AdTech",
-        "ADTECH-": "AdTech",
+    # Vendor sets implied by each strategy. Mirrors
+    # ``PITCH_STRATEGY_VENDORS`` in ``contact_pitch_v1_fit`` — duplicated
+    # here so the widget can log sensible messages without importing
+    # the fit module.
+    _CONTACT_PITCH_STRATEGY_VENDORS = {
+        "dixi":  ("Dixi",),
+        "pmt":   ("PMT",),
+        "mixed": ("Dixi", "PMT"),
+        "auto":  ("Dixi", "PMT", "AdTech"),
     }
 
-    def _discover_contact_pitch_vendors(self):
-        """Return the sorted list of manufacturer labels present in the
-        bundled electrode library. Unknown prefixes fall back to the
-        token before the first ``-`` capitalized."""
-        try:
-            from rosa_core.electrode_models import load_electrode_library
-            library = load_electrode_library()
-        except Exception:
-            return ["Dixi", "PMT"]
-        found = set()
-        for model in library.get("models") or []:
-            mid = str(model.get("id") or "")
-            label = None
-            for prefix, candidate in self._CONTACT_PITCH_VENDOR_LABEL_BY_PREFIX.items():
-                if mid.startswith(prefix):
-                    label = candidate
-                    break
-            if label is None and "-" in mid:
-                label = mid.split("-", 1)[0].title()
-            if label:
-                found.add(label)
-        ordered = sorted(found, key=lambda s: s.lower())
-        return ordered or ["Dixi", "PMT"]
+    def _selected_contact_pitch_strategy(self):
+        data = self.contactPitchStrategyCombo.currentData
+        return str(data or "dixi")
 
     def _selected_contact_pitch_vendors(self):
-        vendors = []
-        for label, box in (self.contactPitchVendorChecks or {}).items():
-            if box.isChecked():
-                vendors.append(label)
-        return tuple(vendors)
+        return self._CONTACT_PITCH_STRATEGY_VENDORS.get(
+            self._selected_contact_pitch_strategy(), ("Dixi",),
+        )
 
     def onRunContactPitchV1Clicked(self):
         volume_node = self.ctSelector.currentNode()
@@ -393,9 +377,13 @@ class DeepCoreDebugWidgetMixin:
             self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
             pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
             ctx = self.logic.build_deep_core_context(volume_node, config=None)
-            # Forward the manufacturer-filter selection so the fit module
-            # only emits suggested electrode ids from the chosen vendors.
-            # Empty selection → no suggestions (advisory field stays blank).
+            # Forward the pitch strategy so the fit module both runs
+            # the walker at the right pitch(es) and filters the
+            # electrode suggestion by the matching vendors. The strategy
+            # key is the single source of truth; the fit module maps
+            # it to ``pitches_mm`` and vendor prefixes.
+            strategy_key = self._selected_contact_pitch_strategy()
+            ctx["contact_pitch_v1_pitch_strategy"] = strategy_key
             ctx["contact_pitch_v1_vendors"] = list(
                 self._selected_contact_pitch_vendors()
             )
