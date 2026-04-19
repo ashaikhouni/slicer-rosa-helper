@@ -90,12 +90,35 @@ DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
                                 # = 9 mm avg gap is either a
                                 # cross-shank bridge or a mis-pitch
                                 # fit — strict 30 mm floor applies.
+# Minimum mean intracranial depth of walker inliers. Real SEEG
+# contacts sit 5-50 mm inside the hull surface; ghost "contacts"
+# produced by bone / skull artifacts cluster at hull_dist 0-3 mm.
+# Trajectories whose inliers are on average in bone (this threshold
+# fails) are rejected post-anchor — catches cases like T1 X12 where
+# a 7-inlier line was assembled out of bone-bright spots along an
+# axis diverging from a real bolt.
+MIN_INLIER_DIST_MEAN_MM = 5.0
 # Air-sinus rejection: along the intracranial portion of every trajectory
 # (skull_entry → deep tip), sample CT HU at AIR_SAMPLE_COUNT points;
 # if more than AIR_FRAC_MAX of those samples are below AIR_HU_THRESHOLD
 # (typical air ≈ −1000 HU), reject. Real electrodes traverse brain
 # parenchyma (~30 HU) with metal spikes; sinus tubes are hollow.
 AIR_HU_THRESHOLD = -300.0
+# Bone rejection: same sampling, but counts points with HU above
+# ``BONE_HU_THRESHOLD``. Brain parenchyma sits at roughly 20-50 HU;
+# skull bone is 500-1500 HU. A real electrode passes metal-contact
+# spikes (> 1500 HU) embedded in brain; a spurious "trajectory"
+# threaded through bone sits at 300-1500 HU throughout. Threshold
+# conservatively above parenchyma and below metal so ONLY the
+# in-bone-not-metal case trips the gate.
+BONE_HU_THRESHOLD = 300.0
+BONE_HU_METAL_CEILING = 1500.0
+BONE_FRAC_MAX = 0.75            # Empirically: real SEEG across T1 /
+                                # T2 / T22 / T21 has in-path bone
+                                # fraction ≤ 0.64 (T21 worst case).
+                                # T1 X12 FP (the cross-bone ghost
+                                # line) had 0.84. A 0.75 ceiling
+                                # cleanly separates them.
 AIR_FRAC_MAX = 0.50  # real shanks crossing ventricles can hit ~35% air
                      # (CSF + small voids). Sinus FPs run >70%.
 AIR_SAMPLE_COUNT = 25
@@ -915,6 +938,7 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         inlier_dists = dist_arr[kk, jj, ii]
         l["dist_min_mm"] = float(inlier_dists.min())
         l["dist_max_mm"] = float(inlier_dists.max())
+        l["dist_mean_mm"] = float(inlier_dists.mean())
         # Use the pre-extend span when available — ``_extend_deep_end``
         # can absorb cross-shank contacts and grow a genuinely-short
         # walker line past the short-span threshold (T21 L_13 went
@@ -1058,12 +1082,64 @@ def run_stage2(frangi_s1, intracranial_mask, exclusion_mask, spacing_xyz,
     return lines, cc_arr
 
 
+def _trajectory_hu_fractions(start_ras, end_ras, ct_arr_kji, ras_to_ijk_mat,
+                               n_samples=AIR_SAMPLE_COUNT,
+                               air_hu_threshold=AIR_HU_THRESHOLD,
+                               bone_hu_threshold=BONE_HU_THRESHOLD,
+                               bone_hu_metal_ceiling=BONE_HU_METAL_CEILING,
+                               end_pad_mm=3.0):
+    """Sample CT HU at evenly-spaced points along [start_ras, end_ras]
+    and return (air_fraction, bone_fraction). Air = HU <
+    ``air_hu_threshold`` (sinuses, mastoid cells). Bone = HU between
+    ``bone_hu_threshold`` and ``bone_hu_metal_ceiling`` (skull bone,
+    but NOT metal contacts — those sit above the ceiling). A real
+    electrode passes through brain parenchyma with metal contact
+    spikes; a spurious path through bone has most samples in the
+    bone range.
+
+    ``end_pad_mm`` trims the sampling segment inward from both
+    endpoints. The first few mm past ``skull_entry_ras`` cross
+    dura and CSF with transitional HU; the last few mm near the
+    deep tip may straddle the tip bloom. Cropping both ends
+    focuses the sample on the clean brain / bone separation
+    zone and widens the real-vs-FP gap.
+    """
+    s = np.asarray(start_ras, dtype=float)
+    e = np.asarray(end_ras, dtype=float)
+    d = e - s
+    L = float(np.linalg.norm(d))
+    if L > 2 * end_pad_mm + 1e-6:
+        axis = d / L
+        s = s + end_pad_mm * axis
+        e = e - end_pad_mm * axis
+    samples = np.linspace(s, e, n_samples)
+    K, J, I = ct_arr_kji.shape
+    air_n = 0
+    bone_n = 0
+    valid = 0
+    for p in samples:
+        h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        i = int(round(float(ijk[0])))
+        j = int(round(float(ijk[1])))
+        k = int(round(float(ijk[2])))
+        if 0 <= k < K and 0 <= j < J and 0 <= i < I:
+            valid += 1
+            hu = float(ct_arr_kji[k, j, i])
+            if hu < air_hu_threshold:
+                air_n += 1
+            elif bone_hu_threshold <= hu < bone_hu_metal_ceiling:
+                bone_n += 1
+    if valid == 0:
+        return 0.0, 0.0
+    return air_n / valid, bone_n / valid
+
+
 def _trajectory_air_fraction(start_ras, end_ras, ct_arr_kji, ras_to_ijk_mat,
                               n_samples=AIR_SAMPLE_COUNT,
                               air_hu_threshold=AIR_HU_THRESHOLD):
-    """Sample CT HU at evenly-spaced points along [start_ras, end_ras]
-    and return the fraction of samples below air_hu_threshold. Used to
-    reject trajectories that traverse air sinuses / mastoid air cells.
+    """Back-compat wrapper: returns only the air fraction. Prefer
+    ``_trajectory_hu_fractions`` in new code.
     """
     s = np.asarray(start_ras, dtype=float)
     e = np.asarray(end_ras, dtype=float)
@@ -1118,6 +1194,7 @@ def extract_bolt_candidates(log_arr, dist_arr, ijk_to_ras_mat, spacing_xyz,
     starts = np.concatenate([[0], changes])
     ends = np.concatenate([changes, [flat_sorted.size]])
     bolt_label_mask = np.zeros_like(cc_arr, dtype=np.uint8)
+    next_bolt_id = 0
 
     for s, e in zip(starts, ends):
         lab = flat_sorted[s]
@@ -1141,12 +1218,14 @@ def extract_bolt_candidates(log_arr, dist_arr, ijk_to_ras_mat, spacing_xyz,
         pts_dist = dist_arr[kk, jj, ii].astype(np.float32)
         bolt_label_mask[kk, jj, ii] = 1
         bolts.append(dict(
+            id=next_bolt_id,
             pts_ras=pts_ras,
             pts_dist=pts_dist,
             n_vox=int(n_vox),
             dist_min_mm=cc_dist_min,
             dist_max_mm=cc_dist_max,
         ))
+        next_bolt_id += 1
 
     return bolts, bolt_label_mask
 
@@ -1633,6 +1712,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             n_inliers=int(l.get("n_blobs", l.get("n_inliers", 0))),
             dist_min_mm=float(l.get("dist_min_mm", float("nan"))),
             dist_max_mm=float(l.get("dist_max_mm", float("nan"))),
+            dist_mean_mm=float(l.get("dist_mean_mm", float("nan"))),
         )
         if source == "stage1":
             rec["amp_sum"] = float(l.get("amp_sum", 0.0))
@@ -1684,16 +1764,24 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         if (rec["length_mm"] < MIN_POST_ANCHOR_LEN_MM
                 or rec["length_mm"] > MAX_POST_ANCHOR_LEN_MM):
             return None
-        # Air-sinus rejection along the intracranial portion.
+        # Air-sinus AND in-bone rejection along the intracranial portion.
+        # Real electrodes cross brain parenchyma (HU ≈ 20-50) punctuated
+        # by metal contact spikes; sinus tubes are hollow (HU air); FP
+        # trajectories threaded through bone sit at HU 300-1500
+        # throughout. Check both fractions in one pass.
         intracranial_start = rec.get("skull_entry_ras", rec["start_ras"])
-        air_frac = _trajectory_air_fraction(
+        air_frac, bone_frac = _trajectory_hu_fractions(
             intracranial_start, rec["end_ras"], ct_arr_kji, ras_to_ijk_mat,
         )
         if air_frac > AIR_FRAC_MAX:
             return None
+        if bone_frac > BONE_FRAC_MAX:
+            return None
         rec["air_fraction"] = float(air_frac)
+        rec["bone_fraction"] = float(bone_frac)
         rec["bolt_n_vox"] = int(bolt["n_vox"])
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])
+        rec["bolt_id"] = int(bolt.get("id", -1))
         return rec
 
     _log("anchoring + length/air filters…")
