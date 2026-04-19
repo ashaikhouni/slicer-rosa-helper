@@ -5,52 +5,112 @@ session in the `rosa_viewer` project.
 
 ---
 
-Resume the `contact_pitch_v1` SEEG detector work. Start by reading
-the project memory files, especially `project_contact_pitch_v1.md`
-(current state) and `project_contact_pitch_v1_next.md` (the plan we
-agreed). Also read `slicer-rosa-helper/docs/CONTACT_PITCH_V1_HANDOFF.md`
-for the algorithm.
+Work on the **Contacts & Trajectory View** module
+([`ContactsTrajectoryView/ContactsTrajectoryView.py`](ContactsTrajectoryView/ContactsTrajectoryView.py)).
 
-**Current state**: contact_pitch_v1 is in production. T22 9/9 0 FP,
-T2 12/12 0 FP, T1/T3 visually clean. Progress reporting is plumbed.
-Committed at `2090358`.
+Start by reading the project memory files, especially
+`project_contact_pitch_v1.md` (production state) and
+`project_contact_pitch_v1_next.md` (the finished plan), plus
+[`docs/CONTACT_PITCH_V1_HANDOFF.md`](docs/CONTACT_PITCH_V1_HANDOFF.md)
+for the detector. Auto Fit / Guided Fit / Manual Fit upstream are
+clean (49 / 49 matched, 0 FP across T22 / T2 / T21 / T1); this next
+session is purely about what happens AFTER a trajectory line is
+published.
 
-**Top priority this session**: library-driven walker + electrode
-classification. Two concrete deliverables:
+**Problem statement**: the module is named "Contacts & Trajectory
+View" but it doesn't actually *detect* contacts from the CT — it
+*synthesizes* them by placing fiducials at the assigned electrode
+model's nominal pitch intervals along the fitted line. If the
+electrode is slightly curved, a contact has drifted, or the model
+assignment is wrong, the "contacts" don't match the real imaged
+positions.
 
-1. **Multi-family walker.** Replace the hardcoded `PITCH_MM = 3.5` in
-   [`PostopCTLocalization/postop_ct_localization/contact_pitch_v1_fit.py`](PostopCTLocalization/postop_ct_localization/contact_pitch_v1_fit.py)
-   with a search over each selected family's offset signature from
-   [`CommonLib/resources/electrodes/electrode_models.json`](CommonLib/resources/electrodes/electrode_models.json).
-   UI: add a multi-select in the "Contact Pitch v1" tab
-   ([`deep_core_widget.py` `_build_contact_pitch_v1_tab`](PostopCTLocalization/postop_ct_localization/deep_core_widget.py))
-   so users pick which families are in play. DIXI-BM (9 mm insulation
-   jump) and DIXI-CM (13 mm insulation jump) need the walker to
-   accept those specific gaps as legal steps, not just a looser
-   uniform tolerance.
+**Goal**: give the user two clear modes for producing contact
+fiducials, both verifiable against the CT image.
 
-2. **Electrode classification step.** After stage-1 + extension, for
-   each trajectory build the 1D LoG (or peak-HU) profile along the
-   intracranial portion, then find the best-fitting model from the
-   selected families. Emit classified electrode id, per-contact RAS
-   positions (arc-length-snapped), and fit score. This is the actual
-   user deliverable.
+## Mode A — trust the assigned electrode (manual / model-driven)
 
-**Verification command** (should still pass after every change):
+Current behaviour, but made explicit. Source of the electrode model:
 
-```bash
-cd /Users/ammar/Dropbox/rosa_viewer/slicer-rosa-helper
-/Users/ammar/miniforge3/envs/shankdetect/bin/python3 \
-    -m unittest tests.deep_core.test_pipeline_dataset_contact_pitch_v1
-```
+1. User selects a model in the table (current UI), or
+2. `Rosa.BestModelId` stamped on the line node by Auto Fit /
+   Guided Fit (`contact_pitch_v1_fit.py` `suggest_model_id`).
 
-T22 baseline: ≥ 8/9 matched, ≤ 10 FP. T2: ≥ 12/12, ≤ 10 FP.
+Fit contacts from the library's `contact_center_offsets_from_tip_mm`
+geometry along the line. User can override the tip position + tip
+shift via the existing `TipAt` / `TipShift` columns.
 
-Follow `feedback_probe_first.md` if you need to iterate on the
-walker — probe-first, don't change the pipeline until the probe
-matches expectations. And `feedback_mixin_helpers.md` / `feedback_factory_indentation.md`
-still apply to the Slicer extension code.
+## Mode B — peak-driven (automatic)
 
-Secondary ideas (from `project_contact_pitch_v1_next.md`) are Frangi
-cost analysis and a blob-graph probe — skip unless (1) is already
-done or user redirects.
+1. Enhance contrast along the trajectory axis. Options to try
+   probe-first, pick the cleanest:
+   - 1-D LoG σ=1 sampled on-axis (already computed by Auto Fit —
+     we can stash `log_sigma1_kji` on the line node attribute or
+     re-compute).
+   - 1-D top-hat filter on raw CT HU.
+   - Derivative of HU profile, peaks = local maxima of `|d²HU/ds²|`.
+2. Peak-pick along the axis from skull_entry → end_ras. Each peak is
+   a candidate contact position (arc-length `s`).
+3. Match the peak sequence against every electrode in the
+   library's selected vendor set; pick the model whose offset
+   pattern matches best (residual `|s_detected − s_model|` sum).
+4. Emit contact fiducials at the DETECTED peak positions (not the
+   model's nominal) so downstream QC reflects real anatomy.
+
+Fallback to Mode A when peaks are too sparse / noisy.
+
+## Concrete deliverables
+
+1. **Add a "Detection mode" combo** to the Contacts tab: *Model-driven*
+   (Mode A, default) / *Peak-driven* (Mode B).
+2. **Write a contact-peak-detection engine** in
+   [`CommonLib/rosa_core/`](CommonLib/rosa_core/) (new module,
+   probably `contact_peak_fit.py`) that takes:
+   - RAS axis endpoints
+   - CT array + IJK↔RAS matrices
+   - Optional LoG volume (skip re-compute)
+   - Vendor filter
+   and returns: (model_id, per-contact positions, fit score).
+3. **Wire it into `_run_contact_generation`** alongside the existing
+   `rosa_core.generate_contacts` synthesis path.
+4. **Update QC** to compare peak-detected contacts vs. the assigned
+   model's nominal positions — flag drifts > 1 mm.
+
+## Reference points
+
+- Module file: [`ContactsTrajectoryView/ContactsTrajectoryView.py`](ContactsTrajectoryView/ContactsTrajectoryView.py)
+  (~1,170 LOC). Widget + Logic in the same file.
+- Contact synthesis today: `rosa_core.generate_contacts` called
+  from `_run_contact_generation`.
+- Electrode library: [`CommonLib/resources/electrodes/electrode_models.json`](CommonLib/resources/electrodes/electrode_models.json).
+  Key field per model: `contact_center_offsets_from_tip_mm`
+  (list of floats, arc-lengths from tip).
+- Auto Fit already emits `Rosa.BestModelId` on every line node it
+  publishes. Guided Fit does too. Manual lines don't — those need
+  a model assignment (either explicit or peak-driven).
+- Feature arrays from Auto Fit: `<CT>_ContactPitch_LoG_sigma1` is
+  already registered as a Slicer volume by the widget. The engine
+  can read it instead of recomputing.
+
+## Verification
+
+Regression suite still has to pass (`tests.deep_core.test_pipeline_dataset_contact_pitch_v1`
+covers T22 default + auto + T2); no changes needed there.
+
+For the new contact-peak engine, add a targeted test that seeds an
+Auto-Fit trajectory and compares peak positions against the
+subject's `contacts.tsv` ground truth from the dataset (`contact_label_dataset/labels/`).
+Aim for ≤ 1.5 mm median per-contact error on T22 / T2 as the
+baseline.
+
+## Things NOT to touch
+
+- `contact_pitch_v1_fit.py` — the Auto Fit pipeline is stable at
+  4 / 4 subjects clean; don't drift those gates.
+- `guided_fit_engine.py` — same.
+- Trajectory origin naming (`auto_fit` / `guided_fit` / `manual`,
+  roles `AutoFitTrajectoryLines` etc.) — stabilized.
+
+Follow `feedback_probe_first.md` for any new filter choice —
+probe a single subject's CT with candidate filters before wiring
+anything into the module.

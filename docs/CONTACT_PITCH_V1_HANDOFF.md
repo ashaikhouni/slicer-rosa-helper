@@ -1,12 +1,10 @@
 # contact_pitch_v1 Handoff
 
-Last updated: 2026-04-18. Auto-detect snap-to-library-pitch +
-walker micro-optimizations added this session (T2 auto: 11/12 → 12/12,
-0 FP; T2 wall: 17.2s → 4.9s, 3.5× faster; same detections).
-Previous session (2026-04-19 wall-clock, earlier in local history)
-added electrode-model suggestion, intracranial length, deep-end
-refinement, crossing-tip retreat, and multi-pitch walker with
-auto-detect.
+Last updated: 2026-04-19. This session extended Auto Fit to reach
+49 / 49 matched across T22 / T2 / T21 / T1 with zero false positives,
+then rebuilt Guided Fit on top of the same LoG engine. Earlier
+sessions added multi-pitch walker + auto-detect pitch + electrode
+suggestion + walker micro-optimizations (T2 wall: 17.2s → 4.9s).
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
 postop CT. The sole detection pipeline now that the legacy
@@ -16,8 +14,34 @@ postop CT. The sole detection pipeline now that the legacy
 | --- | --- | --- |
 | T22 (clean) | 9 / 9 | 0 |
 | T2 (clipped) | 12 / 12 | 0 |
-| T1 (new) | 12 (12 GT) | 0 visible junk |
-| T3 (new) | 14 (14 GT) | 0 visible junk |
+| T2 (auto) | 12 / 12 | 0 |
+| T21 (hand-redone GT) | 16 / 16 | 0 |
+| T1 (dense array) | 12 / 12 | 0 |
+
+## Robustness work added this session
+
+- **Relaxed walker gates** so 5-contact superficial depths can pass
+  (`MIN_BLOBS_PER_LINE 6 → 5`, `AMP_SUM_MIN 6000 → 5000`,
+  `MIN_LINE_SPAN_MM 15 → 12`, `MIN_POST_ANCHOR_LEN_MM 45 → 35`).
+- **Span-aware deep-tip prior** using pre-extend span + avg-pitch
+  gate so superficial short shanks pass a 15 mm floor while long
+  lines still hit a 30 mm floor.
+- **Separate bolt / contact LoG thresholds** (`BOLT_LOG_THRESHOLD =
+  800`, contact stays at 300). Titanium bolts hit much stronger LoG
+  than contacts; stricter threshold splits merged whole-head bolt
+  CCs into per-shank bolts. T1 went from one 191 k-voxel mega-CC to
+  51 discrete bolt CCs.
+- **Tightened bolt outward search** (`BOLT_SEARCH_OUTWARD_MM 120 →
+  60`) so the anchor can't reach a distant CC on a neighbouring
+  shank.
+- **Two-orientation bolt anchor**: `_anchor_or_reject` now calls
+  `anchor_trajectory_to_bolt` both ways and keeps the orientation
+  with more bolt in-tube voxels. Fixes T22 LGR flip where hull
+  head-distance was ambiguous.
+- **Bone-fraction filter** on the intracranial HU path (`BONE_FRAC_MAX
+  = 0.75` with 3 mm end-crop). Real shanks ≤ 0.60; T1 X12-style
+  bone-ghost FP sits at 0.92. Catches through-bone trajectories that
+  pass every geometric gate.
 
 ## Pipeline overview
 
