@@ -281,7 +281,7 @@ class DeepCoreDebugWidgetMixin:
 
     def _build_contact_pitch_v1_tab(self):
         tab = qt.QWidget()
-        self.modeTabs.addTab(tab, "Contact Pitch v1")
+        self.modeTabs.addTab(tab, "Auto Fit")
         form = qt.QFormLayout(tab)
 
         help_text = qt.QLabel(
@@ -295,7 +295,7 @@ class DeepCoreDebugWidgetMixin:
         form.addRow(help_text)
 
         button_row = qt.QHBoxLayout()
-        run_button = qt.QPushButton("Run Contact Pitch v1")
+        run_button = qt.QPushButton("Run Auto Fit")
         run_button.clicked.connect(self.onRunContactPitchV1Clicked)
         button_row.addWidget(run_button)
         button_row.addStretch(1)
