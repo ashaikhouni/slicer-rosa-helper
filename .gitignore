@@ -6,3 +6,12 @@ __pycache__/
 .Rhistory
 build/
 *.s4ext
+
+# Local-only session notes — handoff + resume prompts, Claude memory,
+# and any per-session scratch docs. Keep these out of the public repo.
+docs/CONTACT_PITCH_V1_HANDOFF.md
+docs/NEXT_SESSION_PROMPT.md
+docs/*_HANDOFF.md
+docs/*_SESSION_*.md
+CLAUDE.md
+.claude/

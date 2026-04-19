@@ -1,6 +1,6 @@
 # User Guide
 
-Last updated: 2026-03-01
+Last updated: 2026-04-19
 
 ## 1) Typical Workflow
 
@@ -74,13 +74,42 @@ Main actions:
 - Select trajectory source.
 - Assign electrode model/tip options per trajectory.
 - Check/uncheck trajectories in `Use` column to control which trajectories generate contacts.
+- Choose a **Detection mode**: *Model-driven* (nominal offsets) or
+  *Peak-driven* (CT image peaks).
 - Generate or update contacts/models.
-- View QC metrics and align slice view along a selected trajectory.
-- Optional focus layout mode: top FourUp + bottom `long`/`down` trajectory views centered at trajectory entry.
+- View QC metrics and align slice views along a selected trajectory.
+- Optional focus layout mode: top FourUp + bottom `long`/`down`
+  trajectory views. The blue long-axis view auto-fits its field of
+  view to the entire trajectory (entry → deep tip, 1.2× margin); the
+  purple down-axis view stays centered on the focus point.
+
+Detection modes:
+- *Model-driven (nominal)*: contacts are placed along the fitted
+  trajectory at the assigned electrode model's nominal pitch.
+  Use this when you trust the model assignment and the line fit.
+- *Peak-driven (CT peaks)*: contacts are detected from the postop
+  CT by sampling LoG σ=1 along the trajectory axis with a 2 mm disk,
+  picking peaks, and matching the peak pattern against the
+  electrode library. Contacts are emitted at the detected peak
+  positions — so a curved shaft, a drifted contact, or a wrong model
+  assignment is visible in the output. Reuses the Auto-Fit-stashed
+  `<CT>_ContactPitch_LoG_sigma1` scalar volume when present; computes
+  it on-the-fly otherwise.
+- When a model is assigned in the table, peak-driven matching is
+  restricted to that model. Leaving the model blank lets the engine
+  pick the best-fitting model from the library (filtered by the
+  *Default model* vendor). Peak-driven falls back to model-driven
+  synthesis per trajectory when the engine can't find enough peaks.
+- Per-slot drift between peak-detected and nominal positions is
+  logged; slots drifting more than 1 mm are flagged so you can spot
+  curved shafts or mis-assigned models.
 
 Important:
 - `Generate`/`Update` only operate on checked rows.
-- At least one checked trajectory with a valid model is required.
+- At least one checked trajectory with a valid model is required
+  (or a valid *Default model* vendor for blank-model peak-driven fits).
+- Peak-driven mode requires a `PostopCT` workflow role. Run Auto Fit
+  first or assign the post-op CT via the Focus view selector.
 
 ## 4) Atlas Modules
 

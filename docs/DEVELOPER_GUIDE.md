@@ -1,6 +1,6 @@
 # Developer Guide
 
-Last updated: 2026-03-01
+Last updated: 2026-04-19
 
 ## 1) Architecture Overview
 
@@ -15,12 +15,25 @@ Core design rule:
 ## 2) Shared Libraries
 
 Primary packages in `CommonLib`:
-- `rosa_core`: pure-python domain logic (parser, transforms, contact generation, QC, exporters)
+- `rosa_core`: pure-python domain logic (parser, transforms, contact
+  generation, peak-driven contact detection via `contact_peak_fit`,
+  QC, exporters)
 - `shank_core`: pure-python CT shank detection utilities (masking, blob extraction)
 - `shank_engine`: detection pipeline framework — see `CommonLib/shank_engine/README.md`
 - `rosa_workflow`: workflow state/publish/resolve/registry/export services
 - `rosa_scene`: Slicer scene services (trajectory/electrode/atlas helpers)
   - includes shared layout orchestration via `layout_service.py`
+  - long-axis slice view (`align_slice_to_trajectory(mode='long')`)
+    auto-fits FOV to the trajectory span so the whole shank is visible
+
+Key `rosa_core` entry points added this session:
+- `detect_contacts_on_axis`, `sample_axis_profile`, `detect_peaks_1d`,
+  `fit_best_electrode`, `candidate_ids_for_vendors`,
+  `ras_contacts_to_contact_records`, `PeakFitResult` —
+  all exported from `rosa_core` for the Contacts & Trajectory View
+  module's peak-driven mode. Reuses the LoG σ=1 volume that Auto Fit
+  stashes in the scene (`<CT>_ContactPitch_LoG_sigma1`), falls back
+  to SimpleITK recomputation when the cached volume is absent.
 
 Import rule:
 - modules should import shared services only from `CommonLib/...`
@@ -92,6 +105,7 @@ Compatibility:
 ## 7) Testing
 
 Pure python tests:
+
 ```bash
 cd <repo>
 <python-env>/bin/python -m unittest discover -s tests/rosa_core -p "test_*.py"
@@ -99,10 +113,29 @@ cd <repo>
 ```
 
 Optional pytest run:
+
 ```bash
 cd <repo>
 PYTHONPATH=<python-env>/lib/python3.10/site-packages:$PYTHONPATH python3 -m pytest tests/rosa_core tests/shank_core tests/rosa_scene -q
 ```
+
+Dataset-gated regressions (need a postop CT dataset on disk; set
+`ROSA_SEEG_DATASET` to the top-level directory):
+
+- `tests/deep_core/test_pipeline_dataset_contact_pitch_v1.py` — Auto
+  Fit regression on T22 / T2. Gates matched/FP counts against the
+  production detector.
+- `tests/rosa_core/test_contact_peak_fit.py` — peak-driven contact
+  detection. Synthetic unit tests + dataset tests asserting T22
+  median per-contact error ≤ 1.75 mm and T2 ≤ 1.5 mm vs. the
+  subject's `contacts.tsv` ground truth.
+
+Probes (diagnostic, not asserted):
+
+- `tests/deep_core/probe_contact_peak_filters.py` — compares LoG σ=1,
+  raw CT HU, and white top-hat as on-axis contact signals.
+- `tests/deep_core/probe_contact_peak_engine.py` — end-to-end
+  engine report per GT shank (model id, n matched, residual).
 
 ## 8) Adding New Functionality
 

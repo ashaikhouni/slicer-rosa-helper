@@ -1,14 +1,17 @@
 # SEEG / ROSA Toolkit for 3D Slicer
 
-Last updated: 2026-03-01
+Last updated: 2026-04-19
 
 This repository contains a modular 3D Slicer toolkit for SEEG planning, localization, atlas labeling, and export workflows.
 
 It supports:
+
 - ROSA case loading from `.ros` + Analyze image pairs (`.img/.hdr`)
 - custom MRI/CT import and base-space registration
 - guided and de novo trajectory localization on postop CT
-- contact generation with electrode model assignment and QC metrics
+- contact generation with electrode model assignment and QC metrics,
+  either at the model's nominal pitch ("model-driven") or at CT-image
+  peaks along the trajectory ("peak-driven")
 - atlas source loading (FreeSurfer, THOMAS, WM) and contact labeling
 - THOMAS nucleus burn into MRI with optional DICOM export
 - profile-based data export for downstream analysis/reporting
