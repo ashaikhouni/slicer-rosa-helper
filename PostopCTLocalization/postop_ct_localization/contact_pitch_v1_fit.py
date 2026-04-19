@@ -120,7 +120,21 @@ CROSS_STAGE_DEDUP_PERP_MM = 8.0
 # tiny fragments, neither of which gives a reliable axis. Instead, the
 # anchor step tests whether enough of each bolt CC's voxels sit in a
 # narrow tube around the candidate shank axis.
-BOLT_LOG_THRESHOLD = 300.0          # |LoG| magnitude gate (matches contact)
+BOLT_LOG_THRESHOLD = 800.0          # |LoG| magnitude gate for bolt CCs.
+                                    # Higher than LOG_BLOB_THRESHOLD
+                                    # (300, for contacts) because
+                                    # titanium bolts are much denser
+                                    # than platinum/iridium contacts
+                                    # — real bolts hit |LoG| > 1000
+                                    # easily, scalp / skin metal and
+                                    # partial-volume artifacts sit
+                                    # between 300-700. A strict
+                                    # bolt threshold naturally splits
+                                    # what would otherwise be a
+                                    # whole-head mega-CC into
+                                    # discrete per-shank bolts (T1
+                                    # went from one 191 k-voxel CC
+                                    # to 20+ per-shank CCs).
 BOLT_MIN_VOXELS = 20                # drop tiny (isolated-contact) CCs
 BOLT_HULL_PROXIMITY_MM = 2.0        # CC must touch / poke through hull
 BOLT_TUBE_RADIUS_MM = 3.0            # shank-axis tube for bolt-voxel count
