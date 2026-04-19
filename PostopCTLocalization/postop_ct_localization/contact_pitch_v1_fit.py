@@ -346,23 +346,40 @@ def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD):
     return blobs
 
 
-def _walk_with_pitch(axis, anchor, pts, amps, pitch, perp_tol, ax_tol, max_k):
-    diffs = pts - anchor
-    proj = diffs @ axis
-    perp = diffs - np.outer(proj, axis)
-    perp_d = np.linalg.norm(perp, axis=1)
-    within_perp = perp_d <= perp_tol
-    inliers = set()
-    for k in range(-max_k, max_k + 1):
-        target = k * pitch
-        ax_resid = np.abs(proj - target)
-        cand = np.where(within_perp & (ax_resid <= ax_tol))[0]
-        if cand.size == 0:
-            continue
-        best_blob = cand[np.argmax(amps[cand])]
-        inliers.add(int(best_blob))
-    if not inliers:
+def _walk_with_pitch_precomputed(proj, within_perp, amps, pitch, ax_tol, max_k):
+    """Pitch-matching step given pre-computed per-blob axis projection and
+    perp-tolerance mask (``_walk_line`` computes these once per seed pair
+    and reuses across the 5 pitch perturbations — the axis and perp mask
+    don't change, only the per-k targets do).
+
+    Vectorized: each blob's natural slot is ``k = round(proj / pitch)``.
+    A blob is accepted when its perp tolerance holds, ``|k| ≤ max_k`` and
+    ``|proj − k·pitch| ≤ ax_tol``. For each surviving k slot, keep the
+    single blob with the highest amplitude. Replaces the 41-iteration
+    Python loop over k that dominated the walker after the per-pair
+    factoring (2·MAX_K_STEPS + 1 iterations × 54k calls on T2).
+    """
+    k_nearest = np.rint(proj / pitch).astype(np.int64)
+    target = k_nearest * pitch
+    ax_resid = np.abs(proj - target)
+    valid = within_perp & (ax_resid <= ax_tol) & (np.abs(k_nearest) <= max_k)
+    if not np.any(valid):
         return None
+    idx_valid = np.where(valid)[0]
+    k_valid = k_nearest[idx_valid]
+    amps_valid = amps[idx_valid]
+    order = np.argsort(k_valid, kind="stable")
+    sorted_k = k_valid[order]
+    sorted_idx = idx_valid[order]
+    sorted_amps = amps_valid[order]
+    # Group breakpoints: indices where k changes (plus 0 and len as ends).
+    change = np.where(np.diff(sorted_k) != 0)[0] + 1
+    starts = np.concatenate([[0], change])
+    ends = np.concatenate([change, [sorted_k.size]])
+    inliers = set()
+    for s, e in zip(starts, ends):
+        local_best = int(np.argmax(sorted_amps[s:e]))
+        inliers.add(int(sorted_idx[s + local_best]))
     return dict(inliers=inliers, pitch=pitch, n_inliers=len(inliers))
 
 
@@ -375,13 +392,24 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     if not (pitch_mm - PITCH_TOL_MM <= pitch_seed <= pitch_mm + PITCH_TOL_MM):
         return None
     axis = (p1 - p0) / seed_d
+    # Per-pair precompute: the axis is fixed across pitch perturbations,
+    # so projection + perp-tolerance only need to be computed once.
+    # Perp-distance test uses perp² = |diffs|² − proj² to avoid the
+    # np.outer(proj, axis) allocation that dominated the walker in
+    # profiling (~11 s of 17 s wall on T2).
+    diffs = pts - p0
+    proj = diffs @ axis
+    d2 = np.einsum("ij,ij->i", diffs, diffs)
+    perp_sq = d2 - proj * proj
+    within_perp = perp_sq <= (PERP_TOL_MM * PERP_TOL_MM)
     best = None
     for dp in (-0.2, -0.1, 0.0, 0.1, 0.2):
         pitch_try = pitch_seed + dp
         if not (pitch_mm - PITCH_TOL_MM <= pitch_try <= pitch_mm + PITCH_TOL_MM):
             continue
-        r = _walk_with_pitch(axis, p0, pts, amps, pitch_try,
-                             PERP_TOL_MM, AX_TOL_MM, MAX_K_STEPS)
+        r = _walk_with_pitch_precomputed(
+            proj, within_perp, amps, pitch_try, AX_TOL_MM, MAX_K_STEPS,
+        )
         if r is None:
             continue
         if best is None or r["n_inliers"] > best["n_inliers"]:

@@ -1,10 +1,12 @@
 # contact_pitch_v1 Handoff
 
-Last updated: 2026-04-18. Auto-detect snap-to-library-pitch added this
-session (T2 auto: 11/12 → 12/12, 0 FP). Previous session (2026-04-19
-wall-clock, earlier in local history) added electrode-model
-suggestion, intracranial length, deep-end refinement, crossing-tip
-retreat, and multi-pitch walker with auto-detect.
+Last updated: 2026-04-18. Auto-detect snap-to-library-pitch +
+walker micro-optimizations added this session (T2 auto: 11/12 → 12/12,
+0 FP; T2 wall: 17.2s → 4.9s, 3.5× faster; same detections).
+Previous session (2026-04-19 wall-clock, earlier in local history)
+added electrode-model suggestion, intracranial length, deep-end
+refinement, crossing-tip retreat, and multi-pitch walker with
+auto-detect.
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
 postop CT. Replaces the bolt-first `deep_core_v2` for general use; v2
@@ -279,6 +281,34 @@ it via `Rosa.BestModelId` on the line node to pre-populate its
 - T2 (default Dixi): ≥ 12 / 12 matched, ≤ 10 FP (currently 12 / 12, 0 FP).
 - T2 (auto strategy): ≥ 12 / 12 matched, ≤ 10 FP (currently 12 / 12,
   0 FP; verifies the snap-to-library-pitch path).
+
+## Performance
+
+T2 wall-clock profile (cProfile, `/tmp/profile_cp.py T2`):
+
+| Version | Total | Stage 1 | Preprocessing | Rest |
+| --- | --- | --- | --- | --- |
+| Pre-optimization | 17.24 s | 15.27 s (88%) | 1.5 s | 0.5 s |
+| Post-optimization | 4.92 s | 3.08 s (63%) | 1.5 s | 0.3 s |
+
+The walker was the bottleneck. Three changes in ``_walk_line`` /
+``_walk_with_pitch_precomputed``:
+
+1. **Per-pair precompute.** ``diffs = pts − anchor``, axis projection,
+   and ``|diffs|²`` are computed once per seed pair; the 5 pitch
+   perturbations share them. Was recomputed 5× before.
+2. **Perp via squared magnitudes.** ``perp² = |diffs|² − proj²``
+   replaces ``perp = diffs − np.outer(proj, axis); |perp|``. Skips the
+   per-call ``np.outer`` allocation that was 1.37 s alone.
+3. **Vectorized per-k match.** Each blob's slot ``k = round(proj /
+   pitch)`` is computed in one shot; best-amp blob per k is picked by
+   sort + group-by. Replaces a 41-iteration Python loop of
+   ``np.where`` scans per call × 54 k calls.
+
+Preprocessing (hull / LoG σ=1 / Frangi σ=1 via SITK) is now the
+largest contiguous cost; further speedup would need either lower-
+resolution filter passes or the deferred skip-stage-2 heuristic
+(would skip Frangi when stage-1 covers all bolts).
 
 Run:
 
