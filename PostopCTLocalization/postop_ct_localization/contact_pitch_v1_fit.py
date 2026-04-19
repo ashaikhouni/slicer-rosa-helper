@@ -819,10 +819,14 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     # Deep-end walk: extend each surviving line with unclaimed blobs
     # found within 4 mm of the current deep tip. Strongest-first so
     # high-confidence lines claim their blobs before weaker ones.
+    # Stash the pre-extend span so the deep-tip prior downstream can
+    # tell a genuinely-short walker line from a short line grown by
+    # absorbing neighbouring-shank contacts (T21 L_13: span 19→46).
     claimed: set[int] = set()
     for l in lines:
         for bi in l["inlier_idx"]:
             claimed.add(int(bi))
+        l.setdefault("original_span_mm", float(l.get("span_mm", 0.0)))
     lines.sort(key=lambda l: -float(l.get("amp_sum", 0.0)))
     lines = [
         _extend_deep_end(l, pts_c, amps_c, claimed,
@@ -842,6 +846,7 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         for nl in second_pass_lines:
             for bi in nl["inlier_idx"]:
                 claimed.add(int(bi))
+            nl.setdefault("original_span_mm", float(nl.get("span_mm", 0.0)))
         second_pass_lines = [
             _extend_deep_end(nl, pts_c, amps_c, claimed,
                              dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat)
@@ -873,7 +878,13 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         inlier_dists = dist_arr[kk, jj, ii]
         l["dist_min_mm"] = float(inlier_dists.min())
         l["dist_max_mm"] = float(inlier_dists.max())
-        span_mm = float(l.get("span_mm", 0.0))
+        # Use the pre-extend span when available — ``_extend_deep_end``
+        # can absorb cross-shank contacts and grow a genuinely-short
+        # walker line past the short-span threshold (T21 L_13 went
+        # 19→46 mm this way). The pre-extend span is what the walker
+        # actually locked onto, so it's the honest "is this short?"
+        # signal for the deep-tip rule.
+        span_mm = float(l.get("original_span_mm", l.get("span_mm", 0.0)))
         min_dist = (
             DEEP_TIP_MIN_SHORT_MM
             if span_mm <= DEEP_TIP_SHORT_SPAN_MM
