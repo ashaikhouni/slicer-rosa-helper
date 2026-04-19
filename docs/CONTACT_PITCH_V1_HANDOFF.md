@@ -1,8 +1,10 @@
 # contact_pitch_v1 Handoff
 
-Last updated: 2026-04-19. Electrode-model suggestion (manufacturer-
-filtered) + intracranial length + deep-end refinement + crossing-tip
-retreat + multi-pitch walker with auto-detect added this session.
+Last updated: 2026-04-18. Auto-detect snap-to-library-pitch added this
+session (T2 auto: 11/12 → 12/12, 0 FP). Previous session (2026-04-19
+wall-clock, earlier in local history) added electrode-model
+suggestion, intracranial length, deep-end refinement, crossing-tip
+retreat, and multi-pitch walker with auto-detect.
 
 A direct (no-bolt-first) SEEG shank detector. Runs entirely from the
 postop CT. Replaces the bolt-first `deep_core_v2` for general use; v2
@@ -51,7 +53,13 @@ comes from the UI's **Pitch strategy** combo:
 neighbour distances across the intracranial blob cloud and returns
 the centroid of the dominant mode in `[2.5, 6.0] mm`. Empirically
 yields `~3.3 mm` on clean Dixi CTs (true 3.5, small partial-volume
-low-bias absorbed by the walker's `±0.5 mm` tolerance).
+low-bias). ``resolve_pitches_for_strategy("auto", ...)`` then snaps
+the raw centroid to the nearest library pitch in
+``LIBRARY_PITCHES_MM = (3.5, 3.97, 4.43)`` when within
+``PITCH_SNAP_MM = 0.3``. This removes the ~0.2 mm low-bias (walker
+sees the nominal pitch, not the biased centroid) and recovers band-
+edge shanks that were being dropped at `PITCH_TOL_MM = 0.5` — T2 auto
+went from 11/12 to 12/12 with 0 FP.
 
 1. **Regional minima** on LoG σ=1 (SITK `GrayscaleErode` radius 2),
    threshold `LoG ≤ −300`. One marker per contact, even when the skull
@@ -236,25 +244,30 @@ it via `Rosa.BestModelId` on the line node to pre-populate its
 
 ## Known issues / next steps
 
-1. **Auto-detect pitch has a ~0.2 mm low bias** (mutual-NN centroid
-   reports 3.31 mm on a true 3.5 mm Dixi case). Within the walker's
-   ±0.5 mm tolerance so detection mostly works, but on T2 one shank
-   was lost at the band edge (11/12 instead of 12/12). Mitigations:
-   widen `PITCH_TOL_MM` in auto mode, or snap detected pitch to the
-   nearest known library pitch (3.5 / 3.97 / 4.43) if the centroid
-   falls within ~0.3 mm. Default remains Dixi so the regression
-   baseline is not impacted.
-2. **Post-retreat re-extension.** If trajectory A was never retreated
-   but trajectory B (A's neighbour) was, A's deep end might now have
-   free space where it previously was blocked. Not currently
-   re-extended. Relevant when two crossing shanks have different
-   real lengths and only one overshoots.
-3. **Skip stage 2 when stage 1 covers everything.** Stage 2 only
-   exists for shanks like T2 RSAN that lack visible contacts. On
-   subjects whose shanks all show contacts (T1, T3, most), Frangi
-   adds no recall and only generates FPs that we then filter out.
-   A "stage-2 needed?" check would save ~1–2 s and a class of FPs.
-4. **`shallow_err` always reports the bolt-tip distance from the
+1. **Post-retreat re-extension (as literally written: no-op).**
+   `_refine_deep_end_via_axis_log` only reads the LoG volume along a
+   trajectory's own axis — it never looks at neighbour segments.
+   Re-running refinement on a non-retreated trajectory after a
+   neighbour retreats produces an identical result because the LoG
+   volume is unchanged. The mechanism described in the prior plan
+   (neighbour retreat "frees LoG signal") doesn't apply to axis
+   refinement; it would only apply to stage-1 **inlier
+   re-arbitration** (the priority-4 variant) which is a larger
+   change: after retreat, some blobs previously claimed by the
+   retreater become orphans and could be offered to the
+   non-retreated trajectory via the walker's ownership arbitration.
+   Worth revisiting only when a concrete miscall surfaces that
+   would be fixed by re-arbitration.
+2. **Skip stage 2 when stage 1 covers everything.** Stage 2 only
+   exists for shanks like T2 RSAN that lack visible contacts.
+   Measured contribution: T22 → 0 stage-2 survivors (stage-2 was
+   redundant); T2 → 1 stage-2 survivor (the RSAN shank, required).
+   A conservative heuristic — "no unclaimed real-looking bolt" —
+   needs cross-subject tuning we can't do with just T22/T2 in the
+   regression suite. Revisit when T1/T3 are added to regression so
+   the "real-looking bolt" size threshold can be calibrated across
+   ≥4 subjects.
+3. **`shallow_err` always reports the bolt-tip distance from the
    GT entry**. The GT entry is the bone→brain interface; my start
    is the bolt outer end. Tests use `skull_entry_ras` for the
    shallow-side comparison instead — that's the right point to
@@ -262,8 +275,10 @@ it via `Rosa.BestModelId` on the line node to pre-populate its
 
 ## Regression baseline
 
-- T22: ≥ 8 / 9 matched, ≤ 10 FP (currently 8 / 9, 0 FP).
-- T2: ≥ 12 / 12 matched, ≤ 10 FP (currently 12 / 12, 0 FP).
+- T22 (default Dixi): ≥ 8 / 9 matched, ≤ 10 FP (currently 9 / 9, 0 FP).
+- T2 (default Dixi): ≥ 12 / 12 matched, ≤ 10 FP (currently 12 / 12, 0 FP).
+- T2 (auto strategy): ≥ 12 / 12 matched, ≤ 10 FP (currently 12 / 12,
+  0 FP; verifies the snap-to-library-pitch path).
 
 Run:
 

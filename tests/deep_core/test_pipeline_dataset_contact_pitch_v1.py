@@ -66,7 +66,8 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
         register_builtin_pipelines(cls.registry)
 
     def _run_subject(self, subject_id, *, max_angle_deg=10.0,
-                      max_mid_mm=8.0, deep_core_config_overrides=None):
+                      max_mid_mm=8.0, deep_core_config_overrides=None,
+                      pitch_strategy=None):
         """Run v3 pipeline on a subject and match predictions to GT using
         the probe's axis-midpoint criterion (angle + perpendicular midpoint
         distance). Greedy 1-to-1 assignment.
@@ -84,9 +85,14 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
 
         gt, _ = load_reference_ground_truth_shanks(row)
         config = dict(deep_core_config_overrides or {})
+        run_tag = f"contact_pitch_{subject_id}"
+        if pitch_strategy:
+            run_tag = f"{run_tag}_{pitch_strategy}"
         ctx, _ = build_detection_context(
-            row["ct_path"], run_id=f"contact_pitch_{subject_id}", config=config, extras={}
+            row["ct_path"], run_id=run_tag, config=config, extras={}
         )
+        if pitch_strategy:
+            ctx["contact_pitch_v1_pitch_strategy"] = pitch_strategy
         result = self.registry.run("contact_pitch_v1", ctx)
         self.assertEqual(
             result.get("status"), "ok",
@@ -142,6 +148,23 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
             n_matched, 12, f"contact_pitch_v1 match regressed: {n_matched}/{len(gt)}"
         )
         self.assertLessEqual(n_fp, 10, f"contact_pitch_v1 FP count regressed: {n_fp}")
+
+    def test_T2_auto_strategy(self):
+        # Auto-detect pitch snaps the mutual-NN centroid (~3.3 mm on a
+        # true-3.5 mm Dixi case) to the nearest library pitch within
+        # 0.3 mm. Without the snap, auto lost one shank at the band
+        # edge (11/12); with the snap it matches the Dixi default.
+        gt, trajs, n_matched, n_fp = self._run_subject(
+            "T2", pitch_strategy="auto",
+        )
+        self.assertGreaterEqual(
+            n_matched, 12,
+            f"contact_pitch_v1 auto-strategy match regressed: {n_matched}/{len(gt)}",
+        )
+        self.assertLessEqual(
+            n_fp, 10,
+            f"contact_pitch_v1 auto-strategy FP count regressed: {n_fp}",
+        )
 
 
 if __name__ == "__main__":

@@ -150,6 +150,13 @@ PITCH_STRATEGY_VENDORS = {
 PITCH_AUTO_MIN_MM = 2.5
 PITCH_AUTO_MAX_MM = 6.0
 
+# Mutual-NN centroid sits ~0.2 mm low of the true pitch (partial-volume
+# localization bias). When the auto detector lands within this tolerance
+# of a known library pitch, snap to it so the walker sees the nominal
+# value instead of the biased estimate.
+LIBRARY_PITCHES_MM = (3.5, 3.97, 4.43)
+PITCH_SNAP_MM = 0.3
+
 
 def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
                                            min_mm=PITCH_AUTO_MIN_MM,
@@ -210,6 +217,21 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
     return [round(centroid, 2)]
 
 
+def _snap_to_library_pitch(pitch_mm, library=LIBRARY_PITCHES_MM,
+                             tol_mm=PITCH_SNAP_MM):
+    """If ``pitch_mm`` is within ``tol_mm`` of a known library pitch,
+    return the nominal library value; otherwise return ``pitch_mm``
+    unchanged. Removes the ~0.2 mm low-bias from the mutual-NN centroid.
+    """
+    pitch_mm = float(pitch_mm)
+    best = None
+    for lib in library:
+        d = abs(pitch_mm - float(lib))
+        if d <= tol_mm and (best is None or d < best[0]):
+            best = (d, float(lib))
+    return best[1] if best is not None else pitch_mm
+
+
 def resolve_pitches_for_strategy(strategy, pts_c=None,
                                     dist_arr=None, ras_to_ijk_mat=None):
     """Map a UI ``strategy`` string to a concrete tuple of walker
@@ -226,7 +248,8 @@ def resolve_pitches_for_strategy(strategy, pts_c=None,
             pts_c, dist_arr, ras_to_ijk_mat,
         )
         if detected:
-            return tuple(detected)
+            snapped = tuple(_snap_to_library_pitch(p) for p in detected)
+            return snapped
         return (PITCH_MM,)
     return (PITCH_MM,)
 
@@ -1435,15 +1458,24 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                 _pts_c_preview = _pts_preview[_n_vox_preview <= LOG_BLOB_MAX_VOXELS]
             else:
                 _pts_c_preview = _pts_preview
+            _raw_detected = detect_pitch_from_intracranial_blobs(
+                _pts_c_preview, dist_arr, ras_to_ijk_mat,
+            ) if _pts_c_preview.shape[0] > 0 else []
             resolved_pitches = resolve_pitches_for_strategy(
                 "auto",
                 pts_c=_pts_c_preview,
                 dist_arr=dist_arr,
                 ras_to_ijk_mat=ras_to_ijk_mat,
             )
-            _log(
-                f"auto-detect pitch: using {[f'{p:.2f}' for p in resolved_pitches]} mm"
-            )
+            if _raw_detected:
+                _log(
+                    f"auto-detect pitch: raw={[f'{p:.2f}' for p in _raw_detected]} "
+                    f"→ snapped={[f'{p:.2f}' for p in resolved_pitches]} mm"
+                )
+            else:
+                _log(
+                    f"auto-detect pitch: using {[f'{p:.2f}' for p in resolved_pitches]} mm (fallback)"
+                )
         else:
             resolved_pitches = resolve_pitches_for_strategy(strat_key)
     else:
