@@ -1650,6 +1650,20 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
     axis = d / L
     K, J, I = log_arr.shape
 
+    # Build an orthonormal frame perpendicular to axis for disk
+    # sampling. The walker's fitted axis can be 1-2° off from the
+    # true shank axis; without a disk search, deep contacts at the
+    # end of the chain that sit 1-3 mm off the walker-axis get missed.
+    helper = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = helper - np.dot(helper, axis) * axis
+    u_n = float(np.linalg.norm(u))
+    if u_n < 1e-9:
+        helper = np.array([0.0, 1.0, 0.0])
+        u = helper - np.dot(helper, axis) * axis
+        u_n = float(np.linalg.norm(u))
+    u = u / max(u_n, 1e-9)
+    v = np.cross(axis, u)
+
     def _sample(p):
         h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
         ijk = (ras_to_ijk_mat @ h)[:3]
@@ -1658,30 +1672,38 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
         k = int(np.clip(round(ijk[2]), 0, K - 1))
         return float(log_arr[k, j, i])
 
-    # Forward pass (extend).
+    # Disk sampling: center + 8 angles × 2 radii = 17 samples per step.
+    # Matches the peak-driven Contacts & Trajectory View engine's
+    # perp-sampling pattern.
+    disk_offsets = [(0.0, 0.0)]
+    for radius in (1.5, 2.5):
+        for ang in np.linspace(0.0, 2.0 * np.pi, num=8, endpoint=False):
+            disk_offsets.append((radius * float(np.cos(ang)),
+                                  radius * float(np.sin(ang))))
+
+    def _disk_hit(p_axis):
+        for dr_u, dr_v in disk_offsets:
+            p = p_axis + dr_u * u + dr_v * v
+            if _sample(p) <= -min_abs_log:
+                return True
+        return False
+
     n_steps = int(max_extend_mm / step_mm)
     miss_steps_allowed = max(1, int(miss_mm / step_mm))
     last_hit = None
-    if _sample(end) <= -min_abs_log:
+    if _disk_hit(end):
         last_hit = end.copy()
     consecutive_miss = 0
     for s in range(1, n_steps + 1):
         p = end + s * step_mm * axis
-        if _sample(p) <= -min_abs_log:
+        if _disk_hit(p):
             last_hit = p
             consecutive_miss = 0
         else:
             consecutive_miss += 1
             if consecutive_miss >= miss_steps_allowed:
                 break
-    if last_hit is not None:
-        return last_hit
-
-    # No backward LoG-walk here — clipping against last-real-contact
-    # is handled by the inlier-based pass (_clip_deep_end_to_inliers)
-    # which is independent of LoG thresholds and so doesn't stop at
-    # bone artifacts past the contact array.
-    return None
+    return last_hit
 
 
 STRONG_CONTACT_AMP_MIN = 1000.0  # Real SEEG contacts saturate their LoG
