@@ -57,48 +57,46 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
     def _load_image_and_matrices(self, ctx: DetectionContext):
         """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4).
 
-        Priority order for the IJK→RAS matrix:
-          1. Slicer volume node (``ctx.extras.volume_node``) when
-             present — this is Slicer's scene-displayed pose, so the
-             detector's feature volumes and trajectories will align
-             with what the user sees. NIfTI files with qform_code > 0
-             AND sform_code > 0 (and the two differing — e.g., a
-             post-op CT registered to MR) land here: SITK reads the
-             qform by default, Slicer uses sform. Without this
-             override the LoG mask registered back to Slicer would be
-             rotated relative to the displayed CT (subject-137 bug).
-          2. Otherwise, SITK's own direction/origin from the file.
+        When a Slicer ``volume_node`` is present in ``ctx.extras``,
+        use Slicer's arr_kji and Slicer's IJK→RAS matrix. Slicer's
+        NIfTI reader reorients the voxel array based on the file's
+        direction cosines (specifically sform when both sform and
+        qform are present), so building SITK from the raw file path
+        yields a different voxel layout than what Slicer displays —
+        feature volumes registered back to the scene end up rotated
+        (subject-137 sform/qform mismatch).
 
-        The SITK image's pixel data is still used for filters because
-        SITK applies NIfTI ``scl_slope`` / ``scl_inter`` rescaling
-        (HU correctness), which ``slicer.util.arrayFromVolume`` does
-        not always. Filters are voxel-space so direction/origin don't
-        affect their outputs — only the returned matrices do.
+        Only the path-only branch (CLI, or Slicer volumes without a
+        storage node) reads via ``sitk.ReadImage`` and takes the
+        file's own matrix.
         """
         import SimpleITK as sitk
         from shank_core.io import image_ijk_ras_matrices
 
-        ct = ctx.get("ct")
-        ct_path = getattr(ct, "path", None) if ct is not None else None
         volume_node = (ctx.get("extras") or {}).get("volume_node")
 
+        if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
+            arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
+            img = sitk.GetImageFromArray(arr)
+            img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
+            ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
+            ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
+            self._apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+            return (
+                img,
+                np.asarray(ijk_to_ras, dtype=float),
+                np.asarray(ras_to_ijk, dtype=float),
+            )
+
+        ct = ctx.get("ct")
+        ct_path = getattr(ct, "path", None) if ct is not None else None
         if ct_path:
             img = sitk.ReadImage(str(ct_path))
         else:
             arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
             img = sitk.GetImageFromArray(arr)
             img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
-
-        if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-            ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
-            ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
-            # Align SITK's direction/origin with Slicer's so any
-            # downstream SITK physical-space computation agrees with
-            # the Slicer-scene frame. (Filters only use spacing, so
-            # setting direction/origin is a no-op for their outputs.)
-            self._apply_slicer_geometry_to_sitk(img, ijk_to_ras)
-        else:
-            ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
+        ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
         return (
             img,
             np.asarray(ijk_to_ras, dtype=float),
@@ -115,12 +113,10 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
             spacing = np.array(img.GetSpacing(), dtype=float)
             m = np.asarray(ijk_to_ras, dtype=float)
             origin_ras = m[:3, 3].copy()
-            # Each column of the rotation/scale part is spacing * direction
             dir_ras = np.zeros((3, 3), dtype=float)
             for k in range(3):
                 dir_ras[:, k] = m[:3, k] / max(1e-9, float(spacing[k]))
-            # RAS → LPS: flip X and Y components (rows of direction +
-            # X/Y of origin).
+            # RAS → LPS: flip X and Y components.
             origin_lps = np.array([-origin_ras[0], -origin_ras[1],
                                     origin_ras[2]], dtype=float)
             dir_lps = dir_ras.copy()
