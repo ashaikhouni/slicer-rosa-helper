@@ -114,7 +114,28 @@ BONE_FRAC_MAX = 0.75            # Empirically: real SEEG across T1 /
                                 # fraction ≤ 0.64 (T21 worst case).
                                 # T1 X12 FP (the cross-bone ghost
                                 # line) had 0.84. A 0.75 ceiling
-                                # cleanly separates them.
+                                # cleanly separates them. Moderate-
+                                # bone FPs that sneak past this are
+                                # caught downstream by the joint
+                                # ``(bone ≥ 0.5) AND (n_in < 9) AND
+                                # (amp_per < 1200)`` rule.
+BONE_SKIM_MIN_BONE_FRAC = 0.65  # Joint "cross-bone skim" FP filter.
+BONE_SKIM_MAX_N_INLIERS = 6     # Real SEEG shanks with bone ≥ 0.65
+BONE_SKIM_MAX_AMP_PER_IN = 1200.0
+                                # (T21 worst at 0.64) have many
+                                # inliers AND saturate amp; cross-
+                                # bone skim FPs stitch a handful of
+                                # sparse bone blobs with weak amp.
+                                # All three conditions together catch
+                                # the FP without touching real
+                                # high-bone shanks. Catches subject-
+                                # 137 X2 (bone 0.68, 6 inliers, 692
+                                # amp/inlier). The more moderate-
+                                # bone FP (X3 at bone 0.36) is close
+                                # enough to real high-bone shanks
+                                # (T22 at 0.36 with 7 inliers) that
+                                # we can't separate them with these
+                                # metrics alone.
 AIR_FRAC_MAX = 0.50  # real shanks crossing ventricles can hit ~35% air
                      # (CSF + small voids). Sinus FPs run >70%.
 AIR_SAMPLE_COUNT = 25
@@ -176,7 +197,7 @@ BOLT_HU_RESCUE_TUBE_RADIUS_MM = 5.0 # Wider tube radius for the HU
                                     # would miss bolts that are really
                                     # on-axis but appear 3-5 mm off
                                     # due to walker-axis tilt.
-BOLT_RESCUE_MIN_N_INLIERS = 10      # Min walker inliers on the stage-1 line
+BOLT_RESCUE_MIN_N_INLIERS = 10      # Min walker inliers on the stage-1 line (HU rescue)
 BOLT_RESCUE_MIN_ORIG_SPAN_MM = 25.0 # Min pre-extend contact span (mm)
 BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
                                     # penetrate at least 30 mm into the
@@ -2007,6 +2028,19 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             return None
         if bone_frac > BONE_FRAC_MAX:
             return None
+        # Cross-bone skim FP filter: bone-heavy path + few inliers +
+        # low per-inlier amp. Real SEEG shanks that pass through
+        # some bone still have enough inliers (≥ 9) and saturate
+        # amp (≥ 1200 per inlier); skim-FPs stitch a handful of
+        # sparse bone blobs with weak amplitudes (subject-137 X2,
+        # X3 examples).
+        if rec.get("source") == "stage1":
+            n_in = int(rec.get("n_inliers", 0))
+            amp_per = float(rec.get("amp_sum", 0.0)) / max(1, n_in)
+            if (bone_frac >= BONE_SKIM_MIN_BONE_FRAC
+                    and n_in <= BONE_SKIM_MAX_N_INLIERS
+                    and amp_per < BONE_SKIM_MAX_AMP_PER_IN):
+                return None
         rec["air_fraction"] = float(air_frac)
         rec["bone_fraction"] = float(bone_frac)
         rec["bolt_n_vox"] = int(bolt["n_vox"])
