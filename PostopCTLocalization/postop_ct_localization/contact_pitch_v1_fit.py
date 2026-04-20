@@ -119,6 +119,25 @@ BONE_FRAC_MAX = 0.75            # Empirically: real SEEG across T1 /
                                 # caught downstream by the joint
                                 # ``(bone ≥ 0.5) AND (n_in < 9) AND
                                 # (amp_per < 1200)`` rule.
+DEEP_TIP_NODATA_CHECK_LEN_MM = 20.0
+DEEP_TIP_NODATA_HU_THRESHOLD = -1000.0
+DEEP_TIP_NODATA_FRAC_MAX = 0.30
+                                # Volume-boundary FP filter: sample
+                                # HU along the last
+                                # DEEP_TIP_NODATA_CHECK_LEN_MM of
+                                # trajectory. If >
+                                # DEEP_TIP_NODATA_FRAC_MAX of samples
+                                # read as no-data (HU ≤ -1000, which
+                                # is the NIfTI background value for
+                                # voxels outside the oblique CT
+                                # acquisition region), the deep end
+                                # extends past the scanned volume.
+                                # Real trajectories end inside
+                                # brain tissue (HU 0-80); FP lines
+                                # that project past the FOV edge
+                                # (subject-137 X15) have their last
+                                # cm+ in the HU=-1024 background.
+
 BONE_SKIM_MIN_BONE_FRAC = 0.65  # Joint "cross-bone skim" FP filter.
 BONE_SKIM_MAX_N_INLIERS = 6     # Real SEEG shanks with bone ≥ 0.65
 BONE_SKIM_MAX_AMP_PER_IN = 1200.0
@@ -1268,6 +1287,54 @@ def _trajectory_hu_fractions(start_ras, end_ras, ct_arr_kji, ras_to_ijk_mat,
     return air_n / valid, bone_n / valid
 
 
+def _deep_tip_nodata_fraction(start_ras, end_ras, ct_arr_kji, ras_to_ijk_mat,
+                                check_len_mm=DEEP_TIP_NODATA_CHECK_LEN_MM,
+                                hu_threshold=DEEP_TIP_NODATA_HU_THRESHOLD,
+                                n_samples=11):
+    """Sample the last ``check_len_mm`` of the trajectory (measuring
+    inward from ``end_ras`` toward ``start_ras``) and return the
+    fraction of samples with HU ≤ ``hu_threshold`` (no-data voxels
+    outside the oblique CT acquisition region, typically -1024 in
+    NIfTI background).
+
+    Real trajectories end inside brain tissue (HU ~0-80); FPs whose
+    deep tip projects past the CT field of view have most of their
+    last cm+ sitting in -1024 background.
+    """
+    s = np.asarray(start_ras, dtype=float)
+    e = np.asarray(end_ras, dtype=float)
+    d = e - s
+    L = float(np.linalg.norm(d))
+    if L < 1.0:
+        return 0.0
+    axis = d / L
+    # Start of the check segment = max(0, L - check_len_mm) mm from s.
+    seg_len = float(min(check_len_mm, L))
+    seg_start = e - seg_len * axis
+    samples = np.linspace(seg_start, e, n_samples)
+    K, J, I = ct_arr_kji.shape
+    nodata = 0
+    valid = 0
+    for p in samples:
+        h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        i = int(round(float(ijk[0])))
+        j = int(round(float(ijk[1])))
+        k = int(round(float(ijk[2])))
+        if 0 <= k < K and 0 <= j < J and 0 <= i < I:
+            valid += 1
+            if float(ct_arr_kji[k, j, i]) <= hu_threshold:
+                nodata += 1
+        else:
+            # Sample is literally outside the image bounds → counts
+            # as no-data for our purposes.
+            valid += 1
+            nodata += 1
+    if valid == 0:
+        return 0.0
+    return nodata / valid
+
+
 def _trajectory_air_fraction(start_ras, end_ras, ct_arr_kji, ras_to_ijk_mat,
                               n_samples=AIR_SAMPLE_COUNT,
                               air_hu_threshold=AIR_HU_THRESHOLD):
@@ -2247,6 +2314,16 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         if air_frac > AIR_FRAC_MAX:
             return None
         if bone_frac > BONE_FRAC_MAX:
+            return None
+        # Volume-boundary check: trajectories that extend past the
+        # scanned CT FOV (oblique acquisition → -1024 HU in the
+        # extrapolated region) have their deep portion sitting in
+        # background voxels. Real trajectories end in brain tissue.
+        deep_nodata = _deep_tip_nodata_fraction(
+            rec.get("skull_entry_ras", rec["start_ras"]),
+            rec["end_ras"], ct_arr_kji, ras_to_ijk_mat,
+        )
+        if deep_nodata > DEEP_TIP_NODATA_FRAC_MAX:
             return None
         # Cross-bone skim FP filter: bone-heavy path + few inliers +
         # low per-inlier amp. Real SEEG shanks that pass through
