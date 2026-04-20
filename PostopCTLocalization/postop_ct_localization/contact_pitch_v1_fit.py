@@ -201,6 +201,21 @@ BOLT_HU_RESCUE_TUBE_RADIUS_MM = 5.0 # Wider tube radius for the HU
                                     # would miss bolts that are really
                                     # on-axis but appear 3-5 mm off
                                     # due to walker-axis tilt.
+AXIS_SKULL_SYNTH_STEP_MM = 0.5      # Third-tier rescue: when neither
+AXIS_SKULL_SYNTH_MAX_OUTWARD_MM = 80.0
+AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM = 15.0
+                                    # the LoG nor HU bolt pool finds
+                                    # an anchor AND the stage-1 line
+                                    # has strong-SEEG-chain evidence,
+                                    # walk outward along the walker
+                                    # axis until it crosses the hull
+                                    # boundary. Use the crossing as a
+                                    # synthetic skull_entry_ras and
+                                    # place the synthetic bolt_tip
+                                    # BOLT_PROTRUDE_MM further out.
+                                    # Recovers T4-class subjects
+                                    # whose bolts sit outside the CT
+                                    # acquisition window.
 BOLT_RESCUE_MIN_N_INLIERS = 10      # Min walker inliers on the stage-1 line (HU rescue)
 BOLT_RESCUE_MIN_ORIG_SPAN_MM = 25.0 # Min pre-extend contact span (mm)
 BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
@@ -1677,6 +1692,56 @@ STRONG_CONTACT_AMP_MIN = 1000.0  # Real SEEG contacts saturate their LoG
                                  # position used for deep-end clipping.
 
 
+def _axis_to_skull_synth(shallow_ras, deep_ras, dist_arr, ras_to_ijk_mat,
+                           step_mm=AXIS_SKULL_SYNTH_STEP_MM,
+                           max_outward_mm=AXIS_SKULL_SYNTH_MAX_OUTWARD_MM,
+                           bolt_protrude_mm=AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM,
+                           skull_band_mm=BOLT_BASE_MAX_DIST_MM):
+    """Synthesize a skull_entry_ras + bolt_tip_ras for a strong stage-1
+    line whose bolt CC couldn't be found. Walk outward from
+    ``shallow_ras`` along the axis (shallow → outside) until the hull
+    surface is crossed; return the skull-band position as
+    skull_entry, and a position ``bolt_protrude_mm`` further out as a
+    synthetic bolt_tip. Returns (None, None) when the axis doesn't
+    cross the hull within ``max_outward_mm`` (e.g., bolt outside the
+    CT acquisition window but axis still misses the skull — CT is
+    windowed out in that direction).
+    """
+    s = np.asarray(shallow_ras, dtype=float)
+    e = np.asarray(deep_ras, dtype=float)
+    d = s - e
+    L = float(np.linalg.norm(d))
+    if L < 1e-3:
+        return None, None
+    axis_out = d / L
+    K, J, I = dist_arr.shape
+
+    def _sample(p):
+        h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        i = int(np.clip(round(ijk[0]), 0, I - 1))
+        j = int(np.clip(round(ijk[1]), 0, J - 1))
+        k = int(np.clip(round(ijk[2]), 0, K - 1))
+        return float(dist_arr[k, j, i])
+
+    n_steps = int(max_outward_mm / step_mm)
+    skull_entry = None
+    for idx in range(0, n_steps + 1):
+        p = s + idx * step_mm * axis_out
+        d_at = _sample(p)
+        # skull_entry = outermost position still inside the skull/dura
+        # band (0 < dist ≤ skull_band_mm). Stop when we cross outside
+        # the hull (dist < 0).
+        if 0.0 <= d_at <= skull_band_mm:
+            skull_entry = p
+        elif d_at < 0.0:
+            break
+    if skull_entry is None:
+        return None, None
+    bolt_tip = skull_entry + float(bolt_protrude_mm) * axis_out
+    return skull_entry, bolt_tip
+
+
 def _clip_deep_end_to_inliers(rec,
                                 margin_mm=DEEP_END_MARGIN_PAST_LAST_CONTACT_MM):
     """Clip ``end_ras`` back so it sits no more than ``margin_mm`` past
@@ -2113,8 +2178,33 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             new_start, skull_entry, bolt = bwd
         else:
             new_start, skull_entry, bolt = fwd
+        # Axis-to-skull synthetic rescue: when both the LoG and HU
+        # bolt pools failed AND the walker line has strong-SEEG-chain
+        # evidence, synthesize a skull_entry + bolt_tip by walking
+        # the walker axis outward until it crosses the hull surface.
+        # Recovers T4-class subjects whose bolts sit outside the CT
+        # acquisition window (so no bolt CC at any threshold).
+        bolt_from_synth = None
+        if new_start is None and _is_rescue_candidate(rec):
+            s0, e0 = _orient_shallow_to_deep(
+                rec["start_ras"], rec["end_ras"],
+                dist_arr, ras_to_ijk_mat,
+            )
+            synth_skull, synth_tip = _axis_to_skull_synth(
+                s0, e0, dist_arr, ras_to_ijk_mat,
+            )
+            if synth_skull is not None:
+                rec["start_ras"] = np.asarray(s0, dtype=float)
+                rec["end_ras"] = np.asarray(e0, dtype=float)
+                new_start = synth_tip
+                skull_entry = synth_skull
+                bolt_from_synth = {"n_vox": 0, "dist_min_mm": float("nan"),
+                                    "id": -1}
         if new_start is None:
             return None
+        if bolt_from_synth is not None:
+            bolt = bolt_from_synth
+            rec["bolt_source"] = "axis_synth"
         rec["start_ras"] = np.asarray(new_start, dtype=float)
         if skull_entry is not None:
             rec["skull_entry_ras"] = np.asarray(skull_entry, dtype=float)
