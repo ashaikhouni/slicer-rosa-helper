@@ -74,29 +74,18 @@ DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
 DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
                                 # top-of-skull depths (T21 L_8/L_9/L_13)
                                 # only reach ~15-20 mm intracranial.
-DEEP_TIP_SHORT_SPAN_MM = 60.0   # ``original_span_mm`` threshold below
-                                # which we consider a walker line a
-                                # short-line candidate. Covers T21
-                                # L_8-style 5-contact superficial
-                                # shanks AND full-length 13-16 contact
-                                # lateral shanks (AMC099 L_10 has true
-                                # span 45 mm; walker over-extension
-                                # brings it to 54 mm). The avg-pitch ≤
-                                # 7 mm gate is what actually keeps
-                                # sinus / vessel FPs out; span is just
-                                # a sanity cap. Raised from 45 → 60 to
-                                # recover laterally-placed electrodes
-                                # with dist_max < 30 mm.
 DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
-                                # Additional gate: short-rule only
-                                # applies if the walker line's
-                                # average inter-contact gap stays
-                                # within physically plausible SEEG
-                                # pitch (Dixi 3.5 / PMT 3.97–4.43
-                                # mm). A 5-blob line spanning 37 mm
-                                # = 9 mm avg gap is either a
-                                # cross-shank bridge or a mis-pitch
-                                # fit — strict 30 mm floor applies.
+                                # Deep-tip prior discriminator: walker
+                                # lines whose pre-extend inter-contact
+                                # gap averages ≤ this get the relaxed
+                                # DEEP_TIP_MIN_SHORT_MM=15 floor; any
+                                # wider avg pitch means "not a real
+                                # SEEG chain" → strict DEEP_TIP_MIN_MM
+                                # floor. 7 mm covers Dixi (3.5),
+                                # PMT 16B/C (3.97 / 4.43), and
+                                # over-extension slack up to 2× nominal
+                                # pitch. Cross-shank bridges + sinus
+                                # FPs land well above 7 mm avg.
 # Minimum mean intracranial depth of walker inliers. Real SEEG
 # contacts sit 5-50 mm inside the hull surface; ghost "contacts"
 # produced by bone / skull artifacts cluster at hull_dist 0-3 mm.
@@ -980,9 +969,11 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
 
     # Deep-tip prior: real shanks' deepest inlier sits ≥ DEEP_TIP_MIN_MM
     # head-distance from hull. Skull-/bone-assembled spurious lines
-    # have every inlier at head_distance ≤ 0. Short lines (inlier
-    # span ≤ DEEP_TIP_SHORT_SPAN_MM) use the relaxed 15 mm threshold
-    # so superficial top-of-skull depths (T21 L_8 / L_9 / L_13) are
+    # have every inlier at head_distance ≤ 0. Lines that look like a
+    # real SEEG chain (avg pre-extend pitch ≤ DEEP_TIP_SHORT_MAX_AVG_PITCH_MM)
+    # use the relaxed DEEP_TIP_MIN_SHORT_MM floor so superficial
+    # top-of-skull depths (T21 L_8 / L_9 / L_13) and laterally-placed
+    # full-length shanks with shallow deep tips (AMC099 L_10, L_31) are
     # not dropped; longer lines keep the strict 30 mm floor to
     # continue killing sinus / skull-base tube FPs.
     K, J, I = dist_arr.shape
@@ -999,23 +990,20 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         l["dist_min_mm"] = float(inlier_dists.min())
         l["dist_max_mm"] = float(inlier_dists.max())
         l["dist_mean_mm"] = float(inlier_dists.mean())
-        # Use the pre-extend span when available — ``_extend_deep_end``
-        # can absorb cross-shank contacts and grow a genuinely-short
-        # walker line past the short-span threshold (T21 L_13 went
-        # 19→46 mm this way). The pre-extend span is what the walker
-        # actually locked onto, so it's the honest "is this short?"
-        # signal for the deep-tip rule. Additional average-pitch gate
-        # rejects short walker lines whose inter-contact gap is too
-        # wide to be a real SEEG electrode — those are usually
-        # cross-shank bridges sneaking in via MAX_INLIER_GAP_MM slack.
+        # "Looks like a real SEEG chain" → relaxed deep-tip floor. The
+        # discriminator is the pre-extend average pitch: real electrodes
+        # sit in a narrow 3–7 mm pitch band; cross-shank bridges and
+        # sinus / vessel FPs land outside it. Span isn't a safe
+        # signal — laterally-placed electrodes can be full-length
+        # (45–60 mm) yet have shallow dist_max (AMC099 L_10, another
+        # case L_31 at 60.1 mm span / 23 mm dist_max both real).
+        # ``original_span_mm`` is the pre-extend value so cross-shank
+        # absorption by ``_extend_deep_end`` doesn't skew the average.
         orig_span = float(l.get("original_span_mm", l.get("span_mm", 0.0)))
         n_blobs = max(2, int(l.get("n_blobs", 0)))
         avg_pitch = orig_span / (n_blobs - 1) if n_blobs > 1 else float("inf")
-        is_short = (
-            orig_span <= DEEP_TIP_SHORT_SPAN_MM
-            and avg_pitch <= DEEP_TIP_SHORT_MAX_AVG_PITCH_MM
-        )
-        min_dist = DEEP_TIP_MIN_SHORT_MM if is_short else DEEP_TIP_MIN_MM
+        looks_like_seeg = avg_pitch <= DEEP_TIP_SHORT_MAX_AVG_PITCH_MM
+        min_dist = DEEP_TIP_MIN_SHORT_MM if looks_like_seeg else DEEP_TIP_MIN_MM
         if l["dist_max_mm"] < min_dist:
             continue
         l["start_ras"], l["end_ras"] = _orient_shallow_to_deep(
