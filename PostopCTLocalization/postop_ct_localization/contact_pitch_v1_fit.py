@@ -1773,12 +1773,11 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
     return last_hit
 
 
-STRONG_CONTACT_AMP_MIN = 1000.0  # Real SEEG contacts saturate their LoG
-                                 # response at 1500-2000; weak blobs
-                                 # below this floor (wire / noise /
-                                 # extension over-reach) should not
-                                 # anchor the "last real contact"
-                                 # position used for deep-end clipping.
+# (STRONG_CONTACT_AMP_MIN removed — per-subject LoG amplitudes vary
+# too widely to share a single threshold. T4 saturates at ~1500
+# while T22 hits 2200+; a fixed 1000 floor excluded most T4 inliers,
+# collapsing the clip ceiling. Walker inliers are already vetted by
+# the pitch + geometry tests, so the clip trusts them all.)
 
 
 def _axis_to_skull_synth(shallow_ras, deep_ras, dist_arr, ras_to_ijk_mat,
@@ -1831,17 +1830,17 @@ def _axis_to_skull_synth(shallow_ras, deep_ras, dist_arr, ras_to_ijk_mat,
     return skull_entry, bolt_tip
 
 
-def _clip_deep_end_to_inliers(rec,
+def _clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
                                 margin_mm=DEEP_END_MARGIN_PAST_LAST_CONTACT_MM):
     """Clip ``end_ras`` back so it sits no more than ``margin_mm`` past
-    the deepest STRONG walker inlier (LoG amp ≥
-    STRONG_CONTACT_AMP_MIN) projected onto the shank axis. Keeps the
-    trajectory from running past the real last contact into bone /
-    empty space, independent of LoG thresholds a bone artifact could
-    trip.
+    the deepest walker inlier projected onto the shank axis. Walker
+    inliers are already vetted by pitch + geometry tests in the
+    walker + extension stages, so a separate LoG-amp filter is
+    redundant and brittle across subjects with varying saturation
+    (T4 saturates at ~1500, T22 at 2200+). All inliers count.
 
     No-op when the trajectory has no ``inlier_ras`` (e.g., stage-2
-    Frangi trajectories that skip the walker), or no strong inlier.
+    Frangi trajectories that skip the walker).
     """
     inliers = rec.get("inlier_ras")
     if inliers is None or len(inliers) == 0:
@@ -1853,14 +1852,7 @@ def _clip_deep_end_to_inliers(rec,
     if L < 1e-3:
         return None
     axis = d / L
-    amps = rec.get("inlier_amps")
     pts = np.asarray(inliers, dtype=float)
-    if amps is not None and len(amps) == len(pts):
-        mask = np.asarray(amps, dtype=float) >= STRONG_CONTACT_AMP_MIN
-        if mask.any():
-            pts = pts[mask]
-    if len(pts) == 0:
-        return None
     proj = (pts - start) @ axis
     max_proj = float(proj.max())
     ceiling = max_proj + float(margin_mm)
