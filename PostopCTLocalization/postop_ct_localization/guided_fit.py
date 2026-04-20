@@ -592,9 +592,26 @@ class GuidedFitWidgetMixin:
                 space_name="ROSA_BASE",
                 workflow_node=self.workflowNode,
             )
+            # Merge (don't replace) into WorkingTrajectoryLines so the
+            # seed trajectories that fed Guided Fit stay visible in the
+            # workflow. ``publish_nodes`` replaces the role's node list,
+            # which silently dropped the seeds after a Guided Fit run.
+            existing_working = self.workflowPublisher.state.role_nodes(
+                "WorkingTrajectoryLines", workflow_node=self.workflowNode,
+            )
+            seen_ids = set()
+            merged = []
+            for n in list(existing_working) + list(applied_nodes):
+                if n is None:
+                    continue
+                nid = n.GetID()
+                if nid in seen_ids:
+                    continue
+                seen_ids.add(nid)
+                merged.append(n)
             self.workflowPublisher.publish_nodes(
                 role="WorkingTrajectoryLines",
-                nodes=applied_nodes,
+                nodes=merged,
                 source="postop_ct_guided_fit",
                 space_name="ROSA_BASE",
                 workflow_node=self.workflowNode,
