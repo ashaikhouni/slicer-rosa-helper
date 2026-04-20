@@ -144,6 +144,51 @@ CROSS_STAGE_DEDUP_PERP_MM = 8.0
 # tiny fragments, neither of which gives a reliable axis. Instead, the
 # anchor step tests whether enough of each bolt CC's voxels sit in a
 # narrow tube around the candidate shank axis.
+BOLT_HU_RESCUE_THRESHOLD = 2000.0   # HU threshold for the per-line
+                                    # bolt rescue pool. Titanium bolts
+                                    # saturate well above 2000 HU while
+                                    # cortical bone peaks around 1500;
+                                    # the gap cleanly separates the two.
+                                    # Used only on strong stage-1 lines
+                                    # whose primary LoG-based anchor
+                                    # failed (T4 / ct88 pattern where
+                                    # the bolt's LoG signature falls
+                                    # below BOLT_LOG_THRESHOLD = 800).
+                                    # Tube-filtered per line before
+                                    # being offered to the anchor, so
+                                    # the secondary pool never leaks
+                                    # into global detection.
+BOLT_HU_RESCUE_HULL_PROX_MM = 5.0   # Loosened hull-proximity gate for
+                                    # the HU rescue pool. Thin-wire PMT
+                                    # designs place the bolt-like dense
+                                    # structure 2-5 mm inside the hull
+                                    # rather than poking through; the
+                                    # 2 mm primary gate would reject
+                                    # them. Per-line tube filtering
+                                    # still keeps far-away CCs out.
+BOLT_HU_RESCUE_TUBE_RADIUS_MM = 5.0 # Wider tube radius for the HU
+                                    # rescue anchor. The walker's axis
+                                    # can drift 1-3° from the true
+                                    # shank axis, which over a 40-60 mm
+                                    # outward reach (thin-wire PMT)
+                                    # adds 1-3 mm lateral offset at
+                                    # the bolt. The primary 3 mm tube
+                                    # would miss bolts that are really
+                                    # on-axis but appear 3-5 mm off
+                                    # due to walker-axis tilt.
+BOLT_RESCUE_MIN_N_INLIERS = 10      # Min walker inliers on the stage-1 line
+BOLT_RESCUE_MIN_ORIG_SPAN_MM = 25.0 # Min pre-extend contact span (mm)
+BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
+                                    # penetrate at least 30 mm into the
+                                    # brain; shallower "lines" are
+                                    # typically bolt/skull artifact
+                                    # chains that happen to be long
+                                    # enough to trigger the rescue
+                                    # candidate check. Tighter than
+                                    # BOLT_RESCUE_MIN_N_INLIERS alone
+                                    # because n=10 shallow chains can
+                                    # form on the skull surface.
+
 BOLT_LOG_THRESHOLD = 800.0          # |LoG| magnitude gate for bolt CCs.
                                     # Higher than LOG_BLOB_THRESHOLD
                                     # (300, for contacts) because
@@ -1216,18 +1261,25 @@ def extract_bolt_candidates(log_arr, dist_arr, ijk_to_ras_mat, spacing_xyz,
                              threshold=BOLT_LOG_THRESHOLD,
                              min_voxels=BOLT_MIN_VOXELS,
                              hull_proximity_mm=BOLT_HULL_PROXIMITY_MM,
-                             ras_to_ijk_mat=None):
-    """Find bolt candidate CCs in the LoG σ=1 cloud.
+                             ras_to_ijk_mat=None,
+                             ct_arr=None,
+                             hu_threshold=None):
+    """Find bolt candidate CCs in the LoG σ=1 cloud, or (when ``ct_arr``
+    + ``hu_threshold`` are supplied) in the raw-HU cloud.
 
-    Any CC of bright-metal LoG minima that touches or pokes through the
-    hull surface is a bolt candidate. No axis/linearity check here —
-    the anchor step uses the shank's axis, not the CC's.
+    LoG mode (default): CCs of ``log_arr ≤ -|threshold|``. HU mode:
+    CCs of ``ct_arr ≥ hu_threshold``. Either way, every CC must touch
+    or poke through the hull surface — bolts sit at the skull; shafts
+    buried entirely inside brain don't qualify.
 
     Returns (bolts, bolt_mask). Each bolt dict has: pts_ras, n_vox,
     dist_min_mm, dist_max_mm.
     """
     import SimpleITK as sitk
-    cloud = (log_arr <= -abs(threshold)).astype(np.uint8)
+    if ct_arr is not None and hu_threshold is not None:
+        cloud = (ct_arr >= float(hu_threshold)).astype(np.uint8)
+    else:
+        cloud = (log_arr <= -abs(threshold)).astype(np.uint8)
     bin_img = sitk.GetImageFromArray(cloud)
     cc_filt = sitk.ConnectedComponentImageFilter()
     cc_filt.SetFullyConnected(True)
@@ -1766,6 +1818,20 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         log1, dist_arr, ijk_to_ras_mat, img.GetSpacing(),
     )
     _log(f"bolt extraction: {len(bolts)} bolt candidates")
+    # Secondary HU-based bolt pool. Titanium bolts saturate above 2000
+    # HU regardless of their LoG-σ=1 response, so this catches bolts
+    # that the LoG extractor misses (e.g., T4, ct88 subjects with
+    # weaker LoG bolt signature). Used only as a per-line rescue: the
+    # anchor retries against this pool, tube-filtered to the specific
+    # shank, when the primary LoG pool yielded no anchor for a
+    # high-confidence stage-1 line. Never offered globally.
+    rescue_bolts_hu, _ = extract_bolt_candidates(
+        log1, dist_arr, ijk_to_ras_mat, img.GetSpacing(),
+        ct_arr=ct_arr_kji, hu_threshold=BOLT_HU_RESCUE_THRESHOLD,
+        hull_proximity_mm=BOLT_HU_RESCUE_HULL_PROX_MM,
+    )
+    _log(f"bolt rescue pool (HU ≥ {BOLT_HU_RESCUE_THRESHOLD:.0f}): "
+         f"{len(rescue_bolts_hu)} candidates")
 
     def _assemble(l, source):
         rec = dict(
@@ -1788,7 +1854,74 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             # bolt-tip → deep-tip length, so downstream classifiers
             # need this field to see the true contact span.
             rec["contact_span_mm"] = float(l.get("span_mm", 0.0))
+            # Pre-extend walker span, used by the HU rescue's "strong
+            # stage-1" gate.
+            rec["original_span_mm"] = float(
+                l.get("original_span_mm", l.get("span_mm", 0.0))
+            )
         return rec
+
+    def _filter_bolts_near_axis(bolt_list, start_ras, end_ras,
+                                   tube_radius_mm=BOLT_TUBE_RADIUS_MM,
+                                   outward_mm=BOLT_SEARCH_OUTWARD_MM,
+                                   inward_mm=BOLT_MAX_INWARD_ALONG_MM):
+        """Keep only bolt CCs whose voxels sit within the shank's tube.
+        Per-line spatial gate for the HU rescue so the secondary pool
+        never acts globally.
+        """
+        s = np.asarray(start_ras, dtype=float)
+        e = np.asarray(end_ras, dtype=float)
+        d = e - s
+        L = float(np.linalg.norm(d))
+        if L < 1e-6:
+            return []
+        axis = d / L
+        out = []
+        for b in bolt_list:
+            pts = b.get("pts_ras")
+            if pts is None or len(pts) == 0:
+                continue
+            diffs = np.asarray(pts) - s
+            along = diffs @ axis
+            perp_vec = diffs - np.outer(along, axis)
+            perp = np.linalg.norm(perp_vec, axis=1)
+            in_tube = (
+                (perp <= tube_radius_mm)
+                & (along <= inward_mm)
+                & (along >= -outward_mm)
+            )
+            if int(in_tube.sum()) >= BOLT_MIN_TUBE_VOXELS:
+                out.append(b)
+        return out
+
+    def _is_rescue_candidate(rec):
+        """Strong-SEEG-chain gate for the HU bolt rescue.
+
+        A real SEEG electrode's walker pre-extension line has Dixi/PMT
+        pitch (3-5 mm). ``_extend_deep_end`` can stitch over a wire gap
+        to reach the bolt region, which inflates the post-extend avg
+        pitch. Use the smaller of ``original_span_mm`` and
+        ``contact_span_mm`` for the pitch check so a valid pre-extend
+        chain isn't rejected because extension grew the span past the
+        7 mm cap (ct88 L_39: pre-ext 18.5 mm, post-ext 77 mm).
+        """
+        if rec.get("source") != "stage1":
+            return False
+        n = int(rec.get("n_inliers", 0))
+        if n < BOLT_RESCUE_MIN_N_INLIERS:
+            return False
+        dist_max = float(rec.get("dist_max_mm", 0.0))
+        if dist_max < BOLT_RESCUE_MIN_DIST_MAX_MM:
+            return False
+        span_post = float(rec.get("contact_span_mm", rec.get("length_mm", 0.0)))
+        span_pre = float(rec.get("original_span_mm", span_post))
+        # Minimum is the least-extended span; prefer it since extension
+        # is what inflates avg_pitch on thin-wire PMT lines.
+        span_for_pitch = min(span_pre, span_post) if span_pre > 0 else span_post
+        avg_pitch = span_for_pitch / (n - 1) if n > 1 else float("inf")
+        if avg_pitch > DEEP_TIP_SHORT_MAX_AVG_PITCH_MM:
+            return False
+        return True
 
     # Anchor each candidate to a bolt BEFORE dedup. No bolt == not a
     # real electrode. Then apply length and air-sinus filters; both
@@ -1803,14 +1936,45 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         # bolt CC decide by trying both orientations and keeping the
         # one whose bolt anchor has more tube voxels. Falls back to
         # either non-None result when only one orientation anchors.
-        fwd = anchor_trajectory_to_bolt(
-            rec["start_ras"], rec["end_ras"], bolts,
-        )
-        bwd = anchor_trajectory_to_bolt(
-            rec["end_ras"], rec["start_ras"], bolts,
-        )
-        fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
-        bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
+        def _try_anchor(bolt_pool):
+            fwd = anchor_trajectory_to_bolt(
+                rec["start_ras"], rec["end_ras"], bolt_pool,
+            )
+            bwd = anchor_trajectory_to_bolt(
+                rec["end_ras"], rec["start_ras"], bolt_pool,
+            )
+            fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
+            bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
+            return fwd, bwd, fwd_n, bwd_n
+
+        fwd, bwd, fwd_n, bwd_n = _try_anchor(bolts)
+        # HU rescue: only when the primary LoG pool finds nothing AND
+        # the stage-1 line looks unambiguously like a real SEEG chain.
+        # The rescue bolts are tube-filtered to this specific shank so
+        # the secondary HU pool never anchors anything off-axis.
+        if fwd_n == 0 and bwd_n == 0 and _is_rescue_candidate(rec):
+            local = _filter_bolts_near_axis(
+                rescue_bolts_hu, rec["start_ras"], rec["end_ras"],
+                tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
+            )
+            if local:
+                # Widened anchor tube too: walker axis can drift 1-3°
+                # from true shank axis, pushing the bolt up to 3-5 mm
+                # perpendicular even when it's really on-axis.
+                def _try_anchor_wide(bolt_pool):
+                    fwd = anchor_trajectory_to_bolt(
+                        rec["start_ras"], rec["end_ras"], bolt_pool,
+                        tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
+                    )
+                    bwd = anchor_trajectory_to_bolt(
+                        rec["end_ras"], rec["start_ras"], bolt_pool,
+                        tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
+                    )
+                    fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
+                    bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
+                    return fwd, bwd, fwd_n, bwd_n
+                fwd, bwd, fwd_n, bwd_n = _try_anchor_wide(local)
+
         if bwd_n > fwd_n:
             # Orientation was wrong; flip before writing results back.
             rec["start_ras"], rec["end_ras"] = (
