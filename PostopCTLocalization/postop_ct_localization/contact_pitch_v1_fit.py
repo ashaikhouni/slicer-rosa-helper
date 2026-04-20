@@ -1601,16 +1601,22 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
                                     max_extend_mm=AXIS_REFINE_MAX_MM,
                                     min_abs_log=AXIS_REFINE_MIN_ABS,
                                     miss_mm=AXIS_REFINE_MISS_MM):
-    """Walk strictly along the axis outward from ``end_ras`` sampling
-    LoG; return the RAS point of the deepest on-axis position that still
-    sees strong contact signal, or ``None`` if no extension is warranted.
+    """Normalize ``end_ras`` so it sits on the last real contact peak
+    along the trajectory axis.
 
-    The stopping rule is ``miss_mm`` consecutive millimetres of LoG
-    above ``−min_abs_log``. Contacts oscillate the LoG down to ≤ −500
-    every 3.5 mm; a clean miss-run of a few mm means the real electrode
-    has ended. Walking stays on the original axis — curving or
-    off-axis snapping accumulated drift and shifted midpoints onto
-    adjacent structures in testing.
+    Two passes share the same stopping rule (``miss_mm`` consecutive
+    mm of LoG above ``-min_abs_log``):
+
+      * Forward: walk outward past the current end. Fixes cases where
+        individual deep-contact LoG minima merged into one bright
+        shaft and the 3-D blob extractor missed them (T2 RAI).
+      * Backward (clip-back): when the current end sits past the last
+        real contact (walker / extension / anchor over-reach, e.g.
+        subject-137 L_3's thin-wire PMT), walk INWARD until the first
+        strong-LoG position and clip end to it.
+
+    Returns a new ``end_ras`` point or ``None`` when neither direction
+    finds a contact peak (end is far from any contact signal).
     """
     start = np.asarray(rec.get("start_ras"), dtype=float)
     end = np.asarray(rec.get("end_ras"), dtype=float)
@@ -1620,30 +1626,44 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
         return None
     axis = d / L
     K, J, I = log_arr.shape
-    n_steps = int(max_extend_mm / step_mm)
-    miss_steps_allowed = max(1, int(miss_mm / step_mm))
-    last_hit = end.copy()
-    consecutive_miss = 0
-    saw_any_hit = False
-    for s in range(1, n_steps + 1):
-        p = end + s * step_mm * axis
+
+    def _sample(p):
         h = np.array([float(p[0]), float(p[1]), float(p[2]), 1.0])
         ijk = (ras_to_ijk_mat @ h)[:3]
         i = int(np.clip(round(ijk[0]), 0, I - 1))
         j = int(np.clip(round(ijk[1]), 0, J - 1))
         k = int(np.clip(round(ijk[2]), 0, K - 1))
-        v = float(log_arr[k, j, i])
-        if v <= -min_abs_log:
+        return float(log_arr[k, j, i])
+
+    # Forward pass (extend).
+    n_steps = int(max_extend_mm / step_mm)
+    miss_steps_allowed = max(1, int(miss_mm / step_mm))
+    last_hit = None
+    if _sample(end) <= -min_abs_log:
+        last_hit = end.copy()
+    consecutive_miss = 0
+    for s in range(1, n_steps + 1):
+        p = end + s * step_mm * axis
+        if _sample(p) <= -min_abs_log:
             last_hit = p
-            saw_any_hit = True
             consecutive_miss = 0
         else:
             consecutive_miss += 1
             if consecutive_miss >= miss_steps_allowed:
                 break
-    if not saw_any_hit:
-        return None
-    return last_hit
+    if last_hit is not None:
+        return last_hit
+
+    # Backward clip-back: current end had no LoG and no forward hit, so
+    # walk inward along the axis to find the last real contact peak.
+    # Bound by the trajectory length — never cross start_ras.
+    max_inward_mm = min(max_extend_mm, L - 1.0)
+    n_back_steps = max(1, int(max_inward_mm / step_mm))
+    for s in range(1, n_back_steps + 1):
+        p = end - s * step_mm * axis
+        if _sample(p) <= -min_abs_log:
+            return p
+    return None
 
 
 # ---- Cross-stage dedup -----------------------------------------------
