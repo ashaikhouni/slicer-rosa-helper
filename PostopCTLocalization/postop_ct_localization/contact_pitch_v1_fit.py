@@ -1458,6 +1458,14 @@ AXIS_REFINE_STEP_MM = 0.5
 AXIS_REFINE_MAX_MM = 40.0    # never extend further than this past end_ras
 AXIS_REFINE_MIN_ABS = 300.0  # match LOG_BLOB_THRESHOLD (contact signal)
 AXIS_REFINE_MISS_MM = 3.0    # 3 mm of LoG above -threshold → stop
+DEEP_END_MARGIN_PAST_LAST_CONTACT_MM = 5.0
+                             # Hard cap on how far the deep end can
+                             # sit past the deepest real contact
+                             # (walker inlier). No SEEG electrode has
+                             # a large gap past the last contact, so
+                             # anything further is walker/extension
+                             # over-reach. 5 mm ≈ one contact pitch
+                             # gives slack for walker-axis drift.
 
 # Post-refinement crossing-tip retreat. If a deep tip ends up inside
 # another trajectory's contact-acceptance tube (perp ≤ this), the
@@ -1654,16 +1662,57 @@ def _refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
     if last_hit is not None:
         return last_hit
 
-    # Backward clip-back: current end had no LoG and no forward hit, so
-    # walk inward along the axis to find the last real contact peak.
-    # Bound by the trajectory length — never cross start_ras.
-    max_inward_mm = min(max_extend_mm, L - 1.0)
-    n_back_steps = max(1, int(max_inward_mm / step_mm))
-    for s in range(1, n_back_steps + 1):
-        p = end - s * step_mm * axis
-        if _sample(p) <= -min_abs_log:
-            return p
+    # No backward LoG-walk here — clipping against last-real-contact
+    # is handled by the inlier-based pass (_clip_deep_end_to_inliers)
+    # which is independent of LoG thresholds and so doesn't stop at
+    # bone artifacts past the contact array.
     return None
+
+
+STRONG_CONTACT_AMP_MIN = 1000.0  # Real SEEG contacts saturate their LoG
+                                 # response at 1500-2000; weak blobs
+                                 # below this floor (wire / noise /
+                                 # extension over-reach) should not
+                                 # anchor the "last real contact"
+                                 # position used for deep-end clipping.
+
+
+def _clip_deep_end_to_inliers(rec,
+                                margin_mm=DEEP_END_MARGIN_PAST_LAST_CONTACT_MM):
+    """Clip ``end_ras`` back so it sits no more than ``margin_mm`` past
+    the deepest STRONG walker inlier (LoG amp ≥
+    STRONG_CONTACT_AMP_MIN) projected onto the shank axis. Keeps the
+    trajectory from running past the real last contact into bone /
+    empty space, independent of LoG thresholds a bone artifact could
+    trip.
+
+    No-op when the trajectory has no ``inlier_ras`` (e.g., stage-2
+    Frangi trajectories that skip the walker), or no strong inlier.
+    """
+    inliers = rec.get("inlier_ras")
+    if inliers is None or len(inliers) == 0:
+        return None
+    start = np.asarray(rec.get("start_ras"), dtype=float)
+    end = np.asarray(rec.get("end_ras"), dtype=float)
+    d = end - start
+    L = float(np.linalg.norm(d))
+    if L < 1e-3:
+        return None
+    axis = d / L
+    amps = rec.get("inlier_amps")
+    pts = np.asarray(inliers, dtype=float)
+    if amps is not None and len(amps) == len(pts):
+        mask = np.asarray(amps, dtype=float) >= STRONG_CONTACT_AMP_MIN
+        if mask.any():
+            pts = pts[mask]
+    if len(pts) == 0:
+        return None
+    proj = (pts - start) @ axis
+    max_proj = float(proj.max())
+    ceiling = max_proj + float(margin_mm)
+    if L <= ceiling:
+        return None
+    return start + ceiling * axis
 
 
 # ---- Cross-stage dedup -----------------------------------------------
@@ -1843,11 +1892,37 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     _log(
         f"stage 1: blob-pitch walker — pitches={[f'{p:.2f}' for p in resolved_pitches]} mm"
     )
-    stage1_lines, _pts_blobs = run_stage1(
+    stage1_lines, pts_blobs = run_stage1(
         log1, kji_to_ras, dist_arr, ras_to_ijk_mat,
         pitches_mm=resolved_pitches,
     )
     _log(f"stage 1: {len(stage1_lines)} candidate lines after walk + arbitrate + extend")
+    # Attach inlier RAS coords AND LoG amplitudes to each stage-1 line
+    # so post-anchor refinement can clip the deep end to the last
+    # STRONG real contact (weak/noisy blobs added by extension don't
+    # count as legit deep endpoints).
+    import numpy as _np
+    # Re-derive LoG amplitudes at each contact-sized blob position —
+    # pts_blobs is already the contact-filtered cloud, so indexing
+    # matches line["inlier_idx"].
+    try:
+        K, J, I = log1.shape
+        h_all = _np.concatenate([pts_blobs, _np.ones((pts_blobs.shape[0], 1))], axis=1)
+        ijk_all = (ras_to_ijk_mat @ h_all.T).T[:, :3]
+        ii = _np.clip(_np.round(ijk_all[:, 0]).astype(int), 0, I - 1)
+        jj = _np.clip(_np.round(ijk_all[:, 1]).astype(int), 0, J - 1)
+        kk = _np.clip(_np.round(ijk_all[:, 2]).astype(int), 0, K - 1)
+        blob_amps = _np.abs(log1[kk, jj, ii]).astype(_np.float32)
+    except Exception:
+        blob_amps = None
+    for l in stage1_lines:
+        try:
+            l["inlier_ras"] = _np.asarray(pts_blobs[l["inlier_idx"]], dtype=float)
+            if blob_amps is not None:
+                l["inlier_amps"] = _np.asarray(blob_amps[l["inlier_idx"]], dtype=float)
+        except Exception:
+            l["inlier_ras"] = None
+            l["inlier_amps"] = None
     excl = compute_exclusion_mask(
         frangi_s1.shape, stage1_lines, ras_to_ijk_mat,
     )
@@ -1904,6 +1979,15 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             rec["original_span_mm"] = float(
                 l.get("original_span_mm", l.get("span_mm", 0.0))
             )
+            # Inlier RAS coords + amplitudes — used by the deep-end
+            # refinement to clip at last-STRONG-contact + small margin
+            # (independent of LoG thresholds).
+            inlier_ras = l.get("inlier_ras")
+            if inlier_ras is not None:
+                rec["inlier_ras"] = np.asarray(inlier_ras, dtype=float)
+            inlier_amps = l.get("inlier_amps")
+            if inlier_amps is not None:
+                rec["inlier_amps"] = np.asarray(inlier_amps, dtype=float)
         return rec
 
     def _filter_bolts_near_axis(bolt_list, start_ras, end_ras,
@@ -2108,8 +2192,13 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         )
         if new_end is not None:
             rec["end_ras"] = new_end
-            # length_mm follows the post-anchor bolt_tip→deep_tip
-            # convention. Re-measure now that end_ras moved.
+        # Hard cap: end must sit within DEEP_END_MARGIN_PAST_LAST_CONTACT_MM
+        # of the deepest walker inlier. No SEEG electrode has a long gap
+        # past its last contact; anything further is over-reach.
+        clipped = _clip_deep_end_to_inliers(rec)
+        if clipped is not None:
+            rec["end_ras"] = clipped
+        if new_end is not None or clipped is not None:
             rec["length_mm"] = float(
                 np.linalg.norm(
                     np.asarray(rec["end_ras"]) - np.asarray(rec["start_ras"])
