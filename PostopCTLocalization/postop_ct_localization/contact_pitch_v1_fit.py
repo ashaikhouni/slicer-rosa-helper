@@ -152,7 +152,11 @@ MIN_POST_ANCHOR_LEN_MM = 30.0   # short superficial depths (~20 mm
                                  # the walker's 5-blob floor + avg-pitch
                                  # gate block fragment / hardware FPs
                                  # that might slip under a 30 mm cap.
-MAX_POST_ANCHOR_LEN_MM = 130.0
+MAX_POST_ANCHOR_LEN_MM = 140.0  # Was 130. Bumped to recover subject-137
+                                # L_3 (thin-wire PMT: 84 mm shank + wire
+                                # gap + bolt → anchored length 132 mm).
+                                # Still catches venous sinus / vessel
+                                # FPs (typically > 160 mm).
 
 # Cross-stage dedup (applied AFTER bolt anchoring).
 CROSS_STAGE_DEDUP_ANGLE_DEG = 15.0
