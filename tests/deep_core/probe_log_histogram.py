@@ -45,7 +45,7 @@ import SimpleITK as sitk
 
 from postop_ct_localization.contact_pitch_v1_fit import (
     build_masks, log_sigma, extract_blobs,
-    LOG_SIGMA_MM, LOG_BLOB_THRESHOLD,
+    LOG_SIGMA_MM, LOG_BLOB_THRESHOLD, HU_CLIP_MAX,
 )
 
 
@@ -84,6 +84,10 @@ def _probe_subject(subject: str, ct_path: Path) -> dict:
     """Return one row of measurements for one subject."""
     t0 = time.perf_counter()
     img = sitk.ReadImage(str(ct_path))
+    # Mirror the scanner-invariance clip that run_two_stage_detection
+    # applies, so this probe measures the distribution the walker
+    # actually sees.
+    img = sitk.Clamp(img, lowerBound=-1024.0, upperBound=HU_CLIP_MAX)
     hull, intracranial, _dist = build_masks(img)
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
     # Contact-amplitude signal — only dark-side LoG matters for contacts.
