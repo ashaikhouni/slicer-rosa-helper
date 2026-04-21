@@ -31,6 +31,21 @@ LOG_SIGMA_MM = 1.0
 LOG_BLOB_THRESHOLD = 300.0
 LOG_BLOB_MAX_VOXELS = 500
 
+# CT HU ceiling for scanner-invariance. Metal (titanium bolts, Pt/Ir
+# contacts) saturates in the 2000-3000 HU range on every standard-
+# reconstruction CT we have (22/23 Tx subjects + AMC099 + ct88).
+# Outlier encodings — one subject in our dataset (T1) reaches HU=18966
+# because of a different reconstruction pipeline — produce a LoG
+# response proportionally larger (LoG is a linear operator) and shift
+# the contact-detection distribution to a different effective
+# percentile, which would force the fixed LOG_BLOB_THRESHOLD to
+# behave inconsistently. Clipping the input once here makes the LoG /
+# Frangi response scanner-invariant so the fixed thresholds
+# downstream stay universal. 3000 sits safely above real metal
+# saturation on all observed scans while clamping only the encoding
+# outliers.
+HU_CLIP_MAX = 3000.0
+
 PITCH_MM = 3.5
 PITCH_TOL_MM = 0.5
 PERP_TOL_MM = 1.5
@@ -1961,6 +1976,12 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
     ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     import SimpleITK as sitk
+    # Scanner-invariance pre-clip: cap HU at HU_CLIP_MAX so the LoG /
+    # Frangi response is consistent across scans regardless of how the
+    # CT reconstruction encodes metal saturation. Does not affect hull
+    # detection (thresholded at HU ≥ -500) or any of the downstream HU
+    # filters (all below HU_CLIP_MAX).
+    img = sitk.Clamp(img, lowerBound=-1024.0, upperBound=HU_CLIP_MAX)
     _log("preprocessing: hull, head-distance, intracranial mask…")
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
     # Input fingerprint — lets us compare Slicer vs CLI runs byte-for-byte.
