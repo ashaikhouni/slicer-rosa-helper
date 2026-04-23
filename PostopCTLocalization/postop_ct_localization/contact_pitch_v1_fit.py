@@ -736,6 +736,46 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     )
 
 
+FRANGI_LINE_MIN_MEDIAN = 30.0
+# Minimum median Frangi σ=1 response sampled along the walker line's
+# axis. Real SEEG shanks are thin straight metal cylinders — the exact
+# shape the Frangi tubular-objectness filter was designed for — and
+# saturate the response (real shanks: p10 median=75, p50=240). FP walker
+# lines sit near zero (FP lines: p10=0, p50=3.6). A 30 threshold kills
+# 84% of walker FPs with 100% TP retention on the dataset. Orthogonal
+# to the amp_sum gate (one is amplitude-based, the other is geometry-
+# based), so the two compound.
+
+
+def _frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
+                                step_mm=0.5):
+    """Sample Frangi σ=1 at ``step_mm`` intervals along [start, end] and
+    return (mean, median). Samples the nearest-voxel value; no
+    interpolation. Returns (0.0, 0.0) when the segment is too short or
+    both endpoints fall outside the volume.
+    """
+    K, J, I = frangi_arr.shape
+    s = np.asarray(start_ras, dtype=float)
+    e = np.asarray(end_ras, dtype=float)
+    d = e - s
+    L = float(np.linalg.norm(d))
+    if L < step_mm:
+        return 0.0, 0.0
+    u = d / L
+    n = max(2, int(L / step_mm) + 1)
+    vals = np.empty(n, dtype=np.float32)
+    for idx in range(n):
+        t = idx * step_mm if idx < n - 1 else L
+        p = s + t * u
+        h = np.array([p[0], p[1], p[2], 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        ic = int(np.clip(round(ijk[0]), 0, I - 1))
+        jc = int(np.clip(round(ijk[1]), 0, J - 1))
+        kc = int(np.clip(round(ijk[2]), 0, K - 1))
+        vals[idx] = float(frangi_arr[kc, jc, ic])
+    return float(vals.mean()), float(np.median(vals))
+
+
 def _median_inlier_pitch(pts, axis):
     """Median consecutive spacing of ``pts`` projected onto ``axis``.
 
@@ -1073,7 +1113,7 @@ def _dedup_stage1_lines(lines):
 
 
 def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
-                pitches_mm=None):
+                pitches_mm=None, frangi_arr=None):
     """Blob-pitch detector on the LoG σ=1 field.
     Returns (lines, pts_c) where pts_c are the contact-sized blob RAS
     positions used for stage-1 exclusion construction downstream.
@@ -1082,6 +1122,14 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     walker pass runs per pitch; hypotheses across pitches are unioned
     before dedup / arbitration. Default is the legacy single
     ``[PITCH_MM]`` (Dixi 3.5 mm).
+
+    ``frangi_arr`` — optional Frangi σ=1 volume. When provided, each
+    line gets ``frangi_mean_mm`` / ``frangi_median_mm`` attached (sampled
+    along the line's axis at 0.5 mm steps), and lines with
+    ``frangi_median_mm < FRANGI_LINE_MIN_MEDIAN`` are dropped. This
+    catches FP walker hypotheses that don't sit on a continuous tubular
+    metal structure — 84% of walker FPs are killed with 100% TP
+    retention at threshold 30 on the dataset.
     """
     if pitches_mm is None or len(tuple(pitches_mm)) == 0:
         pitches_mm = (PITCH_MM,)
@@ -1124,6 +1172,21 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     # shaved its amplitude below the gate threshold.
     lines = _dedup_stage1_lines(hyps)
     lines = [l for l in lines if l.get("amp_sum", 0.0) >= AMP_SUM_MIN]
+    # Frangi tubular-objectness gate: a real SEEG shank is a thin metal
+    # cylinder — exactly Frangi's target geometry — and the response
+    # saturates along its axis (median sample ≥ 30 covers 100% of real
+    # shanks). FP walker lines stitched from skull/sinus/bone blobs sit
+    # near zero. Attach stats to every line; drop those whose median
+    # falls below the threshold.
+    if frangi_arr is not None:
+        for l in lines:
+            fmean, fmed = _frangi_along_line_stats(
+                l["start_ras"], l["end_ras"], frangi_arr, ras_to_ijk_mat,
+            )
+            l["frangi_mean_mm"] = fmean
+            l["frangi_median_mm"] = fmed
+        lines = [l for l in lines
+                 if l.get("frangi_median_mm", 0.0) >= FRANGI_LINE_MIN_MEDIAN]
     # Ownership arbitration: if two distinct lines share an inlier, the
     # closer-fit one keeps it. Re-fits axes after reducing inliers and
     # drops any line whose remaining count falls below MIN_BLOBS.
@@ -1158,6 +1221,20 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     second_pass_lines = _second_pass_orphan_walker(
         lines, pts_c, amps_c, pitches_mm=pitches_mm,
     )
+    # Apply the same Frangi gate to second-pass lines so the orphan
+    # walker can't re-introduce FPs that stage-1's Frangi gate already
+    # rejects.
+    if second_pass_lines and frangi_arr is not None:
+        kept_sp = []
+        for nl in second_pass_lines:
+            fmean, fmed = _frangi_along_line_stats(
+                nl["start_ras"], nl["end_ras"], frangi_arr, ras_to_ijk_mat,
+            )
+            nl["frangi_mean_mm"] = fmean
+            nl["frangi_median_mm"] = fmed
+            if fmed >= FRANGI_LINE_MIN_MEDIAN:
+                kept_sp.append(nl)
+        second_pass_lines = kept_sp
     if second_pass_lines:
         # Extend deep ends on second-pass lines too.
         for nl in second_pass_lines:
@@ -2157,6 +2234,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     stage1_lines, pts_blobs = run_stage1(
         log1, kji_to_ras, dist_arr, ras_to_ijk_mat,
         pitches_mm=resolved_pitches,
+        frangi_arr=frangi_s1,
     )
     _log(f"stage 1: {len(stage1_lines)} candidate lines after walk + arbitrate + extend")
     # Attach inlier RAS coords AND LoG amplitudes to each stage-1 line
@@ -2246,6 +2324,10 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                 (float(l.get("original_span_mm", l.get("span_mm", 0.0)))
                  / max(1, int(l.get("n_blobs", 2)) - 1)),
             ))
+            if "frangi_mean_mm" in l:
+                rec["frangi_mean_mm"] = float(l["frangi_mean_mm"])
+            if "frangi_median_mm" in l:
+                rec["frangi_median_mm"] = float(l["frangi_median_mm"])
             # Inlier RAS coords + amplitudes — used by the deep-end
             # refinement to clip at last-STRONG-contact + small margin
             # (independent of LoG thresholds).
