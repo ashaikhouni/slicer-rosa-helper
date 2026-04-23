@@ -715,6 +715,28 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     )
 
 
+def _median_inlier_pitch(pts, axis):
+    """Median consecutive spacing of ``pts`` projected onto ``axis``.
+
+    Robust to a single far-away outlier that would skew mean-based
+    avg_pitch (original_span_mm / (n-1)). When the walker absorbs a
+    spurious blob at one end, the mean pitch inflates past the
+    ``looks_like_seeg`` threshold even though most of the inliers sit
+    on a regular 3.5 mm chain; median collapses back to the true
+    pitch.
+    """
+    pts = np.asarray(pts, dtype=float)
+    axis = np.asarray(axis, dtype=float)
+    if pts.shape[0] < 2:
+        return float("inf")
+    c = pts.mean(axis=0)
+    proj = np.sort((pts - c) @ axis)
+    diffs = np.diff(proj)
+    if diffs.size == 0:
+        return float("inf")
+    return float(np.median(diffs))
+
+
 MIN_BLOBS_POST_ARBITRATION = 4  # looser floor after arbitration, which
                                 # can legitimately shave 1–2 blobs from a
                                 # real electrode sharing boundary contacts.
@@ -1097,6 +1119,10 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         for bi in l["inlier_idx"]:
             claimed.add(int(bi))
         l.setdefault("original_span_mm", float(l.get("span_mm", 0.0)))
+        if "original_median_pitch_mm" not in l:
+            l["original_median_pitch_mm"] = _median_inlier_pitch(
+                pts_c[l["inlier_idx"]], l["axis"],
+            )
     lines.sort(key=lambda l: -float(l.get("amp_sum", 0.0)))
     lines = [
         _extend_deep_end(l, pts_c, amps_c, claimed,
@@ -1117,6 +1143,10 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
             for bi in nl["inlier_idx"]:
                 claimed.add(int(bi))
             nl.setdefault("original_span_mm", float(nl.get("span_mm", 0.0)))
+            if "original_median_pitch_mm" not in nl:
+                nl["original_median_pitch_mm"] = _median_inlier_pitch(
+                    pts_c[nl["inlier_idx"]], nl["axis"],
+                )
         second_pass_lines = [
             _extend_deep_end(nl, pts_c, amps_c, claimed,
                              dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat)
@@ -1152,18 +1182,20 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
         l["dist_max_mm"] = float(inlier_dists.max())
         l["dist_mean_mm"] = float(inlier_dists.mean())
         # "Looks like a real SEEG chain" → relaxed deep-tip floor. The
-        # discriminator is the pre-extend average pitch: real electrodes
+        # discriminator is the pre-extend MEDIAN pitch: real electrodes
         # sit in a narrow 3–7 mm pitch band; cross-shank bridges and
-        # sinus / vessel FPs land outside it. Span isn't a safe
-        # signal — laterally-placed electrodes can be full-length
-        # (45–60 mm) yet have shallow dist_max (AMC099 L_10, another
-        # case L_31 at 60.1 mm span / 23 mm dist_max both real).
-        # ``original_span_mm`` is the pre-extend value so cross-shank
-        # absorption by ``_extend_deep_end`` doesn't skew the average.
-        orig_span = float(l.get("original_span_mm", l.get("span_mm", 0.0)))
-        n_blobs = max(2, int(l.get("n_blobs", 0)))
-        avg_pitch = orig_span / (n_blobs - 1) if n_blobs > 1 else float("inf")
-        looks_like_seeg = avg_pitch <= DEEP_TIP_SHORT_MAX_AVG_PITCH_MM
+        # sinus / vessel FPs land outside it. Median (not mean) so one
+        # walker-absorbed outlier blob doesn't re-classify a genuine
+        # chain as cross-shank (T14 RMMF: 6 inliers, mean pitch 8.5
+        # from one far blob, median pitch 3.7 — the real chain).
+        # ``original_median_pitch_mm`` is the pre-extend value so
+        # ``_extend_deep_end`` absorption can't skew the statistic.
+        median_pitch = float(l.get(
+            "original_median_pitch_mm",
+            (float(l.get("original_span_mm", l.get("span_mm", 0.0)))
+             / max(1, int(l.get("n_blobs", 2)) - 1)),
+        ))
+        looks_like_seeg = median_pitch <= DEEP_TIP_SHORT_MAX_AVG_PITCH_MM
         min_dist = DEEP_TIP_MIN_SHORT_MM if looks_like_seeg else DEEP_TIP_MIN_MM
         if l["dist_max_mm"] < min_dist:
             continue
@@ -2188,6 +2220,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             rec["original_span_mm"] = float(
                 l.get("original_span_mm", l.get("span_mm", 0.0))
             )
+            rec["original_median_pitch_mm"] = float(l.get(
+                "original_median_pitch_mm",
+                (float(l.get("original_span_mm", l.get("span_mm", 0.0)))
+                 / max(1, int(l.get("n_blobs", 2)) - 1)),
+            ))
             # Inlier RAS coords + amplitudes — used by the deep-end
             # refinement to clip at last-STRONG-contact + small margin
             # (independent of LoG thresholds).
@@ -2236,12 +2273,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         """Strong-SEEG-chain gate for the HU bolt rescue.
 
         A real SEEG electrode's walker pre-extension line has Dixi/PMT
-        pitch (3-5 mm). ``_extend_deep_end`` can stitch over a wire gap
-        to reach the bolt region, which inflates the post-extend avg
-        pitch. Use the smaller of ``original_span_mm`` and
-        ``contact_span_mm`` for the pitch check so a valid pre-extend
-        chain isn't rejected because extension grew the span past the
-        7 mm cap (ct88 L_39: pre-ext 18.5 mm, post-ext 77 mm).
+        pitch (3-5 mm). Uses the pre-extend MEDIAN pitch — robust to
+        one walker-absorbed outlier that would skew a mean-based
+        statistic past the 7 mm cap even when most inliers sit on a
+        regular chain. Falls back to min(span_pre, span_post)/(n-1)
+        when median isn't available.
         """
         if rec.get("source") != "stage1":
             return False
@@ -2253,11 +2289,10 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             return False
         span_post = float(rec.get("contact_span_mm", rec.get("length_mm", 0.0)))
         span_pre = float(rec.get("original_span_mm", span_post))
-        # Minimum is the least-extended span; prefer it since extension
-        # is what inflates avg_pitch on thin-wire PMT lines.
         span_for_pitch = min(span_pre, span_post) if span_pre > 0 else span_post
-        avg_pitch = span_for_pitch / (n - 1) if n > 1 else float("inf")
-        if avg_pitch > DEEP_TIP_SHORT_MAX_AVG_PITCH_MM:
+        fallback_avg = span_for_pitch / (n - 1) if n > 1 else float("inf")
+        median_pitch = float(rec.get("original_median_pitch_mm", fallback_avg))
+        if median_pitch > DEEP_TIP_SHORT_MAX_AVG_PITCH_MM:
             return False
         return True
 
