@@ -220,6 +220,48 @@
       "inter_group_insulation_mm": 11.0,
       "total_exploration_length_mm": 80.5,
       "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 31.5, 35.0, 38.5, 42.0, 45.5, 49.0, 62.0, 65.5, 69.0, 72.5, 76.0, 79.5]
+    },
+    {
+      "id": "DIXI-MM09A33",
+      "reference": "MM08-09A33",
+      "type": "MM",
+      "contact_count": 9,
+      "groups": [9],
+      "contact_length_mm": 2.0,
+      "diameter_mm": 0.8,
+      "intra_contact_insulation_mm": 1.9,
+      "center_to_center_separation_mm": 3.9,
+      "inter_group_insulation_mm": null,
+      "total_exploration_length_mm": 33.2,
+      "contact_center_offsets_from_tip_mm": [1.0, 4.9, 8.8, 12.7, 16.6, 20.5, 24.4, 28.3, 32.2]
+    },
+    {
+      "id": "DIXI-MM09A40",
+      "reference": "MM08-09A40",
+      "type": "MM",
+      "contact_count": 9,
+      "groups": [9],
+      "contact_length_mm": 2.0,
+      "diameter_mm": 0.8,
+      "intra_contact_insulation_mm": 2.8,
+      "center_to_center_separation_mm": 4.8,
+      "inter_group_insulation_mm": null,
+      "total_exploration_length_mm": 40.4,
+      "contact_center_offsets_from_tip_mm": [1.0, 5.8, 10.6, 15.4, 20.2, 25.0, 29.8, 34.6, 39.4]
+    },
+    {
+      "id": "DIXI-MM09A51",
+      "reference": "MM08-09A51",
+      "type": "MM",
+      "contact_count": 9,
+      "groups": [9],
+      "contact_length_mm": 2.0,
+      "diameter_mm": 0.8,
+      "intra_contact_insulation_mm": 4.1,
+      "center_to_center_separation_mm": 6.1,
+      "inter_group_insulation_mm": null,
+      "total_exploration_length_mm": 50.8,
+      "contact_center_offsets_from_tip_mm": [1.0, 7.1, 13.2, 19.3, 25.4, 31.5, 37.6, 43.7, 49.8]
     }
   ]
 }

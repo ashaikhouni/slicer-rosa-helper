@@ -338,23 +338,33 @@ PITCH_STRATEGY_PITCHES_MM = {
     "pmt_35":  (3.5,),           # PMT 2102-XX-091 family — same pitch as Dixi
     "pmt":     (3.5, 3.97, 4.43),
     "mixed":   (3.5, 3.97, 4.43),
+    # Dixi hybrid micro-macro (MM08-09A33 / A40 / A51): 9-contact hybrids
+    # with 2 mm contacts and pitches 3.9 / 4.8 / 6.1 mm. Commonly placed
+    # at deep targets (centromedian nucleus etc.) where the contact
+    # cluster sits deep and a long wire section bridges to the bolt.
+    "dixi_mm": (3.9, 4.8, 6.1),
+    "dixi_all": (3.5, 3.9, 4.43, 4.8, 6.1),
 }
 PITCH_STRATEGY_VENDORS = {
-    "dixi":    ("Dixi",),
-    "pmt_35":  ("PMT",),
-    "pmt":     ("PMT",),
-    "mixed":   ("Dixi", "PMT"),
-    "auto":    ("Dixi", "PMT", "AdTech"),
+    "dixi":     ("Dixi",),
+    "pmt_35":   ("PMT",),
+    "pmt":      ("PMT",),
+    "mixed":    ("Dixi", "PMT"),
+    "dixi_mm":  ("Dixi",),
+    "dixi_all": ("Dixi",),
+    "auto":     ("Dixi", "PMT", "AdTech"),
 }
 
 PITCH_AUTO_MIN_MM = 2.5
-PITCH_AUTO_MAX_MM = 6.0
+PITCH_AUTO_MAX_MM = 6.5  # Was 6.0 — cover the Dixi MM09A51 hybrid at 6.1 mm pitch.
 
 # Mutual-NN centroid sits ~0.2 mm low of the true pitch (partial-volume
 # localization bias). When the auto detector lands within this tolerance
 # of a known library pitch, snap to it so the walker sees the nominal
-# value instead of the biased estimate.
-LIBRARY_PITCHES_MM = (3.5, 3.97, 4.43)
+# value instead of the biased estimate. Includes the Dixi MM hybrid
+# pitches (3.9 / 4.8 / 6.1) so auto-detect can lock onto those variants
+# when a subject has a hybrid electrode.
+LIBRARY_PITCHES_MM = (3.5, 3.9, 3.97, 4.43, 4.8, 6.1)
 PITCH_SNAP_MM = 0.3
 
 
