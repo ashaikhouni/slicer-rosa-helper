@@ -250,7 +250,19 @@ AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM = 15.0
                                     # Recovers T4-class subjects
                                     # whose bolts sit outside the CT
                                     # acquisition window.
-BOLT_RESCUE_MIN_N_INLIERS = 10      # Min walker inliers on the stage-1 line (HU rescue)
+BOLT_RESCUE_MIN_N_INLIERS = MIN_BLOBS_PER_LINE
+                                    # Match the walker's own inlier floor.
+                                    # Upstream gates already enforce
+                                    # amp_sum ≥ 5000 and median_pitch ≤ 7,
+                                    # so any line reaching the rescue is a
+                                    # strong SEEG chain. The former 10-floor
+                                    # over-constrained short genuine shanks
+                                    # (T4 RSFG: n=8, amp_sum=7837,
+                                    # median_pitch=3.58, dist_max=41 —
+                                    # clearly real but no rescue attempted).
+                                    # Shallow skull-surface chains are
+                                    # caught by BOLT_RESCUE_MIN_DIST_MAX_MM
+                                    # below, not by the inlier count.
 BOLT_RESCUE_MIN_ORIG_SPAN_MM = 25.0 # Min pre-extend contact span (mm)
 BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
                                     # penetrate at least 30 mm into the
@@ -258,10 +270,9 @@ BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
                                     # typically bolt/skull artifact
                                     # chains that happen to be long
                                     # enough to trigger the rescue
-                                    # candidate check. Tighter than
-                                    # BOLT_RESCUE_MIN_N_INLIERS alone
-                                    # because n=10 shallow chains can
-                                    # form on the skull surface.
+                                    # candidate check. This is what
+                                    # distinguishes real SEEG from
+                                    # skull-surface FPs, not n_inliers.
 
 BOLT_LOG_THRESHOLD = 800.0          # |LoG| magnitude gate for bolt CCs.
                                     # Higher than LOG_BLOB_THRESHOLD
