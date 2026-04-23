@@ -105,22 +105,27 @@ class ContactPitchV1WidgetMixin:
 
         # Pitch strategy controls both the walker's candidate pitches
         # and the manufacturer filter for the electrode-type suggestion.
-        # "Dixi" runs the legacy single 3.5 mm walker. "PMT 2102-XX-091"
+        # "Dixi AM" runs the legacy single 3.5 mm walker. "PMT 2102-XX-091"
         # is the same 3.5 mm walker but with PMT vendor suggestions —
         # the 2102-08/10/12/14/16-091 family all share Dixi's 3.5 mm
         # pitch. "PMT (all)" adds PMT-16B (3.97 mm) / 16C (4.43 mm).
-        # "Mixed" unions Dixi + PMT. "Auto-detect" estimates pitch from
-        # the intracranial blob cloud's mutual-NN histogram.
+        # "Dixi MM hybrid" covers the 9-contact MM08-09A33/40/51
+        # (3.9 / 4.8 / 6.1 mm pitches). "Dixi all" unions AM + MM so
+        # a subject with mixed families is handled in one pass.
+        # "Auto-detect" estimates pitch from the intracranial blob
+        # cloud's mutual-NN histogram.
         self.contactPitchStrategyCombo = qt.QComboBox()
         for label, key in (
-            ("Dixi (3.5 mm)", "dixi"),
+            ("Dixi AM (3.5 mm)", "dixi"),
+            ("Dixi MM hybrid (3.9 / 4.8 / 6.1 mm)", "dixi_mm"),
+            ("Dixi all (AM + MM hybrid)", "dixi_all"),
             ("PMT 2102-XX-091 (3.5 mm)", "pmt_35"),
             ("PMT (3.5 / 3.97 / 4.43 mm)", "pmt"),
             ("Mixed Dixi + PMT", "mixed"),
             ("Auto-detect pitch", "auto"),
         ):
             self.contactPitchStrategyCombo.addItem(label, key)
-        self.contactPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi
+        self.contactPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
         self.contactPitchStrategyCombo.setToolTip(
             "Walker pitch set + suggestion vendor filter. Detection "
             "results are identical across strategies that share the "
@@ -144,11 +149,13 @@ class ContactPitchV1WidgetMixin:
     # here so the widget can log sensible messages without importing
     # the fit module.
     _CONTACT_PITCH_STRATEGY_VENDORS = {
-        "dixi":    ("Dixi",),
-        "pmt_35":  ("PMT",),
-        "pmt":     ("PMT",),
-        "mixed":   ("Dixi", "PMT"),
-        "auto":    ("Dixi", "PMT", "AdTech"),
+        "dixi":     ("Dixi",),
+        "dixi_mm":  ("Dixi",),
+        "dixi_all": ("Dixi",),
+        "pmt_35":   ("PMT",),
+        "pmt":      ("PMT",),
+        "mixed":    ("Dixi", "PMT"),
+        "auto":     ("Dixi", "PMT", "AdTech"),
     }
 
     def _selected_contact_pitch_strategy(self):
