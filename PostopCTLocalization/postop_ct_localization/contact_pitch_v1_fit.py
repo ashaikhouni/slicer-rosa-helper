@@ -522,12 +522,33 @@ def _orient_shallow_to_deep(start_ras, end_ras, dist_arr, ras_to_ijk_mat):
     return np.asarray(end_ras, dtype=float), np.asarray(start_ras, dtype=float)
 
 
-def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD):
+# Sub-voxel centroid refinement on LoG blob minima. Without it, blob
+# positions snap to voxel-integer grid and consecutive-contact distances
+# collapse onto √(integer) values (√14 = 3.74, √38 = 6.16 …). For
+# specific axis orientations those values fall outside the walker's
+# seed-pair pitch band ([3.0, 4.0] ∪ [6.5, 7.5] ∪ [10.0, 11.0]) and the
+# shank is lost. Refined positions land within ~0.1 mm of true centres
+# and collapse observed distances back toward 3.5 / 7.0 / 10.5 mm. Probes
+# can flip this off to compare.
+LOG_BLOB_SUBVOXEL_DEFAULT = True
+
+
+def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
     """Regional-minima blob extraction. Each contact (local LoG minimum)
     becomes one blob. Uses SITK grayscale erode to find local minima in a
     ~1 mm radius, then thresholds by absolute LoG value.
+
+    ``sub_voxel``: when True, refine each minimum's position to sub-voxel
+    accuracy via a 1-D quadratic fit along each axis in the 3×3×3
+    neighbourhood. This counteracts voxel-grid aliasing in blob-pair
+    distances — without it, consecutive-contact distances snap to
+    sqrt-integer values (√14 = 3.74 for well-aligned axes, √24 = 4.90
+    for others), putting some shanks outside the walker's seed-pair
+    pitch band despite being standard Dixi 3.5 mm pitch.
     """
     import SimpleITK as sitk
+    if sub_voxel is None:
+        sub_voxel = LOG_BLOB_SUBVOXEL_DEFAULT
     erode = sitk.GrayscaleErode(
         sitk.GetImageFromArray(log_arr),
         kernelRadius=[2, 2, 2],
@@ -537,12 +558,33 @@ def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD):
     strong = is_local_min & (log_arr <= -abs(threshold))
     kk, jj, ii = np.where(strong)
     blobs = []
+    K, J, I = log_arr.shape
     for k, j, i in zip(kk, jj, ii):
         val = float(log_arr[k, j, i])
-        blobs.append(dict(
-            kji=np.array([float(k), float(j), float(i)]),
-            amp=-val, n_vox=1,
-        ))
+        if sub_voxel and 0 < k < K - 1 and 0 < j < J - 1 and 0 < i < I - 1:
+            # Quadratic vertex along each axis: offset = 0.5·(f⁻ − f⁺) / (f⁻ − 2·f⁰ + f⁺)
+            # Clip to [-0.5, 0.5] so the refined position stays inside the voxel.
+            fi_m = float(log_arr[k, j, i - 1]); fi_p = float(log_arr[k, j, i + 1])
+            fj_m = float(log_arr[k, j - 1, i]); fj_p = float(log_arr[k, j + 1, i])
+            fk_m = float(log_arr[k - 1, j, i]); fk_p = float(log_arr[k + 1, j, i])
+            def _vtx(fm, f0, fp):
+                denom = fm - 2.0 * f0 + fp
+                if abs(denom) < 1e-6:
+                    return 0.0
+                off = 0.5 * (fm - fp) / denom
+                return max(-0.5, min(0.5, off))
+            di = _vtx(fi_m, val, fi_p)
+            dj = _vtx(fj_m, val, fj_p)
+            dk = _vtx(fk_m, val, fk_p)
+            blobs.append(dict(
+                kji=np.array([float(k) + dk, float(j) + dj, float(i) + di]),
+                amp=-val, n_vox=1,
+            ))
+        else:
+            blobs.append(dict(
+                kji=np.array([float(k), float(j), float(i)]),
+                amp=-val, n_vox=1,
+            ))
     return blobs
 
 
