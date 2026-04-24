@@ -109,11 +109,9 @@ DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
 # a 7-inlier line was assembled out of bone-bright spots along an
 # axis diverging from a real bolt.
 MIN_INLIER_DIST_MEAN_MM = 5.0
-# Air-sinus rejection: along the intracranial portion of every trajectory
-# (skull_entry → deep tip), sample CT HU at AIR_SAMPLE_COUNT points;
-# if more than AIR_FRAC_MAX of those samples are below AIR_HU_THRESHOLD
-# (typical air ≈ −1000 HU), reject. Real electrodes traverse brain
-# parenchyma (~30 HU) with metal spikes; sinus tubes are hollow.
+# Air HU threshold retained as an observability term; ``air_fraction``
+# is still written to each anchored record even though the Frangi-σ=1
+# median gate on walker lines now covers sinus FPs upstream.
 AIR_HU_THRESHOLD = -300.0
 # Bone rejection: same sampling, but counts points with HU above
 # ``BONE_HU_THRESHOLD``. Brain parenchyma sits at roughly 20-50 HU;
@@ -170,8 +168,6 @@ BONE_SKIM_MAX_AMP_PER_IN = 1200.0
                                 # (T22 at 0.36 with 7 inliers) that
                                 # we can't separate them with these
                                 # metrics alone.
-AIR_FRAC_MAX = 0.50  # real shanks crossing ventricles can hit ~35% air
-                     # (CSF + small voids). Sinus FPs run >70%.
 AIR_SAMPLE_COUNT = 25
 
 # Post-anchor length bounds. Real SEEG = ~25–80 mm shank + ~15–25 mm
@@ -2504,8 +2500,6 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         air_frac, bone_frac = _trajectory_hu_fractions(
             intracranial_start, rec["end_ras"], ct_arr_kji, ras_to_ijk_mat,
         )
-        if air_frac > AIR_FRAC_MAX:
-            return None
         if bone_frac > BONE_FRAC_MAX:
             return None
         # Volume-boundary check: trajectories that extend past the
