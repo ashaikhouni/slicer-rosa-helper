@@ -305,6 +305,18 @@ PITCH_STRATEGY_VENDORS = {
 PITCH_AUTO_MIN_MM = 2.5
 PITCH_AUTO_MAX_MM = 6.5  # Was 6.0 — cover the Dixi MM09A51 hybrid at 6.1 mm pitch.
 
+# Multi-peak auto-detection. Subjects with mixed electrode families
+# (e.g. Dixi AM 3.5 mm AND Dixi MM A40 4.8 mm on the same scan) produce
+# a mutual-NN histogram with more than one peak: the non-dominant one
+# belongs to the minority family. Picking only the dominant peak
+# silently drops the minority shanks. The iterative picker keeps peaks
+# whose height is at least PITCH_AUTO_SECONDARY_FRAC of the dominant
+# peak, up to PITCH_AUTO_MAX_PEAKS, each separated by ≥
+# PITCH_AUTO_PEAK_EXCLUSION_MM from all earlier peaks.
+PITCH_AUTO_MAX_PEAKS = 3
+PITCH_AUTO_SECONDARY_FRAC = 0.30
+PITCH_AUTO_PEAK_EXCLUSION_MM = 0.6
+
 # Mutual-NN centroid sits ~0.2 mm low of the true pitch (partial-volume
 # localization bias). When the auto detector lands within this tolerance
 # of a known library pitch, snap to it so the walker sees the nominal
@@ -317,8 +329,11 @@ PITCH_SNAP_MM = 0.3
 
 def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
                                            min_mm=PITCH_AUTO_MIN_MM,
-                                           max_mm=PITCH_AUTO_MAX_MM):
-    """Estimate electrode pitch from the mutual-nearest-neighbour
+                                           max_mm=PITCH_AUTO_MAX_MM,
+                                           max_peaks=PITCH_AUTO_MAX_PEAKS,
+                                           secondary_frac=PITCH_AUTO_SECONDARY_FRAC,
+                                           peak_exclusion_mm=PITCH_AUTO_PEAK_EXCLUSION_MM):
+    """Estimate electrode pitch(es) from the mutual-nearest-neighbour
     distances of the intracranial blob cloud.
 
     Mutual-NN pairs (A's 1-NN is B AND B's 1-NN is A) are dominated by
@@ -328,8 +343,16 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
     centroid tends to sit ~0.2 mm low of the nominal pitch (partial-
     volume localization bias) — within the walker's ±0.5 mm tolerance.
 
-    Returns a list with the detected pitch, or an empty list when the
-    blob cloud is too sparse or the histogram is flat.
+    On mixed-family subjects the histogram has more than one peak. The
+    picker finds the tallest peak, records its centroid, masks out a
+    ±peak_exclusion window, then repeats: up to ``max_peaks`` peaks,
+    each at least ``secondary_frac`` as tall as the dominant peak. The
+    dominant-only behaviour is preserved on single-family subjects
+    (secondary peaks never reach the threshold).
+
+    Returns a list of detected pitches in descending peak-height order,
+    or an empty list when the blob cloud is too sparse or the histogram
+    is flat.
     """
     if pts_c is None or len(pts_c) < 10:
         return []
@@ -364,14 +387,34 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
     centers = 0.5 * (edges[:-1] + edges[1:])
     if hist.max() <= 0:
         return []
-    peak_idx = int(np.argmax(hist))
-    peak_mm = float(centers[peak_idx])
-    window = np.abs(centers - peak_mm) <= 0.6
-    denom = float(np.sum(hist[window]))
-    if denom <= 0:
-        return []
-    centroid = float(np.sum(centers[window] * hist[window]) / denom)
-    return [round(centroid, 2)]
+
+    centroid_window_mm = 0.6
+    work = hist.astype(float).copy()
+    dominant_h = float(work.max())
+    picks: list[float] = []
+    for _ in range(int(max_peaks)):
+        peak_h = float(work.max())
+        if peak_h <= 0:
+            break
+        if picks and peak_h < secondary_frac * dominant_h:
+            break
+        peak_idx = int(np.argmax(work))
+        peak_mm = float(centers[peak_idx])
+        # Centroid uses the original histogram so an earlier pick's
+        # exclusion doesn't shrink the neighbouring peak's centroid
+        # window; the exclusion only steers which bin seeds the next
+        # centroid.
+        window = np.abs(centers - peak_mm) <= centroid_window_mm
+        denom = float(np.sum(hist[window]))
+        if denom <= 0:
+            work[peak_idx] = 0.0
+            continue
+        centroid = float(np.sum(centers[window] * hist[window]) / denom)
+        picks.append(round(centroid, 2))
+        # Mask the ±peak_exclusion window so the next iteration can't
+        # re-lock on the same peak's shoulders.
+        work[np.abs(centers - peak_mm) <= peak_exclusion_mm] = 0.0
+    return picks
 
 
 def _snap_to_library_pitch(pitch_mm, library=LIBRARY_PITCHES_MM,
@@ -405,8 +448,12 @@ def resolve_pitches_for_strategy(strategy, pts_c=None,
             pts_c, dist_arr, ras_to_ijk_mat,
         )
         if detected:
-            snapped = tuple(_snap_to_library_pitch(p) for p in detected)
-            return snapped
+            snapped: list[float] = []
+            for p in detected:
+                snap_p = _snap_to_library_pitch(p)
+                if snap_p not in snapped:
+                    snapped.append(snap_p)
+            return tuple(snapped)
         return (PITCH_MM,)
     return (PITCH_MM,)
 
