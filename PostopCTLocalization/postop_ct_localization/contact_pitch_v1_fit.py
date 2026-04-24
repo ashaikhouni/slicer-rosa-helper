@@ -122,16 +122,6 @@ AIR_HU_THRESHOLD = -300.0
 # in-bone-not-metal case trips the gate.
 BONE_HU_THRESHOLD = 300.0
 BONE_HU_METAL_CEILING = 1500.0
-BONE_FRAC_MAX = 0.75            # Empirically: real SEEG across T1 /
-                                # T2 / T22 / T21 has in-path bone
-                                # fraction ≤ 0.64 (T21 worst case).
-                                # T1 X12 FP (the cross-bone ghost
-                                # line) had 0.84. A 0.75 ceiling
-                                # cleanly separates them. Moderate-
-                                # bone FPs that sneak past this are
-                                # caught downstream by the joint
-                                # ``(bone ≥ 0.5) AND (n_in < 9) AND
-                                # (amp_per < 1200)`` rule.
 DEEP_TIP_NODATA_CHECK_LEN_MM = 20.0
 DEEP_TIP_NODATA_HU_THRESHOLD = -1000.0
 DEEP_TIP_NODATA_FRAC_MAX = 0.30
@@ -2500,8 +2490,6 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         air_frac, bone_frac = _trajectory_hu_fractions(
             intracranial_start, rec["end_ras"], ct_arr_kji, ras_to_ijk_mat,
         )
-        if bone_frac > BONE_FRAC_MAX:
-            return None
         # Volume-boundary check: trajectories that extend past the
         # scanned CT FOV (oblique acquisition → -1024 HU in the
         # extrapolated region) have their deep portion sitting in
