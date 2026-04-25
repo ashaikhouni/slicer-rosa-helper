@@ -52,7 +52,7 @@ def _volume_node_ras_to_ijk_matrix(volume_node):
 
 class ContactPitchV1Pipeline(BaseDetectionPipeline):
     pipeline_id = "contact_pitch_v1"
-    pipeline_version = "1.0.12"
+    pipeline_version = "1.0.11"
 
     def _load_image_and_matrices(self, ctx: DetectionContext):
         """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4).

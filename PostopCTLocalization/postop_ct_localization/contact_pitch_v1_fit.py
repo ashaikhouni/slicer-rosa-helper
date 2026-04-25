@@ -313,20 +313,9 @@ PITCH_AUTO_MAX_MM = 6.5  # Was 6.0 — cover the Dixi MM09A51 hybrid at 6.1 mm p
 # whose height is at least PITCH_AUTO_SECONDARY_FRAC of the dominant
 # peak, up to PITCH_AUTO_MAX_PEAKS, each separated by ≥
 # PITCH_AUTO_PEAK_EXCLUSION_MM from all earlier peaks.
-#
-# A secondary peak must also be a *distinct mode*: the histogram must
-# dip between it and every previously-picked peak by at least
-# PITCH_AUTO_MIN_PROMINENCE_FRAC of the candidate's height. Otherwise
-# the candidate is just on the descending tail of the dominant peak's
-# cross-shank-coincidence distribution (broad single-family subjects
-# like T1 emit lots of mutual-NN pairs at multiples of the true pitch
-# AND at off-pitch intervals from cross-shank pairs). Without the
-# distinct-mode test, the picker fires a spurious 4.25 mm pitch on T1
-# whose walker pass produces an in-bone FP.
 PITCH_AUTO_MAX_PEAKS = 3
 PITCH_AUTO_SECONDARY_FRAC = 0.30
 PITCH_AUTO_PEAK_EXCLUSION_MM = 0.6
-PITCH_AUTO_MIN_PROMINENCE_FRAC = 0.20
 
 # Mutual-NN centroid sits ~0.2 mm low of the true pitch (partial-volume
 # localization bias). When the auto detector lands within this tolerance
@@ -343,8 +332,7 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
                                            max_mm=PITCH_AUTO_MAX_MM,
                                            max_peaks=PITCH_AUTO_MAX_PEAKS,
                                            secondary_frac=PITCH_AUTO_SECONDARY_FRAC,
-                                           peak_exclusion_mm=PITCH_AUTO_PEAK_EXCLUSION_MM,
-                                           min_prominence_frac=PITCH_AUTO_MIN_PROMINENCE_FRAC):
+                                           peak_exclusion_mm=PITCH_AUTO_PEAK_EXCLUSION_MM):
     """Estimate electrode pitch(es) from the mutual-nearest-neighbour
     distances of the intracranial blob cloud.
 
@@ -404,7 +392,6 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
     work = hist.astype(float).copy()
     dominant_h = float(work.max())
     picks: list[float] = []
-    pick_centers: list[float] = []
     for _ in range(int(max_peaks)):
         peak_h = float(work.max())
         if peak_h <= 0:
@@ -413,25 +400,6 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
             break
         peak_idx = int(np.argmax(work))
         peak_mm = float(centers[peak_idx])
-        # Distinct-mode test: the candidate must be separated from every
-        # prior pick by a valley whose depth is at least
-        # ``min_prominence_frac`` of the candidate's height. A candidate
-        # sitting on the descending tail of an earlier pick (no valley
-        # between them) is rejected here.
-        if pick_centers:
-            need_drop = min_prominence_frac * peak_h
-            distinct = True
-            for prev_mm in pick_centers:
-                lo, hi = sorted((prev_mm, peak_mm))
-                between = hist[(centers > lo) & (centers < hi)]
-                if between.size == 0 or (peak_h - float(between.min())) < need_drop:
-                    distinct = False
-                    break
-            if not distinct:
-                # Drop this bin from the working histogram so the loop
-                # can keep searching, but don't accept it as a peak.
-                work[peak_idx] = 0.0
-                continue
         # Centroid uses the original histogram so an earlier pick's
         # exclusion doesn't shrink the neighbouring peak's centroid
         # window; the exclusion only steers which bin seeds the next
@@ -443,7 +411,6 @@ def detect_pitch_from_intracranial_blobs(pts_c, dist_arr, ras_to_ijk_mat,
             continue
         centroid = float(np.sum(centers[window] * hist[window]) / denom)
         picks.append(round(centroid, 2))
-        pick_centers.append(peak_mm)
         # Mask the ±peak_exclusion window so the next iteration can't
         # re-lock on the same peak's shoulders.
         work[np.abs(centers - peak_mm) <= peak_exclusion_mm] = 0.0
