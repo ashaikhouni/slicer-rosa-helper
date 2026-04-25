@@ -1018,6 +1018,16 @@ def _extend_deep_end(line, pts_c, amps_c, claimed_blobs,
 def _dedup_stage1_lines(lines):
     """Remove near-duplicate stage-1 walker hypotheses.
 
+    Walker-stage dedup collapses *fragments* of the same shank that the
+    seed-pair sweep produced from slightly different starting points.
+    These fragments are nearly identical in axis and span; the
+    geometric near-coincidence test (angle / perp / span overlap) is
+    the right tool. The "no orphaned blobs" concept that
+    ``_dedup_trajectories`` enforces is not the right tool here —
+    walker fragments often touch slightly different blob subsets, and
+    the more complete fragment will subsume them via arbitration
+    immediately after this dedup runs.
+
     For every (i, j), i < j, a duplicate requires all three of:
       * axis angle ≤ STAGE1_DEDUP_ANGLE_DEG
       * perpendicular center offset ≤ STAGE1_DEDUP_PERP_MM
@@ -1029,8 +1039,7 @@ def _dedup_stage1_lines(lines):
     a single survivor. Returns surviving lines in the input order.
 
     Vectorized: O(N²) pairwise matrices + a Python loop with numpy
-    inner ops, replacing the original pure-Python double loop that
-    took 5 s/call on ~1500 hypotheses (AMC099).
+    inner ops.
     """
     n = len(lines)
     if n < 2:
@@ -1045,12 +1054,10 @@ def _dedup_stage1_lines(lines):
     dots = np.clip(np.abs(axes @ axes.T), 0.0, 1.0)
     ang_ok = np.degrees(np.arccos(dots)) <= STAGE1_DEDUP_ANGLE_DEG
 
-    # par[i, j] = (centers[j] - centers[i]) · axes[i]
     M = axes @ centers.T
     axes_dot_center = np.einsum("ik,ik->i", axes, centers)
     par = M - axes_dot_center[:, None]
 
-    # perp²[i, j] = |centers[j] - centers[i]|² - par[i, j]²
     C2 = np.einsum("ik,ik->i", centers, centers)
     cc = centers @ centers.T
     d2 = C2[:, None] + C2[None, :] - 2.0 * cc
@@ -1081,12 +1088,6 @@ def _dedup_stage1_lines(lines):
         row &= alive
         if not row.any():
             continue
-        # Original branch: a.n_blobs >= b.n_blobs → kill j; else kill
-        # i and break. Under callers' pre-sort by -n_blobs the second
-        # branch is unreachable, but handle it for general safety: if
-        # any surviving j in ``row`` has strictly more blobs than i,
-        # the original would break at the first such j and leave later
-        # j's untouched — so i dies and no further kills from i.
         if np.any(row & (n_blobs > n_blobs[i])):
             alive[i] = False
             continue
@@ -1908,11 +1909,24 @@ def _clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
 def _dedup_trajectories(trajectories,
                         angle_deg=CROSS_STAGE_DEDUP_ANGLE_DEG,
                         perp_mm=CROSS_STAGE_DEDUP_PERP_MM):
-    """Remove near-collinear duplicates across stages. Keeps the longer
-    line of each pair when their axes align and one midpoint projects
-    inside the other segment. Ported from ``deep_core_v2._dedup_v2_trajectories``.
+    """Remove duplicate trajectories.
+
+    Concept: two trajectories are duplicates iff the candidate's blob
+    inliers are a subset of an already-kept trajectory's inliers. The
+    survivor still claims every blob the drop-candidate claimed, so
+    no blob is left orphaned. Disjoint inlier sets always survive
+    independently — they describe physically distinct shanks even
+    when the axes are nearly parallel and close (e.g. T23 CWB next
+    to its sibling, T9 RAC next to LAC).
+
+    Stage-2 (Frangi-only) trajectories carry no ``inlier_idx``. For
+    mixed pairs that lack blob support, fall back to the geometric
+    near-collinearity rule so a stage-2 trajectory describing the
+    same physical shaft as a stage-1 hit still gets collapsed into
+    the longer-evidence line.
     """
     kept: list[dict[str, Any]] = []
+    kept_inliers: list[frozenset] = []
     for t in trajectories:
         s = np.asarray(t["start_ras"], dtype=float)
         e = np.asarray(t["end_ras"], dtype=float)
@@ -1920,9 +1934,36 @@ def _dedup_trajectories(trajectories,
         length = float(np.linalg.norm(d))
         if length < 1e-6:
             continue
-        axis = d / length
+        t_inliers = frozenset(int(b) for b in (t.get("inlier_idx") or []))
+        # Pass 1 — does any kept k subsume t (t.inliers ⊆ k.inliers)?
+        # If so, drop t outright. Disjoint inlier sets are physically
+        # distinct shanks; both survive.
+        is_dup = False
+        if t_inliers:
+            for ki, k_inliers in enumerate(kept_inliers):
+                if k_inliers and t_inliers.issubset(k_inliers):
+                    is_dup = True
+                    break
+        if is_dup:
+            continue
+        # Pass 2 — does t subsume any kept k? Drop those k (no orphans:
+        # all their blobs are in t).
+        if t_inliers:
+            survivors_idx = [
+                ki for ki, k_inliers in enumerate(kept_inliers)
+                if not (k_inliers and k_inliers.issubset(t_inliers))
+            ]
+            if len(survivors_idx) != len(kept):
+                kept = [kept[ki] for ki in survivors_idx]
+                kept_inliers = [kept_inliers[ki] for ki in survivors_idx]
+        # Pass 3 — geometric fallback only when at least one side has
+        # no blob inliers (Frangi-only stage 2 trajectories). Handles
+        # the stage-1↔stage-2 same-shaft collapse.
         is_dup = False
         for ki, k in enumerate(kept):
+            k_inliers = kept_inliers[ki]
+            if t_inliers and k_inliers:
+                continue
             ks = np.asarray(k["start_ras"], dtype=float)
             ke = np.asarray(k["end_ras"], dtype=float)
             kd = ke - ks
@@ -1930,6 +1971,7 @@ def _dedup_trajectories(trajectories,
             if klen < 1e-6:
                 continue
             kaxis = kd / klen
+            axis = d / length
             cos = abs(float(np.dot(axis, kaxis)))
             ang = float(np.degrees(np.arccos(min(1.0, cos))))
             if ang > angle_deg:
@@ -1939,9 +1981,6 @@ def _dedup_trajectories(trajectories,
             along = float(np.dot(v, kaxis))
             perp = v - along * kaxis
             pd = float(np.linalg.norm(perp))
-            # Reject as duplicate only if this midpoint projects within
-            # the kept segment (with margin). Prevents bilateral shanks
-            # on opposite sides of the head from being merged.
             margin = 0.5 * klen
             if along < -margin or along > klen + margin:
                 continue
@@ -1949,9 +1988,11 @@ def _dedup_trajectories(trajectories,
                 is_dup = True
                 if length > klen:
                     kept[ki] = t
+                    kept_inliers[ki] = t_inliers
                 break
         if not is_dup:
             kept.append(t)
+            kept_inliers.append(t_inliers)
     return kept
 
 
@@ -2163,6 +2204,12 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         )
         if source == "stage1":
             rec["amp_sum"] = float(l.get("amp_sum", 0.0))
+            # Carry the walker's blob-inlier set through anchoring so
+            # ``_dedup_trajectories`` can apply the inlier-subset rule
+            # (drop only when no blob is orphaned).
+            inlier_idx = l.get("inlier_idx")
+            if inlier_idx is not None:
+                rec["inlier_idx"] = list(int(b) for b in inlier_idx)
             # Preserve the pre-anchor inlier span — the actual distance
             # between the shallowest and deepest detected contacts. The
             # post-anchor ``length_mm`` overwrites this with the
