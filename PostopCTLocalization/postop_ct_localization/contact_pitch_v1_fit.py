@@ -59,7 +59,6 @@ MIN_BLOBS_PER_LINE = 5          # 5-contact short superficial depth
 MIN_LINE_SPAN_MM = 12.0          # 5 × 3.5 mm pitch ≈ 14 mm nominal; leave
                                  # slack for sub-pitch drift.
 MAX_LINE_SPAN_MM = 90.0
-AMP_SUM_MIN = 5000.0             # 5 contacts × ~1000 amp each.
 # Maximum allowed gap between consecutive inlier contacts along the
 # axis. The walker trims single stray outliers whose gap to the rest
 # exceeds this, then rejects any line whose remaining internal gap still
@@ -911,7 +910,6 @@ def _second_pass_orphan_walker(existing_lines, pts_c, amps_c,
         return []
     new_hyps.sort(key=lambda h: -h["n_blobs"])
     new_lines = _dedup_stage1_lines(new_hyps)
-    new_lines = [l for l in new_lines if l.get("amp_sum", 0.0) >= AMP_SUM_MIN]
     return new_lines
 
 
@@ -1155,7 +1153,6 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     # otherwise-strong line from being dropped because arbitration
     # shaved its amplitude below the gate threshold.
     lines = _dedup_stage1_lines(hyps)
-    lines = [l for l in lines if l.get("amp_sum", 0.0) >= AMP_SUM_MIN]
     # Frangi tubular-objectness gate: a real SEEG shank is a thin metal
     # cylinder — exactly Frangi's target geometry — and the response
     # saturates along its axis (median sample ≥ 30 covers 100% of real
@@ -2385,13 +2382,26 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                 bolt_from_synth = {"n_vox": 0, "dist_min_mm": float("nan"),
                                     "id": -1}
         if new_start is None:
-            return None
-        if bolt_from_synth is not None:
-            bolt = bolt_from_synth
-            rec["bolt_source"] = "axis_synth"
-        rec["start_ras"] = np.asarray(new_start, dtype=float)
-        if skull_entry is not None:
-            rec["skull_entry_ras"] = np.asarray(skull_entry, dtype=float)
+            # Recall-first emission: no LoG bolt CC, no HU rescue, and
+            # axis-to-skull synth never crossed the hull (e.g. T4 RPOG —
+            # bolt sits outside the CT acquisition window). Emit the
+            # walker's line as-is. Confidence scoring will downweight
+            # these no-anchor emissions.
+            if rec["source"] == "stage1":
+                rec["bolt_source"] = "none"
+                bolt = {"n_vox": 0, "dist_min_mm": float("nan"), "id": -1}
+            else:
+                # Stage-2 (Frangi-only) lines without an anchor have no
+                # pitch validation either; without that we have no real
+                # evidence at all.
+                return None
+        else:
+            if bolt_from_synth is not None:
+                bolt = bolt_from_synth
+                rec["bolt_source"] = "axis_synth"
+            rec["start_ras"] = np.asarray(new_start, dtype=float)
+            if skull_entry is not None:
+                rec["skull_entry_ras"] = np.asarray(skull_entry, dtype=float)
         rec["length_mm"] = float(np.linalg.norm(rec["end_ras"] - rec["start_ras"]))
         # Length sanity: real SEEG total length (bolt + shank) is bounded.
         if (rec["length_mm"] < MIN_POST_ANCHOR_LEN_MM
