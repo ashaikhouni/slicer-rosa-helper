@@ -1168,6 +1168,20 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
             l["frangi_median_mm"] = fmed
         lines = [l for l in lines
                  if l.get("frangi_median_mm", 0.0) >= FRANGI_LINE_MIN_MEDIAN]
+    # Snapshot the walker chain's original span and median consecutive
+    # pitch BEFORE arbitration / deep-end extension. Arbitration can
+    # strip blobs in the middle of a clean chain (LIPR's contacts get
+    # awarded to a parallel absorbing line), and deep-end extension
+    # adds blobs at the tail. Either operation skews the consecutive-
+    # gap distribution. The deep-tip prior + downstream classifiers
+    # need the walker's original pitch reading to recognise a
+    # genuinely-pitch-clean SEEG chain.
+    for l in lines:
+        l.setdefault("original_span_mm", float(l.get("span_mm", 0.0)))
+        if "original_median_pitch_mm" not in l:
+            l["original_median_pitch_mm"] = _median_inlier_pitch(
+                pts_c[l["inlier_idx"]], l["axis"],
+            )
     # Ownership arbitration: if two distinct lines share an inlier, the
     # closer-fit one keeps it. Re-fits axes after reducing inliers and
     # drops any line whose remaining count falls below MIN_BLOBS.
@@ -1176,18 +1190,10 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     # Deep-end walk: extend each surviving line with unclaimed blobs
     # found within 4 mm of the current deep tip. Strongest-first so
     # high-confidence lines claim their blobs before weaker ones.
-    # Stash the pre-extend span so the deep-tip prior downstream can
-    # tell a genuinely-short walker line from a short line grown by
-    # absorbing neighbouring-shank contacts (T21 L_13: span 19→46).
     claimed: set[int] = set()
     for l in lines:
         for bi in l["inlier_idx"]:
             claimed.add(int(bi))
-        l.setdefault("original_span_mm", float(l.get("span_mm", 0.0)))
-        if "original_median_pitch_mm" not in l:
-            l["original_median_pitch_mm"] = _median_inlier_pitch(
-                pts_c[l["inlier_idx"]], l["axis"],
-            )
     lines.sort(key=lambda l: -float(l.get("amp_sum", 0.0)))
     lines = [
         _extend_deep_end(l, pts_c, amps_c, claimed,
