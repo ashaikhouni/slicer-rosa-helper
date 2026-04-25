@@ -1999,6 +1999,155 @@ def _dedup_trajectories(trajectories,
     return kept
 
 
+# ---- Score framework v1 ----------------------------------------------
+#
+# Each emitted trajectory carries a continuous physical-evidence score
+# in [0, 1] assembled from the same measurements the hard gates already
+# apply: amp_sum, n_inliers, frangi shaft response, on-library pitch,
+# pre-anchor contact span, post-anchor length, intracranial depth, and
+# bolt-anchor source. Each component saturates at the corresponding
+# gate threshold (`measure ≥ threshold` → 1.0), so a clean SEEG line
+# scores near 1.0 on every term. Stage-2 lines lack walker-only
+# features (amp_sum, pitch, contact_span) — those terms are excluded
+# from the average instead of penalised, keeping stage-1 and stage-2
+# scores comparable.
+#
+# v1 keeps the existing emit-time gates as fallbacks. The score is
+# attached as metadata (`score`, `confidence`, `score_components`) on
+# every survivor so downstream code can rank, filter, or surface the
+# weakest emissions for review without changing detection behaviour.
+SCORE_WEIGHTS = {
+    "amp": 1.0,
+    "n_inliers": 1.0,
+    "frangi": 1.0,
+    "pitch": 1.0,
+    "span": 1.0,
+    "length": 1.0,
+    "depth": 0.5,
+    "intracranial": 0.5,
+    "bolt": 1.0,
+}
+SCORE_HIGH_THRESHOLD = 0.80
+SCORE_MEDIUM_THRESHOLD = 0.50
+SCORE_PITCH_TOL_MM = 1.0       # falloff width around library pitch
+SCORE_SPAN_SHOULDER_MM = 6.0   # linear falloff outside [12, 90]
+SCORE_LENGTH_SHOULDER_MM = 10.0  # linear falloff outside [30, 140]
+SCORE_AMP_SAT = 5000.0
+SCORE_N_INLIERS_SLOPE = 10.0   # n_inliers = MIN_BLOBS_PER_LINE → 0,
+                                # n_inliers = MIN + slope → 1.0
+SCORE_INTRACRANIAL_SAT_MM = 10.0
+SCORE_BOLT_VALUES = {
+    "log": 1.0,
+    "hu_rescue": 0.7,
+    "axis_synth": 0.4,
+    "none": 0.1,
+}
+
+
+def _trapezoid_score(value, lo, hi, shoulder_mm):
+    """1.0 inside [lo, hi]; linear falloff to 0 over `shoulder_mm`."""
+    if value < lo - shoulder_mm or value > hi + shoulder_mm:
+        return 0.0
+    if value < lo:
+        return float((value - (lo - shoulder_mm)) / shoulder_mm)
+    if value > hi:
+        return float(((hi + shoulder_mm) - value) / shoulder_mm)
+    return 1.0
+
+
+def _bolt_source_score(src):
+    return SCORE_BOLT_VALUES.get(str(src), 0.5)
+
+
+def _compute_trajectory_score(rec):
+    """Return (score, confidence, components) for one trajectory record.
+
+    Missing fields (e.g. amp_sum on stage-2 lines) are excluded from
+    the weighted average rather than scored as 0; partial-feature
+    records remain comparable to full-feature ones.
+    """
+    components = {}
+
+    if "amp_sum" in rec:
+        components["amp"] = (
+            min(1.0, max(0.0, float(rec["amp_sum"]) / SCORE_AMP_SAT)),
+            SCORE_WEIGHTS["amp"],
+        )
+
+    n = int(rec.get("n_inliers", 0))
+    components["n_inliers"] = (
+        min(1.0, max(0.0, (n - MIN_BLOBS_PER_LINE) / SCORE_N_INLIERS_SLOPE)),
+        SCORE_WEIGHTS["n_inliers"],
+    )
+
+    if "frangi_median_mm" in rec:
+        components["frangi"] = (
+            min(1.0, max(0.0, float(rec["frangi_median_mm"]) / FRANGI_LINE_MIN_MEDIAN)),
+            SCORE_WEIGHTS["frangi"],
+        )
+
+    pitch = rec.get("original_median_pitch_mm")
+    if pitch is not None and float(pitch) > 0.0:
+        dev = min(abs(float(pitch) - lib) for lib in LIBRARY_PITCHES_MM)
+        components["pitch"] = (
+            min(1.0, max(0.0, 1.0 - dev / SCORE_PITCH_TOL_MM)),
+            SCORE_WEIGHTS["pitch"],
+        )
+
+    if "contact_span_mm" in rec:
+        components["span"] = (
+            _trapezoid_score(
+                float(rec["contact_span_mm"]),
+                MIN_LINE_SPAN_MM, MAX_LINE_SPAN_MM,
+                SCORE_SPAN_SHOULDER_MM,
+            ),
+            SCORE_WEIGHTS["span"],
+        )
+
+    length = float(rec.get("length_mm", 0.0))
+    if length > 0:
+        components["length"] = (
+            _trapezoid_score(
+                length,
+                MIN_POST_ANCHOR_LEN_MM, MAX_POST_ANCHOR_LEN_MM,
+                SCORE_LENGTH_SHOULDER_MM,
+            ),
+            SCORE_WEIGHTS["length"],
+        )
+
+    dist_max = float(rec.get("dist_max_mm", 0.0))
+    components["depth"] = (
+        min(1.0, max(0.0, dist_max / DEEP_TIP_MIN_MM)),
+        SCORE_WEIGHTS["depth"],
+    )
+
+    dist_mean = rec.get("dist_mean_mm")
+    if dist_mean is not None and float(dist_mean) == float(dist_mean):
+        components["intracranial"] = (
+            min(1.0, max(0.0, float(dist_mean) / SCORE_INTRACRANIAL_SAT_MM)),
+            SCORE_WEIGHTS["intracranial"],
+        )
+
+    bolt_src = str(rec.get("bolt_source", "log"))
+    components["bolt"] = (
+        _bolt_source_score(bolt_src),
+        SCORE_WEIGHTS["bolt"],
+    )
+
+    weighted = sum(v * w for v, w in components.values())
+    total_w = sum(w for _, w in components.values())
+    score = weighted / total_w if total_w > 0 else 0.0
+
+    if score >= SCORE_HIGH_THRESHOLD:
+        label = "high"
+    elif score >= SCORE_MEDIUM_THRESHOLD:
+        label = "medium"
+    else:
+        label = "low"
+
+    return score, label, {k: float(v) for k, (v, _) in components.items()}
+
+
 # ---- Orchestration ----------------------------------------------------
 
 def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
@@ -2328,6 +2477,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
             return fwd, bwd, fwd_n, bwd_n
 
+        anchor_pool = "log"
         fwd, bwd, fwd_n, bwd_n = _try_anchor(bolts)
         # HU rescue: only when the primary LoG pool finds nothing AND
         # the stage-1 line looks unambiguously like a real SEEG chain.
@@ -2355,6 +2505,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                     bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
                     return fwd, bwd, fwd_n, bwd_n
                 fwd, bwd, fwd_n, bwd_n = _try_anchor_wide(local)
+                if fwd_n > 0 or bwd_n > 0:
+                    anchor_pool = "hu_rescue"
 
         if bwd_n > fwd_n:
             # Orientation was wrong; flip before writing results back.
@@ -2405,6 +2557,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             if bolt_from_synth is not None:
                 bolt = bolt_from_synth
                 rec["bolt_source"] = "axis_synth"
+            else:
+                rec["bolt_source"] = anchor_pool
             rec["start_ras"] = np.asarray(new_start, dtype=float)
             if skull_entry is not None:
                 rec["skull_entry_ras"] = np.asarray(skull_entry, dtype=float)
@@ -2553,6 +2707,18 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             f"(vendors={'+'.join(vendors_for_suggest)})"
         )
 
+    # Confidence score (v1). Each survivor gets a continuous physical-
+    # evidence score in [0, 1] plus a coarse confidence label. Hard
+    # gates upstream still decide emit/no-emit; the score is metadata
+    # for ranking and downstream review (see _compute_trajectory_score).
+    # ``confidence`` is the numeric score (canonical engine schema
+    # expects a float there); ``confidence_label`` carries the band.
+    for rec in anchored:
+        score, label, components = _compute_trajectory_score(rec)
+        rec["confidence"] = score
+        rec["confidence_label"] = label
+        rec["score_components"] = components
+
     # Convert to JSON-safe dicts (tuples of floats).
     trajectories: list[dict[str, Any]] = []
     for rec in anchored:
@@ -2574,8 +2740,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             _src = str(_t.get("source") or "?")
             _n = int(_t.get("n_inliers") or 0)
             _sp = float(_t.get("contact_span_mm") or 0.0)
+            _sc = float(_t.get("confidence") or 0.0)
+            _conf = str(_t.get("confidence_label") or "?")
             _log(
                 f"  [{_i:02d}] src={_src} n={_n} span={_sp:.1f}mm "
+                f"score={_sc:.2f}({_conf}) "
                 f"skull_entry=({_se[0]:+.1f},{_se[1]:+.1f},{_se[2]:+.1f}) "
                 f"deep_tip=({_en[0]:+.1f},{_en[1]:+.1f},{_en[2]:+.1f})"
             )
