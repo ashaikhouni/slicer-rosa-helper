@@ -72,6 +72,7 @@ _BUNDLED_LIBRARY_BOUNDS_FALLBACK = {
     # Snapshot of the in-tree library used when rosa_core is
     # unavailable (stripped install, Slicer-less environments).
     "min_contacts": 5,
+    "max_contacts": 18,
     "min_contact_span_mm": 14.0,
     "max_contact_span_mm": 78.5,
     "max_within_electrode_pitch_mm": 13.0,
@@ -102,6 +103,7 @@ def _compute_library_bounds():
         regular_pitches.add(round(min(gaps), 2))
     return {
         "min_contacts": min(counts),
+        "max_contacts": max(counts),
         "min_contact_span_mm": min(spans),
         "max_contact_span_mm": max(spans),
         "max_within_electrode_pitch_mm": max(all_pitches),
@@ -2104,7 +2106,9 @@ SCORE_WEIGHTS = {
     "pitch": 1.0,
     "span": 1.0,
     "length": 1.0,
-    "depth": 0.5,
+    "depth": 1.0,         # was 0.5; SEEG is a depth-electrode technique by
+                           # definition, so depth is a load-bearing signal,
+                           # not a soft prior.
     "intracranial": 0.5,
     "bolt": 1.0,
 }
@@ -2116,6 +2120,18 @@ SCORE_LENGTH_SHOULDER_MM = 10.0  # linear falloff outside [30, 140]
 SCORE_AMP_SAT = 5000.0
 SCORE_N_INLIERS_SLOPE = 10.0   # n_inliers = MIN_BLOBS_PER_LINE → 0,
                                 # n_inliers = MIN + slope → 1.0
+SCORE_N_INLIERS_OVER_SLACK = 12.0  # falloff width above the library
+                                    # contact-count maximum. n equal to
+                                    # the max → 1.0; n at max + slack →
+                                    # 0.0. Catches walker chains that
+                                    # ran into a continuous metal
+                                    # structure (e.g. the bolt itself
+                                    # at thread-pitch aliasing).
+SCORE_DEPTH_SAT_MM = 30.0      # dist_max at which the depth term
+                                # saturates at 1.0. Independent of
+                                # ``DEEP_TIP_MIN_MM`` so the gate can
+                                # be tuned / retired without changing
+                                # the score's depth behaviour.
 SCORE_INTRACRANIAL_SAT_MM = 10.0
 SCORE_BOLT_VALUES = {
     "log": 1.0,
@@ -2156,10 +2172,21 @@ def _compute_trajectory_score(rec):
         )
 
     n = int(rec.get("n_inliers", 0))
-    components["n_inliers"] = (
-        min(1.0, max(0.0, (n - MIN_BLOBS_PER_LINE) / SCORE_N_INLIERS_SLOPE)),
-        SCORE_WEIGHTS["n_inliers"],
-    )
+    # Lower side: linear ramp from MIN_BLOBS_PER_LINE up by SCORE_N_INLIERS_SLOPE.
+    # Upper side: 1.0 up to the library's max contact count, then linear
+    # falloff over SCORE_N_INLIERS_OVER_SLACK. n far above the library
+    # max means the walker chained a continuous metal structure (the
+    # bolt itself, an insulated wire shaft) instead of discrete contacts.
+    lib_max = int(_LIBRARY_BOUNDS["max_contacts"])
+    if n <= MIN_BLOBS_PER_LINE:
+        n_score = 0.0
+    elif n <= MIN_BLOBS_PER_LINE + SCORE_N_INLIERS_SLOPE:
+        n_score = (n - MIN_BLOBS_PER_LINE) / SCORE_N_INLIERS_SLOPE
+    elif n <= lib_max:
+        n_score = 1.0
+    else:
+        n_score = max(0.0, 1.0 - (n - lib_max) / SCORE_N_INLIERS_OVER_SLACK)
+    components["n_inliers"] = (n_score, SCORE_WEIGHTS["n_inliers"])
 
     if "frangi_median_mm" in rec:
         components["frangi"] = (
@@ -2198,7 +2225,7 @@ def _compute_trajectory_score(rec):
 
     dist_max = float(rec.get("dist_max_mm", 0.0))
     components["depth"] = (
-        min(1.0, max(0.0, dist_max / DEEP_TIP_MIN_MM)),
+        min(1.0, max(0.0, dist_max / SCORE_DEPTH_SAT_MM)),
         SCORE_WEIGHTS["depth"],
     )
 
