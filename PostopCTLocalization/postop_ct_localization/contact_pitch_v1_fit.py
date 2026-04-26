@@ -51,23 +51,93 @@ PITCH_TOL_MM = 0.5
 PERP_TOL_MM = 1.5
 AX_TOL_MM = 0.7
 MAX_K_STEPS = 20
-MIN_BLOBS_PER_LINE = 5          # 5-contact short superficial depth
-                                 # electrodes (ASF, short frontal/parietal
-                                 # families) have exactly 5 visible
-                                 # contacts — a floor of 6 silently drops
-                                 # them. See T21 L_8/L_9/L_13.
-MIN_LINE_SPAN_MM = 12.0          # 5 × 3.5 mm pitch ≈ 14 mm nominal; leave
-                                 # slack for sub-pitch drift.
-MAX_LINE_SPAN_MM = 90.0
-# Maximum allowed gap between consecutive inlier contacts along the
-# axis. The walker trims single stray outliers whose gap to the rest
-# exceeds this, then rejects any line whose remaining internal gap still
-# exceeds it. 22 mm allows up to ~6 consecutive missed contacts at the
-# 3.5 mm Dixi pitch, and 1 insulation jump on BM (9 mm) or CM (13 mm)
-# families. Higher values let the walker bridge contacts from two
-# separate electrodes into a single cross-midline line (seen on T2 X07
-# where a 6-blob line joined RAMC and LAMC), so we cap here.
-MAX_INLIER_GAP_MM = 22.0
+
+# ---- Library-derived bounds ------------------------------------------
+#
+# A real electrode's contact count, span, and within-electrode pitch
+# are answered by the bundled electrode-model library
+# (CommonLib/resources/electrodes/electrode_models.json) — extracting
+# the bounds from that library at module load is the principled way
+# to ask "is this trajectory shape consistent with a real electrode?"
+# instead of carrying hardcoded snapshots that go stale every time the
+# library changes (the file's history shows AMC099 L_5, subject-137
+# L_3, T21 L_8/L_9/L_13 each prompting a one-off bump).
+#
+# Slack constants below stay separate, named, and small. Each one
+# answers one physical question (sub-voxel walker drift, bolt
+# voxel pull-on, family variants the library doesn't yet enumerate)
+# rather than "make subject X pass."
+
+_BUNDLED_LIBRARY_BOUNDS_FALLBACK = {
+    # Snapshot of the in-tree library used when rosa_core is
+    # unavailable (stripped install, Slicer-less environments).
+    "min_contacts": 5,
+    "min_contact_span_mm": 14.0,
+    "max_contact_span_mm": 78.5,
+    "max_within_electrode_pitch_mm": 13.0,
+    "regular_pitches_mm": (3.5, 3.9, 3.97, 4.43, 4.8, 6.1),
+}
+
+
+def _compute_library_bounds():
+    """Walker / length bounds extracted from the electrode library."""
+    try:
+        from rosa_core.electrode_models import load_electrode_library
+        models = list((load_electrode_library() or {}).get("models") or [])
+    except Exception:
+        models = []
+    if not models:
+        return dict(_BUNDLED_LIBRARY_BOUNDS_FALLBACK)
+    counts, spans = [], []
+    all_pitches, regular_pitches = set(), set()
+    for m in models:
+        counts.append(int(m["contact_count"]))
+        offsets = [float(x) for x in m["contact_center_offsets_from_tip_mm"]]
+        spans.append(offsets[-1] - offsets[0])
+        gaps = [round(offsets[i + 1] - offsets[i], 2)
+                for i in range(len(offsets) - 1)]
+        all_pitches.update(gaps)
+        # Smallest gap of each model is its regular intra-block pitch;
+        # larger jumps (BM 9 mm, CM 13 mm) are insulation gaps.
+        regular_pitches.add(round(min(gaps), 2))
+    return {
+        "min_contacts": min(counts),
+        "min_contact_span_mm": min(spans),
+        "max_contact_span_mm": max(spans),
+        "max_within_electrode_pitch_mm": max(all_pitches),
+        "regular_pitches_mm": tuple(sorted(regular_pitches)),
+    }
+
+
+_LIBRARY_BOUNDS = _compute_library_bounds()
+
+# Walker endpoint + chaining slacks. Each one answers "what physical
+# effect loosens this bound past the strict library value?" — never
+# "which subject passes after this number?".
+WALKER_SPAN_UNDER_SLACK_MM = 2.0   # walker can miss endpoint contacts
+                                    # under sub-voxel drift / partial
+                                    # volume bias (~0.5 mm × 2 endpoints
+                                    # × small pitch).
+WALKER_SPAN_OVER_SLACK_MM = 11.5   # walker can chain a few bolt voxels
+                                    # past the shallowest real contact
+                                    # when bolt LoG response sits in the
+                                    # contact-amplitude band; tighter
+                                    # values cut real shanks short.
+WALKER_GAP_SLACK_MM = 9.0          # 2 consecutive missed contacts at
+                                    # the smallest library pitch
+                                    # (3.5 mm) plus walker drift; real
+                                    # shanks rarely lose >2 in a row.
+
+MIN_BLOBS_PER_LINE = _LIBRARY_BOUNDS["min_contacts"]
+MIN_LINE_SPAN_MM = (
+    _LIBRARY_BOUNDS["min_contact_span_mm"] - WALKER_SPAN_UNDER_SLACK_MM
+)
+MAX_LINE_SPAN_MM = (
+    _LIBRARY_BOUNDS["max_contact_span_mm"] + WALKER_SPAN_OVER_SLACK_MM
+)
+MAX_INLIER_GAP_MM = (
+    _LIBRARY_BOUNDS["max_within_electrode_pitch_mm"] + WALKER_GAP_SLACK_MM
+)
 
 STAGE1_DEDUP_ANGLE_DEG = 3.0
 STAGE1_DEDUP_PERP_MM = 2.0
@@ -109,23 +179,34 @@ DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
 # axis diverging from a real bolt.
 MIN_INLIER_DIST_MEAN_MM = 5.0
 
-# Post-anchor length bounds. Real SEEG = ~25–80 mm shank + ~15–25 mm
-# bolt protrusion. Catches stage-2 venous-sinus / vessel false positives
-# (>130 mm) and short skull-base hardware FPs (<45 mm).
-MIN_POST_ANCHOR_LEN_MM = 30.0   # short superficial depths (~20 mm
-                                 # intracranial + ~10–15 mm bolt). PMT
-                                 # bolts run ~12 mm so AMC099 L_5 lands
-                                 # at 34 mm total; a 35 mm floor
-                                 # rejected it by 0.5 mm. Real 5-contact
-                                 # shanks have ≥ 15 mm intracranial, and
-                                 # the walker's 5-blob floor + avg-pitch
-                                 # gate block fragment / hardware FPs
-                                 # that might slip under a 30 mm cap.
-MAX_POST_ANCHOR_LEN_MM = 140.0  # Was 130. Bumped to recover subject-137
-                                # L_3 (thin-wire PMT: 84 mm shank + wire
-                                # gap + bolt → anchored length 132 mm).
-                                # Still catches venous sinus / vessel
-                                # FPs (typically > 160 mm).
+# Post-anchor length bounds. Anchored length = bolt-tip → deep contact
+# = library contact span + bolt protrusion (and, for thin-wire PMT,
+# the deep wire-segment gap that the contact span doesn't include).
+# Both bounds are derived from the library at module load — adding a
+# longer or shorter electrode model reshapes them automatically.
+BOLT_PROTRUSION_MIN_MM = 16.0      # Short PMT bolts protrude ~12 mm
+                                    # past the skull plus ~4 mm of
+                                    # shallow electrode tail before the
+                                    # first contact.
+ANCHOR_TOTAL_OVERSHOOT_MM = 61.5    # Long-bolt + thin-wire-PMT slack
+                                    # past the deepest library contact
+                                    # span. Long DIXI bolts protrude
+                                    # ~50 mm; the thin-wire PMT family
+                                    # adds an unmodelled ~10 mm wire
+                                    # segment beyond the deepest
+                                    # contact (subject-137 L_3 measured
+                                    # 84 mm contact span + 48 mm bolt
+                                    # + wire = 132 mm anchored). This
+                                    # collapses to ~50 mm once a thin-
+                                    # wire PMT model ships in
+                                    # electrode_models.json.
+
+MIN_POST_ANCHOR_LEN_MM = (
+    _LIBRARY_BOUNDS["min_contact_span_mm"] + BOLT_PROTRUSION_MIN_MM
+)
+MAX_POST_ANCHOR_LEN_MM = (
+    _LIBRARY_BOUNDS["max_contact_span_mm"] + ANCHOR_TOTAL_OVERSHOOT_MM
+)
 
 # Cross-stage dedup (applied AFTER bolt anchoring).
 CROSS_STAGE_DEDUP_ANGLE_DEG = 15.0
@@ -319,10 +400,10 @@ PITCH_AUTO_PEAK_EXCLUSION_MM = 0.6
 # Mutual-NN centroid sits ~0.2 mm low of the true pitch (partial-volume
 # localization bias). When the auto detector lands within this tolerance
 # of a known library pitch, snap to it so the walker sees the nominal
-# value instead of the biased estimate. Includes the Dixi MM hybrid
-# pitches (3.9 / 4.8 / 6.1) so auto-detect can lock onto those variants
-# when a subject has a hybrid electrode.
-LIBRARY_PITCHES_MM = (3.5, 3.9, 3.97, 4.43, 4.8, 6.1)
+# value instead of the biased estimate. The pitches themselves come
+# from the library: each model's regular intra-block pitch (the
+# smallest contact-to-contact gap, ignoring BM/CM insulation jumps).
+LIBRARY_PITCHES_MM = _LIBRARY_BOUNDS["regular_pitches_mm"]
 PITCH_SNAP_MM = 0.3
 
 
