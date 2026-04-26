@@ -1997,22 +1997,37 @@ def _dedup_trajectories(trajectories,
                         perp_mm=CROSS_STAGE_DEDUP_PERP_MM):
     """Remove duplicate trajectories.
 
-    Concept: two trajectories are duplicates iff the candidate's blob
-    inliers are a subset of an already-kept trajectory's inliers. The
-    survivor still claims every blob the drop-candidate claimed, so
-    no blob is left orphaned. Disjoint inlier sets always survive
-    independently — they describe physically distinct shanks even
-    when the axes are nearly parallel and close (e.g. T23 CWB next
-    to its sibling, T9 RAC next to LAC).
+    Three rules, in order:
 
-    Stage-2 (Frangi-only) trajectories carry no ``inlier_idx``. For
-    mixed pairs that lack blob support, fall back to the geometric
-    near-collinearity rule so a stage-2 trajectory describing the
-    same physical shaft as a stage-1 hit still gets collapsed into
-    the longer-evidence line.
+      1. **Same bolt anchor + same physical entry → same shank.**
+         Trajectories that anchored to the same bolt CC AND share
+         the same shallow endpoint within ``perp_mm`` are different
+         walker passes finding disjoint blob ranges along one
+         electrode (T5 LCMN class). Without the start-proximity
+         conjunction, this rule would over-collapse: T1's bolt
+         extractor sometimes merges adjacent bolts into one big CC,
+         so physically distinct shanks at separate entry points
+         end up sharing a ``bolt_id``. Their start_ras values stay
+         far apart (typically 50+ mm), so the proximity term
+         preserves them.
+
+      2. **Inlier-subset → same shank.** The candidate's blob
+         inliers are a subset of an already-kept trajectory's
+         inliers — drop, the survivor still claims every blob.
+         Disjoint inlier sets that anchored to *different* bolts
+         (or to merged bolts at different entries) are physically
+         distinct shanks (T9 RAC next to LAC, T23 CWB next to its
+         sibling) and both survive.
+
+      3. **Geometric fallback** for stage-1↔stage-2 mixed pairs that
+         lack blob support on one side. Near-collinear axes with
+         small perpendicular midpoint distance collapse into the
+         longer-evidence line.
     """
     kept: list[dict[str, Any]] = []
     kept_inliers: list[frozenset] = []
+    kept_bolt_ids: list[int] = []
+    kept_starts: list[np.ndarray] = []
     for t in trajectories:
         s = np.asarray(t["start_ras"], dtype=float)
         e = np.asarray(t["end_ras"], dtype=float)
@@ -2021,19 +2036,35 @@ def _dedup_trajectories(trajectories,
         if length < 1e-6:
             continue
         t_inliers = frozenset(int(b) for b in (t.get("inlier_idx") or []))
-        # Pass 1 — does any kept k subsume t (t.inliers ⊆ k.inliers)?
-        # If so, drop t outright. Disjoint inlier sets are physically
-        # distinct shanks; both survive.
-        is_dup = False
+        t_bolt_id = int(t.get("bolt_id", -1))
+        # Rule 1 — same bolt CC + same entry point. Catches duplicates
+        # the inlier-subset rule misses (different walker passes,
+        # disjoint blob ranges, one electrode) without breaking the
+        # merged-bolt-CC case where two distinct shanks share a
+        # bolt_id but have far-apart start positions.
+        if t_bolt_id >= 0:
+            is_dup = False
+            for ki, k_bolt_id in enumerate(kept_bolt_ids):
+                if k_bolt_id != t_bolt_id:
+                    continue
+                if float(np.linalg.norm(s - kept_starts[ki])) <= perp_mm:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+        # Rule 2 — does any kept k subsume t (t.inliers ⊆ k.inliers)?
+        # If so, drop t outright. Disjoint inlier sets on different
+        # bolts are physically distinct shanks; both survive.
+        is_dup_subset = False
         if t_inliers:
             for ki, k_inliers in enumerate(kept_inliers):
                 if k_inliers and t_inliers.issubset(k_inliers):
-                    is_dup = True
+                    is_dup_subset = True
                     break
-        if is_dup:
+        if is_dup_subset:
             continue
-        # Pass 2 — does t subsume any kept k? Drop those k (no orphans:
-        # all their blobs are in t).
+        # Pass 2b — does t subsume any kept k? Drop those k (no
+        # orphans: all their blobs are in t).
         if t_inliers:
             survivors_idx = [
                 ki for ki, k_inliers in enumerate(kept_inliers)
@@ -2042,6 +2073,8 @@ def _dedup_trajectories(trajectories,
             if len(survivors_idx) != len(kept):
                 kept = [kept[ki] for ki in survivors_idx]
                 kept_inliers = [kept_inliers[ki] for ki in survivors_idx]
+                kept_bolt_ids = [kept_bolt_ids[ki] for ki in survivors_idx]
+                kept_starts = [kept_starts[ki] for ki in survivors_idx]
         # Pass 3 — geometric fallback only when at least one side has
         # no blob inliers (Frangi-only stage 2 trajectories). Handles
         # the stage-1↔stage-2 same-shaft collapse.
@@ -2075,10 +2108,14 @@ def _dedup_trajectories(trajectories,
                 if length > klen:
                     kept[ki] = t
                     kept_inliers[ki] = t_inliers
+                    kept_bolt_ids[ki] = t_bolt_id
+                    kept_starts[ki] = s
                 break
         if not is_dup:
             kept.append(t)
             kept_inliers.append(t_inliers)
+            kept_bolt_ids.append(t_bolt_id)
+            kept_starts.append(s)
     return kept
 
 
