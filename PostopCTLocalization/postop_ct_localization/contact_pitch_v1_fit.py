@@ -55,6 +55,21 @@ HU_CLIP_MAX = 3000.0
 # minimum library contact pitch (3.5 mm).
 CANONICAL_SPACING_MM = 1.0
 
+# Post-resample Gaussian anti-aliasing. The canonical resample uses
+# linear interpolation, which doesn't anti-alias; sub-mm raw CT input
+# (e.g. T7's 0.415 mm anisotropic) keeps high-frequency aliasing that
+# the LoG blob extractor sees as extra "contact" peaks. Apply an
+# isotropic Gaussian smoothing AFTER the resample so the effective
+# resolution matches the 1 mm canonical grid.
+#
+# σ = 0.7 mm (conservative anti-aliasing for 1 mm sampling — Nyquist
+# rule of thumb is σ >= half the target voxel size). On T7 raw post_ct
+# this brings stage-1 emissions from 21 down to 14, matching exactly
+# the registered-T7 output (probe_t7_raw_vs_registered.py). Only fires
+# when the input is finer than canonical; native-1 mm CTs skip both
+# the resample and the smoothing.
+RAW_RESAMPLE_GAUSSIAN_SIGMA_MM = 0.7
+
 PITCH_MM = 3.5
 PITCH_TOL_MM = 0.5
 PERP_TOL_MM = 1.5
@@ -2215,6 +2230,12 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         rs.SetInterpolator(sitk.sitkLinear)
         rs.SetDefaultPixelValue(-1024)
         img = rs.Execute(img)
+        # Anti-alias to match the new sampling rate. Without this the
+        # raw input's sub-mm-grid aliasing survives into the LoG and
+        # the blob extractor reports ghost contacts (21 vs 14 stage-1
+        # emissions on raw T7 vs registered T7).
+        if RAW_RESAMPLE_GAUSSIAN_SIGMA_MM > 0:
+            img = sitk.SmoothingRecursiveGaussian(img, RAW_RESAMPLE_GAUSSIAN_SIGMA_MM)
         # Recompute IJK↔RAS for the resampled grid (origin / direction
         # unchanged, spacing changed → matrix changes).
         from shank_core.io import image_ijk_ras_matrices
