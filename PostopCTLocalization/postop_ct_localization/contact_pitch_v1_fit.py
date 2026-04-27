@@ -23,7 +23,26 @@ import numpy as np
 INTRACRANIAL_MIN_DISTANCE_MM = 10.0
 FRANGI_STAGE1_SIGMA = 1.0
 LOG_SIGMA_MM = 1.0
-LOG_BLOB_THRESHOLD = 300.0
+# |LoG| floor for accepting a contact-sized local minimum.
+#
+# Calibrated for the Box r=1 (3x3x3) blob extractor. Per-inlier
+# amplitude distribution across 295 GT-matched shanks (4760 inliers,
+# probe_inlier_amp_distribution.py): p1 = 406, p5 = 626, p50 = 1062,
+# weakest individual inlier = 302.6. Real-shank chains have 12-24
+# inliers each, so dropping the bottom few percent of weak peaks
+# doesn't break any chain.
+#
+# The earlier value (300) was set when the blob extractor used SITK
+# Ball r=2 (81 voxels). Box r=1 (27 voxels, no kernel-snap aliasing
+# at 3.5 mm pitch) keeps more weak peaks alive at threshold 300, and
+# those weak peaks form spurious chains that surface as medium-band
+# orphans (probe_log_threshold_sweep.py: 101 orphans @ 300 vs 12 @
+# 500 vs 1 @ 600 — recall held at 295/295 across the entire sweep).
+#
+# 500 is ~50 % of the typical per-contact LoG (1062), giving roughly
+# 2x cross-scanner safety margin. 600 was empirically clean too but
+# tightens that margin further.
+LOG_BLOB_THRESHOLD = 500.0
 LOG_BLOB_MAX_VOXELS = 500
 
 # CT HU ceiling for scanner-invariance. Metal (titanium bolts, Pt/Ir
@@ -1586,7 +1605,7 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
 # along the axis.
 AXIS_REFINE_STEP_MM = 0.5
 AXIS_REFINE_MAX_MM = 40.0    # never extend further than this past end_ras
-AXIS_REFINE_MIN_ABS = 300.0  # match LOG_BLOB_THRESHOLD (contact signal)
+AXIS_REFINE_MIN_ABS = LOG_BLOB_THRESHOLD  # tied to the blob extractor's contact-peak floor
 AXIS_REFINE_MISS_MM = 3.0    # 3 mm of LoG above -threshold → stop
 DEEP_END_MARGIN_PAST_LAST_CONTACT_MM = 5.0
                              # Hard cap on how far the deep end can
