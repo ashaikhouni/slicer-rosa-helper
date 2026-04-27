@@ -621,8 +621,29 @@ LOG_BLOB_SUBVOXEL_DEFAULT = True
 
 def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
     """Regional-minima blob extraction. Each contact (local LoG minimum)
-    becomes one blob. Uses SITK grayscale erode to find local minima in a
-    ~1 mm radius, then thresholds by absolute LoG value.
+    becomes one blob. Uses SITK grayscale erode with a 3×3×3 Box kernel
+    (26-connectivity, max reach √3 ≈ 1.73 voxels), then thresholds by
+    absolute LoG value.
+
+    Why this kernel:
+      The local-min suppression neighbourhood must be wider than the
+      LoG within-peak shoulders (≈1.5-2 mm FWHM at σ=1 mm) so each
+      contact gives one detection, but strictly narrower than the
+      smallest library contact pitch (3.5 mm) so adjacent contacts on
+      the same shank both survive as distinct local minima. The
+      previous SITK Ball at radius 2 had diagonal reach √6 ≈ 2.45
+      voxels — fine on most subjects at 1 mm voxels but failed on the
+      `(±1, ±1, ±2)` voxel-offset family where adjacent contacts on a
+      shank happen to grid-snap (T7 LSFG: 5/8 contacts detected, 2 of
+      those 5 then failed the walker's 0.5 mm pitch tolerance, line
+      rejected, recovered via stage 2 only).
+
+      A 3×3×3 Box (corner reach √3 ≈ 1.73 mm at 1 mm voxels) sits
+      cleanly between the within-peak FWHM and the contact pitch and
+      is voxel-size-invariant up to spacing ≈ pitch/√3 ≈ 2 mm. On the
+      dataset this recovers all LSFG-class shanks via stage 1, brings
+      stage 2 to zero contributions (was rescuing 1 shank), and
+      preserves T25 LITG which other tighter kernels happen to lose.
 
     ``sub_voxel``: when True, refine each minimum's position to sub-voxel
     accuracy via a 1-D quadratic fit along each axis in the 3×3×3
@@ -637,7 +658,8 @@ def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
         sub_voxel = LOG_BLOB_SUBVOXEL_DEFAULT
     erode = sitk.GrayscaleErode(
         sitk.GetImageFromArray(log_arr),
-        kernelRadius=[2, 2, 2],
+        kernelRadius=[1, 1, 1],
+        kernelType=sitk.sitkBox,
     )
     eroded = sitk.GetArrayFromImage(erode).astype(np.float32)
     is_local_min = (log_arr <= eroded + 1e-4)

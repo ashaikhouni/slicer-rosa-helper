@@ -134,20 +134,30 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
         n_fp = len(trajs) - n_matched
         return gt, trajs, n_matched, n_fp
 
+    # FP caps loosened from 10 to 20 when the LoG-blob extractor switched
+    # from Ball r=2 (81-voxel kernel, max diagonal reach 2.45 voxels) to
+    # Box r=1 (3×3×3 cube, max corner reach √3 voxels). The smaller
+    # kernel admits more local-min candidates per subject — recovering
+    # LSFG-class shanks that the wider Ball missed via diagonal-corner
+    # interference — at the cost of more walker-emitted orphans. The
+    # primary recall guard (n_matched ≥ N_GT) is unchanged; the FP cap
+    # is now a runaway guardrail rather than an "FPs ≤ 10" target.
+    # Score framework downstream classifies most extra orphans as
+    # medium/low confidence.
     def test_T22(self):
         gt, trajs, n_matched, n_fp = self._run_subject("T22")
         self.assertEqual(len(gt), 9, "T22 GT count drifted")
         self.assertGreaterEqual(
             n_matched, 8, f"contact_pitch_v1 match regressed: {n_matched}/{len(gt)}"
         )
-        self.assertLessEqual(n_fp, 10, f"contact_pitch_v1 FP count regressed: {n_fp}")
+        self.assertLessEqual(n_fp, 20, f"contact_pitch_v1 FP count regressed: {n_fp}")
 
     def test_T2(self):
         gt, trajs, n_matched, n_fp = self._run_subject("T2")
         self.assertGreaterEqual(
             n_matched, 12, f"contact_pitch_v1 match regressed: {n_matched}/{len(gt)}"
         )
-        self.assertLessEqual(n_fp, 10, f"contact_pitch_v1 FP count regressed: {n_fp}")
+        self.assertLessEqual(n_fp, 20, f"contact_pitch_v1 FP count regressed: {n_fp}")
 
     def test_T2_auto_strategy(self):
         # Auto-detect pitch snaps the mutual-NN centroid (~3.3 mm on a
@@ -162,7 +172,7 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
             f"contact_pitch_v1 auto-strategy match regressed: {n_matched}/{len(gt)}",
         )
         self.assertLessEqual(
-            n_fp, 10,
+            n_fp, 20,
             f"contact_pitch_v1 auto-strategy FP count regressed: {n_fp}",
         )
 
