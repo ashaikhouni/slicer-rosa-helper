@@ -46,6 +46,20 @@ LOG_BLOB_MAX_VOXELS = 500
 # outliers.
 HU_CLIP_MAX = 3000.0
 
+# Canonical voxel spacing (mm). Inputs at finer spacings are
+# downsampled to this grid before any LoG / Frangi / morphology
+# runs, so kernel sizing, thresholds, and walker tolerances behave
+# identically across raw post-op CTs (typically 0.4-0.7 mm) and
+# registered scans (typically 1 mm). Trajectories emit in scanner-
+# space RAS coordinates and remain valid in the original input CT
+# regardless of whether resampling happened.
+#
+# 1.0 mm matches the registered dataset and gives kernel reach
+# √3 ≈ 1.73 mm with the Box r=1 LoG-blob extractor — wider than the
+# σ=1 mm LoG within-peak FWHM (~1.5-2 mm) and narrower than the
+# minimum library contact pitch (3.5 mm).
+CANONICAL_SPACING_MM = 1.0
+
 PITCH_MM = 3.5
 PITCH_TOL_MM = 0.5
 PERP_TOL_MM = 1.5
@@ -2363,6 +2377,34 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
     ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     import SimpleITK as sitk
+    # Voxel-spacing canonicalization: downsample finer-than-canonical
+    # inputs (typical raw post-op CT at 0.4-0.7 mm) to CANONICAL_SPACING_MM
+    # so the kernel sizes, thresholds, and walker tolerances downstream
+    # behave identically across input voxel grids. Trajectories emit
+    # in scanner-space RAS — valid in the original input CT regardless.
+    spacing = img.GetSpacing()
+    needs_resample = min(float(s) for s in spacing) < CANONICAL_SPACING_MM * 0.95
+    if needs_resample:
+        size_in = img.GetSize()
+        target_spacing = (CANONICAL_SPACING_MM, CANONICAL_SPACING_MM, CANONICAL_SPACING_MM)
+        target_size = [
+            max(1, int(round(size_in[i] * float(spacing[i]) / CANONICAL_SPACING_MM)))
+            for i in range(3)
+        ]
+        rs = sitk.ResampleImageFilter()
+        rs.SetOutputSpacing(target_spacing)
+        rs.SetSize(target_size)
+        rs.SetOutputOrigin(img.GetOrigin())
+        rs.SetOutputDirection(img.GetDirection())
+        rs.SetInterpolator(sitk.sitkLinear)
+        rs.SetDefaultPixelValue(-1024)
+        img = rs.Execute(img)
+        # Recompute IJK↔RAS for the resampled grid (origin / direction
+        # unchanged, spacing changed → matrix changes).
+        from shank_core.io import image_ijk_ras_matrices
+        ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
+        ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+        ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     # Scanner-invariance pre-clip: cap HU at HU_CLIP_MAX so the LoG /
     # Frangi response is consistent across scans regardless of how the
     # CT reconstruction encodes metal saturation. Does not affect hull
