@@ -350,15 +350,18 @@ class DeepCoreVisualizationLogicMixin:
             else:
                 node.SetAttribute("Rosa.DeepCoreAnnulusMeanHu", f"{float(annulus_mean):.3f}")
             node.SetAttribute("Rosa.DeepCoreAnnulusSampleCount", str(int(annulus_samples)))
-            # Prefer an explicit skull-entry point from the detector (e.g.,
             # contact_pitch_v1 emits `skull_entry_ras` = deepest bolt-tube
-            # voxel along the shank axis, i.e. bone→brain transition).
-            # Fall back to the annulus-gradient estimate otherwise.
+            # voxel along the shank axis (bone→brain transition). Trajectories
+            # whose anchoring failed (bolt_source = "none") have no
+            # skull_entry_ras and skip the skull-jump record entirely. The
+            # annulus-gradient fallback that used to live here was removed
+            # with the v1/v2 pipeline cleanup (commit 4916dae); call site
+            # was overlooked then.
             entry_override = proposal.get("skull_entry_ras")
+            node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", "")
+            node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", "")
             if entry_override is not None and len(list(entry_override)) >= 3:
                 entry_pt = [float(v) for v in list(entry_override)[:3]]
-                node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", "")
-                node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", "")
                 skull_jump_records.append(
                     {
                         "point_ras": entry_pt,
@@ -366,25 +369,6 @@ class DeepCoreVisualizationLogicMixin:
                         "description": "bolt base (bone->brain)",
                     }
                 )
-            else:
-                skull_jump = self._proposal_skull_transition_from_annulus_gradient(
-                    volume_node=volume_node,
-                    proposal=proposal,
-                )
-                skull_jump_point = skull_jump.get("point_ras")
-                if skull_jump_point is None:
-                    node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", "")
-                    node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", "")
-                else:
-                    node.SetAttribute("Rosa.DeepCoreSkullJumpHuPerMm", f"{float(skull_jump.get('jump_hu_per_mm', 0.0)):.3f}")
-                    node.SetAttribute("Rosa.DeepCoreSkullJumpAxialMm", f"{float(skull_jump.get('axial_pos_mm', 0.0)):.3f}")
-                    skull_jump_records.append(
-                        {
-                            "point_ras": [float(v) for v in np.asarray(skull_jump_point, dtype=float).reshape(3)],
-                            "label": f"{line_tag}{idx:02d}*",
-                            "description": "first large annulus jump",
-                        }
-                    )
             shallow_name = str(proposal.get("shallow_endpoint_name") or "").strip().lower()
             deep_name = str(proposal.get("deep_endpoint_name") or "").strip().lower()
             shallow_ras = end_ras if shallow_name == "end" else start_ras
