@@ -103,7 +103,16 @@ class DeepCoreVisualizationLogicMixin:
             node.CreateDefaultDisplayNodes()
         return node
 
-    def _update_scalar_volume_from_array(self, reference_volume_node, node_name, array_kji):
+    def _update_scalar_volume_from_array(self, reference_volume_node, node_name, array_kji,
+                                          ijk_to_ras_mat=None):
+        """Push a numpy array into a Slicer scalar volume.
+
+        ``ijk_to_ras_mat``: optional 4x4 matrix (numpy or VTK) to use
+        for the new volume's geometry. When omitted, copies the
+        reference volume's IJK->RAS — which is wrong if the array was
+        computed on a different grid (e.g. canonical-1mm-resampled
+        feature volumes on raw sub-mm CT input).
+        """
         if array_kji is None:
             return None
         node = self._get_or_create_scalar_volume_node(node_name)
@@ -112,7 +121,13 @@ class DeepCoreVisualizationLogicMixin:
             arr = arr.astype(np.float32)
         slicer.util.updateVolumeFromArray(node, arr)
         m = vtk.vtkMatrix4x4()
-        reference_volume_node.GetIJKToRASMatrix(m)
+        if ijk_to_ras_mat is not None:
+            np_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+            for r in range(4):
+                for c in range(4):
+                    m.SetElement(r, c, float(np_mat[r, c]))
+        else:
+            reference_volume_node.GetIJKToRASMatrix(m)
         node.SetIJKToRASMatrix(m)
         self._copy_parent_transform(reference_volume_node, node)
         display = node.GetDisplayNode()

@@ -23,6 +23,11 @@ class ContactPitchV1WidgetMixin:
         if not features or reference_volume_node is None:
             return
         base = reference_volume_node.GetName() or "ContactPitch"
+        # Pipeline supplies the IJK->RAS for the grid the feature arrays
+        # actually live on. Differs from the input volume's matrix when
+        # canonical-1mm resampling fired on raw sub-mm input; without
+        # this the LoG / Frangi volumes display offset from the CT.
+        feature_ijk_to_ras = features.get("ijk_to_ras_mat")
         feature_labels = (
             ("log_sigma1", "LoG_sigma1", True),
             ("frangi_sigma1", "Frangi_sigma1", True),
@@ -39,6 +44,7 @@ class ContactPitchV1WidgetMixin:
             try:
                 node = self.logic._update_scalar_volume_from_array(
                     reference_volume_node, f"{base}_ContactPitch_{label}", arr,
+                    ijk_to_ras_mat=feature_ijk_to_ras,
                 )
             except Exception as exc:
                 self.log(f"[contact-pitch-v1] skipped feature {label}: {exc}")

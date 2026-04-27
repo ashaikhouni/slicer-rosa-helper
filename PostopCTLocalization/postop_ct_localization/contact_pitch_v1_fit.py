@@ -2808,6 +2808,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             "intracranial": intracranial.astype(np.uint8),
             "hull": hull.astype(np.uint8),
             "bolt_mask": bolt_mask,
+            # IJK->RAS matrix for the grid the feature arrays live on.
+            # Differs from the input volume's matrix when canonical-1mm
+            # resampling fired (raw sub-mm input). Slicer must use this
+            # to position the feature volumes correctly in the scene.
+            "ijk_to_ras_mat": np.asarray(ijk_to_ras_mat, dtype=float),
         }
         return trajectories, features
     return trajectories
