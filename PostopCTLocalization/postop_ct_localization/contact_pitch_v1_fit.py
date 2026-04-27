@@ -90,7 +90,29 @@ CANONICAL_SPACING_MM = 1.0
 RAW_RESAMPLE_GAUSSIAN_SIGMA_MM = 0.7
 
 PITCH_MM = 3.5
-PITCH_TOL_MM = 0.5
+# Inter-contact pitch tolerance for the walker. Calibrated for the
+# Box r=1 (3x3x3) blob extractor + sub-voxel quadratic refinement.
+#
+# Per-peak position error budget (1 sigma):
+#   sub-voxel residual   ~0.10 mm
+#   manufacturing        ~0.05 mm
+#   registration         ~0.10 mm
+#   combined per-peak    ~0.15 mm
+# Inter-contact distance error: sigma_d = sqrt(2) * 0.15 ~0.21 mm.
+# 2 sigma (95%) tolerance = 0.42 mm; 2.5 sigma (99%) = 0.53 mm.
+#
+# The earlier value 0.5 mm was empirical for the Ball r=2 era, where
+# kernel snap on the (+-1,+-1,+-2) family added ~0.5-1 mm of position
+# error and forced a wider tolerance. Box r=1 doesn't kernel-snap at
+# 3.5 mm pitch (corner reach sqrt(3) ~1.73 mm < pitch), so the wider
+# slack is no longer needed.
+#
+# 0.4 (~2 sigma) is the math-grounded choice: kills walker-chain
+# false positives whose blobs aren't on a regular pitch while
+# preserving the 95 % confidence interval for real shanks. Probe
+# probe_pitch_tol_sweep.py confirmed dataset recall holds at 295/295
+# down to 0.2 mm; 0.4 keeps cross-scanner safety margin.
+PITCH_TOL_MM = 0.4
 PERP_TOL_MM = 1.5
 AX_TOL_MM = 0.7
 MAX_K_STEPS = 20
