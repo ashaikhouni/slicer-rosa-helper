@@ -87,11 +87,9 @@ class ContactPitchV1WidgetMixin:
         form = qt.QFormLayout(tab)
 
         help_text = qt.QLabel(
-            "Direct shank detection (no bolt stage). Stage 1: LoG \u03c3=1 "
-            "regional-minima blobs + Dixi 3.5 mm pitch walk. Stage 2: Frangi "
-            "tube fallback (CC + PCA) for shanks without resolvable contacts. "
-            "Trajectories are tagged stage1/stage2 and span the detected "
-            "contact range (not bolt entry to deep tip)."
+            "Direct shank detection (no bolt stage). LoG \u03c3=1 "
+            "regional-minima blobs + library-pitch walk. Trajectories "
+            "span the detected contact range (not bolt entry to deep tip)."
         )
         help_text.wordWrap = True
         form.addRow(help_text)
@@ -204,11 +202,8 @@ class ContactPitchV1WidgetMixin:
             if det_result.get("status") == "error":
                 raise RuntimeError(det_result.get("error", {}).get("message", "unknown"))
             trajectories = list(det_result.get("trajectories") or [])
-            counts = det_result.get("diagnostics", {}).get("counts", {})
             self.log(
-                f"[contact-pitch-v1] {len(trajectories)} trajectories "
-                f"(stage1={counts.get('stage1_count', 0)}, "
-                f"stage2={counts.get('stage2_count', 0)})"
+                f"[contact-pitch-v1] {len(trajectories)} trajectories"
             )
 
             features = getattr(pipeline, "_last_feature_arrays", None) or {}
@@ -324,9 +319,7 @@ class ContactPitchV1WidgetMixin:
             self.log(f"[contact-pitch-v1] published {len(nodes)} trajectory lines to workflow")
             self.contactPitchProgressBar.setValue(self.contactPitchProgressBar.maximum)
             self.contactPitchStatusLabel.setText(
-                f"done — {len(trajectories)} trajectories "
-                f"(stage1={counts.get('stage1_count', 0)}, "
-                f"stage2={counts.get('stage2_count', 0)})"
+                f"done — {len(trajectories)} trajectories"
             )
         except Exception as exc:
             self.log(f"[contact-pitch-v1] error: {exc}")

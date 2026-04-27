@@ -1,15 +1,13 @@
-"""Contact-pitch v1: two-stage LoG+Frangi SEEG detection pipeline.
+"""Contact-pitch v1: LoG-blob + library-pitch SEEG detection pipeline.
 
 Stages:
   1. ``detect`` — runs ``contact_pitch_v1_fit.run_two_stage_detection``.
-     This single stage covers preprocessing (hull mask + intracranial +
-     hull distance + LoG + Frangi), stage-1 blob-pitch, and stage-2
-     Frangi shaft fallback.
+     One stage end-to-end: preprocessing (hull mask + intracranial +
+     hull distance + LoG + Frangi), blob-pitch walker, bolt anchoring,
+     deep-end refinement, and per-trajectory confidence scoring.
 
-Locates shanks directly from the CT using a Dixi 3.5 mm pitch prior on
-LoG regional-minima blobs (stage 1) with a Frangi shaft fallback for
-pitch-unresolved shanks (stage 2). Every trajectory is emitted with a
-``source`` tag ("stage1" or "stage2") for easy debugging.
+Locates shanks directly from the CT using a library-pitch prior on
+LoG regional-minima blobs.
 """
 from __future__ import annotations
 
@@ -150,11 +148,9 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
             pitch_strategy=pitch_strategy,
         )
         self._last_feature_arrays = features
-        stage1 = sum(1 for t in trajectories if t.get("source") == "stage1")
-        stage2 = sum(1 for t in trajectories if t.get("source") == "stage2")
         return {
             "trajectories": trajectories,
-            "stats": {"stage1_count": stage1, "stage2_count": stage2},
+            "stats": {},
         }
 
     def run(self, ctx: DetectionContext) -> DetectionResult:
@@ -169,10 +165,7 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
                 fn=lambda: self._run_detect(ctx),
             )
             result["trajectories"] = list(output["trajectories"])
-            stats = output.get("stats") or {}
             diag.set_count("proposal_count", len(result["trajectories"]))
-            diag.set_count("stage1_count", int(stats.get("stage1_count", 0)))
-            diag.set_count("stage2_count", int(stats.get("stage2_count", 0)))
         except Exception as exc:
             self.fail(
                 ctx=ctx, result=result, diagnostics=diag,

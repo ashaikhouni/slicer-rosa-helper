@@ -1,20 +1,15 @@
-"""Contact-pitch v1 detector: two-stage LoG+Frangi SEEG shank detection.
-
-Ported directly from ``tests/deep_core/probe_two_stage.py`` + supporting
-probes. No gates or filters beyond what the probe uses.
+"""Contact-pitch v1 detector: LoG-blob + library-pitch SEEG shank detection.
 
 Pipeline:
   * preprocessing: hull mask, intracranial mask, hull signed-distance,
     LoG sigma=1, Frangi sigma=1.
-  * stage 1 — blob-pitch: LoG regional-minima blobs + Dixi 3.5 mm pitch
-    Hough-style walk, amp_sum gate, deep-tip prior.
-  * stage 1 exclusion zone (3 mm tube around every accepted stage-1 line).
-  * stage 2 — Frangi shaft fallback: Frangi>=30 cloud minus the exclusion
-    zone, CC + PCA, span/aspect filters, hull-endpoint + deep-tip prior.
-  * combine stage 1 + stage 2 hypotheses.
-
-See ``slicer-rosa-helper/docs/DEEP_CORE_V2_HANDOFF.md`` for the session
-story that produced this design.
+  * blob-pitch walker: LoG regional-minima blobs + library-pitch
+    Hough-style walk, amp_sum gate, deep-tip prior, Frangi-along-axis
+    gate.
+  * bolt anchoring (LoG primary, HU rescue, axis-to-skull synth, or no-
+    anchor recall-first emission with confidence-score downweighting).
+  * post-anchor dedup, deep-end refinement, crossing-tip retreat.
+  * physical-evidence confidence score per emission.
 """
 from __future__ import annotations
 
@@ -159,15 +154,6 @@ STAGE1_DEDUP_ANGLE_DEG = 3.0
 STAGE1_DEDUP_PERP_MM = 2.0
 STAGE1_DEDUP_OVERLAP_FRAC = 0.3
 
-STAGE2_FRANGI_THR = 30.0
-STAGE2_MIN_VOXELS = 30
-STAGE2_MAX_VOXELS = 20000
-STAGE2_MIN_SPAN_MM = 20.0
-STAGE2_MAX_SPAN_MM = 85.0
-STAGE2_MAX_PERP_RMS_MM = 3.0
-STAGE2_MIN_ASPECT_GEOM = 5.0
-
-FALLBACK_EXCLUSION_MM = 3.0
 HULL_ENDPOINT_MAX_MM = 15.0
 DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
                                 # sinus / skull-base tube FPs hide).
@@ -224,9 +210,9 @@ MAX_POST_ANCHOR_LEN_MM = (
     _LIBRARY_BOUNDS["max_contact_span_mm"] + ANCHOR_TOTAL_OVERSHOOT_MM
 )
 
-# Cross-stage dedup (applied AFTER bolt anchoring).
-CROSS_STAGE_DEDUP_ANGLE_DEG = 15.0
-CROSS_STAGE_DEDUP_PERP_MM = 8.0
+# Post-anchor dedup: same-bolt + close-entry duplicates (multi-pitch
+# walker passes that found disjoint blob ranges along one electrode).
+POST_ANCHOR_DEDUP_PERP_MM = 8.0
 
 # Bolt detection from LoG σ=1 cloud.
 # A bolt CC is any connected blob of bright-metal LoG minima that reaches
@@ -650,14 +636,13 @@ def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
       `(±1, ±1, ±2)` voxel-offset family where adjacent contacts on a
       shank happen to grid-snap (T7 LSFG: 5/8 contacts detected, 2 of
       those 5 then failed the walker's 0.5 mm pitch tolerance, line
-      rejected, recovered via stage 2 only).
+      rejected).
 
       A 3×3×3 Box (corner reach √3 ≈ 1.73 mm at 1 mm voxels) sits
       cleanly between the within-peak FWHM and the contact pitch and
       is voxel-size-invariant up to spacing ≈ pitch/√3 ≈ 2 mm. On the
-      dataset this recovers all LSFG-class shanks via stage 1, brings
-      stage 2 to zero contributions (was rescuing 1 shank), and
-      preserves T25 LITG which other tighter kernels happen to lose.
+      dataset this recovers all LSFG-class shanks and preserves
+      T25 LITG which other tighter kernels happen to lose.
 
     ``sub_voxel``: when True, refine each minimum's position to sub-voxel
     accuracy via a 1-D quadratic fit along each axis in the 3×3×3
@@ -1410,123 +1395,6 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     return kept, pts_c
 
 
-# ---- Stage 1 exclusion zone ------------------------------------------
-
-def compute_exclusion_mask(cloud_mask_shape, lines_ras, ras_to_ijk_mat,
-                           radius_mm=FALLBACK_EXCLUSION_MM, step_mm=1.0):
-    """Mark voxels within `radius_mm` of any stage-1 line. Stage 2 skips
-    these voxels so already-detected shanks aren't re-detected as Frangi
-    tubes.
-    """
-    excl = np.zeros(cloud_mask_shape, dtype=bool)
-    K, J, I = cloud_mask_shape
-    for line in lines_ras:
-        start = np.asarray(line["start_ras"], dtype=float)
-        end = np.asarray(line["end_ras"], dtype=float)
-        axis = end - start
-        L = float(np.linalg.norm(axis))
-        if L < 1e-3:
-            continue
-        axis = axis / L
-        n_steps = int(L / step_mm) + 1
-        for k_step in range(n_steps):
-            p_ras = start + k_step * step_mm * axis
-            h = np.array([p_ras[0], p_ras[1], p_ras[2], 1.0])
-            ijk = (ras_to_ijk_mat @ h)[:3]
-            k, j, i = int(round(ijk[2])), int(round(ijk[1])), int(round(ijk[0]))
-            r = int(np.ceil(radius_mm / 0.5))
-            k0, k1 = max(0, k - r), min(K, k + r + 1)
-            j0, j1 = max(0, j - r), min(J, j + r + 1)
-            i0, i1 = max(0, i - r), min(I, i + r + 1)
-            excl[k0:k1, j0:j1, i0:i1] = True
-    return excl
-
-
-# ---- Stage 2: Frangi shaft fallback -----------------------------------
-
-def run_stage2(frangi_s1, intracranial_mask, exclusion_mask, spacing_xyz,
-               dist_arr, ijk_to_ras_mat, ras_to_ijk_mat):
-    """Fast shaft detector: CC + PCA on residual Frangi cloud. A continuous
-    dark shaft with CT-invisible contacts (e.g. RSAN on T2) shows up as a
-    single elongated CC in the Frangi tube response; PCA gives the axis
-    directly. Same span/aspect + hull-endpoint + deep-tip priors as in
-    run_stage1.
-    """
-    import SimpleITK as sitk
-    cloud_mask = (frangi_s1 >= STAGE2_FRANGI_THR) & intracranial_mask & ~exclusion_mask
-    bin_img = sitk.GetImageFromArray(cloud_mask.astype(np.uint8))
-    cc_filt = sitk.ConnectedComponentImageFilter()
-    cc_filt.SetFullyConnected(True)
-    cc_img = cc_filt.Execute(bin_img)
-    cc_arr = sitk.GetArrayFromImage(cc_img)
-
-    sx, sy, sz = float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])
-    lines = []
-    flat = cc_arr.ravel()
-    order = np.argsort(flat)
-    flat_sorted = flat[order]
-    changes = np.where(np.diff(flat_sorted) != 0)[0] + 1
-    starts = np.concatenate([[0], changes])
-    ends = np.concatenate([changes, [flat_sorted.size]])
-    for s, e in zip(starts, ends):
-        lab = flat_sorted[s]
-        if lab == 0:
-            continue
-        idxs = order[s:e]
-        n_vox = idxs.size
-        if n_vox < STAGE2_MIN_VOXELS or n_vox > STAGE2_MAX_VOXELS:
-            continue
-        kk, jj, ii = np.unravel_index(idxs, cc_arr.shape)
-        pts_mm = np.stack([ii * sx, jj * sy, kk * sz], axis=1).astype(np.float64)
-        c = pts_mm.mean(axis=0)
-        X = pts_mm - c
-        cov = X.T @ X / max(1, n_vox - 1)
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        eigvals = eigvals[::-1]
-        eigvecs = eigvecs[:, ::-1]
-        pc1 = eigvecs[:, 0]
-        proj = X @ pc1
-        lo, hi = float(proj.min()), float(proj.max())
-        span = hi - lo
-        if span < STAGE2_MIN_SPAN_MM or span > STAGE2_MAX_SPAN_MM:
-            continue
-        perp = X - np.outer(proj, pc1)
-        perp_rms = float(np.sqrt(np.mean(np.sum(perp * perp, axis=1))))
-        if perp_rms > STAGE2_MAX_PERP_RMS_MM:
-            continue
-        aspect_geom = span / max(perp_rms, 1e-3)
-        if aspect_geom < STAGE2_MIN_ASPECT_GEOM:
-            continue
-        cc_dist_min = float(dist_arr[kk, jj, ii].min())
-        cc_dist_max = float(dist_arr[kk, jj, ii].max())
-        if cc_dist_min > HULL_ENDPOINT_MAX_MM:
-            continue
-        if cc_dist_max < DEEP_TIP_MIN_MM:
-            continue
-        kji_pts = np.stack([kk, jj, ii], axis=1).astype(np.float64)
-        kji_c = kji_pts.mean(axis=0)
-        X_kji = kji_pts - kji_c
-        _, _, Vt = np.linalg.svd(X_kji, full_matrices=False)
-        kji_axis = _unit(Vt[0])
-        kji_proj = X_kji @ kji_axis
-        kji_lo, kji_hi = float(kji_proj.min()), float(kji_proj.max())
-        start_kji = kji_c + kji_lo * kji_axis
-        end_kji = kji_c + kji_hi * kji_axis
-        start_ijk = np.array([start_kji[2], start_kji[1], start_kji[0], 1.0])
-        end_ijk = np.array([end_kji[2], end_kji[1], end_kji[0], 1.0])
-        start_ras = (ijk_to_ras_mat @ start_ijk)[:3]
-        end_ras = (ijk_to_ras_mat @ end_ijk)[:3]
-        start_ras, end_ras = _orient_shallow_to_deep(
-            start_ras, end_ras, dist_arr, ras_to_ijk_mat,
-        )
-        lines.append(dict(
-            start_ras=start_ras, end_ras=end_ras,
-            length_mm=span, n_inliers=int(n_vox),
-            dist_min_mm=cc_dist_min, dist_max_mm=cc_dist_max,
-        ))
-    return lines, cc_arr
-
-
 # ---- Bolt detection + anchoring --------------------------------------
 
 def extract_bolt_candidates(log_arr, dist_arr, ijk_to_ras_mat, spacing_xyz,
@@ -2004,8 +1872,7 @@ def _clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
     redundant and brittle across subjects with varying saturation
     (T4 saturates at ~1500, T22 at 2200+). All inliers count.
 
-    No-op when the trajectory has no ``inlier_ras`` (e.g., stage-2
-    Frangi trajectories that skip the walker).
+    No-op when the trajectory has no ``inlier_ras``.
     """
     inliers = rec.get("inlier_ras")
     if inliers is None or len(inliers) == 0:
@@ -2029,11 +1896,10 @@ def _clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
 # ---- Cross-stage dedup -----------------------------------------------
 
 def _dedup_trajectories(trajectories,
-                        angle_deg=CROSS_STAGE_DEDUP_ANGLE_DEG,
-                        perp_mm=CROSS_STAGE_DEDUP_PERP_MM):
+                        perp_mm=POST_ANCHOR_DEDUP_PERP_MM):
     """Remove duplicate trajectories.
 
-    Three rules, in order:
+    Two rules, in order:
 
       1. **Same bolt anchor + same physical entry → same shank.**
          Trajectories that anchored to the same bolt CC AND share
@@ -2054,11 +1920,6 @@ def _dedup_trajectories(trajectories,
          (or to merged bolts at different entries) are physically
          distinct shanks (T9 RAC next to LAC, T23 CWB next to its
          sibling) and both survive.
-
-      3. **Geometric fallback** for stage-1↔stage-2 mixed pairs that
-         lack blob support on one side. Near-collinear axes with
-         small perpendicular midpoint distance collapse into the
-         longer-evidence line.
     """
     kept: list[dict[str, Any]] = []
     kept_inliers: list[frozenset] = []
@@ -2111,47 +1972,10 @@ def _dedup_trajectories(trajectories,
                 kept_inliers = [kept_inliers[ki] for ki in survivors_idx]
                 kept_bolt_ids = [kept_bolt_ids[ki] for ki in survivors_idx]
                 kept_starts = [kept_starts[ki] for ki in survivors_idx]
-        # Pass 3 — geometric fallback only when at least one side has
-        # no blob inliers (Frangi-only stage 2 trajectories). Handles
-        # the stage-1↔stage-2 same-shaft collapse.
-        is_dup = False
-        for ki, k in enumerate(kept):
-            k_inliers = kept_inliers[ki]
-            if t_inliers and k_inliers:
-                continue
-            ks = np.asarray(k["start_ras"], dtype=float)
-            ke = np.asarray(k["end_ras"], dtype=float)
-            kd = ke - ks
-            klen = float(np.linalg.norm(kd))
-            if klen < 1e-6:
-                continue
-            kaxis = kd / klen
-            axis = d / length
-            cos = abs(float(np.dot(axis, kaxis)))
-            ang = float(np.degrees(np.arccos(min(1.0, cos))))
-            if ang > angle_deg:
-                continue
-            mid = 0.5 * (s + e)
-            v = mid - ks
-            along = float(np.dot(v, kaxis))
-            perp = v - along * kaxis
-            pd = float(np.linalg.norm(perp))
-            margin = 0.5 * klen
-            if along < -margin or along > klen + margin:
-                continue
-            if pd <= perp_mm:
-                is_dup = True
-                if length > klen:
-                    kept[ki] = t
-                    kept_inliers[ki] = t_inliers
-                    kept_bolt_ids[ki] = t_bolt_id
-                    kept_starts[ki] = s
-                break
-        if not is_dup:
-            kept.append(t)
-            kept_inliers.append(t_inliers)
-            kept_bolt_ids.append(t_bolt_id)
-            kept_starts.append(s)
+        kept.append(t)
+        kept_inliers.append(t_inliers)
+        kept_bolt_ids.append(t_bolt_id)
+        kept_starts.append(s)
     return kept
 
 
@@ -2163,10 +1987,7 @@ def _dedup_trajectories(trajectories,
 # pre-anchor contact span, post-anchor length, intracranial depth, and
 # bolt-anchor source. Each component saturates at the corresponding
 # gate threshold (`measure ≥ threshold` → 1.0), so a clean SEEG line
-# scores near 1.0 on every term. Stage-2 lines lack walker-only
-# features (amp_sum, pitch, contact_span) — those terms are excluded
-# from the average instead of penalised, keeping stage-1 and stage-2
-# scores comparable.
+# scores near 1.0 on every term.
 #
 # v1 keeps the existing emit-time gates as fallbacks. The score is
 # attached as metadata (`score`, `confidence`, `score_components`) on
@@ -2230,12 +2051,7 @@ def _bolt_source_score(src):
 
 
 def _compute_trajectory_score(rec):
-    """Return (score, confidence, components) for one trajectory record.
-
-    Missing fields (e.g. amp_sum on stage-2 lines) are excluded from
-    the weighted average rather than scored as 0; partial-feature
-    records remain comparable to full-feature ones.
-    """
+    """Return (score, confidence, components) for one trajectory record."""
     components = {}
 
     if "amp_sum" in rec:
@@ -2349,7 +2165,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                              suggestion_vendors=None,
                              pitch_strategy=None,
                              pitches_mm=None):
-    """Run the full two-stage detector on a SITK image.
+    """Run the full SEEG shank detector on a SITK image.
 
     Args:
         img: SimpleITK image (raw CT).
@@ -2520,15 +2336,6 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         except Exception:
             l["inlier_ras"] = None
             l["inlier_amps"] = None
-    excl = compute_exclusion_mask(
-        frangi_s1.shape, stage1_lines, ras_to_ijk_mat,
-    )
-    _log("stage 2: Frangi shaft fallback…")
-    stage2_lines, _cc_arr = run_stage2(
-        frangi_s1, intracranial, excl, img.GetSpacing(),
-        dist_arr, ijk_to_ras_mat, ras_to_ijk_mat,
-    )
-    _log(f"stage 2: {len(stage2_lines)} candidate lines")
 
     _log("bolt extraction…")
     bolts, bolt_mask = extract_bolt_candidates(
@@ -2550,56 +2357,49 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     _log(f"bolt rescue pool (HU ≥ {BOLT_HU_RESCUE_THRESHOLD:.0f}): "
          f"{len(rescue_bolts_hu)} candidates")
 
-    def _assemble(l, source):
+    def _assemble(l):
         rec = dict(
             start_ras=np.asarray(l["start_ras"], dtype=float),
             end_ras=np.asarray(l["end_ras"], dtype=float),
             shallow_endpoint_name="start",
             deep_endpoint_name="end",
-            source=source,
             length_mm=float(l.get("span_mm", l.get("length_mm", 0.0))),
             n_inliers=int(l.get("n_blobs", l.get("n_inliers", 0))),
             dist_min_mm=float(l.get("dist_min_mm", float("nan"))),
             dist_max_mm=float(l.get("dist_max_mm", float("nan"))),
             dist_mean_mm=float(l.get("dist_mean_mm", float("nan"))),
+            amp_sum=float(l.get("amp_sum", 0.0)),
         )
-        if source == "stage1":
-            rec["amp_sum"] = float(l.get("amp_sum", 0.0))
-            # Carry the walker's blob-inlier set through anchoring so
-            # ``_dedup_trajectories`` can apply the inlier-subset rule
-            # (drop only when no blob is orphaned).
-            inlier_idx = l.get("inlier_idx")
-            if inlier_idx is not None:
-                rec["inlier_idx"] = list(int(b) for b in inlier_idx)
-            # Preserve the pre-anchor inlier span — the actual distance
-            # between the shallowest and deepest detected contacts. The
-            # post-anchor ``length_mm`` overwrites this with the
-            # bolt-tip → deep-tip length, so downstream classifiers
-            # need this field to see the true contact span.
-            rec["contact_span_mm"] = float(l.get("span_mm", 0.0))
-            # Pre-extend walker span, used by the HU rescue's "strong
-            # stage-1" gate.
-            rec["original_span_mm"] = float(
-                l.get("original_span_mm", l.get("span_mm", 0.0))
-            )
-            rec["original_median_pitch_mm"] = float(l.get(
-                "original_median_pitch_mm",
-                (float(l.get("original_span_mm", l.get("span_mm", 0.0)))
-                 / max(1, int(l.get("n_blobs", 2)) - 1)),
-            ))
-            if "frangi_mean_mm" in l:
-                rec["frangi_mean_mm"] = float(l["frangi_mean_mm"])
-            if "frangi_median_mm" in l:
-                rec["frangi_median_mm"] = float(l["frangi_median_mm"])
-            # Inlier RAS coords + amplitudes — used by the deep-end
-            # refinement to clip at last-STRONG-contact + small margin
-            # (independent of LoG thresholds).
-            inlier_ras = l.get("inlier_ras")
-            if inlier_ras is not None:
-                rec["inlier_ras"] = np.asarray(inlier_ras, dtype=float)
-            inlier_amps = l.get("inlier_amps")
-            if inlier_amps is not None:
-                rec["inlier_amps"] = np.asarray(inlier_amps, dtype=float)
+        # Carry the walker's blob-inlier set through anchoring so
+        # ``_dedup_trajectories`` can apply the inlier-subset rule
+        # (drop only when no blob is orphaned).
+        inlier_idx = l.get("inlier_idx")
+        if inlier_idx is not None:
+            rec["inlier_idx"] = list(int(b) for b in inlier_idx)
+        # Preserve the pre-anchor inlier span — the actual distance
+        # between the shallowest and deepest detected contacts. The
+        # post-anchor ``length_mm`` overwrites this with the
+        # bolt-tip → deep-tip length, so downstream classifiers
+        # need this field to see the true contact span.
+        rec["contact_span_mm"] = float(l.get("span_mm", 0.0))
+        rec["original_span_mm"] = float(
+            l.get("original_span_mm", l.get("span_mm", 0.0))
+        )
+        rec["original_median_pitch_mm"] = float(l.get(
+            "original_median_pitch_mm",
+            (float(l.get("original_span_mm", l.get("span_mm", 0.0)))
+             / max(1, int(l.get("n_blobs", 2)) - 1)),
+        ))
+        if "frangi_mean_mm" in l:
+            rec["frangi_mean_mm"] = float(l["frangi_mean_mm"])
+        if "frangi_median_mm" in l:
+            rec["frangi_median_mm"] = float(l["frangi_median_mm"])
+        inlier_ras = l.get("inlier_ras")
+        if inlier_ras is not None:
+            rec["inlier_ras"] = np.asarray(inlier_ras, dtype=float)
+        inlier_amps = l.get("inlier_amps")
+        if inlier_amps is not None:
+            rec["inlier_amps"] = np.asarray(inlier_amps, dtype=float)
         return rec
 
     def _filter_bolts_near_axis(bolt_list, start_ras, end_ras,
@@ -2645,8 +2445,6 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         regular chain. Falls back to min(span_pre, span_post)/(n-1)
         when median isn't available.
         """
-        if rec.get("source") != "stage1":
-            return False
         n = int(rec.get("n_inliers", 0))
         if n < BOLT_RESCUE_MIN_N_INLIERS:
             return False
@@ -2662,9 +2460,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             return False
         return True
 
-    # Anchor each candidate to a bolt BEFORE dedup. No bolt == not a
-    # real electrode. Then apply length and air-sinus filters; both
-    # catch stage-2 false positives that look nothing like real shanks.
+    # Anchor each candidate to a bolt BEFORE dedup. Length and air-sinus
+    # filters catch the rare walker false positives.
     def _anchor_or_reject(rec):
         # ``_orient_shallow_to_deep`` upstream uses hull head-distance
         # to pick which endpoint is the shallow one, but that's
@@ -2689,7 +2486,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         anchor_pool = "log"
         fwd, bwd, fwd_n, bwd_n = _try_anchor(bolts)
         # HU rescue: only when the primary LoG pool finds nothing AND
-        # the stage-1 line looks unambiguously like a real SEEG chain.
+        # the walker line looks unambiguously like a real SEEG chain.
         # The rescue bolts are tube-filtered to this specific shank so
         # the secondary HU pool never anchors anything off-axis.
         if fwd_n == 0 and bwd_n == 0 and _is_rescue_candidate(rec):
@@ -2754,14 +2551,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             # bolt sits outside the CT acquisition window). Emit the
             # walker's line as-is. Confidence scoring will downweight
             # these no-anchor emissions.
-            if rec["source"] == "stage1":
-                rec["bolt_source"] = "none"
-                bolt = {"n_vox": 0, "dist_min_mm": float("nan"), "id": -1}
-            else:
-                # Stage-2 (Frangi-only) lines without an anchor have no
-                # pitch validation either; without that we have no real
-                # evidence at all.
-                return None
+            rec["bolt_source"] = "none"
+            bolt = {"n_vox": 0, "dist_min_mm": float("nan"), "id": -1}
         else:
             if bolt_from_synth is not None:
                 bolt = bolt_from_synth
@@ -2784,22 +2575,13 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     _log("anchoring + length filters…")
     anchored: list[dict[str, Any]] = []
     for l in stage1_lines:
-        rec = _anchor_or_reject(_assemble(l, "stage1"))
-        if rec is not None:
-            anchored.append(rec)
-    for l in stage2_lines:
-        rec = _anchor_or_reject(_assemble(l, "stage2"))
+        rec = _anchor_or_reject(_assemble(l))
         if rec is not None:
             anchored.append(rec)
     _log(f"anchoring: {len(anchored)} survived")
 
-    # Sort: prefer stage1 over stage2, then longer length. Stage1 is
-    # pitch-confirmed; stage2 is a geometric fallback. Dedup keeps the
-    # first survivor of each cluster.
-    def _sort_key(rec):
-        return (0 if rec["source"] == "stage1" else 1,
-                -float(rec.get("length_mm", 0.0)))
-    anchored.sort(key=_sort_key)
+    # Dedup keeps the longer line of each cluster.
+    anchored.sort(key=lambda rec: -float(rec.get("length_mm", 0.0)))
     anchored = _dedup_trajectories(anchored)
     _log(f"final dedup: {len(anchored)} trajectories")
 
@@ -2809,8 +2591,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     # contacts sit inside a single long bright shaft and don't produce
     # distinct 3D minima). Sample the LoG profile 1-dimensionally along
     # the trajectory axis and push ``end_ras`` out to the last real
-    # contact peak. Stage-2 trajectories share the problem (they are
-    # explicitly the no-per-contact case) so we refine both.
+    # contact peak.
     for rec in anchored:
         new_end = _refine_deep_end_via_axis_log(
             rec, log1, ras_to_ijk_mat,
@@ -2892,8 +2673,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             # bolt anchor produces reliably even when the walker misses
             # contacts (e.g. the T22-X02 case where the walker stopped
             # at 7/15 contacts but the intracranial length still
-            # reflects the real 15CM shank). Same rule for stage-1 and
-            # stage-2 — only their input metric differs in practice.
+            # reflects the real 15CM shank).
             intra = float(rec.get("intracranial_length_mm") or 0.0)
             if intra < 5.0:
                 continue
@@ -2917,9 +2697,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         )
 
     # Confidence score (v1). Each survivor gets a continuous physical-
-    # evidence score in [0, 1] plus a coarse confidence label. Hard
-    # gates upstream still decide emit/no-emit; the score is metadata
-    # for ranking and downstream review (see _compute_trajectory_score).
+    # evidence score in [0, 1] plus a coarse confidence label.
     # ``confidence`` is the numeric score (canonical engine schema
     # expects a float there); ``confidence_label`` carries the band.
     for rec in anchored:
@@ -2946,13 +2724,13 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         for _i, _t in enumerate(trajectories):
             _se = _t.get("skull_entry_ras") or _t.get("start_ras") or [0.0, 0.0, 0.0]
             _en = _t.get("end_ras") or [0.0, 0.0, 0.0]
-            _src = str(_t.get("source") or "?")
+            _bolt = str(_t.get("bolt_source") or "?")
             _n = int(_t.get("n_inliers") or 0)
             _sp = float(_t.get("contact_span_mm") or 0.0)
             _sc = float(_t.get("confidence") or 0.0)
             _conf = str(_t.get("confidence_label") or "?")
             _log(
-                f"  [{_i:02d}] src={_src} n={_n} span={_sp:.1f}mm "
+                f"  [{_i:02d}] bolt={_bolt} n={_n} span={_sp:.1f}mm "
                 f"score={_sc:.2f}({_conf}) "
                 f"skull_entry=({_se[0]:+.1f},{_se[1]:+.1f},{_se[2]:+.1f}) "
                 f"deep_tip=({_en[0]:+.1f},{_en[1]:+.1f},{_en[2]:+.1f})"
