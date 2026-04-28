@@ -115,12 +115,33 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.guidedSourceCombo.currentIndexChanged.connect(self.onGuidedSourceChanged)
         form.addRow("Trajectory source", self.guidedSourceCombo)
 
+        # Confidence filter — auto-checks "Use" only for trajectories at
+        # or above the chosen band. Auto-Fit emissions carry confidence
+        # via Rosa.Confidence / Rosa.ConfidenceLabel attributes; manual
+        # / imported trajectories have no confidence and always check.
+        self.confidenceFilterCombo = qt.QComboBox()
+        for key, label in (
+            ("all", "Show all (no filter)"),
+            ("low", "Low and above (>= 0)"),
+            ("medium", "Medium and above (>= 0.50)"),
+            ("high", "High only (>= 0.80)"),
+        ):
+            self.confidenceFilterCombo.addItem(label, key)
+        self.confidenceFilterCombo.setCurrentIndex(0)
+        self.confidenceFilterCombo.currentIndexChanged.connect(
+            self.onConfidenceFilterChanged
+        )
+        form.addRow("Confidence filter", self.confidenceFilterCombo)
+
         self.guidedTrajectoryTable = qt.QTableWidget()
-        self.guidedTrajectoryTable.setColumnCount(3)
-        self.guidedTrajectoryTable.setHorizontalHeaderLabels(["Use", "Trajectory", "Length (mm)"])
+        self.guidedTrajectoryTable.setColumnCount(4)
+        self.guidedTrajectoryTable.setHorizontalHeaderLabels(
+            ["Use", "Trajectory", "Length (mm)", "Confidence"]
+        )
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Stretch)
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
+        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.ResizeToContents)
         self.guidedTrajectoryTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.guidedTrajectoryTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.guidedTrajectoryTable.cellClicked.connect(self.onGuidedTrajectoryTableCellClicked)
@@ -337,8 +358,30 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.logic.trajectory_scene.show_only_groups(groups)
 
     def _refresh_summary(self):
+        n_total = len(self.loadedTrajectories)
+        # Show confidence-band counts when any trajectory carries one
+        # (i.e. Auto-Fit results); manual / imported trajectories have
+        # no confidence and are reported as untagged.
+        bands = {"high": 0, "medium": 0, "low": 0}
+        n_untagged = 0
+        for traj in self.loadedTrajectories:
+            lab = str(traj.get("confidence_label") or "").strip().lower()
+            if lab in bands:
+                bands[lab] += 1
+            else:
+                n_untagged += 1
+        if n_untagged == n_total:
+            band_text = ""
+        else:
+            parts = []
+            for k in ("high", "medium", "low"):
+                if bands[k]:
+                    parts.append(f"{bands[k]} {k}")
+            if n_untagged:
+                parts.append(f"{n_untagged} untagged")
+            band_text = " (" + ", ".join(parts) + ")" if parts else ""
         self.summaryLabel.setText(
-            f"working trajectories={len(self.loadedTrajectories)}, "
+            f"trajectories={n_total}{band_text}, "
             f"assignments={len(self.assignmentMap)}"
         )
 

@@ -93,9 +93,13 @@ class ContactPitchV1WidgetMixin:
         form = qt.QFormLayout(tab)
 
         help_text = qt.QLabel(
-            "Direct shank detection (no bolt stage). LoG \u03c3=1 "
-            "regional-minima blobs + library-pitch walk. Trajectories "
-            "span the detected contact range (not bolt entry to deep tip)."
+            "SEEG shank detection from the postop CT. Pipeline: LoG \u03c3=1 "
+            "regional-minima blobs \u2192 library-pitch walker \u2192 unified "
+            "metal-evidence bolt anchor (LoG and HU saturation in one pass) "
+            "with axis-to-skull synth fallback for bolts outside the FOV. "
+            "Each trajectory is published as a line node from skull entry to "
+            "deep tip (intracranial portion only). Per-trajectory confidence "
+            "is shown in the Trajectory Set table below."
         )
         help_text.wordWrap = True
         form.addRow(help_text)
@@ -324,8 +328,17 @@ class ContactPitchV1WidgetMixin:
 
             self.log(f"[contact-pitch-v1] published {len(nodes)} trajectory lines to workflow")
             self.contactPitchProgressBar.setValue(self.contactPitchProgressBar.maximum)
+            band_counts = {"high": 0, "medium": 0, "low": 0, "?": 0}
+            for t in trajectories:
+                lab = str(t.get("confidence_label") or "?").strip().lower()
+                band_counts[lab if lab in band_counts else "?"] += 1
+            band_summary = (
+                f"{band_counts['high']} high / "
+                f"{band_counts['medium']} medium / "
+                f"{band_counts['low']} low"
+            )
             self.contactPitchStatusLabel.setText(
-                f"done — {len(trajectories)} trajectories"
+                f"done — {len(trajectories)} trajectories ({band_summary})"
             )
         except Exception as exc:
             self.log(f"[contact-pitch-v1] error: {exc}")

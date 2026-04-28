@@ -358,6 +358,24 @@ class DeepCoreVisualizationLogicMixin:
             node.SetAttribute("Rosa.DeepCoreProposalFamily", family)
             node.SetAttribute("Rosa.DeepCoreProposalScore", f"{float(proposal.get('score', 0.0)):.3f}")
             node.SetAttribute("Rosa.ProposalLengthMm", f"{float(proposal.get('span_mm', 0.0)):.3f}")
+            # Per-trajectory confidence (contact_pitch_v1 score framework).
+            # Stored as MRML attributes so downstream UI (Guided Fit
+            # trajectory table, Auto Fit list) can show / filter by
+            # confidence without re-running detection.
+            confidence = proposal.get("confidence")
+            if confidence is not None:
+                try:
+                    node.SetAttribute("Rosa.Confidence", f"{float(confidence):.3f}")
+                except Exception:
+                    node.SetAttribute("Rosa.Confidence", "")
+            confidence_label = proposal.get("confidence_label")
+            if confidence_label is not None:
+                node.SetAttribute(
+                    "Rosa.ConfidenceLabel", str(confidence_label),
+                )
+            bolt_source = proposal.get("bolt_source")
+            if bolt_source is not None:
+                node.SetAttribute("Rosa.BoltSource", str(bolt_source))
             annulus_mean = proposal.get("annulus_mean_ct_hu")
             annulus_samples = int(proposal.get("annulus_sample_count", 0) or 0)
             if annulus_mean is None:

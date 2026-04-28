@@ -298,10 +298,63 @@ class GuidedFitWidgetMixin:
                 length_item.setFlags(length_item.flags() & ~qt.Qt.ItemIsEditable)
                 self.guidedTrajectoryTable.setItem(row, 2, length_item)
 
+                # Confidence column. Auto-Fit emissions carry numeric
+                # ``confidence`` + a discrete ``confidence_label``;
+                # manual / imported trajectories show "—".
+                conf = traj.get("confidence")
+                conf_label = str(traj.get("confidence_label") or "").strip().lower()
+                if conf is None:
+                    conf_text = "—"
+                else:
+                    band = conf_label or "—"
+                    conf_text = f"{float(conf):.2f}  ({band})"
+                conf_item = qt.QTableWidgetItem(conf_text)
+                conf_item.setFlags(conf_item.flags() & ~qt.Qt.ItemIsEditable)
+                # Color-code the band so users can spot weak emissions
+                # at a glance without reading the score.
+                if conf_label == "high":
+                    conf_item.setForeground(qt.QBrush(qt.QColor("#1e7d32")))
+                elif conf_label == "medium":
+                    conf_item.setForeground(qt.QBrush(qt.QColor("#e8a000")))
+                elif conf_label == "low":
+                    conf_item.setForeground(qt.QBrush(qt.QColor("#c62828")))
+                self.guidedTrajectoryTable.setItem(row, 3, conf_item)
+
             if self.guidedTrajectoryTable.rowCount > 0:
                 self.guidedTrajectoryTable.selectRow(0)
+            # Apply any active confidence filter (hides rows below band).
+            self._apply_confidence_filter()
         finally:
             self._updatingGuidedTable = False
+
+    def _apply_confidence_filter(self):
+        """Hide rows whose trajectory's confidence falls below the
+        threshold chosen in the Confidence-filter combo. Manual /
+        imported trajectories (no confidence set) always show — the
+        filter only narrows Auto-Fit results.
+        """
+        combo = getattr(self, "confidenceFilterCombo", None)
+        if combo is None:
+            return
+        key = combo.itemData(combo.currentIndex)
+        if key in (None, "all"):
+            min_score = float("-inf")
+        elif key == "high":
+            min_score = 0.80
+        elif key == "medium":
+            min_score = 0.50
+        else:  # "low" treated as "any score >= 0"
+            min_score = 0.0
+        for row, traj in enumerate(self.loadedTrajectories):
+            conf = traj.get("confidence")
+            if conf is None:
+                hidden = False  # untagged trajectories always visible
+            else:
+                hidden = float(conf) < min_score
+            self.guidedTrajectoryTable.setRowHidden(row, hidden)
+
+    def onConfidenceFilterChanged(self, _idx):
+        self._apply_confidence_filter()
 
     def onGuidedTrajectoryItemChanged(self, item):
         if self._updatingGuidedTable or self._renamingGuidedTrajectory:

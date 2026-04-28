@@ -246,6 +246,14 @@ class TrajectorySceneService:
         node.GetNthControlPointPositionWorld(1, p1)
         logical_name = (str(name or "").strip() or self.logical_name_from_node(node)).strip()
         group = self.infer_group_from_node(node)
+        # Confidence (contact_pitch_v1 score framework) — set by
+        # deep_core_visualization on Auto-Fit publish, absent on manually
+        # imported / planned trajectories.
+        conf_str = (node.GetAttribute("Rosa.Confidence") or "").strip()
+        try:
+            confidence = float(conf_str) if conf_str else None
+        except Exception:
+            confidence = None
         return {
             "name": logical_name,
             "node_name": node.GetName() or logical_name,
@@ -260,6 +268,11 @@ class TrajectorySceneService:
                 else float(node.GetAttribute("Rosa.BestModelScore"))
             ),
             "proposal_family": str(node.GetAttribute("Rosa.DeepCoreProposalFamily") or ""),
+            "confidence": confidence,
+            "confidence_label": str(
+                node.GetAttribute("Rosa.ConfidenceLabel") or ""
+            ),
+            "bolt_source": str(node.GetAttribute("Rosa.BoltSource") or ""),
         }
 
     def collect_planned_trajectory_map(self):
