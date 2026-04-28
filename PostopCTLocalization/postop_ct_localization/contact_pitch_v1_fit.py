@@ -256,9 +256,26 @@ MAX_POST_ANCHOR_LEN_MM = (
     _LIBRARY_BOUNDS["max_contact_span_mm"] + ANCHOR_TOTAL_OVERSHOOT_MM
 )
 
-# Post-anchor dedup: same-bolt + close-entry duplicates (multi-pitch
-# walker passes that found disjoint blob ranges along one electrode).
-POST_ANCHOR_DEDUP_PERP_MM = 8.0
+# Post-anchor dedup: same-bolt + same-physical-line duplicates (multi-
+# pitch walker passes that found disjoint blob ranges along one
+# electrode). Two trajectories sharing a bolt CC are the same physical
+# shank when their axes are nearly parallel AND their midpoints sit
+# on the same line. Per-axis variation (1-3°) over a 50-80 mm reach
+# would shift start_ras / end_ras by 5-15 mm, but the midpoint-to-
+# axis perpendicular stays small. Distinct shanks merged into one
+# bolt CC (T1, T22) have either non-parallel axes or non-coincident
+# midpoints, so they survive.
+POST_ANCHOR_DEDUP_PERP_MM = 3.0
+POST_ANCHOR_DEDUP_ANG_DEG = 8.0  # 5° was too tight: auto-pitch
+                                  # half-aliased walker passes (every-
+                                  # other-contact at 6.7 mm vs 3.5)
+                                  # produce axes 5-6° from the full-
+                                  # pitch pass. 8° catches them; the
+                                  # midpoint-perp 3 mm gate still
+                                  # preserves distinct adjacent shanks
+                                  # whose axes happen to be parallel
+                                  # (T1, T22 mega-CC cases — those
+                                  # have midpoint perp >> 3 mm).
 
 # Bolt detection: unified metal-evidence pass.
 # A bolt CC is any connected blob of saturating metal-evidence voxels
@@ -1974,35 +1991,39 @@ def _clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
 # ---- Cross-stage dedup -----------------------------------------------
 
 def _dedup_trajectories(trajectories,
-                        perp_mm=POST_ANCHOR_DEDUP_PERP_MM):
+                        perp_mm=POST_ANCHOR_DEDUP_PERP_MM,
+                        ang_deg=POST_ANCHOR_DEDUP_ANG_DEG):
     """Remove duplicate trajectories.
 
     Two rules, in order:
 
-      1. **Same bolt anchor + same physical entry → same shank.**
+      1. **Same bolt anchor + same physical line → same shank.**
          Trajectories that anchored to the same bolt CC AND share
-         the same shallow endpoint within ``perp_mm`` are different
-         walker passes finding disjoint blob ranges along one
-         electrode (T5 LCMN class). Without the start-proximity
-         conjunction, this rule would over-collapse: T1's bolt
-         extractor sometimes merges adjacent bolts into one big CC,
-         so physically distinct shanks at separate entry points
-         end up sharing a ``bolt_id``. Their start_ras values stay
-         far apart (typically 50+ mm), so the proximity term
-         preserves them.
+         the same physical axis (small inter-axis angle AND small
+         midpoint-to-axis perpendicular) are different walker passes
+         finding disjoint blob ranges along one electrode
+         (T5 LCMN, T3 LAI classes). The line-to-line proximity check
+         stays robust under walker-axis variation: a 1-3° tilt over
+         a 50-80 mm reach moves the start/end points by 5-15 mm but
+         leaves the midpoint perp within ~1 mm. Distinct shanks
+         that happen to share a merged ``bolt_id`` (T1's mega-CC,
+         T22's adjacent bolts) have either non-parallel axes or
+         non-coincident midpoints, so they survive.
 
       2. **Inlier-subset → same shank.** The candidate's blob
          inliers are a subset of an already-kept trajectory's
          inliers — drop, the survivor still claims every blob.
          Disjoint inlier sets that anchored to *different* bolts
-         (or to merged bolts at different entries) are physically
+         (or to merged bolts at different lines) are physically
          distinct shanks (T9 RAC next to LAC, T23 CWB next to its
          sibling) and both survive.
     """
     kept: list[dict[str, Any]] = []
     kept_inliers: list[frozenset] = []
     kept_bolt_ids: list[int] = []
-    kept_starts: list[np.ndarray] = []
+    kept_axes: list[np.ndarray] = []
+    kept_mids: list[np.ndarray] = []
+    cos_ang_tol = float(np.cos(np.radians(ang_deg)))
     for t in trajectories:
         s = np.asarray(t["start_ras"], dtype=float)
         e = np.asarray(t["end_ras"], dtype=float)
@@ -2010,19 +2031,25 @@ def _dedup_trajectories(trajectories,
         length = float(np.linalg.norm(d))
         if length < 1e-6:
             continue
+        t_axis = d / length
+        t_mid = 0.5 * (s + e)
         t_inliers = frozenset(int(b) for b in (t.get("inlier_idx") or []))
         t_bolt_id = int(t.get("bolt_id", -1))
-        # Rule 1 — same bolt CC + same entry point. Catches duplicates
-        # the inlier-subset rule misses (different walker passes,
-        # disjoint blob ranges, one electrode) without breaking the
-        # merged-bolt-CC case where two distinct shanks share a
-        # bolt_id but have far-apart start positions.
+        # Rule 1 — same bolt CC + same physical line.
         if t_bolt_id >= 0:
             is_dup = False
             for ki, k_bolt_id in enumerate(kept_bolt_ids):
                 if k_bolt_id != t_bolt_id:
                     continue
-                if float(np.linalg.norm(s - kept_starts[ki])) <= perp_mm:
+                cos_ang = abs(float(t_axis @ kept_axes[ki]))
+                if cos_ang < cos_ang_tol:
+                    continue  # not parallel enough
+                # Midpoint-to-other-axis perpendicular.
+                delta = t_mid - kept_mids[ki]
+                perp = float(np.linalg.norm(
+                    delta - (delta @ kept_axes[ki]) * kept_axes[ki]
+                ))
+                if perp <= perp_mm:
                     is_dup = True
                     break
             if is_dup:
@@ -2049,11 +2076,13 @@ def _dedup_trajectories(trajectories,
                 kept = [kept[ki] for ki in survivors_idx]
                 kept_inliers = [kept_inliers[ki] for ki in survivors_idx]
                 kept_bolt_ids = [kept_bolt_ids[ki] for ki in survivors_idx]
-                kept_starts = [kept_starts[ki] for ki in survivors_idx]
+                kept_axes = [kept_axes[ki] for ki in survivors_idx]
+                kept_mids = [kept_mids[ki] for ki in survivors_idx]
         kept.append(t)
         kept_inliers.append(t_inliers)
         kept_bolt_ids.append(t_bolt_id)
-        kept_starts.append(s)
+        kept_axes.append(t_axis)
+        kept_mids.append(t_mid)
     return kept
 
 
