@@ -260,101 +260,87 @@ MAX_POST_ANCHOR_LEN_MM = (
 # walker passes that found disjoint blob ranges along one electrode).
 POST_ANCHOR_DEDUP_PERP_MM = 8.0
 
-# Bolt detection from LoG σ=1 cloud.
-# A bolt CC is any connected blob of bright-metal LoG minima that reaches
-# near/outside the hull surface. We deliberately skip the CC's own PCA
-# axis — bolt CCs can be giant merged chains (electrode + contacts) or
-# tiny fragments, neither of which gives a reliable axis. Instead, the
-# anchor step tests whether enough of each bolt CC's voxels sit in a
-# narrow tube around the candidate shank axis.
-BOLT_HU_RESCUE_THRESHOLD = 2000.0   # HU threshold for the per-line
-                                    # bolt rescue pool. Titanium bolts
-                                    # saturate well above 2000 HU while
-                                    # cortical bone peaks around 1500;
-                                    # the gap cleanly separates the two.
-                                    # Used only on strong stage-1 lines
-                                    # whose primary LoG-based anchor
-                                    # failed (T4 / ct88 pattern where
-                                    # the bolt's LoG signature falls
-                                    # below BOLT_LOG_THRESHOLD = 800).
-                                    # Tube-filtered per line before
-                                    # being offered to the anchor, so
-                                    # the secondary pool never leaks
-                                    # into global detection.
-BOLT_HU_RESCUE_HULL_PROX_MM = 5.0   # Loosened hull-proximity gate for
-                                    # the HU rescue pool. Thin-wire PMT
-                                    # designs place the bolt-like dense
-                                    # structure 2-5 mm inside the hull
-                                    # rather than poking through; the
-                                    # 2 mm primary gate would reject
-                                    # them. Per-line tube filtering
-                                    # still keeps far-away CCs out.
-BOLT_HU_RESCUE_TUBE_RADIUS_MM = 5.0 # Wider tube radius for the HU
-                                    # rescue anchor. The walker's axis
-                                    # can drift 1-3° from the true
-                                    # shank axis, which over a 40-60 mm
-                                    # outward reach (thin-wire PMT)
-                                    # adds 1-3 mm lateral offset at
-                                    # the bolt. The primary 3 mm tube
-                                    # would miss bolts that are really
-                                    # on-axis but appear 3-5 mm off
-                                    # due to walker-axis tilt.
-AXIS_SKULL_SYNTH_STEP_MM = 0.5      # Third-tier rescue: when neither
+# Bolt detection: unified metal-evidence pass.
+# A bolt CC is any connected blob of saturating metal-evidence voxels
+# that reaches near/outside the hull surface. Per-voxel evidence is the
+# normalized maximum of |LoG| and HU:
+#
+#     evidence(v) = max(|LoG(v)| / LOG_BOLT_NORMALIZER,
+#                       max(0, HU(v)) / HU_BOLT_NORMALIZER)
+#
+# The CC threshold (METAL_BOLT_THRESHOLD = 1.0) means "either LoG saturates
+# at the contact-bolt level (|LoG| ≥ 800) OR HU saturates at the
+# titanium-bolt level (HU ≥ 2000)". One pass replaces the historical
+# 3-tier cascade (LoG@800 → HU@2000 → axis-synth) — when the CC pass
+# finds no anchor and the axis crosses the hull, axis-synth still kicks
+# in as the only remaining fallback (covers bolts outside the CT FOV).
+#
+# Why per-voxel-max rather than two separate CC passes:
+#   - Titanium bolts saturate HU first; platinum-iridium contacts saturate
+#     LoG first. Both signals are "definitely metal" so taking the max
+#     captures any bolt regardless of vendor and the hull-touch + tube
+#     filters keep skull-only CCs out.
+#   - One pass produces stable per-shank CCs. Today's split caused
+#     duplicate CCs (LoG bolt + HU bolt of the same physical bolt) which
+#     the orientation-flip step had to disambiguate.
+LOG_BOLT_NORMALIZER = 800.0         # |LoG| level at which platinum-iridium
+                                    # bolts saturate. Higher than
+                                    # ``LOG_BLOB_THRESHOLD = 300`` (used
+                                    # for contacts) — bolts are denser
+                                    # than contacts. Below this, scalp
+                                    # metal and partial-volume artifacts
+                                    # contribute. Used as the LoG arm of
+                                    # the unified bolt evidence and of
+                                    # the score-side metal_continuity
+                                    # term so a single change here
+                                    # tightens / loosens both at once.
+HU_BOLT_NORMALIZER = 2000.0         # HU level at which titanium bolts
+                                    # saturate. Cortical bone peaks
+                                    # around 1500 HU so 2000 cleanly
+                                    # separates the two. Used as the HU
+                                    # arm of the unified bolt evidence
+                                    # and of the score-side
+                                    # metal_continuity term.
+METAL_BOLT_THRESHOLD = 1.0          # Unified normalized cutoff. 1.0 means
+                                    # "saturates in at least one modality".
+                                    # Calibrated 2026-04-28 across the
+                                    # 22-subject dataset: 295/295 matched
+                                    # anchor-or-synth, 4 must-preserve
+                                    # shanks behave correctly (T4 RSFG
+                                    # anchors via HU; T3 LAI / T4 LCMN /
+                                    # T4 LSFG fall through to synth as
+                                    # their bolts sit outside CT FOV).
+                                    # Lowering admits scalp CC mega-merges
+                                    # (94k+ voxels at 0.85, 442k at 0.5);
+                                    # raising drops thin LoG bolts.
+AXIS_SKULL_SYNTH_STEP_MM = 0.5      # Synth fallback (only path remaining
 AXIS_SKULL_SYNTH_MAX_OUTWARD_MM = 80.0
 AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM = 15.0
-                                    # the LoG nor HU bolt pool finds
-                                    # an anchor AND the stage-1 line
-                                    # has strong-SEEG-chain evidence,
-                                    # walk outward along the walker
-                                    # axis until it crosses the hull
-                                    # boundary. Use the crossing as a
-                                    # synthetic skull_entry_ras and
-                                    # place the synthetic bolt_tip
-                                    # BOLT_PROTRUDE_MM further out.
-                                    # Recovers T4-class subjects
-                                    # whose bolts sit outside the CT
-                                    # acquisition window.
-BOLT_RESCUE_MIN_N_INLIERS = MIN_BLOBS_PER_LINE
-                                    # Match the walker's own inlier floor.
-                                    # Upstream gates already enforce
-                                    # amp_sum ≥ 5000 and median_pitch ≤ 7,
-                                    # so any line reaching the rescue is a
-                                    # strong SEEG chain. The former 10-floor
-                                    # over-constrained short genuine shanks
-                                    # (T4 RSFG: n=8, amp_sum=7837,
-                                    # median_pitch=3.58, dist_max=41 —
-                                    # clearly real but no rescue attempted).
-                                    # Shallow skull-surface chains are
-                                    # caught by BOLT_RESCUE_MIN_DIST_MAX_MM
-                                    # below, not by the inlier count.
-BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
-                                    # penetrate at least 30 mm into the
-                                    # brain; shallower "lines" are
-                                    # typically bolt/skull artifact
-                                    # chains that happen to be long
-                                    # enough to trigger the rescue
-                                    # candidate check. This is what
-                                    # distinguishes real SEEG from
-                                    # skull-surface FPs, not n_inliers.
+                                    # when the unified bolt CC pass finds
+                                    # no anchor): walk outward along the
+                                    # walker axis until it crosses the
+                                    # hull, place a synthetic bolt-tip
+                                    # PROTRUDE_MM further out. Recovers
+                                    # T4-class subjects whose bolts sit
+                                    # outside the CT acquisition window.
 
-BOLT_LOG_THRESHOLD = 800.0          # |LoG| magnitude gate for bolt CCs.
-                                    # Higher than LOG_BLOB_THRESHOLD
-                                    # (300, for contacts) because
-                                    # titanium bolts are much denser
-                                    # than platinum/iridium contacts
-                                    # — real bolts hit |LoG| > 1000
-                                    # easily, scalp / skin metal and
-                                    # partial-volume artifacts sit
-                                    # between 300-700. A strict
-                                    # bolt threshold naturally splits
-                                    # what would otherwise be a
-                                    # whole-head mega-CC into
-                                    # discrete per-shank bolts (T1
-                                    # went from one 191 k-voxel CC
-                                    # to 20+ per-shank CCs).
 BOLT_MIN_VOXELS = 20                # drop tiny (isolated-contact) CCs
-BOLT_HULL_PROXIMITY_MM = 2.0        # CC must touch / poke through hull
-BOLT_TUBE_RADIUS_MM = 3.0            # shank-axis tube for bolt-voxel count
+BOLT_HULL_PROXIMITY_MM = 5.0        # CC must reach within this many mm
+                                    # of the hull surface. 5 mm covers
+                                    # thin-wire PMT designs whose bolt-
+                                    # like dense structure sits 2-5 mm
+                                    # inside the hull rather than poking
+                                    # through. Per-line tube filtering
+                                    # still keeps far-away CCs out, so
+                                    # the loose value doesn't admit
+                                    # skull-band noise.
+BOLT_TUBE_RADIUS_MM = 5.0           # shank-axis tube for bolt-voxel count.
+                                    # 5 mm tolerates 1-3° walker-axis
+                                    # drift, which can put real bolts
+                                    # 3-5 mm laterally offset over a
+                                    # 40-60 mm outward reach. The 3 mm
+                                    # value used pre-unification missed
+                                    # T4 / thin-wire-PMT bolts.
 BOLT_MIN_TUBE_VOXELS = 15            # min CC voxels in tube to accept bolt
 BOLT_MAX_INWARD_ALONG_MM = 30.0     # bolt may extend up to this far past
                                     # the shallowest contact (CCs often
@@ -907,22 +893,28 @@ def _frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
     return float(vals.mean()), float(np.median(vals))
 
 
-METAL_EVIDENCE_LOG_NORM = 800.0
-METAL_EVIDENCE_HU_NORM = 2000.0
-METAL_EVIDENCE_STRONG_THR = 1.0
+def compute_metal_evidence_volume(log_arr, ct_arr):
+    """Per-voxel metal-evidence volume:
+
+        evidence(v) = max(|LoG(v)|/LOG_BOLT_NORMALIZER,
+                          max(0, HU(v))/HU_BOLT_NORMALIZER)
+
+    Returned as float32. ``ct_arr`` may be None (LoG-only fallback).
+    """
+    log_norm = np.abs(log_arr) / float(LOG_BOLT_NORMALIZER)
+    if ct_arr is None:
+        return log_norm.astype(np.float32, copy=False)
+    hu_norm = np.maximum(0.0, ct_arr) / float(HU_BOLT_NORMALIZER)
+    return np.maximum(log_norm, hu_norm).astype(np.float32, copy=False)
 
 
 def _frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
                                     ras_to_ijk_mat, step_mm=0.5):
-    """Fraction of axis samples whose per-voxel metal evidence reaches
-    contact-saturation level. Per-voxel evidence is
-    ``max(|LoG|/LOG_NORM, max(0, HU)/HU_NORM)``; saturation threshold
-    is 1.0 by default (i.e., any of |LoG|≥800 OR HU≥2000 counts).
-
-    Real SEEG shanks have many contact-saturating voxels along their
-    axis (matched p10 ≈ 0.27, p50 ≈ 0.65). Hull-skimming bone-assembled
-    chains and synth-extended FPs have near-zero saturation
-    (orphan p50 ≈ 0.01).
+    """Fraction of axis samples whose per-voxel metal evidence saturates
+    (>= METAL_BOLT_THRESHOLD). Real SEEG shanks have many
+    contact-saturating voxels along their axis (matched p10 ≈ 0.27,
+    p50 ≈ 0.65). Hull-skimming bone-assembled chains and synth-extended
+    FPs have near-zero saturation (orphan p50 ≈ 0.01).
     """
     K, J, I = log_arr.shape
     s = np.asarray(start_ras, dtype=float)
@@ -941,9 +933,9 @@ def _frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
         ic = int(np.clip(round(ijk[0]), 0, I - 1))
         jc = int(np.clip(round(ijk[1]), 0, J - 1))
         kc = int(np.clip(round(ijk[2]), 0, K - 1))
-        log_norm = abs(float(log_arr[kc, jc, ic])) / METAL_EVIDENCE_LOG_NORM
-        hu_norm = max(0.0, float(ct_arr[kc, jc, ic])) / METAL_EVIDENCE_HU_NORM
-        if max(log_norm, hu_norm) >= METAL_EVIDENCE_STRONG_THR:
+        log_norm = abs(float(log_arr[kc, jc, ic])) / LOG_BOLT_NORMALIZER
+        hu_norm = max(0.0, float(ct_arr[kc, jc, ic])) / HU_BOLT_NORMALIZER
+        if max(log_norm, hu_norm) >= METAL_BOLT_THRESHOLD:
             n_strong += 1
     return float(n_strong) / float(n)
 
@@ -1484,7 +1476,7 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
 # ---- Bolt detection + anchoring --------------------------------------
 
 def extract_bolt_candidates(log_arr, dist_arr, ijk_to_ras_mat, spacing_xyz,
-                             threshold=BOLT_LOG_THRESHOLD,
+                             threshold=LOG_BOLT_NORMALIZER,
                              min_voxels=BOLT_MIN_VOXELS,
                              hull_proximity_mm=BOLT_HULL_PROXIMITY_MM,
                              ras_to_ijk_mat=None,
@@ -2135,10 +2127,9 @@ SCORE_DEPTH_SAT_MM = 30.0      # dist_max at which the depth term
                                 # the score's depth behaviour.
 SCORE_INTRACRANIAL_SAT_MM = 10.0
 SCORE_BOLT_VALUES = {
-    "log": 1.0,
-    "hu_rescue": 0.7,
-    "axis_synth": 0.4,
-    "none": 0.1,
+    "metal": 1.0,        # unified bolt CC (replaces "log" + "hu_rescue")
+    "synthesized": 0.4,  # axis-to-skull synth fallback
+    "none": 0.1,         # no anchor and synth couldn't reach hull
 }
 
 
@@ -2238,7 +2229,7 @@ def _compute_trajectory_score(rec):
             SCORE_WEIGHTS["intracranial"],
         )
 
-    bolt_src = str(rec.get("bolt_source", "log"))
+    bolt_src = str(rec.get("bolt_source", "metal"))
     components["bolt"] = (
         _bolt_source_score(bolt_src),
         SCORE_WEIGHTS["bolt"],
@@ -2456,25 +2447,16 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             l["inlier_ras"] = None
             l["inlier_amps"] = None
 
-    _log("bolt extraction…")
+    _log("bolt extraction (unified metal-evidence)…")
+    metal_evidence_vol = compute_metal_evidence_volume(log1, ct_arr_kji)
     bolts, bolt_mask = extract_bolt_candidates(
         log1, dist_arr, ijk_to_ras_mat, img.GetSpacing(),
+        ct_arr=metal_evidence_vol, hu_threshold=METAL_BOLT_THRESHOLD,
+        hull_proximity_mm=BOLT_HULL_PROXIMITY_MM,
     )
-    _log(f"bolt extraction: {len(bolts)} bolt candidates")
-    # Secondary HU-based bolt pool. Titanium bolts saturate above 2000
-    # HU regardless of their LoG-σ=1 response, so this catches bolts
-    # that the LoG extractor misses (e.g., T4, ct88 subjects with
-    # weaker LoG bolt signature). Used only as a per-line rescue: the
-    # anchor retries against this pool, tube-filtered to the specific
-    # shank, when the primary LoG pool yielded no anchor for a
-    # high-confidence stage-1 line. Never offered globally.
-    rescue_bolts_hu, _ = extract_bolt_candidates(
-        log1, dist_arr, ijk_to_ras_mat, img.GetSpacing(),
-        ct_arr=ct_arr_kji, hu_threshold=BOLT_HU_RESCUE_THRESHOLD,
-        hull_proximity_mm=BOLT_HU_RESCUE_HULL_PROX_MM,
-    )
-    _log(f"bolt rescue pool (HU ≥ {BOLT_HU_RESCUE_THRESHOLD:.0f}): "
-         f"{len(rescue_bolts_hu)} candidates")
+    _log(f"bolt extraction: {len(bolts)} bolt candidates "
+         f"(metal_evidence ≥ {METAL_BOLT_THRESHOLD:.2f}, "
+         f"hull_prox ≤ {BOLT_HULL_PROXIMITY_MM:.1f} mm)")
 
     def _assemble(l):
         rec = dict(
@@ -2521,41 +2503,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             rec["inlier_amps"] = np.asarray(inlier_amps, dtype=float)
         return rec
 
-    def _filter_bolts_near_axis(bolt_list, start_ras, end_ras,
-                                   tube_radius_mm=BOLT_TUBE_RADIUS_MM,
-                                   outward_mm=BOLT_SEARCH_OUTWARD_MM,
-                                   inward_mm=BOLT_MAX_INWARD_ALONG_MM):
-        """Keep only bolt CCs whose voxels sit within the shank's tube.
-        Per-line spatial gate for the HU rescue so the secondary pool
-        never acts globally.
-        """
-        s = np.asarray(start_ras, dtype=float)
-        e = np.asarray(end_ras, dtype=float)
-        d = e - s
-        L = float(np.linalg.norm(d))
-        if L < 1e-6:
-            return []
-        axis = d / L
-        out = []
-        for b in bolt_list:
-            pts = b.get("pts_ras")
-            if pts is None or len(pts) == 0:
-                continue
-            diffs = np.asarray(pts) - s
-            along = diffs @ axis
-            perp_vec = diffs - np.outer(along, axis)
-            perp = np.linalg.norm(perp_vec, axis=1)
-            in_tube = (
-                (perp <= tube_radius_mm)
-                & (along <= inward_mm)
-                & (along >= -outward_mm)
-            )
-            if int(in_tube.sum()) >= BOLT_MIN_TUBE_VOXELS:
-                out.append(b)
-        return out
-
-    def _is_rescue_candidate(rec):
-        """Strong-SEEG-chain gate for the HU bolt rescue.
+    def _is_genuine_seeg_line(rec):
+        """Strong-SEEG-chain gate for the synth fallback.
 
         A real SEEG electrode's walker pre-extension line has Dixi/PMT
         pitch (3-5 mm). Uses the pre-extend MEDIAN pitch — robust to
@@ -2565,10 +2514,10 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         when median isn't available.
         """
         n = int(rec.get("n_inliers", 0))
-        if n < BOLT_RESCUE_MIN_N_INLIERS:
+        if n < MIN_BLOBS_PER_LINE:
             return False
         dist_max = float(rec.get("dist_max_mm", 0.0))
-        if dist_max < BOLT_RESCUE_MIN_DIST_MAX_MM:
+        if dist_max < DEEP_TIP_MIN_MM:
             return False
         span_post = float(rec.get("contact_span_mm", rec.get("length_mm", 0.0)))
         span_pre = float(rec.get("original_span_mm", span_post))
@@ -2579,8 +2528,9 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             return False
         return True
 
-    # Anchor each candidate to a bolt BEFORE dedup. Length and air-sinus
-    # filters catch the rare walker false positives.
+    # Anchor each candidate to the unified metal-evidence bolt CC pool
+    # BEFORE dedup. Length and Frangi-tubularity filters catch the rare
+    # walker false positives that survive the anchor step.
     def _anchor_or_reject(rec):
         # ``_orient_shallow_to_deep`` upstream uses hull head-distance
         # to pick which endpoint is the shallow one, but that's
@@ -2589,49 +2539,15 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         # (T22 LGR: orbital-floor tip is ~10 mm from hull, skull-top
         # bolt is ~15 mm from hull — orientation flipped). Let the
         # bolt CC decide by trying both orientations and keeping the
-        # one whose bolt anchor has more tube voxels. Falls back to
-        # either non-None result when only one orientation anchors.
-        def _try_anchor(bolt_pool):
-            fwd = anchor_trajectory_to_bolt(
-                rec["start_ras"], rec["end_ras"], bolt_pool,
-            )
-            bwd = anchor_trajectory_to_bolt(
-                rec["end_ras"], rec["start_ras"], bolt_pool,
-            )
-            fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
-            bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
-            return fwd, bwd, fwd_n, bwd_n
-
-        anchor_pool = "log"
-        fwd, bwd, fwd_n, bwd_n = _try_anchor(bolts)
-        # HU rescue: only when the primary LoG pool finds nothing AND
-        # the walker line looks unambiguously like a real SEEG chain.
-        # The rescue bolts are tube-filtered to this specific shank so
-        # the secondary HU pool never anchors anything off-axis.
-        if fwd_n == 0 and bwd_n == 0 and _is_rescue_candidate(rec):
-            local = _filter_bolts_near_axis(
-                rescue_bolts_hu, rec["start_ras"], rec["end_ras"],
-                tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
-            )
-            if local:
-                # Widened anchor tube too: walker axis can drift 1-3°
-                # from true shank axis, pushing the bolt up to 3-5 mm
-                # perpendicular even when it's really on-axis.
-                def _try_anchor_wide(bolt_pool):
-                    fwd = anchor_trajectory_to_bolt(
-                        rec["start_ras"], rec["end_ras"], bolt_pool,
-                        tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
-                    )
-                    bwd = anchor_trajectory_to_bolt(
-                        rec["end_ras"], rec["start_ras"], bolt_pool,
-                        tube_radius_mm=BOLT_HU_RESCUE_TUBE_RADIUS_MM,
-                    )
-                    fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
-                    bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
-                    return fwd, bwd, fwd_n, bwd_n
-                fwd, bwd, fwd_n, bwd_n = _try_anchor_wide(local)
-                if fwd_n > 0 or bwd_n > 0:
-                    anchor_pool = "hu_rescue"
+        # one whose bolt anchor has more tube voxels.
+        fwd = anchor_trajectory_to_bolt(
+            rec["start_ras"], rec["end_ras"], bolts,
+        )
+        bwd = anchor_trajectory_to_bolt(
+            rec["end_ras"], rec["start_ras"], bolts,
+        )
+        fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
+        bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
 
         if bwd_n > fwd_n:
             # Orientation was wrong; flip before writing results back.
@@ -2642,14 +2558,13 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             new_start, skull_entry, bolt = bwd
         else:
             new_start, skull_entry, bolt = fwd
-        # Axis-to-skull synthetic rescue: when both the LoG and HU
-        # bolt pools failed AND the walker line has strong-SEEG-chain
-        # evidence, synthesize a skull_entry + bolt_tip by walking
-        # the walker axis outward until it crosses the hull surface.
-        # Recovers T4-class subjects whose bolts sit outside the CT
-        # acquisition window (so no bolt CC at any threshold).
+        # Synth fallback: when the unified bolt CC pass found no anchor
+        # (T4-class shanks whose bolts sit outside the CT acquisition
+        # window) AND the walker line looks unambiguously like a real
+        # SEEG chain, synthesize a skull_entry + bolt_tip by walking the
+        # walker axis outward until it crosses the hull surface.
         bolt_from_synth = None
-        if new_start is None and _is_rescue_candidate(rec):
+        if new_start is None and _is_genuine_seeg_line(rec):
             s0, e0 = _orient_shallow_to_deep(
                 rec["start_ras"], rec["end_ras"],
                 dist_arr, ras_to_ijk_mat,
@@ -2665,19 +2580,20 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                 bolt_from_synth = {"n_vox": 0, "dist_min_mm": float("nan"),
                                     "id": -1}
         if new_start is None:
-            # Recall-first emission: no LoG bolt CC, no HU rescue, and
+            # Recall-first emission: no metal-evidence bolt CC AND
             # axis-to-skull synth never crossed the hull (e.g. T4 RPOG —
-            # bolt sits outside the CT acquisition window). Emit the
-            # walker's line as-is. Confidence scoring will downweight
-            # these no-anchor emissions.
+            # bolt sits outside the CT acquisition window AND the axis
+            # never reaches the hull). Emit the walker's line as-is.
+            # Confidence scoring will downweight these no-anchor
+            # emissions.
             rec["bolt_source"] = "none"
             bolt = {"n_vox": 0, "dist_min_mm": float("nan"), "id": -1}
         else:
             if bolt_from_synth is not None:
                 bolt = bolt_from_synth
-                rec["bolt_source"] = "axis_synth"
+                rec["bolt_source"] = "synthesized"
             else:
-                rec["bolt_source"] = anchor_pool
+                rec["bolt_source"] = "metal"
             rec["start_ras"] = np.asarray(new_start, dtype=float)
             if skull_entry is not None:
                 rec["skull_entry_ras"] = np.asarray(skull_entry, dtype=float)
@@ -2691,10 +2607,10 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         # Frangi gate only saw the contact span; the bolt anchor extends
         # ``start_ras`` outward by 15-60 mm without checking what's in
         # between. Real shanks have continuous wire+bolt support and
-        # keep frangi_median ≥ 30 even on the extended line. axis_synth
-        # FPs (e.g. T1 Or-#10) extend through brain/air with no metal
-        # support and drop out here. Overwrite the score's
-        # ``frangi_median_mm`` so it sees the true post-anchor value.
+        # keep frangi_median ≥ 30 even on the extended line. Synthesized
+        # FPs extend through brain/air with no metal support and drop
+        # out here. Overwrite the score's ``frangi_median_mm`` so it
+        # sees the true post-anchor value.
         new_fmean, new_fmed = _frangi_along_line_stats(
             rec["start_ras"], rec["end_ras"], frangi_s1, ras_to_ijk_mat,
         )
@@ -2703,10 +2619,10 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         if new_fmed < FRANGI_LINE_MIN_MEDIAN:
             return None
         # Metal-continuity score feature: fraction of full-axis samples
-        # at contact-saturating evidence (|LoG|≥800 or HU≥2000). Real
-        # shanks have many discrete contact peaks along the axis;
-        # cross-shank bone-assembled chains have a few saturating
-        # spots clustered at one end with empty middle/extension.
+        # whose unified metal evidence saturates (|LoG|≥LOG_BOLT_NORMALIZER
+        # OR HU≥HU_BOLT_NORMALIZER). Real shanks have many discrete contact
+        # peaks along the axis; cross-shank bone-assembled chains have a
+        # few saturating spots clustered at one end with empty middle.
         rec["frac_strong_metal"] = _frac_strong_metal_along_line(
             rec["start_ras"], rec["end_ras"],
             log1, ct_arr_kji, ras_to_ijk_mat,
