@@ -871,6 +871,20 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
 
 
 FRANGI_LINE_MIN_MEDIAN = 30.0
+# Wire-gap rescue threshold for the post-anchor Frangi gate. Thin-wire
+# SEEG (DIXI MM, PMT 2102-XX-091, AdTech depth-strip hybrids) puts
+# 30-60 mm of thin wire between the bolt and the contact array. The
+# wire produces no Frangi tubular response (too thin / too uniform),
+# so the post-anchor median falls below 30 even though both ends of
+# the line have saturating metal evidence. When that happens, defer
+# to ``frac_strong_metal`` as a second opinion: if at least 10 % of
+# the axis samples saturate in either |LoG| or HU, the line has real
+# metal-continuity at bolt + contacts and is allowed through. Cross-
+# shank synth-extension FPs fail BOTH conditions (median Frangi near
+# zero AND frac_strong near zero — air/brain in the synth segment
+# contributes nothing) so they remain filtered. Discovered on ct88
+# L_37 (thin-wire shank with 50 mm bolt-to-electrode gap).
+FRAC_STRONG_WIRE_RESCUE = 0.10
 # Minimum median Frangi σ=1 response sampled along the walker line's
 # axis. Real SEEG shanks are thin straight metal cylinders — the exact
 # shape the Frangi tubular-objectness filter was designed for — and
@@ -2653,17 +2667,29 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         )
         rec["frangi_mean_mm"] = float(new_fmean)
         rec["frangi_median_mm"] = float(new_fmed)
-        if new_fmed < FRANGI_LINE_MIN_MEDIAN:
-            return None
         # Metal-continuity score feature: fraction of full-axis samples
         # whose unified metal evidence saturates (|LoG|≥LOG_BOLT_NORMALIZER
         # OR HU≥HU_BOLT_NORMALIZER). Real shanks have many discrete contact
         # peaks along the axis; cross-shank bone-assembled chains have a
         # few saturating spots clustered at one end with empty middle.
+        # Computed BEFORE the Frangi gate so the gate can defer to it on
+        # thin-wire shanks (long wire between bolt and contact array
+        # contributes no Frangi response, dragging median below 30 even
+        # though both ends have strong metal evidence).
         rec["frac_strong_metal"] = _frac_strong_metal_along_line(
             rec["start_ras"], rec["end_ras"],
             log1, ct_arr_kji, ras_to_ijk_mat,
         )
+        # Frangi gate. A line whose median Frangi falls below 30 is
+        # rejected UNLESS its metal-continuity is high — that catches
+        # the thin-wire SEEG case (bolt + deep contact array with a
+        # wire-only gap between, e.g. ct88 L_37). Cross-shank synth-
+        # extension FPs fail BOTH conditions: low Frangi AND low
+        # frac_strong (the synth segment passes through brain/air with
+        # no contacts), so they remain filtered.
+        if (new_fmed < FRANGI_LINE_MIN_MEDIAN
+                and rec["frac_strong_metal"] < FRAC_STRONG_WIRE_RESCUE):
+            return None
         rec["bolt_n_vox"] = int(bolt["n_vox"])
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])
         rec["bolt_id"] = int(bolt.get("id", -1))
