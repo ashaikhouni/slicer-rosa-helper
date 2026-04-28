@@ -2064,7 +2064,17 @@ SCORE_WEIGHTS = {
 }
 SCORE_HIGH_THRESHOLD = 0.80
 SCORE_MEDIUM_THRESHOLD = 0.50
-SCORE_PITCH_TOL_MM = 1.0       # falloff width around library pitch
+SCORE_PITCH_TOL_MM = 0.25      # falloff width around library pitch.
+                                # Calibrated against dataset matched
+                                # distribution: matched p90 = 0.18 mm
+                                # dev (well within tolerance), orphan
+                                # p50 = 0.35 mm dev (now scores 0).
+                                # Math: per-peak position σ ≈ 0.15 mm,
+                                # median pitch σ ≈ 0.07 mm for N=15
+                                # contacts, so 0.25 mm covers 3.5-σ of
+                                # measurement noise. Earlier value
+                                # 1.0 mm was a generous shoulder
+                                # carried over from the Ball r=2 era.
 SCORE_SPAN_SHOULDER_MM = 6.0   # linear falloff outside [12, 90]
 SCORE_LENGTH_SHOULDER_MM = 10.0  # linear falloff outside [30, 140]
 SCORE_AMP_SAT = 5000.0
