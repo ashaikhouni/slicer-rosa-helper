@@ -870,29 +870,16 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     )
 
 
-FRANGI_LINE_MIN_MEDIAN = 30.0
-# Wire-gap rescue thresholds for the post-anchor Frangi gate. Thin-wire
-# SEEG (DIXI MM, PMT 2102-XX-091, AdTech depth-strip hybrids) puts
-# 30-60 mm of thin wire between the bolt and the contact array. The
-# wire produces no Frangi tubular response (too thin / too uniform),
-# so the post-anchor median falls below 30 even though both ends of
-# the line have saturating metal evidence. When that happens, defer
-# to TWO conditions both being met:
-#
-#   ``frac_strong_metal >= FRAC_STRONG_WIRE_RESCUE``
-#       At least 10 % of axis samples saturate in either |LoG| or HU.
-#       Cross-shank synth-extension FPs fail this (their synth segment
-#       passes through brain/air — frac_strong ~0).
-#   ``n_inliers >= MIN_INLIERS_WIRE_RESCUE``
-#       Real thin-wire SEEG always has many contacts (L_37: n=15).
-#       Short FP alignments that happen to chain 6-10 LoG blobs at
-#       library pitch (T3 medium-band ti=14: n=8 frac_strong=0.39)
-#       fail this even though they pass the frac_strong check.
-#
-# Discovered on ct88 L_37 (thin-wire, 50 mm bolt-to-electrode gap,
-# n=15) and T3 medium FP (n=8 frac_strong=0.39).
-FRAC_STRONG_WIRE_RESCUE = 0.10
-MIN_INLIERS_WIRE_RESCUE = 12
+FRANGI_LINE_MIN_MEDIAN = 30.0  # post-anchor Frangi gate; only fires
+                                 # when the bolt anchor failed (synthesized
+                                 # / none). When the anchor latched onto a
+                                 # real metal CC, the bolt itself is the
+                                 # proof of realness — a weak Frangi
+                                 # median from a wire-only gap between
+                                 # bolt and contacts (thin-wire SEEG)
+                                 # shouldn't override that. The score's
+                                 # ``frangi`` component already penalizes
+                                 # weak Frangi proportionally.
 # Minimum median Frangi σ=1 response sampled along the walker line's
 # axis. Real SEEG shanks are thin straight metal cylinders — the exact
 # shape the Frangi tubular-objectness filter was designed for — and
@@ -2688,19 +2675,19 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             rec["start_ras"], rec["end_ras"],
             log1, ct_arr_kji, ras_to_ijk_mat,
         )
-        # Frangi gate. A line whose median Frangi falls below 30 is
-        # rejected UNLESS BOTH wire-rescue conditions hold — high
-        # metal-continuity (frac_strong) AND many walker inliers.
-        # Both conditions are needed: short FP alignments can have
-        # high frac_strong (random bone-blob chains hitting library
-        # pitch — ct88 T3 ti=14 had n=8, frac_strong=0.39) but real
-        # thin-wire SEEG always has n >= 12 inliers (L_37: n=15).
-        n_inliers = int(rec.get("n_inliers", 0))
-        wire_rescue_ok = (
-            rec["frac_strong_metal"] >= FRAC_STRONG_WIRE_RESCUE
-            and n_inliers >= MIN_INLIERS_WIRE_RESCUE
-        )
-        if new_fmed < FRANGI_LINE_MIN_MEDIAN and not wire_rescue_ok:
+        # Frangi gate fires ONLY when the bolt anchor failed
+        # (synthesized / none). When ``bolt_source == "metal"`` the
+        # anchor latched onto a real bolt CC and that's already proof
+        # the line is real — even if the segment between bolt and
+        # contacts is a wire too thin to register as tubular (e.g.
+        # ct88 L_37: 50 mm wire gap, frangi_median=8.6, but bolt
+        # anchored at 122 tube voxels). The score's Frangi component
+        # penalizes weak Frangi proportionally; no need for a hard
+        # cliff. Synthesized / none lines still get the gate because
+        # the synth fallback can extend through brain/air with no
+        # metal evidence on a cross-shank trajectory.
+        if (rec["bolt_source"] != "metal"
+                and new_fmed < FRANGI_LINE_MIN_MEDIAN):
             return None
         rec["bolt_n_vox"] = int(bolt["n_vox"])
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])

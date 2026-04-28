@@ -284,7 +284,11 @@ class GuidedFitWidgetMixin:
                 self.guidedTrajectoryTable.insertRow(row)
 
                 use_check = qt.QCheckBox()
-                use_check.setChecked(True)
+                # Default UNCHECKED. The "Remove Marked Trajectories"
+                # button only acts on checked rows, so a stray click
+                # on a fresh table is harmless. Users mark rows
+                # explicitly via the Mark Selected / Mark All buttons.
+                use_check.setChecked(False)
                 use_check.setStyleSheet("margin-left:8px; margin-right:8px;")
                 self.guidedTrajectoryTable.setCellWidget(row, 0, use_check)
 
@@ -355,6 +359,56 @@ class GuidedFitWidgetMixin:
 
     def onConfidenceFilterChanged(self, _idx):
         self._apply_confidence_filter()
+
+    # ---- Bulk-mark actions for the trajectory table ------------------
+
+    def _selected_table_rows(self):
+        """Indices of rows currently selected in the trajectory table.
+        Uses the selection model so Ctrl/Shift-click multi-selection
+        works correctly. Falls back to currentRow() when nothing is
+        selected.
+        """
+        sel_model = self.guidedTrajectoryTable.selectionModel()
+        rows = set()
+        if sel_model is not None:
+            for idx in sel_model.selectedRows():
+                rows.add(int(idx.row()))
+        if not rows:
+            cur = int(self.guidedTrajectoryTable.currentRow())
+            if cur >= 0:
+                rows.add(cur)
+        return sorted(rows)
+
+    def _set_marked(self, rows, marked):
+        """Set the Mark checkbox state on the given table rows. Skips
+        hidden rows (so confidence-filtered ones aren't accidentally
+        marked by Mark All).
+        """
+        for row in rows:
+            if self.guidedTrajectoryTable.isRowHidden(row):
+                continue
+            cell = self.guidedTrajectoryTable.cellWidget(row, 0)
+            if cell is not None:
+                cell.setChecked(bool(marked))
+
+    def onMarkSelectedClicked(self):
+        rows = self._selected_table_rows()
+        if not rows:
+            return
+        self._set_marked(rows, True)
+
+    def onMarkAllClicked(self):
+        all_rows = list(range(int(self.guidedTrajectoryTable.rowCount)))
+        self._set_marked(all_rows, True)
+
+    def onUnmarkAllClicked(self):
+        # Force-clear ALL rows (including hidden ones) so a confidence
+        # filter change doesn't leak previously-marked rows back into
+        # the next "Remove Marked" action.
+        for row in range(int(self.guidedTrajectoryTable.rowCount)):
+            cell = self.guidedTrajectoryTable.cellWidget(row, 0)
+            if cell is not None:
+                cell.setChecked(False)
 
     def onGuidedTrajectoryItemChanged(self, item):
         if self._updatingGuidedTable or self._renamingGuidedTrajectory:

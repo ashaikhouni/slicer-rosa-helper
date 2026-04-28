@@ -136,23 +136,52 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.guidedTrajectoryTable = qt.QTableWidget()
         self.guidedTrajectoryTable.setColumnCount(4)
         self.guidedTrajectoryTable.setHorizontalHeaderLabels(
-            ["Use", "Trajectory", "Length (mm)", "Confidence"]
+            ["Mark", "Trajectory", "Length (mm)", "Confidence"]
         )
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Stretch)
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
         self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.ResizeToContents)
         self.guidedTrajectoryTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
-        self.guidedTrajectoryTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        # ExtendedSelection: Ctrl-click to add to selection, Shift-click
+        # to extend a range. Combined with the "Mark Selected" button
+        # below, lets users select N rows and toggle them in bulk
+        # without iterating one checkbox at a time.
+        self.guidedTrajectoryTable.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
         self.guidedTrajectoryTable.cellClicked.connect(self.onGuidedTrajectoryTableCellClicked)
         self.guidedTrajectoryTable.currentCellChanged.connect(self.onGuidedTrajectoryTableCurrentCellChanged)
         self.guidedTrajectoryTable.itemChanged.connect(self.onGuidedTrajectoryItemChanged)
         form.addRow(self.guidedTrajectoryTable)
 
+        # Bulk-mark actions. Trajectories start UNCHECKED so a stray
+        # click on "Remove Marked Trajectories" does nothing — users
+        # have to explicitly mark first. Multi-select + the "Mark
+        # Selected" button is the fast path for marking multiple rows.
         actions_row = qt.QHBoxLayout()
-        self.removeCheckedButton = qt.QPushButton("Remove Checked Trajectories")
+        self.markSelectedButton = qt.QPushButton("Mark Selected")
+        self.markSelectedButton.setToolTip(
+            "Check the Mark column for every currently-selected row. "
+            "Use Ctrl/Shift-click to select multiple rows."
+        )
+        self.markSelectedButton.clicked.connect(self.onMarkSelectedClicked)
+        actions_row.addWidget(self.markSelectedButton)
+
+        self.markAllButton = qt.QPushButton("Mark All Visible")
+        self.markAllButton.setToolTip(
+            "Check the Mark column for every visible row "
+            "(rows hidden by the Confidence filter are skipped)."
+        )
+        self.markAllButton.clicked.connect(self.onMarkAllClicked)
+        actions_row.addWidget(self.markAllButton)
+
+        self.unmarkAllButton = qt.QPushButton("Unmark All")
+        self.unmarkAllButton.clicked.connect(self.onUnmarkAllClicked)
+        actions_row.addWidget(self.unmarkAllButton)
+
+        self.removeCheckedButton = qt.QPushButton("Remove Marked Trajectories")
         self.removeCheckedButton.clicked.connect(self.onRemoveCheckedClicked)
         actions_row.addWidget(self.removeCheckedButton)
+
         actions_row.addStretch(1)
         form.addRow(actions_row)
 
