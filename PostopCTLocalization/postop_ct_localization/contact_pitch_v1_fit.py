@@ -210,7 +210,6 @@ STAGE1_DEDUP_ANGLE_DEG = 3.0
 STAGE1_DEDUP_PERP_MM = 2.0
 STAGE1_DEDUP_OVERLAP_FRAC = 0.3
 
-HULL_ENDPOINT_MAX_MM = 15.0
 DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
                                 # sinus / skull-base tube FPs hide).
 DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
@@ -228,15 +227,6 @@ DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
                                 # over-extension slack up to 2× nominal
                                 # pitch. Cross-shank bridges + sinus
                                 # FPs land well above 7 mm avg.
-# Minimum mean intracranial depth of walker inliers. Real SEEG
-# contacts sit 5-50 mm inside the hull surface; ghost "contacts"
-# produced by bone / skull artifacts cluster at hull_dist 0-3 mm.
-# Trajectories whose inliers are on average in bone (this threshold
-# fails) are rejected post-anchor — catches cases like T1 X12 where
-# a 7-inlier line was assembled out of bone-bright spots along an
-# axis diverging from a real bolt.
-MIN_INLIER_DIST_MEAN_MM = 5.0
-
 # Post-anchor length bounds. Anchored length = bolt-tip → deep contact
 # = library contact span + bolt protrusion (and, for thin-wire PMT,
 # the deep wire-segment gap that the contact span doesn't include).
@@ -337,7 +327,6 @@ BOLT_RESCUE_MIN_N_INLIERS = MIN_BLOBS_PER_LINE
                                     # Shallow skull-surface chains are
                                     # caught by BOLT_RESCUE_MIN_DIST_MAX_MM
                                     # below, not by the inlier count.
-BOLT_RESCUE_MIN_ORIG_SPAN_MM = 25.0 # Min pre-extend contact span (mm)
 BOLT_RESCUE_MIN_DIST_MAX_MM = 30.0  # Min inlier depth (mm). Real shanks
                                     # penetrate at least 30 mm into the
                                     # brain; shallower "lines" are

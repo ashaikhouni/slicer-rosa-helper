@@ -116,7 +116,6 @@ def _gate_margins(rec):
         "contact_span_mm": span - cpfit.MIN_LINE_SPAN_MM,
         "length_mm": length - cpfit.MIN_POST_ANCHOR_LEN_MM,
         "dist_max_mm__deep_tip": dist_max - deep_tip_floor,
-        "dist_mean_mm__floor5": dist_mean - cpfit.MIN_INLIER_DIST_MEAN_MM,
         "frangi_median_mm__floor30": frangi - cpfit.FRANGI_LINE_MIN_MEDIAN,
         "pitch_dev_mm__neg_lower_better": -pitch_dev,  # smaller dev = better
         "amp_sum_per_inlier": amp / max(1, n),  # per-contact amp; not gated but informative
@@ -202,7 +201,6 @@ def main():
             "contact_span_mm",
             "length_mm",
             "dist_max_mm__deep_tip",
-            "dist_mean_mm__floor5",
             "frangi_median_mm__floor30",
         }}
         tightest_k = min(gates_only, key=lambda k: gates_only[k])

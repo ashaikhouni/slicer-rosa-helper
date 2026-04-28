@@ -1,9 +1,8 @@
 """Effect-of-gates probe — does DEEP_TIP_* still drop anything today?
 
 Concept-swap #5 retires DEEP_TIP_MIN_MM, DEEP_TIP_MIN_SHORT_MM,
-DEEP_TIP_SHORT_MAX_AVG_PITCH_MM, MIN_INLIER_DIST_MEAN_MM. Before
-designing a replacement, find out if those gates are doing any
-work in the current dataset:
+DEEP_TIP_SHORT_MAX_AVG_PITCH_MM. Before designing a replacement,
+find out if those gates are doing any work in the current dataset:
 
   1. Run the pipeline normally (baseline).
   2. Run with the gates effectively disabled (set thresholds to 0).
@@ -145,26 +144,23 @@ def main():
     print("DEEP_TIP_MIN_MM        =", cpfit.DEEP_TIP_MIN_MM)
     print("DEEP_TIP_MIN_SHORT_MM  =", cpfit.DEEP_TIP_MIN_SHORT_MM)
     print("DEEP_TIP_SHORT_MAX_AVG_PITCH_MM =", cpfit.DEEP_TIP_SHORT_MAX_AVG_PITCH_MM)
-    print("MIN_INLIER_DIST_MEAN_MM =", cpfit.MIN_INLIER_DIST_MEAN_MM)
     base_rows, base_totals, base_per_traj = _run_dataset("baseline", return_per_traj=True)
 
-    # Disable the deep-tip gates by setting their thresholds to 0.
+    # Disable the deep-tip gates by setting their thresholds to 1 mm
+    # (effectively "no gate" — no real shank has dist_max < 1 mm).
+    # Using 1 instead of 0 because the score framework has a
+    # ``dist_max / DEEP_TIP_MIN_MM`` term that would crash on zero.
+    # ``SCORE_DEPTH_SAT_MM`` is decoupled (commit 560e6bd), so the depth
+    # score behaves identically to baseline; only the gate is off.
     saved = {
         "DEEP_TIP_MIN_MM": cpfit.DEEP_TIP_MIN_MM,
         "DEEP_TIP_MIN_SHORT_MM": cpfit.DEEP_TIP_MIN_SHORT_MM,
-        "MIN_INLIER_DIST_MEAN_MM": cpfit.MIN_INLIER_DIST_MEAN_MM,
     }
     try:
-        # 1 mm is effectively "no gate" — no real shank has dist_max < 1 mm.
-        # Using 1 instead of 0 because the score framework has a
-        # ``dist_max / DEEP_TIP_MIN_MM`` term that would crash on zero.
-        # Score saturation point is restored to 30 inside the call so the
-        # depth_score behaves identically to baseline; only the gate is off.
         cpfit.DEEP_TIP_MIN_MM = 1.0
         cpfit.DEEP_TIP_MIN_SHORT_MM = 1.0
-        cpfit.MIN_INLIER_DIST_MEAN_MM = 0.0
         no_rows, no_totals, no_per_traj = _run_dataset(
-            "deep-tip + intracranial-mean gates DISABLED",
+            "deep-tip gates DISABLED",
             return_per_traj=True,
         )
     finally:
