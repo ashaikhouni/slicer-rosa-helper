@@ -2629,6 +2629,22 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         if (rec["length_mm"] < MIN_POST_ANCHOR_LEN_MM
                 or rec["length_mm"] > MAX_POST_ANCHOR_LEN_MM):
             return None
+        # Re-validate Frangi tubular evidence on the FULL extended axis
+        # (bolt-tip → deep-tip), not just the contact span. Stage 1's
+        # Frangi gate only saw the contact span; the bolt anchor extends
+        # ``start_ras`` outward by 15-60 mm without checking what's in
+        # between. Real shanks have continuous wire+bolt support and
+        # keep frangi_median ≥ 30 even on the extended line. axis_synth
+        # FPs (e.g. T1 Or-#10) extend through brain/air with no metal
+        # support and drop out here. Overwrite the score's
+        # ``frangi_median_mm`` so it sees the true post-anchor value.
+        new_fmean, new_fmed = _frangi_along_line_stats(
+            rec["start_ras"], rec["end_ras"], frangi_s1, ras_to_ijk_mat,
+        )
+        rec["frangi_mean_mm"] = float(new_fmean)
+        rec["frangi_median_mm"] = float(new_fmed)
+        if new_fmed < FRANGI_LINE_MIN_MEDIAN:
+            return None
         rec["bolt_n_vox"] = int(bolt["n_vox"])
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])
         rec["bolt_id"] = int(bolt.get("id", -1))
