@@ -918,6 +918,47 @@ def _frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
     return float(vals.mean()), float(np.median(vals))
 
 
+METAL_EVIDENCE_LOG_NORM = 800.0
+METAL_EVIDENCE_HU_NORM = 2000.0
+METAL_EVIDENCE_STRONG_THR = 1.0
+
+
+def _frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
+                                    ras_to_ijk_mat, step_mm=0.5):
+    """Fraction of axis samples whose per-voxel metal evidence reaches
+    contact-saturation level. Per-voxel evidence is
+    ``max(|LoG|/LOG_NORM, max(0, HU)/HU_NORM)``; saturation threshold
+    is 1.0 by default (i.e., any of |LoG|≥800 OR HU≥2000 counts).
+
+    Real SEEG shanks have many contact-saturating voxels along their
+    axis (matched p10 ≈ 0.27, p50 ≈ 0.65). Hull-skimming bone-assembled
+    chains and synth-extended FPs have near-zero saturation
+    (orphan p50 ≈ 0.01).
+    """
+    K, J, I = log_arr.shape
+    s = np.asarray(start_ras, dtype=float)
+    e = np.asarray(end_ras, dtype=float)
+    L = float(np.linalg.norm(e - s))
+    if L < step_mm:
+        return 0.0
+    u = (e - s) / L
+    n = max(2, int(L / step_mm) + 1)
+    n_strong = 0
+    for idx in range(n):
+        t = idx * step_mm if idx < n - 1 else L
+        p = s + t * u
+        h = np.array([p[0], p[1], p[2], 1.0])
+        ijk = (ras_to_ijk_mat @ h)[:3]
+        ic = int(np.clip(round(ijk[0]), 0, I - 1))
+        jc = int(np.clip(round(ijk[1]), 0, J - 1))
+        kc = int(np.clip(round(ijk[2]), 0, K - 1))
+        log_norm = abs(float(log_arr[kc, jc, ic])) / METAL_EVIDENCE_LOG_NORM
+        hu_norm = max(0.0, float(ct_arr[kc, jc, ic])) / METAL_EVIDENCE_HU_NORM
+        if max(log_norm, hu_norm) >= METAL_EVIDENCE_STRONG_THR:
+            n_strong += 1
+    return float(n_strong) / float(n)
+
+
 def _median_inlier_pitch(pts, axis):
     """Median consecutive spacing of ``pts`` projected onto ``axis``.
 
@@ -2061,7 +2102,18 @@ SCORE_WEIGHTS = {
                            # not a soft prior.
     "intracranial": 0.5,
     "bolt": 1.0,
+    "metal_continuity": 2.0,  # frac_strong-along-axis: real shanks have
+                               # discrete contact-saturating peaks all
+                               # along the line (matched p10=0.27,
+                               # p50=0.65); cross-shank chains and
+                               # synth-extended FPs have frac near 0
+                               # (orphan p50=0.01). Weight 2.0 pushes
+                               # zero-saturation orphans into LOW band.
 }
+SCORE_METAL_CONTINUITY_SAT = 0.10  # frac_strong saturation: matched p1
+                                    # ≈ 0.16, so 0.10 gives nearly all
+                                    # matched full credit while penalizing
+                                    # orphans clustered at 0.00-0.05.
 SCORE_HIGH_THRESHOLD = 0.80
 SCORE_MEDIUM_THRESHOLD = 0.50
 SCORE_PITCH_TOL_MM = 0.25      # falloff width around library pitch.
@@ -2147,6 +2199,12 @@ def _compute_trajectory_score(rec):
         components["frangi"] = (
             min(1.0, max(0.0, float(rec["frangi_median_mm"]) / FRANGI_LINE_MIN_MEDIAN)),
             SCORE_WEIGHTS["frangi"],
+        )
+
+    if "frac_strong_metal" in rec:
+        components["metal_continuity"] = (
+            min(1.0, max(0.0, float(rec["frac_strong_metal"]) / SCORE_METAL_CONTINUITY_SAT)),
+            SCORE_WEIGHTS["metal_continuity"],
         )
 
     pitch = rec.get("original_median_pitch_mm")
@@ -2655,6 +2713,15 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         rec["frangi_median_mm"] = float(new_fmed)
         if new_fmed < FRANGI_LINE_MIN_MEDIAN:
             return None
+        # Metal-continuity score feature: fraction of full-axis samples
+        # at contact-saturating evidence (|LoG|≥800 or HU≥2000). Real
+        # shanks have many discrete contact peaks along the axis;
+        # cross-shank bone-assembled chains have a few saturating
+        # spots clustered at one end with empty middle/extension.
+        rec["frac_strong_metal"] = _frac_strong_metal_along_line(
+            rec["start_ras"], rec["end_ras"],
+            log1, ct_arr_kji, ras_to_ijk_mat,
+        )
         rec["bolt_n_vox"] = int(bolt["n_vox"])
         rec["bolt_dist_min_mm"] = float(bolt["dist_min_mm"])
         rec["bolt_id"] = int(bolt.get("id", -1))
