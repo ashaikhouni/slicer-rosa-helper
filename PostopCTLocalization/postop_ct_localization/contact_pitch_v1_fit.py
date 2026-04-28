@@ -1622,6 +1622,13 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
         # skull_entry = deepest tube voxel STILL in skull/dura band.
         # Without the dist clip, big merged CCs (bolt + contacts) put
         # the marker at the deepest contact instead of the bolt base.
+        # When no tube voxel reaches the skull band (e.g. cropped
+        # scans where the bolt is partly outside FOV, or the tube
+        # axis grazes the bolt CC), set deep_local=None so the caller
+        # leaves ``skull_entry_ras`` unset and falls back to
+        # ``start_ras`` for intracranial-length reporting — preferable
+        # to placing a bogus skull-entry deep inside the head.
+        deep_local = None
         if pts_dist is not None:
             in_skull_band = np.where(
                 (pts_dist[tube_idxs] <= base_max_dist_mm)
@@ -1630,8 +1637,6 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
                 deep_local = int(tube_idxs[
                     in_skull_band[np.argmax(along_tube[in_skull_band])]
                 ])
-            else:
-                deep_local = int(tube_idxs[np.argmax(along_tube)])
         else:
             deep_local = int(tube_idxs[np.argmax(along_tube)])
         if n_in > best_n:
@@ -1639,12 +1644,15 @@ def anchor_trajectory_to_bolt(traj_start_ras, traj_end_ras, bolts,
             best_n = n_in
             # Project chosen voxels onto the SHANK axis so endpoints
             # stay strictly colinear with the trajectory line. Without
-            # this, the markers can sit up to tube_radius_mm (3 mm) off
-            # the axis since they're picked from voxel centers.
+            # this, the markers can sit up to tube_radius_mm off the
+            # axis since they're picked from voxel centers.
             shallow_along = float(along[shallow_local])
-            deep_along = float(along[deep_local])
             best_shallow = traj_start + shallow_along * shank_axis
-            best_entry = traj_start + deep_along * shank_axis
+            if deep_local is None:
+                best_entry = None
+            else:
+                deep_along = float(along[deep_local])
+                best_entry = traj_start + deep_along * shank_axis
 
     if best is None:
         return None, None, None
