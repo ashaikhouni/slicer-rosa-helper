@@ -642,6 +642,36 @@ class GuidedFitWidgetMixin:
             self.guidedFitStatusLabel.setText(f"error: {exc}")
             return
 
+        # Diagnostic: surface the blob-cloud size + RAS extent so a
+        # systematic frame mismatch (planned trajectories in a
+        # different frame than the postop CT) is visible at a glance.
+        # When every seed reports "0 < N" blobs in ROI, this line
+        # tells whether the engine extracted ANY blobs (LoG bad) or
+        # extracted plenty but they're nowhere near the seeds (frame
+        # mismatch).
+        try:
+            _pts = features.get("blob_pts_ras")
+            _vol_name = volume_node.GetName() if volume_node is not None else "?"
+            if _pts is not None and len(_pts) > 0:
+                _arr = np.asarray(_pts, dtype=float)
+                _mn = _arr.min(axis=0)
+                _mx = _arr.max(axis=0)
+                self.log(
+                    f"[guided] LoG blob cloud: n={int(_arr.shape[0])} "
+                    f"on '{_vol_name}'; RAS bbox "
+                    f"x=[{_mn[0]:+.1f},{_mx[0]:+.1f}] "
+                    f"y=[{_mn[1]:+.1f},{_mx[1]:+.1f}] "
+                    f"z=[{_mn[2]:+.1f},{_mx[2]:+.1f}]"
+                )
+            else:
+                self.log(
+                    f"[guided] LoG blob cloud is EMPTY on '{_vol_name}' "
+                    "— no metal-bright voxels in the postop CT (wrong "
+                    "volume? CT not loaded? HU rescaled?)."
+                )
+        except Exception as exc:
+            self.log(f"[guided] blob-cloud diagnostic failed: {exc}")
+
         roi_mm = float(self.guidedRoiRadiusSpin.value)
         max_angle = float(self.guidedMaxAngleSpin.value)
         max_lat = float(self.guidedMaxLateralShiftSpin.value)
@@ -677,6 +707,30 @@ class GuidedFitWidgetMixin:
                 "running PCA fit only (tip: run Auto Fit first to "
                 "inherit walker + score)"
             )
+
+        # Diagnostic: log the seed-cloud RAS bbox so a frame mismatch
+        # vs. the blob cloud's bbox is immediately visible. If seeds
+        # are systematically offset from the LoG cloud, every fit
+        # will report "0 blobs in ROI" — but the user can see the
+        # offset here without inspecting individual rows.
+        try:
+            _seed_centers = np.asarray([
+                0.5 * (np.asarray(self._seed_start_end_ras(t)[0], dtype=float)
+                       + np.asarray(self._seed_start_end_ras(t)[1], dtype=float))
+                for _r, t in seed_rows
+            ], dtype=float)
+            if _seed_centers.shape[0] > 0:
+                _smn = _seed_centers.min(axis=0)
+                _smx = _seed_centers.max(axis=0)
+                self.log(
+                    f"[guided] seed midpoint cloud: n={_seed_centers.shape[0]} "
+                    f"RAS bbox "
+                    f"x=[{_smn[0]:+.1f},{_smx[0]:+.1f}] "
+                    f"y=[{_smn[1]:+.1f},{_smx[1]:+.1f}] "
+                    f"z=[{_smn[2]:+.1f},{_smx[2]:+.1f}]"
+                )
+        except Exception as exc:
+            self.log(f"[guided] seed-cloud diagnostic failed: {exc}")
 
         # Two-phase: first collect fit records, then run crossing-tip
         # retreat across all records, then emit the scene nodes with
