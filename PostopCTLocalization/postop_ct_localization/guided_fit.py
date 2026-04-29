@@ -552,6 +552,32 @@ class GuidedFitWidgetMixin:
         ras_to_ijk = np.array([
             [float(m2.GetElement(r, c)) for c in range(4)] for r in range(4)
         ], dtype=float)
+        # Write the volume node's IJK->RAS into the SITK image's
+        # origin/direction. Without this, the SITK image carries the
+        # identity defaults from `sitk.GetImageFromArray`, and
+        # `prepare_volume`'s resample inherits that identity geometry
+        # — `image_ijk_ras_matrices(resampled_img)` then returns a
+        # matrix unrelated to the real CT, and the blob cloud projects
+        # to bogus RAS coords. Mirror what
+        # `ContactPitchV1Pipeline._apply_slicer_geometry_to_sitk` does
+        # for Auto Fit's path.
+        try:
+            spacing = np.array(img.GetSpacing(), dtype=float)
+            origin_ras = ijk_to_ras[:3, 3].copy()
+            dir_ras = np.zeros((3, 3), dtype=float)
+            for k in range(3):
+                dir_ras[:, k] = ijk_to_ras[:3, k] / max(1e-9, float(spacing[k]))
+            # SITK images live in LPS; flip X and Y from the RAS form.
+            origin_lps = np.array(
+                [-origin_ras[0], -origin_ras[1], origin_ras[2]], dtype=float,
+            )
+            dir_lps = dir_ras.copy()
+            dir_lps[0, :] *= -1.0
+            dir_lps[1, :] *= -1.0
+            img.SetOrigin(tuple(float(v) for v in origin_lps.tolist()))
+            img.SetDirection(tuple(float(v) for v in dir_lps.flatten().tolist()))
+        except Exception:
+            pass
         return img, ijk_to_ras, ras_to_ijk
 
     @staticmethod
@@ -839,6 +865,21 @@ class GuidedFitWidgetMixin:
                 group="guided_fit",
                 origin="postop_ct_guided_fit",
             )
+            # Inherit the postop CT's parent transform so the line
+            # displays in the same world frame the CT is shown in. The
+            # fit RAS coords are already in the volume node's local
+            # IJK→RAS frame; if the volume has a separate parent
+            # transform, the line needs the same transform applied
+            # at display time. (Auto Fit does this via
+            # ``_copy_parent_transform`` in deep_core_visualization;
+            # Guided Fit was missing the equivalent.)
+            try:
+                if volume_node is not None and node is not None:
+                    node.SetAndObserveTransformNodeID(
+                        volume_node.GetTransformNodeID()
+                    )
+            except Exception:
+                pass
             # Stamp Auto-Fit-equivalent confidence + bolt-source attrs so
             # the Slicer confidence filter combo and Trajectory Set table
             # treat guided-fit lines the same as auto-fit lines.
