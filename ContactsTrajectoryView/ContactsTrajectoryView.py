@@ -1333,6 +1333,20 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         if self.lastQCMetricsRows:
             self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
         self._refresh_summary()
+        # Auto-apply the trajectory-aligned dual-view layout if the
+        # user hasn't already done so. Editing contacts requires both
+        # the long-axis view (drag along axis = depth) AND the
+        # perpendicular view (drag perpendicular = lateral); without
+        # the focus layout the user has no slice plane that's both
+        # aligned with the shank and showing the cross-section.
+        if not self.logic.layout_service.has_focus_slice_views():
+            self._schedule_apply_focus_layout()
+            self.log(
+                f"[contacts:{log_context}] applied trajectory focus "
+                "layout — drag contacts in TrajectoryLong (depth) or "
+                "TrajectoryDown (lateral) views; click a row to align"
+            )
+        self._schedule_follow_selected_trajectory()
 
     def onGenerateContactsClicked(self):
         if not self.loadedTrajectories:
