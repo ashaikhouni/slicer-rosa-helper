@@ -590,6 +590,84 @@ def resolve_pitches_for_strategy(strategy, pts_c=None,
 
 # ---- Preprocessing ----------------------------------------------------
 
+def prepare_volume(img, ijk_to_ras_mat, ras_to_ijk_mat=None):
+    """Canonicalize a CT volume so every contact_pitch_v1 consumer sees
+    the same input regardless of scanner spacing or HU range.
+
+    Three transformations applied IN ORDER:
+
+      1. **Resample** to ``CANONICAL_SPACING_MM`` if any input axis is
+         finer than ``0.95 × canonical`` (typical raw post-op CT at
+         0.4-0.7 mm). Native 1 mm CTs skip this. Bilinear interp,
+         default pixel value -1024.
+      2. **Anisotropic Gaussian anti-alias** per axis:
+         ``σ[i] = max(0, canonical - s_in[i])``. Axes that aren't
+         downsampled get σ=0 — no smoothing where there's no aliasing
+         risk. Without this the raw input's sub-mm-grid aliasing
+         survives into the LoG and the blob extractor reports ghost
+         contacts (21 vs 14 stage-1 emissions on raw T7 vs registered
+         T7); isotropic σ=0.7 over-smoothed near-canonical axes and
+         lost S56's two horizontal SEEG shanks.
+      3. **HU clamp** to ``[-1024, HU_CLIP_MAX]`` so the LoG / Frangi
+         response is consistent across scans regardless of how the CT
+         reconstruction encodes metal saturation.
+
+    Both Auto Fit's ``run_two_stage_detection`` and Guided Fit's
+    ``compute_features`` (in ``guided_fit_engine``) call this so they
+    see the same canonical volume. Any drift between the two paths
+    is a P0 parity bug per ``feedback_cli_slicer_parity.md``.
+
+    Returns ``(img_canon, ijk_to_ras_canon, ras_to_ijk_canon)``. When
+    no resampling is needed the matrices pass through unchanged
+    (apart from being cast to float64 ndarrays); when resampling
+    happens the matrices are recomputed from the new grid via
+    ``shank_core.io.image_ijk_ras_matrices``. ``ras_to_ijk_mat`` may
+    be omitted in the latter case — it'll be derived from the new
+    image; in the no-resample case the caller's matrix is preserved
+    as-is for numerical-parity reasons (otherwise we'd take an
+    inverse here that diverges from the Slicer-supplied inverse by
+    floating-point noise).
+    """
+    import SimpleITK as sitk
+    from shank_core.io import image_ijk_ras_matrices
+
+    ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+
+    spacing = img.GetSpacing()
+    needs_resample = min(float(s) for s in spacing) < CANONICAL_SPACING_MM * 0.95
+    if needs_resample:
+        size_in = img.GetSize()
+        target_spacing = (CANONICAL_SPACING_MM, CANONICAL_SPACING_MM, CANONICAL_SPACING_MM)
+        target_size = [
+            max(1, int(round(size_in[i] * float(spacing[i]) / CANONICAL_SPACING_MM)))
+            for i in range(3)
+        ]
+        rs = sitk.ResampleImageFilter()
+        rs.SetOutputSpacing(target_spacing)
+        rs.SetSize(target_size)
+        rs.SetOutputOrigin(img.GetOrigin())
+        rs.SetOutputDirection(img.GetDirection())
+        rs.SetInterpolator(sitk.sitkLinear)
+        rs.SetDefaultPixelValue(-1024)
+        img = rs.Execute(img)
+        sigmas_per_axis = tuple(
+            float(max(0.0, CANONICAL_SPACING_MM - float(s)))
+            for s in spacing
+        )
+        if max(sigmas_per_axis) > 0:
+            img = sitk.SmoothingRecursiveGaussian(img, sigmas_per_axis)
+        ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
+        ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+        ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
+    else:
+        if ras_to_ijk_mat is None:
+            ras_to_ijk_mat = np.linalg.inv(ijk_to_ras_mat)
+        ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
+
+    img = sitk.Clamp(img, lowerBound=-1024.0, upperBound=HU_CLIP_MAX)
+    return img, ijk_to_ras_mat, ras_to_ijk_mat
+
+
 def build_masks(img):
     import SimpleITK as sitk
     # Cast to float so the threshold range is unrestricted by pixel type
@@ -2386,66 +2464,14 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             except Exception:
                 pass
 
-    ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
-    ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
     import SimpleITK as sitk
-    # Voxel-spacing canonicalization: downsample finer-than-canonical
-    # inputs (typical raw post-op CT at 0.4-0.7 mm) to CANONICAL_SPACING_MM
-    # so the kernel sizes, thresholds, and walker tolerances downstream
-    # behave identically across input voxel grids. Trajectories emit
-    # in scanner-space RAS — valid in the original input CT regardless.
-    spacing = img.GetSpacing()
-    needs_resample = min(float(s) for s in spacing) < CANONICAL_SPACING_MM * 0.95
-    if needs_resample:
-        size_in = img.GetSize()
-        target_spacing = (CANONICAL_SPACING_MM, CANONICAL_SPACING_MM, CANONICAL_SPACING_MM)
-        target_size = [
-            max(1, int(round(size_in[i] * float(spacing[i]) / CANONICAL_SPACING_MM)))
-            for i in range(3)
-        ]
-        rs = sitk.ResampleImageFilter()
-        rs.SetOutputSpacing(target_spacing)
-        rs.SetSize(target_size)
-        rs.SetOutputOrigin(img.GetOrigin())
-        rs.SetOutputDirection(img.GetDirection())
-        rs.SetInterpolator(sitk.sitkLinear)
-        rs.SetDefaultPixelValue(-1024)
-        img = rs.Execute(img)
-        # Anti-alias to match the new sampling rate. Without this the
-        # raw input's sub-mm-grid aliasing survives into the LoG and
-        # the blob extractor reports ghost contacts (21 vs 14 stage-1
-        # emissions on raw T7 vs registered T7).
-        #
-        # Anisotropic σ, scaled per axis by the amount of downsampling:
-        # σ[i] = max(0, s_out - s_in[i]). Axes that aren't downsampled
-        # (s_in >= canonical) get σ=0 — no smoothing where there's no
-        # aliasing risk.
-        #
-        # Why anisotropic: isotropic σ=0.7 (the previous calibration on
-        # T7 raw at ~0.415 mm in-plane) over-smooths in directions where
-        # the input was already near-canonical, blurring adjacent
-        # contacts on near-horizontal shanks below the LoG threshold.
-        # S56 had 2 horizontal SEEG shanks (L_2, L_3) entirely missed
-        # at isotropic σ=0.7 because their X/Y in-plane contacts blurred
-        # together; anisotropic σ recovers them.
-        sigmas_per_axis = tuple(
-            float(max(0.0, CANONICAL_SPACING_MM - float(s)))
-            for s in spacing
-        )
-        if max(sigmas_per_axis) > 0:
-            img = sitk.SmoothingRecursiveGaussian(img, sigmas_per_axis)
-        # Recompute IJK↔RAS for the resampled grid (origin / direction
-        # unchanged, spacing changed → matrix changes).
-        from shank_core.io import image_ijk_ras_matrices
-        ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
-        ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
-        ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
-    # Scanner-invariance pre-clip: cap HU at HU_CLIP_MAX so the LoG /
-    # Frangi response is consistent across scans regardless of how the
-    # CT reconstruction encodes metal saturation. Does not affect hull
-    # detection (thresholded at HU ≥ -500) or any of the downstream HU
-    # filters (all below HU_CLIP_MAX).
-    img = sitk.Clamp(img, lowerBound=-1024.0, upperBound=HU_CLIP_MAX)
+    # Canonicalize spacing + anti-alias + HU clamp. Shared with
+    # ``guided_fit_engine.compute_features`` so both paths see the
+    # identical preprocessed volume — any drift here is a P0 parity
+    # bug per ``feedback_cli_slicer_parity.md``.
+    img, ijk_to_ras_mat, ras_to_ijk_mat = prepare_volume(
+        img, ijk_to_ras_mat, ras_to_ijk_mat,
+    )
     _log("preprocessing: hull, head-distance, intracranial mask…")
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
     # Input fingerprint — lets us compare Slicer vs CLI runs byte-for-byte.

@@ -626,7 +626,14 @@ class GuidedFitWidgetMixin:
 
         try:
             img, ijk_to_ras, ras_to_ijk = self._guided_fit_volume_matrices(volume_node)
-            features = gfe.compute_features(img, ijk_to_ras)
+            features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk)
+            # ``compute_features`` may have resampled the volume to the
+            # canonical grid; pull the canonical img + matrices back so
+            # subsequent ``fit_trajectory`` calls operate on the same
+            # grid the LoG / Frangi kernels were computed on.
+            img = features["img"]
+            ijk_to_ras = features["ijk_to_ras_mat"]
+            ras_to_ijk = features["ras_to_ijk_mat"]
         except Exception as exc:
             self.log(f"[guided] preprocessing failed: {exc}")
             qt.QMessageBox.critical(

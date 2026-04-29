@@ -67,16 +67,28 @@ def _unit(v):
     return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
 
 
-def compute_features(img, ijk_to_ras_mat, spacing_xyz=None):
-    """One-time preprocessing per volume. Computes the same feature
-    set Auto Fit uses — hull, head distance, LoG σ=1, blob cloud,
-    Frangi σ=1, CT array, and bolt candidates from the unified
-    metal-evidence pool — so a batch of seeds share one preprocessing
-    pass and so the same scoring rubric (frangi, frac_strong_metal,
-    bolt_source) can be applied to guided-fit results.
+def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None):
+    """One-time preprocessing per volume. Runs the SAME pipeline-entry
+    canonicalization (resample-to-1mm + anisotropic anti-alias +
+    HU clamp) Auto Fit uses, then computes the same feature set —
+    hull, head distance, LoG σ=1, blob cloud, Frangi σ=1, CT array,
+    and bolt candidates from the unified metal-evidence pool — so a
+    batch of seeds share one preprocessing pass and so the same
+    scoring rubric (frangi, frac_strong_metal, bolt_source) can be
+    applied to guided-fit results.
+
+    Because canonicalization may resample the volume, the canonical
+    img + IJK↔RAS matrices are stamped into the returned dict under
+    keys ``img`` / ``ijk_to_ras_mat`` / ``ras_to_ijk_mat``. Callers
+    MUST use these for any subsequent ``fit_trajectory`` call so the
+    canonical grid is consistent with the feature kernels — passing
+    the original (pre-resample) matrices would compute trajectories
+    on a grid that doesn't match where the LoG / Frangi peaks live.
     """
     import SimpleITK as sitk
-    ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
+    img, ijk_to_ras_mat, ras_to_ijk_mat = cpfit.prepare_volume(
+        img, ijk_to_ras_mat, ras_to_ijk_mat,
+    )
     hull_arr, intracranial, dist_arr = cpfit.build_masks(img)
     log1 = cpfit.log_sigma(img, sigma_mm=cpfit.LOG_SIGMA_MM)
     frangi_s1 = cpfit.frangi_single(img, sigma=cpfit.FRANGI_STAGE1_SIGMA)
@@ -84,6 +96,9 @@ def compute_features(img, ijk_to_ras_mat, spacing_xyz=None):
 
     pts_ras, amps = _extract_blob_cloud_ras(log1, ijk_to_ras_mat)
 
+    # ``spacing_xyz`` overrides the (now-canonical) image spacing only
+    # when the caller has a reason to lie about it. Default: trust the
+    # canonical grid — that's the point of prepare_volume.
     spacing = spacing_xyz
     if spacing is None:
         try:
@@ -103,6 +118,11 @@ def compute_features(img, ijk_to_ras_mat, spacing_xyz=None):
     )
 
     return {
+        # Canonical-grid img + matrices, updated by prepare_volume.
+        # Callers pass these to fit_trajectory.
+        "img": img,
+        "ijk_to_ras_mat": ijk_to_ras_mat,
+        "ras_to_ijk_mat": ras_to_ijk_mat,
         "log": log1,
         "frangi": frangi_s1,
         "ct_arr_kji": ct_arr_kji,
