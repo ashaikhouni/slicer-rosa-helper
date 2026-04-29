@@ -55,32 +55,56 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
     def _load_image_and_matrices(self, ctx: DetectionContext):
         """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4).
 
-        Single source of truth: when ``ctx['ct'].path`` exists on disk,
-        load via ``sitk.ReadImage`` regardless of whether a Slicer
-        ``volume_node`` is also present. CLI tests and the Slicer widget
-        therefore run on the same voxel array and the same IJK→RAS
-        matrix — same input → same trajectory set, no entry-point drift.
+        Voxel data: when ``ctx['ct'].path`` exists on disk we load via
+        ``sitk.ReadImage`` regardless of whether a Slicer ``volume_node``
+        is also present. CLI tests and the Slicer widget therefore see
+        the same voxel array — fixes the ``arrayFromVolume`` vs
+        ``sitk.ReadImage`` data fork that hit S56 / AMC099 (see
+        ``feedback_cli_slicer_parity.md``).
 
-        Fallback: scene-only volumes without a storage node still go
-        through ``arr_kji``. When a ``volume_node`` is present in that
-        path we adopt its IJK→RAS so subsequent feature-volume publish
-        aligns with Slicer's display; otherwise fall back to the
-        sitk-built image's own matrix.
+        IJK→RAS matrix: prefer the Slicer volume node's CURRENT matrix
+        when one is present, falling back to the on-disk header
+        otherwise.
 
-        Note: feature volumes registered back to Slicer's scene may
-        appear rotated when the on-disk NIfTI's sform / qform disagree
-        with Slicer's reoriented display (e.g., subject-137); that's a
-        visualization-side fix to do at publish time, not at detection
-        load.
+        Why the matrix and the data come from different sources: ROSA-
+        imported volumes have the registration BAKED into the volume
+        node's ``IJKToRASMatrix`` (no parent transform node). The
+        on-disk NIfTI header still carries the un-registered matrix.
+        Reading the header for both data + matrix runs the entire
+        detection in un-registered RAS while Slicer renders the CT
+        post-registration, so trajectories + LoG + Frangi all align
+        with each other but not with the CT volume the user sees.
+        Using the node's matrix while keeping the on-disk array
+        produces detection results in the SAME RAS frame Slicer is
+        displaying.
+
+        CLI parity is preserved: CLI calls don't put a volume_node in
+        ``ctx['extras']``, so the path-only branch returns the on-disk
+        matrix exactly as before. The dataset regression test
+        (``test_dataset_full``) loads CTs without registration, so the
+        node matrix and disk matrix are identical when a node IS
+        present — no behavior drift on the gated subjects.
         """
         import SimpleITK as sitk
         from shank_core.io import image_ijk_ras_matrices
+
+        volume_node = (ctx.get("extras") or {}).get("volume_node")
 
         ct = ctx.get("ct")
         ct_path = getattr(ct, "path", None) if ct is not None else None
         if ct_path:
             img = sitk.ReadImage(str(ct_path))
-            ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
+            if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
+                ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
+                ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
+                # Rewrite SITK image origin/direction to match the node
+                # matrix; voxel data is unchanged. Without this the
+                # canonical-resample step in prepare_volume inherits
+                # the on-disk header geometry and produces feature
+                # volumes offset from the displayed CT.
+                self._apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+            else:
+                ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
             return (
                 img,
                 np.asarray(ijk_to_ras, dtype=float),
@@ -91,7 +115,6 @@ class ContactPitchV1Pipeline(BaseDetectionPipeline):
         img = sitk.GetImageFromArray(arr)
         img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
 
-        volume_node = (ctx.get("extras") or {}).get("volume_node")
         if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
             ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
             ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
