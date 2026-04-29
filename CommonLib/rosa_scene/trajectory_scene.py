@@ -237,13 +237,38 @@ class TrajectorySceneService:
             node.SetNthControlPointLabel(1, "T")
 
     def trajectory_from_line_node(self, name, node):
-        """Extract one line node as a trajectory dictionary in ROSA/LPS coordinates."""
+        """Extract one line node as a trajectory dictionary.
+
+        Coordinate frames returned:
+
+          - ``start`` / ``end`` — **LPS**, for backward compatibility
+            with the project's legacy ROSA/LPS dict shape consumed by
+            ``rosa_core.qc``, ``rosa_core.assignments``,
+            ``rosa_core.contacts``, ``rosa_core.exporters``,
+            ``rosa_workflow.export_bundle``, etc.
+          - ``start_lps`` / ``end_lps`` — explicit alias of the above;
+            prefer when writing new code so the frame is unambiguous.
+          - ``start_ras`` / ``end_ras`` — **RAS**, the same coordinates
+            ``GetNthControlPointPositionWorld`` returns directly.
+            Prefer when interfacing with detector code that operates
+            in RAS (the entire shank_engine pipeline, Slicer markup
+            APIs).
+
+        ``lps_to_ras_point`` is a symmetric ``[-x, -y, z]`` flip; it
+        also serves as ``ras_to_lps_point``. The legacy ``start`` /
+        ``end`` keys carry LPS values produced by that flip on the
+        RAS world coords; ``start_ras`` / ``end_ras`` carry the
+        un-flipped coords.
+        """
         if node is None or node.GetNumberOfControlPoints() < 2:
             return None
         p0 = [0.0, 0.0, 0.0]
         p1 = [0.0, 0.0, 0.0]
         node.GetNthControlPointPositionWorld(0, p0)
         node.GetNthControlPointPositionWorld(1, p1)
+        # Slicer world coords are RAS — flip to LPS for the legacy keys.
+        p0_lps = lps_to_ras_point(p0)
+        p1_lps = lps_to_ras_point(p1)
         logical_name = (str(name or "").strip() or self.logical_name_from_node(node)).strip()
         group = self.infer_group_from_node(node)
         # Confidence (contact_pitch_v1 score framework) — set by
@@ -259,8 +284,12 @@ class TrajectorySceneService:
             "node_name": node.GetName() or logical_name,
             "node_id": node.GetID(),
             "group": group,
-            "start": lps_to_ras_point(p0),
-            "end": lps_to_ras_point(p1),
+            "start": p0_lps,
+            "end": p1_lps,
+            "start_lps": [float(v) for v in p0_lps],
+            "end_lps": [float(v) for v in p1_lps],
+            "start_ras": [float(v) for v in p0],
+            "end_ras": [float(v) for v in p1],
             "best_model_id": str(node.GetAttribute("Rosa.BestModelId") or ""),
             "best_model_score": (
                 None

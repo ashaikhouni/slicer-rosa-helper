@@ -66,7 +66,17 @@ def invert_4x4(matrix4x4: Matrix4x4) -> Matrix4x4:
 
 
 def lps_to_ras_point(point_xyz: Point3D) -> Point3D:
-    """Convert point from LPS to RAS by flipping X and Y."""
+    """Convert point from LPS to RAS by flipping X and Y.
+
+    Note: this operation is its own inverse — the same flip converts
+    RAS to LPS. Some callers in this codebase rely on that symmetry
+    (e.g. ``rosa_scene.trajectory_scene.trajectory_from_line_node``
+    flips the RAS world coords from a Slicer markup back to LPS for
+    ROSA-style export). When the input frame is ambiguous, prefer the
+    explicit-frame keys ``start_lps`` / ``start_ras`` on the
+    trajectory dict over relying on the legacy ``start`` / ``end``
+    LPS aliases.
+    """
     return [-point_xyz[0], -point_xyz[1], point_xyz[2]]
 
 

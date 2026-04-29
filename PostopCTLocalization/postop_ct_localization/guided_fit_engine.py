@@ -159,9 +159,11 @@ def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
 
     ``auto_trajs`` is the list of trajectory dicts produced by
     ``rosa_scene.TrajectorySceneService.collect_working_trajectory_rows``
-    or ``logic.collect_trajectories_by_source("auto_fit", ...)``: each
-    has ``start`` / ``end`` (RAS), and may carry ``confidence``,
-    ``confidence_label``, ``bolt_source``.
+    or ``logic.collect_trajectories_by_source("auto_fit", ...)``.
+    Both shapes carry the explicit-frame ``start_ras`` / ``end_ras``
+    keys; the legacy ``start`` / ``end`` keys are LPS and are NOT
+    accepted here — silently falling back to them previously produced
+    a sign-flipped X/Y comparison against the planned-RAS seed.
 
     Returns a fit-shaped dict (same keys as ``fit_trajectory``'s
     success branch) or ``None`` when no auto trajectory satisfies the
@@ -176,8 +178,8 @@ def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
 
     best = None  # (score=ang+mid_d, traj, ang, mid_d, conf)
     for tr in auto_trajs:
-        ts_raw = tr.get("start_ras", tr.get("start"))
-        te_raw = tr.get("end_ras", tr.get("end"))
+        ts_raw = tr.get("start_ras")
+        te_raw = tr.get("end_ras")
         if ts_raw is None or te_raw is None:
             continue
         ts = np.asarray(ts_raw, dtype=float).reshape(3)
@@ -210,8 +212,8 @@ def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
     if best is None:
         return None
     score, tr, ang, mid_d, conf = best
-    ts = np.asarray(tr.get("start_ras", tr.get("start")), dtype=float).reshape(3)
-    te = np.asarray(tr.get("end_ras", tr.get("end")), dtype=float).reshape(3)
+    ts = np.asarray(tr.get("start_ras"), dtype=float).reshape(3)
+    te = np.asarray(tr.get("end_ras"), dtype=float).reshape(3)
     bolt_src = str(tr.get("bolt_source") or "")
     # Preserve the auto trajectory's start/end orientation. Auto Fit
     # established it via bidirectional bolt anchor (start = bolt-side,

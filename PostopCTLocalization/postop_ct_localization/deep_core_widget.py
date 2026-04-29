@@ -299,13 +299,17 @@ class ContactPitchV1WidgetMixin:
                     traj = self.logic.trajectory_scene.trajectory_from_line_node("", node)
                     if traj is None:
                         continue
+                    # Use the explicit `start_ras` / `end_ras` keys; the
+                    # legacy `start` / `end` keys are LPS, and writing
+                    # them under a `_ras`-suffixed workflow column would
+                    # silently sign-flip downstream consumers.
                     row = {
                         "name": str(traj.get("name") or ""),
                         "node_name": str(traj.get("node_name") or node.GetName() or ""),
                         "node_id": str(traj.get("node_id") or node.GetID() or ""),
                         "group": str(traj.get("group") or "auto_fit"),
-                        "start_ras": list(traj.get("start") or [0.0, 0.0, 0.0]),
-                        "end_ras": list(traj.get("end") or [0.0, 0.0, 0.0]),
+                        "start_ras": list(traj.get("start_ras") or [0.0, 0.0, 0.0]),
+                        "end_ras": list(traj.get("end_ras") or [0.0, 0.0, 0.0]),
                     }
                     if ni < len(trajectories):
                         det = trajectories[ni]
