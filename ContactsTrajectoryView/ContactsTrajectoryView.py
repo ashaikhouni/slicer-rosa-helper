@@ -3,6 +3,8 @@
 Last updated: 2026-03-01
 """
 
+import datetime
+import math
 import os
 import sys
 
@@ -351,6 +353,32 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.updateContactsButton.setEnabled(False)
         button_row.addWidget(self.updateContactsButton)
         form.addRow(button_row)
+
+        # GT-export row. The auto-snap dataset *_contacts.tsv files are
+        # NOT human-curated (every row reads coord_source=World,
+        # snap_status=unchanged, move_mm=0); the placement test gate's
+        # 1.5 / 1.25 mm error budget tells us nothing real. This button
+        # writes the user's hand-corrected fiducial positions to a
+        # parallel labels_gt/<sid>_contacts_gt.tsv that the test
+        # framework can prefer over the auto-snap. See
+        # ``project_contact_gt_annotation_workflow.md`` for the full
+        # plan.
+        gt_row = qt.QHBoxLayout()
+        self.saveContactsAsGtButton = qt.QPushButton("Save Contacts as GT")
+        self.saveContactsAsGtButton.setToolTip(
+            "Write the current contact-fiducial positions to "
+            "labels_gt/<subject>_contacts_gt.tsv. Run Generate "
+            "Contacts first, hand-correct any wrong fiducials in the "
+            "slice viewers, then click here. The TSV reuses the "
+            "labels/ schema with coord_source=manual + a verified-at "
+            "timestamp; move_mm is the delta from the auto-generated "
+            "position."
+        )
+        self.saveContactsAsGtButton.setEnabled(False)
+        self.saveContactsAsGtButton.clicked.connect(self.onSaveContactsAsGtClicked)
+        gt_row.addWidget(self.saveContactsAsGtButton)
+        gt_row.addStretch(1)
+        form.addRow(gt_row)
 
     def _build_qc_ui(self):
         """Create QC metric table."""
@@ -1119,6 +1147,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
 
         self.lastGeneratedContacts = contacts
+        # GT-export becomes available once we have something to save.
+        self.saveContactsAsGtButton.setEnabled(bool(contacts))
         assignment_rows = list(assignments.get("assignments", []))
         for row in assignment_rows:
             traj_name = row.get("trajectory", "")
@@ -1201,6 +1231,189 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         except Exception as exc:
             self.log(f"[contacts:update] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
+
+    # ---- GT-export ----------------------------------------------------
+
+    _GT_TSV_COLUMNS = (
+        "subject_id", "channel", "shank", "contact_index",
+        "x", "y", "z",
+        "coord_source", "snap_status", "move_mm", "peak_value",
+        "ct_path", "source_contacts_file", "verified_at_iso",
+    )
+
+    def _suggest_subject_id(self):
+        """Best-effort subject-ID guess from the loaded postop CT name.
+
+        Dataset CT volumes are named ``<sid>_ct.nii.gz`` so the volume
+        node name typically ends in ``_ct``. Strip the suffix; otherwise
+        return the volume name verbatim.
+        """
+        ct_node = self._resolve_postop_ct_node()
+        if ct_node is None:
+            return ""
+        name = (ct_node.GetName() or "").strip()
+        if name.endswith("_ct"):
+            name = name[:-3]
+        return name
+
+    def _resolve_subject_id(self):
+        """Prompt the user for a subject ID, pre-filled with the best
+        guess from the postop CT name. Returns ``""`` on cancel.
+        """
+        suggested = self._suggest_subject_id()
+        text, ok = qt.QInputDialog.getText(
+            slicer.util.mainWindow(),
+            "Save Contacts as GT",
+            "Subject ID (used as labels_gt/<sid>_contacts_gt.tsv):",
+            qt.QLineEdit.Normal,
+            suggested,
+        )
+        if not ok:
+            return ""
+        return str(text or "").strip()
+
+    def _gt_output_path(self, subject_id):
+        """Resolve labels_gt directory under $ROSA_SEEG_DATASET (or the
+        configured fallback). Creates the directory on first call.
+        """
+        dataset_root = os.environ.get(
+            "ROSA_SEEG_DATASET",
+            "/Users/ammar/Dropbox/thalamus_subjects/seeg_localization",
+        )
+        gt_dir = os.path.join(dataset_root, "contact_label_dataset", "labels_gt")
+        os.makedirs(gt_dir, exist_ok=True)
+        return os.path.join(gt_dir, f"{subject_id}_contacts_gt.tsv")
+
+    def _ct_path_for_gt(self):
+        ct_node = self._resolve_postop_ct_node()
+        if ct_node is None:
+            return ""
+        storage = ct_node.GetStorageNode()
+        if storage is None:
+            return ""
+        return str(storage.GetFileName() or "")
+
+    def _build_gt_rows(self, subject_id):
+        """Walk the current ContactFiducials nodes, pair each control
+        point with its auto-generated nominal position from
+        ``self.lastGeneratedContacts``, and produce one TSV row per
+        contact. ``move_mm`` is the RAS distance from the auto position
+        to the user-edited position; the user implicitly verifies every
+        contact by clicking save.
+        """
+        nominal_by_key = {}
+        for c in self.lastGeneratedContacts or []:
+            traj_name = str(c.get("trajectory") or "")
+            try:
+                idx = int(c.get("index", 0))
+            except (TypeError, ValueError):
+                continue
+            pos_lps = c.get("position_lps")
+            if pos_lps is None:
+                continue
+            nominal_ras = lps_to_ras_point([float(v) for v in list(pos_lps)])
+            nominal_by_key[(traj_name, idx)] = nominal_ras
+
+        ct_path = self._ct_path_for_gt()
+        timestamp_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        contact_nodes = self.workflowState.role_nodes(
+            "ContactFiducials", workflow_node=self.workflowNode,
+        )
+        rows = []
+        for node in contact_nodes:
+            traj_name = str(node.GetAttribute("Rosa.TrajectoryName") or "").strip()
+            if not traj_name:
+                # Fall back to derived shank from node name; if that's
+                # not available either, skip — we can't write a row
+                # without a shank.
+                node_name = str(node.GetName() or "")
+                if node_name.startswith("ROSA_Contacts_"):
+                    traj_name = node_name[len("ROSA_Contacts_"):]
+            if not traj_name:
+                continue
+            n_pts = node.GetNumberOfControlPoints()
+            for i in range(n_pts):
+                pos = [0.0, 0.0, 0.0]
+                node.GetNthControlPointPositionWorld(i, pos)
+                label = node.GetNthControlPointLabel(i) or f"{traj_name}{i + 1}"
+                idx = i + 1
+                nominal = nominal_by_key.get((traj_name, idx))
+                if nominal is None:
+                    move_mm = 0.0
+                else:
+                    move_mm = math.sqrt(
+                        sum((pos[j] - nominal[j]) ** 2 for j in range(3))
+                    )
+                rows.append({
+                    "subject_id": subject_id,
+                    "channel": label,
+                    "shank": traj_name,
+                    "contact_index": idx,
+                    "x": f"{pos[0]:.6f}",
+                    "y": f"{pos[1]:.6f}",
+                    "z": f"{pos[2]:.6f}",
+                    "coord_source": "manual",
+                    "snap_status": "verified",
+                    "move_mm": f"{move_mm:.6f}",
+                    "peak_value": "",
+                    "ct_path": ct_path,
+                    "source_contacts_file": "",
+                    "verified_at_iso": timestamp_iso,
+                })
+        return rows
+
+    @classmethod
+    def _write_gt_tsv(cls, path, rows):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\t".join(cls._GT_TSV_COLUMNS) + "\n")
+            for row in rows:
+                f.write(
+                    "\t".join(str(row.get(col, "")) for col in cls._GT_TSV_COLUMNS) + "\n"
+                )
+
+    def onSaveContactsAsGtClicked(self):
+        if not self.lastGeneratedContacts:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Contacts & Trajectory View",
+                "Generate contacts first, hand-correct the fiducials in "
+                "the slice viewers, then click Save Contacts as GT.",
+            )
+            return
+        subject_id = self._resolve_subject_id()
+        if not subject_id:
+            return
+        try:
+            rows = self._build_gt_rows(subject_id)
+            if not rows:
+                qt.QMessageBox.warning(
+                    slicer.util.mainWindow(),
+                    "Contacts & Trajectory View",
+                    "No ContactFiducials nodes found in the workflow. "
+                    "Generate contacts first.",
+                )
+                return
+            out_path = self._gt_output_path(subject_id)
+            existed = os.path.exists(out_path)
+            self._write_gt_tsv(out_path, rows)
+        except Exception as exc:
+            self.log(f"[contacts:save_gt] error: {exc}")
+            qt.QMessageBox.critical(
+                slicer.util.mainWindow(),
+                "Contacts & Trajectory View",
+                f"Could not write GT TSV: {exc}",
+            )
+            return
+        verb = "Overwrote" if existed else "Wrote"
+        self.log(
+            f"[contacts:save_gt] {verb.lower()} {len(rows)} contacts → {out_path}"
+        )
+        qt.QMessageBox.information(
+            slicer.util.mainWindow(),
+            "Contacts & Trajectory View",
+            f"{verb} {len(rows)} contacts to {out_path}",
+        )
 
     def _selected_trajectory_name_from_table(self):
         row = self.contactTable.currentRow()
