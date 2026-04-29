@@ -104,21 +104,54 @@ class PostopCTLocalizationLogicBaseMixin:
             workflow_node=workflow_node,
         )
 
-    def sync_manual_trajectories_to_workflow(self, workflow_node=None):
-        """Tag/publish scene-authored line markups as manual trajectories."""
+    MANUAL_ORIENTATION_AUTO = "auto"
+    MANUAL_ORIENTATION_ENTRY_FIRST = "entry_first"
+    MANUAL_ORIENTATION_TARGET_FIRST = "target_first"
+
+    def sync_manual_trajectories_to_workflow(
+        self, workflow_node=None, orientation="auto"
+    ):
+        """Tag/publish scene-authored line markups as manual trajectories.
+
+        ``orientation`` controls how each line's two control points are
+        ordered before the canonical (cp0=Entry, cp1=Target) labels are
+        stamped:
+
+          * ``"auto"`` (default) — sample the postop CT head-distance map
+            at both endpoints; the shallower (closer-to-skull) end becomes
+            cp0 / Entry. Falls back to ``"entry_first"`` when no postop CT
+            volume is registered.
+          * ``"entry_first"`` — trust the user's click order as drawn.
+          * ``"target_first"`` — swap cp0/cp1 unconditionally.
+
+        Returns ``(n_synced, n_reoriented)``.
+        """
         wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
         rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["manual"])
+        mode = self._normalize_manual_orientation(orientation)
+        volume_node, dist_map = (None, None)
+        if mode == self.MANUAL_ORIENTATION_AUTO:
+            volume_node = self._find_postop_ct_volume_node(workflow_node=wf)
+            dist_map = self._ensure_manual_fit_head_distance_map(volume_node)
+            if dist_map is None:
+                # Hull distance unavailable — preserve user click order rather
+                # than silently mis-orient.
+                mode = self.MANUAL_ORIENTATION_ENTRY_FIRST
         nodes = []
+        n_reoriented = 0
         for row in rows:
             node = slicer.mrmlScene.GetNodeByID(row.get("node_id", ""))
             if node is None:
                 continue
+            if self._apply_manual_orientation(node, mode, volume_node, dist_map):
+                n_reoriented += 1
             self.trajectory_scene.set_trajectory_metadata(
                 node=node,
                 trajectory_name=row.get("name", ""),
                 group="manual",
                 origin=node.GetAttribute("Rosa.TrajectoryOrigin") or "manual_scene",
             )
+            node.SetAttribute("Rosa.ManualOrientation", mode)
             nodes.append(node)
         self.workflow_publish.publish_nodes(
             role="ManualTrajectoryLines",
@@ -138,7 +171,204 @@ class PostopCTLocalizationLogicBaseMixin:
             context_id=self.workflow_state.context_id(workflow_node=wf),
             nodes=nodes,
         )
-        return len(nodes)
+        return len(nodes), n_reoriented
+
+    def seed_manual_from_source(self, source_key, workflow_node=None):
+        """Clone trajectories from another group into the Manual set.
+
+        Lets the user start from Auto Fit / Guided Fit / imported lines and
+        then add missing shanks by drawing extra line markups, instead of
+        re-deriving everything from scratch. Existing manual lines with the
+        same logical name are skipped — re-clicking Seed is idempotent and
+        does not duplicate. The source nodes are NOT modified; new nodes
+        are created in the Manual group with origin = ``seeded_from_<src>``.
+
+        Returns ``(n_added, n_skipped)``.
+        """
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        src = str(source_key or "").strip().lower()
+        if src not in {
+            "auto_fit", "guided_fit", "imported_rosa",
+            "imported_external", "planned_rosa",
+        }:
+            return 0, 0
+        existing_manual_names = {
+            str(row.get("name", "")).strip()
+            for row in self.trajectory_scene.collect_working_trajectory_rows(
+                groups=["manual"]
+            )
+        }
+        source_rows = self.trajectory_scene.collect_working_trajectory_rows(
+            groups=[src]
+        )
+        nodes = []
+        n_added = 0
+        n_skipped = 0
+        for row in source_rows:
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            if name in existing_manual_names:
+                n_skipped += 1
+                continue
+            start = row.get("start_ras")
+            end = row.get("end_ras")
+            if not start or not end or len(start) < 3 or len(end) < 3:
+                continue
+            node = self.trajectory_scene.create_or_update_trajectory_line(
+                name=name,
+                start_ras=start,
+                end_ras=end,
+                node_id=None,
+                group="manual",
+                origin=f"seeded_from_{src}",
+                node_name=None,
+            )
+            if node is None:
+                continue
+            node.SetAttribute("Rosa.SeededFrom", src)
+            nodes.append(node)
+            existing_manual_names.add(name)
+            n_added += 1
+        if nodes:
+            self.workflow_publish.publish_nodes(
+                role="ManualTrajectoryLines",
+                nodes=nodes,
+                source=f"manual_seeded_from_{src}",
+                space_name="ROSA_BASE",
+                workflow_node=wf,
+            )
+            self.workflow_publish.publish_nodes(
+                role="WorkingTrajectoryLines",
+                nodes=nodes,
+                source=f"manual_seeded_from_{src}",
+                space_name="ROSA_BASE",
+                workflow_node=wf,
+            )
+            self.trajectory_scene.place_trajectory_nodes_in_hierarchy(
+                context_id=self.workflow_state.context_id(workflow_node=wf),
+                nodes=nodes,
+            )
+        return n_added, n_skipped
+
+    def swap_manual_trajectory_endpoints(self, workflow_node=None):
+        """Swap cp0/cp1 on every manual line in the scene. Returns swap count.
+
+        Get-out-of-jail card for users who left ``orientation`` on
+        ``"auto"`` and got the result wrong (e.g. shank entered through a
+        thin region the head mask classified as outside-air, so the bolt
+        sampled with negative depth).
+        """
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        rows = self.trajectory_scene.collect_working_trajectory_rows(groups=["manual"])
+        n = 0
+        for row in rows:
+            node = slicer.mrmlScene.GetNodeByID(row.get("node_id", ""))
+            if node is None:
+                continue
+            if not self._swap_line_control_points(node):
+                continue
+            self.trajectory_scene.set_trajectory_metadata(
+                node=node,
+                trajectory_name=row.get("name", ""),
+                group="manual",
+                origin=node.GetAttribute("Rosa.TrajectoryOrigin") or "manual_scene",
+            )
+            n += 1
+        return n
+
+    @classmethod
+    def _normalize_manual_orientation(cls, orientation):
+        mode = str(orientation or "").strip().lower()
+        valid = {
+            cls.MANUAL_ORIENTATION_AUTO,
+            cls.MANUAL_ORIENTATION_ENTRY_FIRST,
+            cls.MANUAL_ORIENTATION_TARGET_FIRST,
+        }
+        return mode if mode in valid else cls.MANUAL_ORIENTATION_AUTO
+
+    def _find_postop_ct_volume_node(self, workflow_node=None):
+        """Resolve the registered postop CT volume node, or None."""
+        wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+        for role in ("PostopCT", "AdditionalCTVolumes"):
+            nodes = self.workflow_state.role_nodes(role, workflow_node=wf)
+            for node in nodes:
+                if node is not None:
+                    return node
+        return None
+
+    def _ensure_manual_fit_head_distance_map(self, volume_node):
+        """Lazy-build and cache the head-distance map (kji, mm) for ``volume_node``."""
+        if volume_node is None:
+            return None
+        cache = getattr(self, "_manual_fit_head_dist_cache", None)
+        cache_key = volume_node.GetID()
+        if cache and cache.get("key") == cache_key:
+            return cache.get("dist_map_kji")
+        try:
+            arr = np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float)
+        except Exception:
+            return None
+        spacing = tuple(float(v) for v in volume_node.GetSpacing())
+        masks = build_preview_masks(
+            arr_kji=arr,
+            spacing_xyz=spacing,
+            threshold=1500.0,
+            use_head_mask=False,
+            build_head_mask=True,
+        )
+        dist_map = masks.get("head_distance_map_kji")
+        if dist_map is None:
+            return None
+        self._manual_fit_head_dist_cache = {
+            "key": cache_key,
+            "dist_map_kji": np.asarray(dist_map, dtype=np.float32),
+        }
+        return self._manual_fit_head_dist_cache["dist_map_kji"]
+
+    def _apply_manual_orientation(self, node, mode, volume_node, dist_map):
+        """Reorient one manual line per ``mode``. Returns True if cp0/cp1 swapped."""
+        if node is None or node.GetNumberOfControlPoints() < 2:
+            return False
+        if mode == self.MANUAL_ORIENTATION_ENTRY_FIRST:
+            return False
+        if mode == self.MANUAL_ORIENTATION_TARGET_FIRST:
+            return self._swap_line_control_points(node)
+        # auto
+        if dist_map is None or volume_node is None:
+            return False
+        p0_world = [0.0, 0.0, 0.0]
+        p1_world = [0.0, 0.0, 0.0]
+        node.GetNthControlPointPositionWorld(0, p0_world)
+        node.GetNthControlPointPositionWorld(1, p1_world)
+        d0 = self._sample_head_distance_at_world(volume_node, dist_map, p0_world)
+        d1 = self._sample_head_distance_at_world(volume_node, dist_map, p1_world)
+        if d0 <= d1:
+            return False
+        return self._swap_line_control_points(node)
+
+    def _sample_head_distance_at_world(self, volume_node, dist_map, world_xyz):
+        """Sample head-distance map at a markup-world point. World is LPS in this scene."""
+        ras = lps_to_ras_point([float(world_xyz[0]), float(world_xyz[1]), float(world_xyz[2])])
+        ijk = self._ras_to_ijk_float(volume_node, ras)
+        K, J, I = dist_map.shape
+        i = int(np.clip(round(float(ijk[0])), 0, I - 1))
+        j = int(np.clip(round(float(ijk[1])), 0, J - 1))
+        k = int(np.clip(round(float(ijk[2])), 0, K - 1))
+        return float(dist_map[k, j, i])
+
+    def _swap_line_control_points(self, node):
+        """Swap cp0 and cp1 positions on a markup line node. Returns True on success."""
+        if node is None or node.GetNumberOfControlPoints() < 2:
+            return False
+        p0 = [0.0, 0.0, 0.0]
+        p1 = [0.0, 0.0, 0.0]
+        node.GetNthControlPointPositionWorld(0, p0)
+        node.GetNthControlPointPositionWorld(1, p1)
+        node.RemoveAllControlPoints()
+        node.AddControlPoint(vtk.vtkVector3d(*p1))
+        node.AddControlPoint(vtk.vtkVector3d(*p0))
+        return True
 
     @staticmethod
 
