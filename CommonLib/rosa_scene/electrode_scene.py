@@ -26,10 +26,11 @@ class ElectrodeSceneService:
     def create_contacts_fiducials_node(self, contacts, node_name="ROSA_Contacts"):
         """Create one fiducial node from contact list in ROSA/LPS space.
 
-        The node is left unlocked and its display node is configured for
-        interactive editing — dragging in slice viewers reveals the
-        translation arrows so the user can hand-correct contact
-        positions for GT annotation.
+        The node is left unlocked so the user can drag individual
+        control points in slice / 3D views (Slicer markup default).
+        Interaction handles are NOT enabled — with 16-18 contacts
+        per shank they would render an overlapping arrow widget at
+        every contact, drowning the actual glyphs in clutter.
         """
         node = self.find_node_by_name(node_name, "vtkMRMLMarkupsFiducialNode")
         if node is None:
@@ -41,35 +42,14 @@ class ElectrodeSceneService:
             point_index = node.AddControlPoint(vtk.vtkVector3d(*ras))
             contact_index = contact.get("index", point_index + 1)
             node.SetNthControlPointLabel(point_index, str(contact_index))
-        # Be explicit about edit-ability — Slicer markups default to
-        # unlocked but we don't want any code path elsewhere to lock
-        # them out of the GT-annotation flow.
+        # Explicit unlock so no code path elsewhere can stamp a lock
+        # that breaks the GT-annotation drag flow.
         node.SetLocked(False)
 
         display_node = node.GetDisplayNode()
         if display_node:
             display_node.SetGlyphScale(2.00)
             display_node.SetTextScale(1.50)
-            # Show 3D translation arrows around the active control point
-            # so the user can grab and drag without having to click the
-            # ~2 mm glyph exactly. Without this, drag in slice viewers
-            # only works when the cursor is on the glyph itself, which
-            # is finicky on tightly-spaced contacts.
-            if hasattr(display_node, "SetHandlesInteractive"):
-                try:
-                    display_node.SetHandlesInteractive(True)
-                except Exception:
-                    pass
-            for setter, value in (
-                ("SetTranslationHandleVisibility", True),
-                ("SetRotationHandleVisibility", False),
-                ("SetScaleHandleVisibility", False),
-            ):
-                if hasattr(display_node, setter):
-                    try:
-                        getattr(display_node, setter)(value)
-                    except Exception:
-                        pass
         return node
 
     def create_contacts_fiducials_nodes_by_trajectory(self, contacts, node_prefix="ROSA_Contacts"):
