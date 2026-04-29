@@ -357,21 +357,41 @@ class ElectrodeSceneService:
                 continue
 
             p_first = list(group[0]["position_lps"])
+            trajectory = trajectories_by_name.get(traj_name)
+            tip_at = (group[0].get("tip_at") or "target").lower()
             if len(group) >= 2:
                 p_last = list(group[-1]["position_lps"])
                 axis = self._vunit(self._vsub(p_last, p_first))
             else:
-                trajectory = trajectories_by_name.get(traj_name)
                 if trajectory is None:
                     continue
-                tip_at = (group[0].get("tip_at") or "target").lower()
                 if tip_at == "entry":
                     axis = self._vunit(self._vsub(trajectory["end"], trajectory["start"]))
                 else:
                     axis = self._vunit(self._vsub(trajectory["start"], trajectory["end"]))
 
             tip = self._vsub(p_first, self._vmul(axis, float(offsets[0])))
-            shaft_len = float(model.get("total_exploration_length_mm", 0.0))
+            nominal_len = float(model.get("total_exploration_length_mm", 0.0))
+            # Extend the shaft cylinder all the way to the trajectory's
+            # shallow endpoint so the insulated wire past the most-
+            # proximal contact is visualized — important for DBS leads
+            # where the contacts cover only a few cm but the lead
+            # extends out to the burr-hole bolt. Project the endpoint
+            # onto the axis so a small lateral offset between the
+            # trajectory line and the contact-center line doesn't bend
+            # the shaft. Falls back to the model's nominal length when
+            # the trajectory dict is unavailable, or when the projected
+            # distance is shorter than nominal (don't make the shaft
+            # truncate to less than the contact-bearing region).
+            shaft_len = nominal_len
+            if trajectory is not None:
+                shallow_lps = list(trajectory.get(
+                    "end" if tip_at == "entry" else "start"
+                ) or [])
+                if len(shallow_lps) == 3:
+                    along = self._vdot(self._vsub(shallow_lps, tip), axis)
+                    if along > nominal_len:
+                        shaft_len = float(along)
             shaft_end = self._vadd(tip, self._vmul(axis, shaft_len))
             radius = float(model.get("diameter_mm", 0.8)) / 2.0
             contact_len = float(model.get("contact_length_mm", 2.0))
