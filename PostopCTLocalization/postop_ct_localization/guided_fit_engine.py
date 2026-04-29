@@ -68,15 +68,19 @@ def _unit(v):
 
 
 def compute_features(img, ijk_to_ras_mat, spacing_xyz=None):
-    """One-time preprocessing per volume. Computes the full set of
-    arrays Auto Fit uses — hull, head distance, LoG σ=1, blob cloud,
-    and bolt candidates — so a batch of seeds share one preprocessing
-    pass. ``ijk_to_ras_mat`` is needed here because bolt extraction
-    has to emit RAS coordinates for the downstream anchor call.
+    """One-time preprocessing per volume. Computes the same feature
+    set Auto Fit uses — hull, head distance, LoG σ=1, blob cloud,
+    Frangi σ=1, CT array, and bolt candidates from the unified
+    metal-evidence pool — so a batch of seeds share one preprocessing
+    pass and so the same scoring rubric (frangi, frac_strong_metal,
+    bolt_source) can be applied to guided-fit results.
     """
+    import SimpleITK as sitk
     ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
     hull_arr, intracranial, dist_arr = cpfit.build_masks(img)
     log1 = cpfit.log_sigma(img, sigma_mm=cpfit.LOG_SIGMA_MM)
+    frangi_s1 = cpfit.frangi_single(img, sigma=cpfit.FRANGI_STAGE1_SIGMA)
+    ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
 
     pts_ras, amps = _extract_blob_cloud_ras(log1, ijk_to_ras_mat)
 
@@ -87,12 +91,21 @@ def compute_features(img, ijk_to_ras_mat, spacing_xyz=None):
         except Exception:
             spacing = (1.0, 1.0, 1.0)
 
+    # Unified metal-evidence bolt extraction — same path as Auto Fit's
+    # ``run_two_stage_detection``. Picks up bolts that LoG alone misses
+    # (HU-saturated metal CCs).
+    metal_evidence_vol = cpfit.compute_metal_evidence_volume(log1, ct_arr_kji)
     bolts, bolt_mask = cpfit.extract_bolt_candidates(
         log1, dist_arr, ijk_to_ras_mat, spacing,
+        ct_arr=metal_evidence_vol,
+        hu_threshold=cpfit.METAL_BOLT_THRESHOLD,
+        hull_proximity_mm=cpfit.BOLT_HULL_PROXIMITY_MM,
     )
 
     return {
         "log": log1,
+        "frangi": frangi_s1,
+        "ct_arr_kji": ct_arr_kji,
         "hull": hull_arr,
         "intracranial": intracranial,
         "head_distance": dist_arr,
@@ -130,6 +143,109 @@ def _pca_axis(points, weights):
     Xw = X * w[:, None]
     _U, _S, Vt = np.linalg.svd(Xw, full_matrices=False)
     return centroid, _unit(Vt[0])
+
+
+def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
+                              max_angle_deg=DEFAULT_MAX_ANGLE_DEG,
+                              max_lateral_shift_mm=DEFAULT_MAX_LATERAL_SHIFT_MM):
+    """Match a seed against an existing list of Auto Fit trajectories.
+
+    For Phase 2 of Guided Fit ↔ Auto Fit unification: if Auto Fit has
+    already detected a shank near the seed, Guided Fit should inherit
+    that result (full walker validation + post-anchor scoring) rather
+    than re-derive a parallel PCA fit. Selection is closest by
+    ``angle + perpendicular-midpoint distance``, with auto-fit
+    ``confidence`` as tie-break.
+
+    ``auto_trajs`` is the list of trajectory dicts produced by
+    ``rosa_scene.TrajectorySceneService.collect_working_trajectory_rows``
+    or ``logic.collect_trajectories_by_source("auto_fit", ...)``: each
+    has ``start`` / ``end`` (RAS), and may carry ``confidence``,
+    ``confidence_label``, ``bolt_source``.
+
+    Returns a fit-shaped dict (same keys as ``fit_trajectory``'s
+    success branch) or ``None`` when no auto trajectory satisfies the
+    tolerances.
+    """
+    if not auto_trajs:
+        return None
+    planned_start = np.asarray(planned_start_ras, dtype=float).reshape(3)
+    planned_end = np.asarray(planned_end_ras, dtype=float).reshape(3)
+    seed_axis = _unit(planned_end - planned_start)
+    seed_mid = 0.5 * (planned_start + planned_end)
+
+    best = None  # (score=ang+mid_d, traj, ang, mid_d, conf)
+    for tr in auto_trajs:
+        ts_raw = tr.get("start_ras", tr.get("start"))
+        te_raw = tr.get("end_ras", tr.get("end"))
+        if ts_raw is None or te_raw is None:
+            continue
+        ts = np.asarray(ts_raw, dtype=float).reshape(3)
+        te = np.asarray(te_raw, dtype=float).reshape(3)
+        tr_axis = _unit(te - ts)
+        cos_a = float(np.clip(abs(np.dot(seed_axis, tr_axis)), 0.0, 1.0))
+        ang = float(np.degrees(np.arccos(cos_a)))
+        if ang > float(max_angle_deg):
+            continue
+        tr_mid = 0.5 * (ts + te)
+        d = seed_mid - tr_mid
+        perp = d - float(np.dot(d, tr_axis)) * tr_axis
+        mid_d = float(np.linalg.norm(perp))
+        if mid_d > float(max_lateral_shift_mm):
+            continue
+        score = ang + mid_d
+        try:
+            conf = float(tr.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if best is None:
+            best = (score, tr, ang, mid_d, conf)
+            continue
+        # Closest wins; ties (within 0.5 mm+deg) broken by higher confidence.
+        if score < best[0] - 0.5:
+            best = (score, tr, ang, mid_d, conf)
+        elif abs(score - best[0]) <= 0.5 and conf > best[4]:
+            best = (score, tr, ang, mid_d, conf)
+
+    if best is None:
+        return None
+    score, tr, ang, mid_d, conf = best
+    ts = np.asarray(tr.get("start_ras", tr.get("start")), dtype=float).reshape(3)
+    te = np.asarray(tr.get("end_ras", tr.get("end")), dtype=float).reshape(3)
+    bolt_src = str(tr.get("bolt_source") or "")
+    # Preserve the auto trajectory's start/end orientation. Auto Fit
+    # established it via bidirectional bolt anchor (start = bolt-side,
+    # end = deep tip); seed direction may disagree but the auto-derived
+    # orientation is authoritative because it's grounded in the imaged
+    # metal CC, not the planned axis.
+    return {
+        "success": True,
+        "start_ras": [float(v) for v in ts],
+        "end_ras": [float(v) for v in te],
+        "axis_ras": [float(v) for v in _unit(te - ts)],
+        "n_inliers": int(tr.get("n_inliers", 0) or 0),
+        "n_wide_inliers": int(tr.get("n_inliers", 0) or 0),
+        "tight_refit": True,
+        "angle_deg": ang,
+        "lateral_shift_mm": mid_d,
+        "length_mm": float(np.linalg.norm(te - ts)),
+        "intracranial_length_mm": float(
+            tr.get("intracranial_length_mm") or np.linalg.norm(te - ts)
+        ),
+        "roi_radius_mm": 0.0,
+        "bolt_anchored": (bolt_src == "metal"),
+        "bolt_n_vox": int(tr.get("bolt_n_vox", 0) or 0),
+        "bolt_source": bolt_src,
+        "confidence": conf,
+        "confidence_label": str(tr.get("confidence_label") or ""),
+        "frangi_mean_mm": float(tr.get("frangi_mean_mm") or 0.0),
+        "frangi_median_mm": float(tr.get("frangi_median_mm") or 0.0),
+        "frac_strong_metal": float(tr.get("frac_strong_metal") or 0.0),
+        "original_median_pitch_mm": float(tr.get("original_median_pitch_mm") or 0.0),
+        "contact_span_mm": float(tr.get("contact_span_mm") or 0.0),
+        "matched_auto_source": True,
+        "matched_auto_name": str(tr.get("name") or ""),
+    }
 
 
 def fit_trajectory(planned_start_ras, planned_end_ras, features,
@@ -265,15 +381,32 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
         pass
 
     # ---- Bolt anchor: produces bolt_tip_ras + skull_entry_ras -------
+    # Try both orientations (shallow→deep and deep→shallow) and keep
+    # whichever has more bolt-tube voxels — mirrors the auto-fit
+    # ``_anchor_or_reject`` strategy. Necessary because seed sources
+    # don't all use the same start=bolt convention; an upstream-flipped
+    # seed would otherwise force the anchor to look for the bolt at
+    # the deep-tip end and silently miss it.
     bolt_tip_ras = None
     skull_entry_ras = None
     bolt_n_vox = 0
     bolts = features.get("bolts") or []
     if bolts:
         try:
-            new_start, skull_entry, bolt = cpfit.anchor_trajectory_to_bolt(
-                shallow_ras, deep_ras, bolts,
-            )
+            fwd = cpfit.anchor_trajectory_to_bolt(shallow_ras, deep_ras, bolts)
+            bwd = cpfit.anchor_trajectory_to_bolt(deep_ras, shallow_ras, bolts)
+            fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
+            bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
+            if bwd_n > fwd_n:
+                # The fit's PCA orientation was inverted relative to the
+                # imaged shank's bolt→tip direction. Swap before storing
+                # the result so start_ras / end_ras carry the right
+                # bolt-side / deep-tip semantics.
+                shallow_ras, deep_ras = deep_ras, shallow_ras
+                fit_axis = -fit_axis
+                new_start, skull_entry, bolt = bwd
+            else:
+                new_start, skull_entry, bolt = fwd
             if new_start is not None:
                 bolt_tip_ras = np.asarray(new_start, dtype=float)
                 if skull_entry is not None:
@@ -289,6 +422,79 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
 
     fit_length = float(np.linalg.norm(deep_ras - start_out))
 
+    # Score the guided-fit result with the same rubric Auto Fit uses
+    # so downstream UI (confidence filter, mark/remove, Trajectory
+    # Set table) treats the two sources interchangeably.
+    bolt_source = "metal" if bolt_tip_ras is not None else "none"
+    intracranial_endpoint = (
+        skull_entry_ras if skull_entry_ras is not None else start_out
+    )
+    intra_length = float(np.linalg.norm(deep_ras - np.asarray(intracranial_endpoint, dtype=float)))
+    # Pre-anchor span and amp_sum: derived from the tight-refit inlier set.
+    proj_centered = (tight_pts - centroid) @ fit_axis
+    contact_span_mm = float(proj_centered.max() - proj_centered.min())
+    amp_sum = float(np.sum(tight_amps))
+    # dist_min/max along the line in the head-distance map.
+    dist_arr = features.get("head_distance")
+    ras_to_ijk = np.asarray(ras_to_ijk_mat, dtype=float)
+    if dist_arr is not None:
+        try:
+            shallow_d = cpfit._sample_dist_at_ras(dist_arr, ras_to_ijk, intracranial_endpoint)
+            deep_d = cpfit._sample_dist_at_ras(dist_arr, ras_to_ijk, deep_ras)
+            dist_min_mm = float(min(shallow_d, deep_d))
+            dist_max_mm = float(max(shallow_d, deep_d))
+            dist_mean_mm = float(0.5 * (shallow_d + deep_d))
+        except Exception:
+            dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
+    else:
+        dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
+    # Frangi tubularity along the post-anchor axis.
+    frangi_arr = features.get("frangi")
+    frangi_mean_mm = frangi_median_mm = 0.0
+    if frangi_arr is not None:
+        try:
+            f_mean, f_med = cpfit._frangi_along_line_stats(
+                start_out, deep_ras, frangi_arr, ras_to_ijk,
+            )
+            frangi_mean_mm = float(f_mean)
+            frangi_median_mm = float(f_med)
+        except Exception:
+            pass
+    # Metal-continuity: fraction of axis samples saturating the unified
+    # metal-evidence threshold.
+    ct_arr_kji = features.get("ct_arr_kji")
+    if ct_arr_kji is not None:
+        try:
+            frac_strong = cpfit._frac_strong_metal_along_line(
+                start_out, deep_ras,
+                features.get("log"), ct_arr_kji, ras_to_ijk,
+            )
+        except Exception:
+            frac_strong = 0.0
+    else:
+        frac_strong = 0.0
+    # Median NN spacing among tight inliers — proxy for contact pitch.
+    pitch_mm = 0.0
+    if tight_pts.shape[0] >= 2:
+        sorted_along = np.sort(proj_centered)
+        diffs = np.diff(sorted_along)
+        if diffs.size > 0:
+            pitch_mm = float(np.median(diffs))
+    score_rec = {
+        "amp_sum": amp_sum,
+        "n_inliers": int(n_tight),
+        "frangi_median_mm": frangi_median_mm,
+        "frac_strong_metal": float(frac_strong),
+        "original_median_pitch_mm": pitch_mm,
+        "contact_span_mm": contact_span_mm,
+        "length_mm": fit_length,
+        "dist_min_mm": dist_min_mm,
+        "dist_max_mm": dist_max_mm,
+        "dist_mean_mm": dist_mean_mm,
+        "bolt_source": bolt_source,
+    }
+    confidence, confidence_label, score_components = cpfit._compute_trajectory_score(score_rec)
+
     result = {
         "success": True,
         "start_ras": [float(v) for v in start_out],
@@ -300,9 +506,23 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
         "angle_deg": angle_deg,
         "lateral_shift_mm": lateral_shift_mm,
         "length_mm": fit_length,
+        "intracranial_length_mm": intra_length,
         "roi_radius_mm": float(roi_radius_mm),
         "bolt_anchored": bolt_tip_ras is not None,
         "bolt_n_vox": bolt_n_vox,
+        # Auto-Fit-equivalent score fields (consumed by Slicer UI's
+        # confidence filter and Rosa.* attribute stampers).
+        "bolt_source": bolt_source,
+        "confidence": float(confidence),
+        "confidence_label": str(confidence_label),
+        "frangi_mean_mm": frangi_mean_mm,
+        "frangi_median_mm": frangi_median_mm,
+        "frac_strong_metal": float(frac_strong),
+        "original_median_pitch_mm": pitch_mm,
+        "contact_span_mm": contact_span_mm,
+        "dist_min_mm": dist_min_mm,
+        "dist_max_mm": dist_max_mm,
+        "dist_mean_mm": dist_mean_mm,
     }
     if skull_entry_ras is not None:
         result["skull_entry_ras"] = [float(v) for v in skull_entry_ras]
