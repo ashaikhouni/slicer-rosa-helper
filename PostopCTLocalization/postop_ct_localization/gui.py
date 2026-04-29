@@ -182,6 +182,16 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.removeCheckedButton.clicked.connect(self.onRemoveCheckedClicked)
         actions_row.addWidget(self.removeCheckedButton)
 
+        self.revertToAutoFitButton = qt.QPushButton("Revert to Auto Fit")
+        self.revertToAutoFitButton.setToolTip(
+            "Reset the endpoints of every selected row back to the "
+            "Auto Fit baseline (Rosa.AutoFitStartRas / "
+            "Rosa.AutoFitEndRas). Rows without a stamped baseline "
+            "(manual / imported / pre-baseline auto rows) are skipped."
+        )
+        self.revertToAutoFitButton.clicked.connect(self.onRevertToAutoFitClicked)
+        actions_row.addWidget(self.revertToAutoFitButton)
+
         actions_row.addStretch(1)
         form.addRow(actions_row)
 

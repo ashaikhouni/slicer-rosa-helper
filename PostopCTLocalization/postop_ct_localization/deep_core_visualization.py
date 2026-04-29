@@ -355,6 +355,17 @@ class DeepCoreVisualizationLogicMixin:
                 origin="contact_pitch_v1",
                 node_name=f"AutoFit_{family}_{idx:02d}",
             )
+            # Immutable baseline RAS so the user can revert post-edit. The
+            # control points themselves are user-draggable; these attrs
+            # are written once at publish time and never re-stamped.
+            node.SetAttribute(
+                "Rosa.AutoFitStartRas",
+                ",".join(f"{float(v):.6f}" for v in start_ras),
+            )
+            node.SetAttribute(
+                "Rosa.AutoFitEndRas",
+                ",".join(f"{float(v):.6f}" for v in end_ras),
+            )
             node.SetAttribute("Rosa.DeepCoreProposalFamily", family)
             node.SetAttribute("Rosa.DeepCoreProposalScore", f"{float(proposal.get('score', 0.0)):.3f}")
             node.SetAttribute("Rosa.ProposalLengthMm", f"{float(proposal.get('span_mm', 0.0)):.3f}")

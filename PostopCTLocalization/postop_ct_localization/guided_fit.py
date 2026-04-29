@@ -466,6 +466,68 @@ class GuidedFitWidgetMixin:
         self.log(f"[guided] removed {removed} trajectories from source '{source_key}'")
         self.onRefreshClicked()
 
+    @staticmethod
+    def _parse_baseline_ras_attr(text):
+        """Decode an `x,y,z` MRML attr written by deep_core_visualization
+        at Auto Fit publish time. Returns ``None`` if the attribute is
+        missing, malformed, or holds fewer than three coordinates.
+        """
+        if not text:
+            return None
+        try:
+            parts = [float(v) for v in str(text).split(",")]
+        except Exception:
+            return None
+        if len(parts) < 3:
+            return None
+        return parts[:3]
+
+    def onRevertToAutoFitClicked(self):
+        rows = self._selected_table_rows()
+        if not rows:
+            qt.QMessageBox.information(
+                slicer.util.mainWindow(),
+                "Postop CT Localization",
+                "Select at least one trajectory row to revert.",
+            )
+            return
+        reverted = 0
+        skipped = 0
+        for row in rows:
+            if row < 0 or row >= len(self.loadedTrajectories):
+                skipped += 1
+                continue
+            traj = self.loadedTrajectories[row]
+            node_id = str(traj.get("node_id") or "")
+            if not node_id:
+                skipped += 1
+                continue
+            node = slicer.mrmlScene.GetNodeByID(node_id)
+            if node is None or node.GetNumberOfControlPoints() < 2:
+                skipped += 1
+                continue
+            start_ras = self._parse_baseline_ras_attr(
+                node.GetAttribute("Rosa.AutoFitStartRas")
+            )
+            end_ras = self._parse_baseline_ras_attr(
+                node.GetAttribute("Rosa.AutoFitEndRas")
+            )
+            if start_ras is None or end_ras is None:
+                skipped += 1
+                continue
+            node.SetNthControlPointPosition(
+                0, float(start_ras[0]), float(start_ras[1]), float(start_ras[2])
+            )
+            node.SetNthControlPointPosition(
+                1, float(end_ras[0]), float(end_ras[1]), float(end_ras[2])
+            )
+            reverted += 1
+        self.log(
+            f"[auto-fit] reverted {reverted} trajectory/ies to baseline "
+            f"({skipped} skipped — no Rosa.AutoFit*Ras stamp)"
+        )
+        self.onRefreshClicked()
+
     # ---- Fitting ------------------------------------------------------
 
     def _guided_fit_volume_matrices(self, volume_node):
