@@ -130,6 +130,7 @@ class ContactPitchV1WidgetMixin:
             ("PMT 2102-XX-091 (3.5 mm)", "pmt_35"),
             ("PMT (3.5 / 3.97 / 4.43 mm)", "pmt"),
             ("Mixed Dixi + PMT", "mixed"),
+            ("Medtronic DBS (2 / 3 / 7 mm)", "medtronic"),
             ("Auto-detect pitch", "auto"),
         ):
             self.contactPitchStrategyCombo.addItem(label, key)
@@ -163,6 +164,7 @@ class ContactPitchV1WidgetMixin:
         "pmt_35":   ("PMT",),
         "pmt":      ("PMT",),
         "mixed":    ("Dixi", "PMT"),
+        "medtronic": ("Medtronic",),
         "auto":     ("Dixi", "PMT", "AdTech"),
     }
 

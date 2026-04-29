@@ -145,8 +145,39 @@ _BUNDLED_LIBRARY_BOUNDS_FALLBACK = {
 }
 
 
-def _compute_library_bounds():
-    """Walker / length bounds extracted from the electrode library."""
+SEEG_VENDORS = ("Dixi", "PMT", "AdTech")
+
+
+def _model_vendor(model):
+    """Resolve a vendor name for a model entry. Newer entries carry an
+    explicit ``vendor`` field; older Dixi / PMT entries didn't, so fall
+    back to the id prefix.
+    """
+    v = str(model.get("vendor") or "").strip()
+    if v:
+        return v
+    mid = str(model.get("id") or "")
+    if mid.startswith("DIXI-"):
+        return "Dixi"
+    if mid.startswith("PMT-"):
+        return "PMT"
+    if mid.startswith("Medtronic_"):
+        return "Medtronic"
+    return ""
+
+
+def _compute_library_bounds(vendors=SEEG_VENDORS):
+    """Walker / length bounds extracted from the electrode library,
+    filtered to a set of vendor names.
+
+    Default ``vendors=SEEG_VENDORS`` so that adding a non-SEEG family
+    (Medtronic DBS leads with 4 contacts) does not silently lower the
+    SEEG walker's ``min_contacts`` from 5 to 4 — that change drops the
+    full-dataset orphan budget below the test guard. Pass a different
+    tuple (or ``None`` for no filter) when the caller wants bounds
+    tuned to a non-SEEG strategy.
+    """
+    vendor_set = None if vendors is None else {str(v) for v in vendors}
     try:
         from rosa_core.electrode_models import load_electrode_library
         models = list((load_electrode_library() or {}).get("models") or [])
@@ -157,6 +188,8 @@ def _compute_library_bounds():
     counts, spans = [], []
     all_pitches, regular_pitches = set(), set()
     for m in models:
+        if vendor_set is not None and _model_vendor(m) not in vendor_set:
+            continue
         counts.append(int(m["contact_count"]))
         offsets = [float(x) for x in m["contact_center_offsets_from_tip_mm"]]
         spans.append(offsets[-1] - offsets[0])
@@ -166,6 +199,8 @@ def _compute_library_bounds():
         # Smallest gap of each model is its regular intra-block pitch;
         # larger jumps (BM 9 mm, CM 13 mm) are insulation gaps.
         regular_pitches.add(round(min(gaps), 2))
+    if not counts:
+        return dict(_BUNDLED_LIBRARY_BOUNDS_FALLBACK)
     return {
         "min_contacts": min(counts),
         "max_contacts": max(counts),
@@ -421,6 +456,11 @@ PITCH_STRATEGY_PITCHES_MM = {
     # cluster sits deep and a long wire section bridges to the bolt.
     "dixi_mm": (3.9, 4.8, 6.1),
     "dixi_all": (3.5, 3.9, 4.43, 4.8, 6.1),
+    # Medtronic DBS leads — 4-contact ring leads (3387 / 3389 / 3391)
+    # plus SenSight directional (B33005 / B33015 — directional split is
+    # below CT resolution; treated as 4-level rings). Pitches: 3389 +
+    # SenSight B33005 = 2 mm; 3387 + SenSight B33015 = 3 mm; 3391 = 7 mm.
+    "medtronic": (2.0, 3.0, 7.0),
 }
 PITCH_STRATEGY_VENDORS = {
     "dixi":     ("Dixi",),
@@ -429,8 +469,88 @@ PITCH_STRATEGY_VENDORS = {
     "mixed":    ("Dixi", "PMT"),
     "dixi_mm":  ("Dixi",),
     "dixi_all": ("Dixi",),
+    "medtronic": ("Medtronic",),
     "auto":     ("Dixi", "PMT", "AdTech"),
 }
+
+def library_bounds_for_strategy(strategy_key):
+    """Return library-derived bounds filtered to the strategy's vendor
+    set. Default (unknown / unset strategy) falls back to SEEG bounds.
+    """
+    key = str(strategy_key or "").strip().lower()
+    vendors = PITCH_STRATEGY_VENDORS.get(key)
+    if not vendors:
+        return _LIBRARY_BOUNDS
+    return _compute_library_bounds(vendors)
+
+
+def _strategy_global_overrides(bounds):
+    """Translate a library-bounds dict into the module-level walker
+    constants the detector actually reads. Mirrors the assignments at
+    module load (lines 198-207, 252-257) so both paths stay in sync.
+    """
+    return {
+        "MIN_BLOBS_PER_LINE": int(bounds["min_contacts"]),
+        "MIN_LINE_SPAN_MM": float(bounds["min_contact_span_mm"]) - WALKER_SPAN_UNDER_SLACK_MM,
+        "MAX_LINE_SPAN_MM": float(bounds["max_contact_span_mm"]) + WALKER_SPAN_OVER_SLACK_MM,
+        "MAX_INLIER_GAP_MM": float(bounds["max_within_electrode_pitch_mm"]) + WALKER_GAP_SLACK_MM,
+        "MIN_POST_ANCHOR_LEN_MM": float(bounds["min_contact_span_mm"]) + BOLT_PROTRUSION_MIN_MM,
+        "MAX_POST_ANCHOR_LEN_MM": float(bounds["max_contact_span_mm"]) + ANCHOR_TOTAL_OVERSHOOT_MM,
+    }
+
+
+class _StrategyBoundsScope:
+    """Context manager that swaps walker constants to a strategy's
+    vendor-filtered bounds for the duration of one detection call.
+
+    Pipeline calls are single-threaded per Slicer scene, so the scope
+    is safe; we restore the SEEG defaults on exit so a Medtronic call
+    can't leak into a subsequent Dixi call.
+    """
+
+    def __init__(self, strategy_key):
+        self.strategy_key = strategy_key
+        self._saved = None
+        self.bounds = None
+
+    def __enter__(self):
+        self.bounds = library_bounds_for_strategy(self.strategy_key)
+        new_g = _strategy_global_overrides(self.bounds)
+        g = globals()
+        self._saved = {k: g[k] for k in new_g}
+        g.update(new_g)
+        return self.bounds
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._saved is not None:
+            globals().update(self._saved)
+            self._saved = None
+        return False
+
+
+def _with_strategy_bounds(fn):
+    """Decorator: swap walker constants to the call's
+    ``pitch_strategy`` for the duration of the decorated function,
+    then restore the SEEG default. Reads ``pitch_strategy`` via
+    inspect-bind so it works for both positional and keyword callers.
+    """
+    import inspect
+    sig = inspect.signature(fn)
+
+    def wrapper(*args, **kwargs):
+        try:
+            bound = sig.bind_partial(*args, **kwargs)
+            strategy = bound.arguments.get("pitch_strategy")
+        except TypeError:
+            strategy = kwargs.get("pitch_strategy")
+        with _StrategyBoundsScope(strategy):
+            return fn(*args, **kwargs)
+
+    wrapper.__wrapped__ = fn
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    return wrapper
+
 
 PITCH_AUTO_MIN_MM = 2.5
 PITCH_AUTO_MAX_MM = 6.5  # Was 6.0 — cover the Dixi MM09A51 hybrid at 6.1 mm pitch.
@@ -1074,7 +1194,13 @@ MIN_BLOBS_POST_ARBITRATION = 4  # looser floor after arbitration, which
                                 # arbitrated contact without being killed.
 
 
-def _refit_line_from_inliers(line, pts_c, amps_c, min_blobs=MIN_BLOBS_PER_LINE):
+def _refit_line_from_inliers(line, pts_c, amps_c, min_blobs=None):
+    # Default-arg ``MIN_BLOBS_PER_LINE`` would freeze at module-load
+    # value, ignoring the strategy-bounds scope set up by
+    # ``_with_strategy_bounds``. Resolve at call time so a Medtronic
+    # run uses 4 (its library minimum) instead of 5 (Dixi).
+    if min_blobs is None:
+        min_blobs = MIN_BLOBS_PER_LINE
     """Recompute axis / span / endpoints / amp_sum from the current
     ``inlier_idx`` list. Mutates ``line`` and returns it. Returns None
     if the line has too few inliers or too short a span after refit.
@@ -2434,6 +2560,7 @@ def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
     return _fn
 
 
+@_with_strategy_bounds
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                              return_features=False, progress_logger=None,
                              suggestion_vendors=None,
@@ -3100,7 +3227,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
 
 # ---- Post-detection electrode classification -------------------------
 
-VENDOR_ID_PREFIXES = {"Dixi": "DIXI-", "PMT": "PMT-"}
+VENDOR_ID_PREFIXES = {
+    "Dixi": "DIXI-",
+    "PMT": "PMT-",
+    "Medtronic": "Medtronic_",
+}
 
 
 def _vendor_prefixes(vendors):
