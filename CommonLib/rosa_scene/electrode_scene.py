@@ -48,7 +48,10 @@ class ElectrodeSceneService:
 
         display_node = node.GetDisplayNode()
         if display_node:
-            display_node.SetGlyphScale(2.00)
+            # Glyph picking in slice views requires the cursor on the
+            # glyph itself; the prior 2.0 scale was too small to grab
+            # reliably on tightly-spaced DBS / SEEG contacts.
+            display_node.SetGlyphScale(4.00)
             display_node.SetTextScale(1.50)
         return node
 

@@ -350,6 +350,22 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.createModelsCheck.setChecked(True)
         form.addRow("Model option", self.createModelsCheck)
 
+        # When the cylinders are visible they obscure the contact
+        # fiducial glyphs in slice viewers, making click-to-drag
+        # painful for GT correction. Toggle hides every published
+        # ``ElectrodeShaftModelNodes`` + ``ElectrodeContactModelNodes``
+        # so the glyphs are pickable; cylinders remain in the scene
+        # so re-checking the box doesn't require re-generating.
+        self.showModelsCheck = qt.QCheckBox("Show electrode models in viewers")
+        self.showModelsCheck.setChecked(True)
+        self.showModelsCheck.setToolTip(
+            "Uncheck to hide the cylinder visualizations so contact "
+            "fiducial glyphs become clickable for hand-correction in "
+            "slice views."
+        )
+        self.showModelsCheck.toggled.connect(self.onShowModelsToggled)
+        form.addRow("", self.showModelsCheck)
+
         button_row = qt.QHBoxLayout()
         self.generateContactsButton = qt.QPushButton("Generate Contact Fiducials")
         self.generateContactsButton.clicked.connect(self.onGenerateContactsClicked)
@@ -1692,6 +1708,26 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onShowPlannedToggled(self, checked):
         self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
+
+    def onShowModelsToggled(self, checked):
+        """Toggle visibility of every published electrode-model node
+        (cylinders for shaft + contact tubes). Hiding them makes the
+        contact fiducial glyphs clickable in slice viewers without
+        deleting the cylinders from the scene.
+        """
+        visible = bool(checked)
+        for role in (
+            "ElectrodeShaftModelNodes",
+            "ElectrodeContactModelNodes",
+        ):
+            for node in self.workflowState.role_nodes(role, workflow_node=self.workflowNode):
+                display = node.GetDisplayNode()
+                if display is not None:
+                    display.SetVisibility(visible)
+                    if hasattr(display, "SetVisibility2D"):
+                        display.SetVisibility2D(visible)
+                    if hasattr(display, "SetVisibility3D"):
+                        display.SetVisibility3D(visible)
 
 
 class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
