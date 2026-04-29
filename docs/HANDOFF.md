@@ -91,16 +91,18 @@ must not let weak-evidence cases earn high.
 ## Pending structural work
 
 See `project_contact_pitch_v1_risks_2026-04-29.md` for the five
-identified risks with location, fix, and tradeoff. Order:
+identified risks with location, fix, and tradeoff.
 
-1. Silent exception swallowing in score paths — **landed 2026-04-29**.
-2. Full-dataset regression test + this doc consolidation — **landed 2026-04-29**.
-3. Coordinate naming silent LPS/RAS sign-flip in
-   `trajectory_from_line_node` vs. `collect_working_trajectory_rows`.
-4. Auto Fit ↔ Guided Fit preprocessing drift — extract
-   `prepare_volume`.
-5. `contact_pitch_v1_fit.py` monolith split into `preprocess` /
-   `pitch_walker` / `bolt_anchor` / `scoring` / `model_suggestion`.
+| # | risk | status |
+|---|---|---|
+| 5 | silent except-pass in score paths | **landed** `f699e2e` |
+| 4 | full-dataset regression + handoff consolidation | **landed** `360c95c` |
+| 3 | coordinate naming silent LPS/RAS sign-flip | **landed** `f140d07` |
+| 1 | Auto Fit ↔ Guided Fit preprocessing drift (extract `prepare_volume`) | **landed** `0cecf9a` |
+| 2 | `contact_pitch_v1_fit.py` monolith split | deferred |
 
-Items 3-5 should not be attempted until `test_dataset_full` is the
-gate for every commit.
+Item 2 (monolith split into `preprocess` / `pitch_walker` /
+`bolt_anchor` / `scoring` / `model_suggestion` modules) is the only
+open structural item. The `prepare_volume` extract from item 1 is
+the natural first slice of that split — when the monolith work
+starts, it has a working precedent.
