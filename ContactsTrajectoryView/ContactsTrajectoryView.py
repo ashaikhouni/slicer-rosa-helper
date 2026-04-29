@@ -289,13 +289,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         form = qt.QFormLayout(section)
 
         self.contactTable = qt.QTableWidget()
-        self.contactTable.setColumnCount(7)
+        self.contactTable.setColumnCount(8)
         self.contactTable.setHorizontalHeaderLabels(
             [
                 "Use",
                 "Trajectory",
                 "Traj Length (mm)",
                 "Electrode Model",
+                "# Contacts",
                 "Elec Length (mm)",
                 "Tip At",
                 "Tip Shift (mm)",
@@ -308,6 +309,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.contactTable.horizontalHeader().setSectionResizeMode(4, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(5, qt.QHeaderView.ResizeToContents)
         self.contactTable.horizontalHeader().setSectionResizeMode(6, qt.QHeaderView.ResizeToContents)
+        self.contactTable.horizontalHeader().setSectionResizeMode(7, qt.QHeaderView.ResizeToContents)
         self.contactTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.contactTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.contactTable.cellClicked.connect(self.onContactTableCellClicked)
@@ -504,6 +506,25 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         spin.setSuffix(" mm")
         return spin
 
+    def _build_contact_count_spinbox(self):
+        """Integer spinbox for the # Contacts column. Auto-populated
+        when an electrode model is assigned; editable independently for
+        peak-driven model-free emission. ``0`` = "use the model" (or
+        emit all detected peaks if no model is assigned).
+        """
+        spin = qt.QSpinBox()
+        spin.setRange(0, 32)
+        spin.setValue(0)
+        spin.setToolTip(
+            "Number of contacts to emit in peak-driven mode.\n"
+            "  - 0 (default): use the assigned model's contact count "
+            "(or emit all detected peaks if no model is assigned).\n"
+            "  - >0: emit exactly N contacts as the strongest peaks "
+            "along the axis. Lets you skip the model assignment when "
+            "the count is known but the exact electrode pattern isn't."
+        )
+        return spin
+
     def _build_use_checkbox(self):
         check = qt.QCheckBox()
         check.setChecked(True)
@@ -518,14 +539,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         return electrode_length_mm(model)
 
     def _bind_model_length_update(self, model_combo, row):
+        # Both the electrode-length cell AND the # Contacts spinbox
+        # auto-update when the model selection changes.
+        def _on_model_change(_arg, row_index=row):
+            self._update_electrode_length_cell(row_index)
+            self._update_contact_count_cell(row_index)
+
         if hasattr(model_combo, "currentTextChanged"):
-            model_combo.currentTextChanged.connect(
-                lambda _text, row_index=row: self._update_electrode_length_cell(row_index)
-            )
+            model_combo.currentTextChanged.connect(_on_model_change)
         else:
-            model_combo.currentIndexChanged.connect(
-                lambda _idx, row_index=row: self._update_electrode_length_cell(row_index)
-            )
+            model_combo.currentIndexChanged.connect(_on_model_change)
 
     def _update_electrode_length_cell(self, row):
         model_combo = self.contactTable.cellWidget(row, 3)
@@ -533,7 +556,39 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         length_text = ""
         if model_id:
             length_text = f"{self._electrode_length_mm(model_id):.2f}"
-        self._set_readonly_text_item(row, 4, length_text)
+        self._set_readonly_text_item(row, 5, length_text)
+
+    def _update_contact_count_cell(self, row):
+        """Sync the # Contacts spinbox to the currently-selected
+        electrode model. Overwrites any prior user value — the model
+        change is the implicit "I want this many contacts" signal; the
+        user can re-edit afterward to override.
+        """
+        spin = self.contactTable.cellWidget(row, 4)
+        if spin is None:
+            return
+        model_combo = self.contactTable.cellWidget(row, 3)
+        model_id = widget_current_text(model_combo).strip()
+        n = 0
+        if model_id:
+            offsets = self.modelsById.get(model_id, {}).get(
+                "contact_center_offsets_from_tip_mm",
+            ) or []
+            n = len(offsets)
+        spin.blockSignals(True)
+        try:
+            spin.setValue(int(n))
+        finally:
+            spin.blockSignals(False)
+
+    def _get_contact_count(self, row):
+        spin = self.contactTable.cellWidget(row, 4)
+        if spin is None:
+            return 0
+        try:
+            return int(spin.value)
+        except Exception:
+            return 0
 
     def _load_electrode_library(self):
         try:
@@ -577,10 +632,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     model_combo.setCurrentIndex(idx)
                     auto_assigned += 1
             self.contactTable.setCellWidget(row, 3, model_combo)
-            self._set_readonly_text_item(row, 4, "")
+            self.contactTable.setCellWidget(row, 4, self._build_contact_count_spinbox())
+            self._set_readonly_text_item(row, 5, "")
             self._update_electrode_length_cell(row)
-            self.contactTable.setCellWidget(row, 5, self._build_tip_at_combo())
-            self.contactTable.setCellWidget(row, 6, self._build_tip_shift_spinbox())
+            self._update_contact_count_cell(row)
+            self.contactTable.setCellWidget(row, 6, self._build_tip_at_combo())
+            self.contactTable.setCellWidget(row, 7, self._build_tip_shift_spinbox())
 
         enabled = bool(trajectories) and bool(self.modelsById)
         self.generateContactsButton.setEnabled(enabled)
@@ -661,15 +718,20 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             if not traj_item:
                 continue
             model_combo = self.contactTable.cellWidget(row, 3)
-            tip_at_combo = self.contactTable.cellWidget(row, 5)
-            tip_shift_spin = self.contactTable.cellWidget(row, 6)
+            tip_at_combo = self.contactTable.cellWidget(row, 6)
+            tip_shift_spin = self.contactTable.cellWidget(row, 7)
             model_id = widget_current_text(model_combo).strip()
-            if not model_id:
-                continue
+            n_contacts = self._get_contact_count(row)
+            # Rows without a model are kept for the peak-driven path —
+            # the engine emits all detected peaks (or the strongest
+            # ``n_contacts`` of them when set). Model-driven generation
+            # still requires a model and skips no-model rows
+            # downstream.
             rows.append(
                 {
                     "trajectory": traj_item.text(),
                     "model_id": model_id,
+                    "n_contacts_target": int(n_contacts) if n_contacts > 0 else None,
                     "tip_at": widget_current_text(tip_at_combo) or "target",
                     "tip_shift_mm": self._widget_value(tip_shift_spin),
                     "xyz_offset_mm": [0.0, 0.0, 0.0],
@@ -936,6 +998,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             row = assignment_by_name.get(name)
             tip_at = (row.get("tip_at") if row else "target") or "target"
             assigned_model = (row.get("model_id") if row else "") or ""
+            n_contacts_target = row.get("n_contacts_target") if row else None
+            # Two modes: model-driven (with assigned model, peaks are
+            # snapped to the model's slot pattern) and model-free
+            # (no model — emit detected peaks directly, optionally
+            # capped at ``n_contacts_target`` strongest peaks).
+            use_model_free = not assigned_model
             start_lps = traj.get("start") or [0.0, 0.0, 0.0]
             end_lps = traj.get("end") or [0.0, 0.0, 0.0]
             # Trajectories travel from entry → target; the deep tip is
@@ -951,6 +1019,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     models_by_id=self.modelsById,
                     candidate_ids=candidate_ids,
                     restrict_to_model_id=assigned_model or None,
+                    model_free=use_model_free,
+                    n_contacts_target=n_contacts_target if use_model_free else None,
                 )
             except Exception as exc:
                 self.log(
@@ -963,18 +1033,28 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 records = ras_contacts_to_contact_records(
                     result, traj, tip_at_for_schema=tip_at,
                 )
-                if row is not None:
+                if row is not None and not use_model_free:
                     # Engine may have chosen a different model than
                     # the combo — reflect that in the stored
                     # assignment so downstream consumers see the
-                    # winner.
+                    # winner. (Skipped in model-free mode: there's no
+                    # model selection to write back, ``result.model_id``
+                    # is the "manual" sentinel.)
                     row["model_id"] = result.model_id
                 contacts.extend(records)
-                self.log(
-                    f"[contacts:{log_context}] {name}: peak fit {result.model_id} "
-                    f"({result.n_matched}/{result.n_model_slots} peaks, "
-                    f"mean res {result.mean_residual_mm:.2f} mm)"
-                )
+                if use_model_free:
+                    self.log(
+                        f"[contacts:{log_context}] {name}: model-free peak fit "
+                        f"({result.n_matched} peaks emitted from "
+                        f"{result.n_peaks_found} detected)"
+                    )
+                else:
+                    self.log(
+                        f"[contacts:{log_context}] {name}: peak fit "
+                        f"{result.model_id} "
+                        f"({result.n_matched}/{result.n_model_slots} peaks, "
+                        f"mean res {result.mean_residual_mm:.2f} mm)"
+                    )
                 continue
 
             # Fallback: synthesize at the user-assigned model's nominal
@@ -1051,6 +1131,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         out = []
         for name, result in peak_fit_by_traj.items():
             if result is None or not result.model_id:
+                continue
+            # Drift is "peak vs model nominal" — undefined for the
+            # model-free path (``model_id="manual"``), since there's
+            # no slot pattern to compare against.
+            if result.model_id not in self.modelsById:
                 continue
             traj = trajectories_by_name.get(name)
             row = assignment_by_name.get(name)

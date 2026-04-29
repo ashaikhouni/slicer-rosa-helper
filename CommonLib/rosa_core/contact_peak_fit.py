@@ -471,6 +471,8 @@ def detect_contacts_on_axis(start_ras,
                             candidate_ids=None,
                             *,
                             restrict_to_model_id=None,
+                            model_free=False,
+                            n_contacts_target=None,
                             dist_arr_kji=None,
                             step_mm=PEAK_STEP_MM,
                             disk_radius_mm=PEAK_DISK_RADIUS_MM,
@@ -531,6 +533,45 @@ def detect_contacts_on_axis(start_ras,
             n_peaks_found=0, n_model_slots=0, n_matched=0,
             mean_residual_mm=float("inf"),
             rejected_reason="no_peaks",
+        )
+
+    if model_free:
+        # Model-free path: emit detected peaks as contacts directly.
+        # No slot matching, no library lookup. ``n_contacts_target``
+        # caps the count by keeping the strongest |amplitude| peaks
+        # (LoG signal at metal goes strongly negative, so |profile|
+        # ranks brightness directly). Used by the GT-annotation
+        # workflow when the user knows the contact count but doesn't
+        # want to bias placement to a model's exact pitch pattern.
+        if n_contacts_target is not None and len(peaks) > int(n_contacts_target):
+            profile_arr = np.asarray(profile, dtype=float)
+            peak_amps = []
+            for arc in peaks:
+                idx = int(round(arc / step_mm))
+                idx = max(0, min(profile_arr.size - 1, idx))
+                peak_amps.append(abs(float(profile_arr[idx])))
+            order = sorted(
+                range(len(peaks)), key=lambda k: -peak_amps[k],
+            )[: int(n_contacts_target)]
+            kept_arcs = sorted(peaks[k] for k in order)
+        else:
+            kept_arcs = list(peaks)
+
+        shallow_arr = np.asarray(shallow, dtype=float)
+        positions_ras = [
+            (shallow_arr + arc * axis_unit).tolist() for arc in kept_arcs
+        ]
+        return PeakFitResult(
+            model_id="manual",
+            positions_ras=positions_ras,
+            peak_detected=[True] * len(positions_ras),
+            tip_arclen_mm=float(kept_arcs[0]) if kept_arcs else 0.0,
+            tip_direction=axis_unit.tolist(),
+            n_peaks_found=len(peaks),
+            n_model_slots=len(positions_ras),
+            n_matched=len(positions_ras),
+            mean_residual_mm=0.0,
+            rejected_reason="",
         )
 
     if restrict_to_model_id:
