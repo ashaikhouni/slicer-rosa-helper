@@ -317,7 +317,6 @@
       "vendor": "Medtronic",
       "type": "directional_1_3_3_1",
       "contact_count": 4,
-      "physical_contact_count": 8,
       "groups": [4],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
@@ -326,7 +325,7 @@
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 8.5,
       "contact_center_offsets_from_tip_mm": [1.75, 3.75, 5.75, 7.75],
-      "directional_levels": [["0"], ["1a", "1b", "1c"], ["2a", "2b", "2c"], ["3"]]
+      "contact_labels": ["0", "1", "2", "3"]
     },
     {
       "id": "Medtronic_SenSight_B33015",
@@ -334,7 +333,6 @@
       "vendor": "Medtronic",
       "type": "directional_1_3_3_1",
       "contact_count": 4,
-      "physical_contact_count": 8,
       "groups": [4],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
@@ -343,7 +341,7 @@
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 11.5,
       "contact_center_offsets_from_tip_mm": [1.75, 4.75, 7.75, 10.75],
-      "directional_levels": [["0"], ["1a", "1b", "1c"], ["2a", "2b", "2c"], ["3"]]
+      "contact_labels": ["0", "1", "2", "3"]
     }
   ]
 }
