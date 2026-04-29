@@ -50,51 +50,55 @@ def _volume_node_ras_to_ijk_matrix(volume_node):
 
 class ContactPitchV1Pipeline(BaseDetectionPipeline):
     pipeline_id = "contact_pitch_v1"
-    pipeline_version = "1.0.22"
+    pipeline_version = "1.0.29"
 
     def _load_image_and_matrices(self, ctx: DetectionContext):
         """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4).
 
-        When a Slicer ``volume_node`` is present in ``ctx.extras``,
-        use Slicer's arr_kji and Slicer's IJK→RAS matrix. Slicer's
-        NIfTI reader reorients the voxel array based on the file's
-        direction cosines (specifically sform when both sform and
-        qform are present), so building SITK from the raw file path
-        yields a different voxel layout than what Slicer displays —
-        feature volumes registered back to the scene end up rotated
-        (subject-137 sform/qform mismatch).
+        Single source of truth: when ``ctx['ct'].path`` exists on disk,
+        load via ``sitk.ReadImage`` regardless of whether a Slicer
+        ``volume_node`` is also present. CLI tests and the Slicer widget
+        therefore run on the same voxel array and the same IJK→RAS
+        matrix — same input → same trajectory set, no entry-point drift.
 
-        Only the path-only branch (CLI, or Slicer volumes without a
-        storage node) reads via ``sitk.ReadImage`` and takes the
-        file's own matrix.
+        Fallback: scene-only volumes without a storage node still go
+        through ``arr_kji``. When a ``volume_node`` is present in that
+        path we adopt its IJK→RAS so subsequent feature-volume publish
+        aligns with Slicer's display; otherwise fall back to the
+        sitk-built image's own matrix.
+
+        Note: feature volumes registered back to Slicer's scene may
+        appear rotated when the on-disk NIfTI's sform / qform disagree
+        with Slicer's reoriented display (e.g., subject-137); that's a
+        visualization-side fix to do at publish time, not at detection
+        load.
         """
         import SimpleITK as sitk
         from shank_core.io import image_ijk_ras_matrices
 
-        volume_node = (ctx.get("extras") or {}).get("volume_node")
-
-        if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-            arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
-            img = sitk.GetImageFromArray(arr)
-            img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
-            ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
-            ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
-            self._apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+        ct = ctx.get("ct")
+        ct_path = getattr(ct, "path", None) if ct is not None else None
+        if ct_path:
+            img = sitk.ReadImage(str(ct_path))
+            ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
             return (
                 img,
                 np.asarray(ijk_to_ras, dtype=float),
                 np.asarray(ras_to_ijk, dtype=float),
             )
 
-        ct = ctx.get("ct")
-        ct_path = getattr(ct, "path", None) if ct is not None else None
-        if ct_path:
-            img = sitk.ReadImage(str(ct_path))
+        arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
+
+        volume_node = (ctx.get("extras") or {}).get("volume_node")
+        if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
+            ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
+            ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
+            self._apply_slicer_geometry_to_sitk(img, ijk_to_ras)
         else:
-            arr = np.asarray(ctx["arr_kji"], dtype=np.float32)
-            img = sitk.GetImageFromArray(arr)
-            img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
-        ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
+            ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
+
         return (
             img,
             np.asarray(ijk_to_ras, dtype=float),

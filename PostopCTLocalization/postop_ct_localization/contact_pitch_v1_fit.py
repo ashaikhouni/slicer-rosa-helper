@@ -2174,9 +2174,31 @@ SCORE_DEPTH_SAT_MM = 30.0      # dist_max at which the depth term
 SCORE_INTRACRANIAL_SAT_MM = 10.0
 SCORE_BOLT_VALUES = {
     "metal": 1.0,        # unified bolt CC (replaces "log" + "hu_rescue")
+    "metal_cc": 0.7,     # wire-class: bolt CC extends into brain as
+                          # continuous metal; walker found no contact-pitch
+                          # line (saturated/merged contacts), but the CC
+                          # itself defines the shank axis. Lower than
+                          # "metal" because no contact-pitch validation.
     "synthesized": 0.4,  # axis-to-skull synth fallback
     "none": 0.1,         # no anchor and synth couldn't reach hull
 }
+
+# Wire-class extension: when a bolt CC is unmatched by any walker line
+# AND its connected metal extends into the brain, the CC IS the shank
+# (saturated contacts merging). Emit a PCA-fit trajectory through the
+# bolt+wire CC. Catches AMC099 L_4 and similar short / lateral / strong-
+# metal cases.
+WIRE_CLASS_MIN_DEPTH_MM = 15.0       # bolt CC's deepest voxel must sit
+                                       # ≥ 15 mm inside the head — true bolt
+                                       # screws cap at ~10 mm. The signal is
+                                       # "metal continues past the bolt".
+WIRE_CLASS_MIN_SPAN_MM = 15.0         # PCA major-axis projection range.
+                                       # Below 15 mm overlaps screw-only
+                                       # CCs and short surgical clips.
+WIRE_CLASS_MIN_VOXELS = 50            # excludes tiny clips and CC noise.
+WIRE_CLASS_MIN_ELONGATION = 0.65      # major eigenvalue / sum-of-eigenvalues.
+                                       # Cylindrical bolts/wires sit > 0.7;
+                                       # blob-shaped clips < 0.5.
 
 
 def _trapezoid_score(value, lo, hi, shoulder_mm):
@@ -2197,29 +2219,37 @@ def _bolt_source_score(src):
 def _compute_trajectory_score(rec):
     """Return (score, confidence, components) for one trajectory record."""
     components = {}
+    is_wire_class = bool(rec.get("wire_class"))
 
-    if "amp_sum" in rec:
+    # ``amp_sum`` and ``n_inliers`` are walker-only signals. Wire-class
+    # trajectories come from a bolt-CC PCA fit and have neither — they
+    # would force-zero those components and drag the score artificially
+    # low. Skip them and let the remaining components (frangi, span,
+    # length, depth, intracranial, bolt, metal_continuity) carry the
+    # signal.
+    if "amp_sum" in rec and not is_wire_class:
         components["amp"] = (
             min(1.0, max(0.0, float(rec["amp_sum"]) / SCORE_AMP_SAT)),
             SCORE_WEIGHTS["amp"],
         )
 
-    n = int(rec.get("n_inliers", 0))
-    # Lower side: linear ramp from MIN_BLOBS_PER_LINE up by SCORE_N_INLIERS_SLOPE.
-    # Upper side: 1.0 up to the library's max contact count, then linear
-    # falloff over SCORE_N_INLIERS_OVER_SLACK. n far above the library
-    # max means the walker chained a continuous metal structure (the
-    # bolt itself, an insulated wire shaft) instead of discrete contacts.
-    lib_max = int(_LIBRARY_BOUNDS["max_contacts"])
-    if n <= MIN_BLOBS_PER_LINE:
-        n_score = 0.0
-    elif n <= MIN_BLOBS_PER_LINE + SCORE_N_INLIERS_SLOPE:
-        n_score = (n - MIN_BLOBS_PER_LINE) / SCORE_N_INLIERS_SLOPE
-    elif n <= lib_max:
-        n_score = 1.0
-    else:
-        n_score = max(0.0, 1.0 - (n - lib_max) / SCORE_N_INLIERS_OVER_SLACK)
-    components["n_inliers"] = (n_score, SCORE_WEIGHTS["n_inliers"])
+    if not is_wire_class:
+        n = int(rec.get("n_inliers", 0))
+        # Lower side: linear ramp from MIN_BLOBS_PER_LINE up by SCORE_N_INLIERS_SLOPE.
+        # Upper side: 1.0 up to the library's max contact count, then linear
+        # falloff over SCORE_N_INLIERS_OVER_SLACK. n far above the library
+        # max means the walker chained a continuous metal structure (the
+        # bolt itself, an insulated wire shaft) instead of discrete contacts.
+        lib_max = int(_LIBRARY_BOUNDS["max_contacts"])
+        if n <= MIN_BLOBS_PER_LINE:
+            n_score = 0.0
+        elif n <= MIN_BLOBS_PER_LINE + SCORE_N_INLIERS_SLOPE:
+            n_score = (n - MIN_BLOBS_PER_LINE) / SCORE_N_INLIERS_SLOPE
+        elif n <= lib_max:
+            n_score = 1.0
+        else:
+            n_score = max(0.0, 1.0 - (n - lib_max) / SCORE_N_INLIERS_OVER_SLACK)
+        components["n_inliers"] = (n_score, SCORE_WEIGHTS["n_inliers"])
 
     if "frangi_median_mm" in rec:
         components["frangi"] = (
@@ -2284,6 +2314,22 @@ def _compute_trajectory_score(rec):
     weighted = sum(v * w for v, w in components.values())
     total_w = sum(w for _, w in components.values())
     score = weighted / total_w if total_w > 0 else 0.0
+
+    # Confidence policy: high band is reserved for trajectories with BOTH
+    # contact-pitch validation AND a real metal bolt CC (bolt_source ==
+    # "metal"). Anything missing one or the other caps at medium:
+    #
+    #   pitch + metal bolt    → high allowed
+    #   pitch + synthesized   → cap medium  (CT didn't capture the bolt;
+    #                                         the synth fallback is a
+    #                                         best-guess on degraded input)
+    #   pitch + no anchor     → cap medium  (bolt_source == "none")
+    #   bolt CC + no pitch    → cap medium  (wire_class; metal_cc bolt)
+    #
+    # Wire-class records carry bolt_source == "metal_cc" by construction,
+    # so the single ``bolt_src != "metal"`` test covers them too.
+    if bolt_src != "metal" and score >= SCORE_HIGH_THRESHOLD:
+        score = SCORE_HIGH_THRESHOLD - 0.01
 
     if score >= SCORE_HIGH_THRESHOLD:
         label = "high"
@@ -2369,8 +2415,25 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         # raw input's sub-mm-grid aliasing survives into the LoG and
         # the blob extractor reports ghost contacts (21 vs 14 stage-1
         # emissions on raw T7 vs registered T7).
-        if RAW_RESAMPLE_GAUSSIAN_SIGMA_MM > 0:
-            img = sitk.SmoothingRecursiveGaussian(img, RAW_RESAMPLE_GAUSSIAN_SIGMA_MM)
+        #
+        # Anisotropic σ, scaled per axis by the amount of downsampling:
+        # σ[i] = max(0, s_out - s_in[i]). Axes that aren't downsampled
+        # (s_in >= canonical) get σ=0 — no smoothing where there's no
+        # aliasing risk.
+        #
+        # Why anisotropic: isotropic σ=0.7 (the previous calibration on
+        # T7 raw at ~0.415 mm in-plane) over-smooths in directions where
+        # the input was already near-canonical, blurring adjacent
+        # contacts on near-horizontal shanks below the LoG threshold.
+        # S56 had 2 horizontal SEEG shanks (L_2, L_3) entirely missed
+        # at isotropic σ=0.7 because their X/Y in-plane contacts blurred
+        # together; anisotropic σ recovers them.
+        sigmas_per_axis = tuple(
+            float(max(0.0, CANONICAL_SPACING_MM - float(s)))
+            for s in spacing
+        )
+        if max(sigmas_per_axis) > 0:
+            img = sitk.SmoothingRecursiveGaussian(img, sigmas_per_axis)
         # Recompute IJK↔RAS for the resampled grid (origin / direction
         # unchanged, spacing changed → matrix changes).
         from shank_core.io import image_ijk_ras_matrices
@@ -2702,6 +2765,81 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             anchored.append(rec)
     _log(f"anchoring: {len(anchored)} survived")
 
+    # Wire-class extension: emit trajectories from unmatched bolt CCs whose
+    # connected metal extends into the brain. Catches shanks where contacts
+    # saturate into a continuous wire (clinical CTs, lateral / short
+    # entries — e.g. AMC099 L_4) that the contact-pitch walker can't
+    # resolve into discrete LoG peaks.
+    used_bolt_ids = {
+        int(rec.get("bolt_id", -1))
+        for rec in anchored
+        if int(rec.get("bolt_id", -1)) >= 0
+    }
+    wire_recs: list[dict[str, Any]] = []
+    for bolt in bolts:
+        if int(bolt["id"]) in used_bolt_ids:
+            continue
+        if int(bolt["n_vox"]) < WIRE_CLASS_MIN_VOXELS:
+            continue
+        if float(bolt["dist_max_mm"]) < WIRE_CLASS_MIN_DEPTH_MM:
+            continue
+        pts = np.asarray(bolt["pts_ras"], dtype=float)
+        centroid = pts.mean(axis=0)
+        centered = pts - centroid
+        cov = (centered.T @ centered) / max(1, len(pts) - 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        total_var = float(eigvals.sum())
+        if total_var <= 1e-9:
+            continue
+        elongation = float(eigvals[-1]) / total_var
+        if elongation < WIRE_CLASS_MIN_ELONGATION:
+            continue
+        axis_dir = eigvecs[:, -1]
+        proj = centered @ axis_dir
+        span = float(proj.max() - proj.min())
+        if span < WIRE_CLASS_MIN_SPAN_MM:
+            continue
+        p_min = centroid + float(proj.min()) * axis_dir
+        p_max = centroid + float(proj.max()) * axis_dir
+        s_ras, e_ras = _orient_shallow_to_deep(
+            p_min, p_max, dist_arr, ras_to_ijk_mat,
+        )
+        rec = dict(
+            start_ras=np.asarray(s_ras, dtype=float),
+            end_ras=np.asarray(e_ras, dtype=float),
+            shallow_endpoint_name="start",
+            deep_endpoint_name="end",
+            length_mm=float(np.linalg.norm(e_ras - s_ras)),
+            n_inliers=0,
+            contact_span_mm=span,
+            original_span_mm=span,
+            original_median_pitch_mm=0.0,
+            dist_min_mm=float(bolt["dist_min_mm"]),
+            dist_max_mm=float(bolt["dist_max_mm"]),
+            dist_mean_mm=float(np.mean(bolt["pts_dist"])),
+            bolt_source="metal_cc",
+            bolt_n_vox=int(bolt["n_vox"]),
+            bolt_dist_min_mm=float(bolt["dist_min_mm"]),
+            bolt_id=int(bolt["id"]),
+            wire_class=True,
+            inlier_idx=[],
+        )
+        new_fmean, new_fmed = _frangi_along_line_stats(
+            rec["start_ras"], rec["end_ras"], frangi_s1, ras_to_ijk_mat,
+        )
+        rec["frangi_mean_mm"] = float(new_fmean)
+        rec["frangi_median_mm"] = float(new_fmed)
+        rec["frac_strong_metal"] = _frac_strong_metal_along_line(
+            rec["start_ras"], rec["end_ras"],
+            log1, ct_arr_kji, ras_to_ijk_mat,
+        )
+        rec["skull_entry_ras"] = np.asarray(s_ras, dtype=float)
+        rec["intracranial_length_mm"] = float(np.linalg.norm(e_ras - s_ras))
+        wire_recs.append(rec)
+    if wire_recs:
+        _log(f"wire-class: emitting {len(wire_recs)} from unmatched bolt CCs")
+        anchored.extend(wire_recs)
+
     # Dedup keeps the longer line of each cluster.
     anchored.sort(key=lambda rec: -float(rec.get("length_mm", 0.0)))
     anchored = _dedup_trajectories(anchored)
@@ -2786,32 +2924,78 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         except Exception as exc:
             _log(f"electrode library load failed ({exc}); no suggestions emitted")
             _models = []
-    if _models:
+    # Strategy-aware library filter: when the user picks a specific
+    # pitch strategy (e.g. "Dixi AM (3.5 mm)"), suggestions should
+    # come only from that strategy's library family — vendor + pitch
+    # set jointly. The vendor-only filter inside the classifiers is
+    # too loose to distinguish DIXI-AM from DIXI-MM (both pass "Dixi"
+    # prefix but ride different pitch families).
+    _models_filtered = filter_models_for_strategy(
+        _models, pitch_strategy if _models else None,
+    )
+    if _models and not _models_filtered:
+        _log(
+            f"library filter for strategy '{pitch_strategy}' "
+            f"eliminated all models; keeping vendor-prefix subset "
+            f"of {len(_models)} for fallback"
+        )
+        _models_filtered = _models  # safety: don't strand suggestions
+    if _models_filtered:
         n_suggested = 0
         for rec in anchored:
-            # Shortest electrode that covers the intracranial length is
-            # a more robust primary signal than walker-inlier count/span:
-            # it is anchored on skull_entry→deep_tip geometry, which the
-            # bolt anchor produces reliably even when the walker misses
-            # contacts (e.g. the T22-X02 case where the walker stopped
-            # at 7/15 contacts but the intracranial length still
-            # reflects the real 15CM shank).
             intra = float(rec.get("intracranial_length_mm") or 0.0)
             if intra < 5.0:
                 continue
-            best = suggest_shortest_covering_model(
-                intra, _models, vendors=vendors_for_suggest,
+            # Walker-signature classifier: matches against the model
+            # library using observed pitch + contact count + contact span +
+            # intracranial length jointly. Disambiguates models that
+            # share a covering length but differ on pitch (e.g. PMT-16A
+            # vs PMT-16B at 3.5 vs 3.97 mm) or count (DIXI-15CM vs
+            # DIXI-18AM at similar lengths). Falls back to length-only
+            # (``suggest_shortest_covering_model``) for wire-class
+            # records where pitch / inlier count are unavailable.
+            pitch_obs = float(rec.get("original_median_pitch_mm") or 0.0)
+            n_obs = int(rec.get("n_inliers") or 0)
+            span_obs = float(rec.get("contact_span_mm") or 0.0)
+            # Walker's raw ``contact_span_mm`` is the actual inlier-
+            # projection range — informative for CM/BM electrodes
+            # whose contact groups are separated by 9-13 mm structural
+            # gaps and whose span legitimately exceeds (n-1)*median_pitch.
+            # Span term distinguishes DIXI-15AM (span 49) from
+            # DIXI-15BM (60) from DIXI-15CM (68) at the same n=15
+            # and median pitch=3.5.
+            best = classify_by_walker_signature(
+                n_observed=n_obs,
+                pitch_observed_mm=pitch_obs,
+                contact_span_observed_mm=span_obs,
+                intracranial_length_mm=intra,
+                models=_models_filtered,
+                vendors=vendors_for_suggest,
             )
-            if best is None:
-                continue
-            rec["suggested_model_id"] = str(best["model_id"])
-            rec["suggested_model_method"] = "shortest_covering"
-            rec["suggested_model_length_mm"] = float(best["model_length_mm"])
-            rec["suggested_model_gap_mm"] = float(best["gap_mm"])
-            # Score proxy: how snug the fit is — smaller is tighter.
-            # (Mostly for logging/tie-break; Contacts & Trajectory View
-            # only reads ``best_model_id`` to populate its dropdown.)
-            rec["suggested_model_score"] = float(abs(best["gap_mm"]))
+            method = "walker_signature"
+            if best is None or pitch_obs <= 0.0 or n_obs <= 0:
+                # Wire-class or weak-signature: use the length-only
+                # fallback so the user still gets *some* model id.
+                fallback = suggest_shortest_covering_model(
+                    intra, _models_filtered, vendors=vendors_for_suggest,
+                )
+                if fallback is None:
+                    continue
+                rec["suggested_model_id"] = str(fallback["model_id"])
+                rec["suggested_model_method"] = "shortest_covering"
+                rec["suggested_model_length_mm"] = float(fallback["model_length_mm"])
+                rec["suggested_model_gap_mm"] = float(fallback["gap_mm"])
+                rec["suggested_model_score"] = float(abs(fallback["gap_mm"]))
+            else:
+                rec["suggested_model_id"] = str(best["model_id"])
+                rec["suggested_model_method"] = method
+                rec["suggested_model_length_mm"] = float(best["model_total_mm"])
+                rec["suggested_model_gap_mm"] = float(best["length_err_mm"])
+                rec["suggested_model_score"] = float(best["score"])
+                # Per-component diagnostics (logged + kept on rec for QC).
+                rec["suggested_model_pitch_err_mm"] = float(best["pitch_err_mm"])
+                rec["suggested_model_count_err"] = int(best["count_err"])
+                rec["suggested_model_span_err_mm"] = float(best["span_err_mm"])
             n_suggested += 1
         _log(
             f"suggested electrodes: {n_suggested} trajectories "
@@ -2934,6 +3118,247 @@ def suggest_shortest_covering_model(intracranial_length_mm, models,
                 "model_id": mid,
                 "model_length_mm": total,
                 "gap_mm": total - L,
+            }
+    return best
+
+
+def refine_signature_via_axis_peaks(rec, log_arr, ras_to_ijk_mat,
+                                     step_mm=0.25,
+                                     disk_radius_mm=2.0,
+                                     n_radii=4,
+                                     n_angles=8,
+                                     min_amplitude=200.0,
+                                     min_separation_mm=2.0,
+                                     min_peaks_required=4,
+                                     shallow_pad_mm=1.5,
+                                     deep_pad_mm=3.0):
+    """Re-derive ``(n_inliers, median_pitch, contact_span)`` for one
+    trajectory by 1-D peak picking on the LoG profile sampled along
+    its intracranial axis. Returns ``None`` if the axis yields fewer
+    than ``min_peaks_required`` peaks (caller should keep walker
+    stats in that case).
+
+    The walker's NN-spacing pitch is biased on anisotropic CTs (e.g.
+    S56's auto-detect locked to 3.14 mm instead of 3.5 mm — sub-voxel
+    aliasing of blob centroids on the X/Y-downsampled grid). Peak
+    detection along the FIT axis samples the LoG at 0.25 mm steps with
+    trilinear interpolation, recovering sub-voxel peak positions and
+    thus the true contact pitch.
+
+    The ``shallow_pad_mm`` / ``deep_pad_mm`` extend the sampling range
+    slightly past the skull entry and deep tip — small headroom catches
+    the first / last contact when the bolt anchor or deep-end refine
+    placed the endpoint just past the contact.
+
+    Returns dict with keys ``n_peaks``, ``median_pitch_mm``,
+    ``peak_span_mm``, ``peak_arc_mm`` (list, debug) or ``None``.
+    """
+    from rosa_core.contact_peak_fit import sample_axis_profile, detect_peaks_1d
+    entry = np.asarray(
+        rec.get("skull_entry_ras", rec.get("start_ras")), dtype=float,
+    ).reshape(3)
+    end = np.asarray(rec.get("end_ras"), dtype=float).reshape(3)
+    axis_vec = end - entry
+    L = float(np.linalg.norm(axis_vec))
+    if L < 5.0:
+        return None
+    axis_unit = axis_vec / L
+    sample_start = entry - float(shallow_pad_mm) * axis_unit
+    sample_end = end + float(deep_pad_mm) * axis_unit
+    try:
+        arc_mm, profile = sample_axis_profile(
+            volume_kji=log_arr,
+            ras_to_ijk_mat=np.asarray(ras_to_ijk_mat, dtype=float),
+            start_ras=sample_start, end_ras=sample_end,
+            step_mm=step_mm, disk_radius_mm=disk_radius_mm,
+            n_radii=n_radii, n_angles=n_angles, reducer="min",
+        )
+    except Exception:
+        return None
+    peaks_arc = detect_peaks_1d(
+        profile, step_mm=step_mm, polarity="min",
+        min_amplitude=min_amplitude,
+        min_separation_mm=min_separation_mm,
+    )
+    if len(peaks_arc) < int(min_peaks_required):
+        return None
+    arr = np.asarray(sorted(peaks_arc), dtype=float)
+    diffs = np.diff(arr)
+    if diffs.size == 0:
+        return None
+    median_pitch = float(np.median(diffs))
+    peak_span = float(arr[-1] - arr[0])
+    return {
+        "n_peaks": int(arr.size),
+        "median_pitch_mm": median_pitch,
+        "peak_span_mm": peak_span,
+        "peak_arc_mm": [float(v) for v in arr.tolist()],
+    }
+
+
+def filter_models_for_strategy(models, strategy_key,
+                                 pitch_tolerance_mm=0.25):
+    """Restrict the model library to those matching a pitch-strategy
+    selection — vendor prefix AND median pitch within ``pitch_tolerance_mm``
+    of one of the strategy's pitches.
+
+    The user picking "Dixi AM (3.5 mm)" wants suggestions only from the
+    Dixi 3.5 mm family — not DIXI-MM09A33 (3.9 mm) or DIXI-MM09A40
+    (4.8 mm), which share the Dixi vendor prefix but ride a different
+    pitch family. The vendor-only filter that
+    ``classify_by_walker_signature`` / ``suggest_shortest_covering_model``
+    apply via the ``vendors`` parameter is too loose for that intent;
+    this helper layers a pitch-set filter on top.
+
+    For ``strategy_key == "auto"`` (or unknown strategy) the model
+    library is returned unchanged — auto-detect makes no commitment to a
+    specific pitch set.
+    """
+    if not strategy_key:
+        return list(models)
+    key = str(strategy_key).strip().lower()
+    if key == "auto":
+        return list(models)
+    pitches = PITCH_STRATEGY_PITCHES_MM.get(key)
+    vendors = PITCH_STRATEGY_VENDORS.get(key)
+    if not pitches or not vendors:
+        return list(models)
+    prefixes = _vendor_prefixes(vendors)
+    if not prefixes:
+        return list(models)
+    out = []
+    for m in models:
+        mid = str(m.get("id") or "")
+        if not mid.startswith(prefixes):
+            continue
+        m_pitch = _model_pitch_median_mm(m)
+        if m_pitch <= 0.0:
+            continue
+        if not any(abs(m_pitch - float(p)) <= float(pitch_tolerance_mm)
+                   for p in pitches):
+            continue
+        out.append(m)
+    return out
+
+
+def _model_pitch_median_mm(model):
+    """Median inter-contact spacing for one electrode model.
+
+    Most library models are uniform-pitch (DIXI-AM 3.5 mm, PMT-16B 3.97 mm),
+    in which case the median equals the pitch. For non-uniform spacings
+    (DIXI-MM family) the median picks the dominant intercontact distance,
+    which is the right matcher target for the walker's
+    ``original_median_pitch_mm`` (also a median across blob NN spacings).
+    """
+    offsets = model.get("contact_center_offsets_from_tip_mm") or []
+    if len(offsets) < 2:
+        return 0.0
+    diffs = [
+        float(offsets[i + 1]) - float(offsets[i])
+        for i in range(len(offsets) - 1)
+    ]
+    if not diffs:
+        return 0.0
+    diffs.sort()
+    return float(diffs[len(diffs) // 2])
+
+
+def classify_by_walker_signature(n_observed, pitch_observed_mm,
+                                  contact_span_observed_mm,
+                                  intracranial_length_mm, models,
+                                  vendors=("Dixi",),
+                                  pitch_weight_mm=10.0,
+                                  count_weight_mm=3.5,
+                                  span_weight=1.0,
+                                  length_weight=0.5,
+                                  dura_tolerance_mm=10.0,
+                                  span_shoulder_mm=2.0):
+    """Pick the electrode model best explained by the walker's full
+    signature: ``(n_inliers, original_median_pitch_mm, contact_span_mm,
+    intracranial_length_mm)`` against each model's
+    ``(contact_count, median_pitch, contact_span, total_exploration_length)``.
+
+    Score (mm-equivalent units, lower better) =
+        pitch_err * pitch_weight_mm
+      + count_err * count_weight_mm
+      + max(0, span_err - span_shoulder_mm) * span_weight
+      + max(0, length_err - dura_tolerance_mm) * length_weight
+
+    Pitch dominates because it is the strongest within-vendor
+    discriminator (DIXI AM 3.5 vs DIXI MM 3.9/4.8/6.1; PMT 3.5 vs PMT
+    3.97 vs PMT 4.43). Count breaks pitch ties (PMT-8 vs PMT-12 at the
+    same 3.5 mm pitch). Span and length sit on shoulders so a snug fit
+    inside the tolerance window contributes 0 — they only penalize
+    flagrant mismatches, not normal scanner / skull-entry noise.
+
+    Wire-class fallback: when ``pitch_observed_mm <= 0`` or
+    ``n_observed <= 0`` (no walker validation), the corresponding
+    component is skipped — the score reduces to span + length only,
+    matching the behaviour of ``classify_by_count_and_span`` /
+    ``suggest_shortest_covering_model`` on those records.
+
+    ``vendors`` filters models by vendor-id prefix (same convention as
+    the other classifiers in this module).
+
+    Returns ``{"model_id", "score", "model_pitch_mm", "model_n",
+    "model_span_mm", "model_total_mm"}`` or ``None``.
+    """
+    prefixes = _vendor_prefixes(vendors)
+    if not prefixes:
+        return None
+    n_obs = int(n_observed) if n_observed and n_observed > 0 else 0
+    pitch_obs = float(pitch_observed_mm) if pitch_observed_mm and pitch_observed_mm > 0 else 0.0
+    span_obs = float(contact_span_observed_mm or 0.0)
+    length_obs = float(intracranial_length_mm or 0.0)
+    best = None
+    for model in models:
+        mid = str(model.get("id") or "")
+        if not mid.startswith(prefixes):
+            continue
+        offsets = model.get("contact_center_offsets_from_tip_mm") or []
+        if len(offsets) < 2:
+            continue
+        n_model = int(model.get("contact_count") or len(offsets))
+        span_model = float(offsets[-1]) - float(offsets[0])
+        pitch_model = _model_pitch_median_mm(model)
+        total_model = model.get("total_exploration_length_mm")
+        if total_model is None:
+            total_model = span_model
+        total_model = float(total_model)
+
+        # Pitch + count: only when the walker actually saw contacts.
+        pitch_term = 0.0
+        if pitch_obs > 0.0 and pitch_model > 0.0:
+            pitch_term = float(pitch_weight_mm) * abs(pitch_obs - pitch_model)
+        count_term = 0.0
+        if n_obs > 0:
+            count_term = float(count_weight_mm) * abs(n_obs - n_model)
+        # Span + length: shoulder-trapezoid so small mismatches are free.
+        # Skip span when not observed (wire-class without walker span).
+        span_term = 0.0
+        span_err = 0.0
+        if span_obs > 0.0:
+            span_err = abs(span_obs - span_model)
+            span_term = float(span_weight) * max(0.0, span_err - float(span_shoulder_mm))
+        length_err = abs(length_obs - total_model) if length_obs > 0.0 else 0.0
+        length_term = (
+            float(length_weight) * max(0.0, length_err - float(dura_tolerance_mm))
+            if length_obs > 0.0 else 0.0
+        )
+
+        score = pitch_term + count_term + span_term + length_term
+        if best is None or score < best["score"]:
+            best = {
+                "model_id": mid,
+                "score": float(score),
+                "model_pitch_mm": float(pitch_model),
+                "model_n": int(n_model),
+                "model_span_mm": float(span_model),
+                "model_total_mm": float(total_model),
+                "pitch_err_mm": float(abs(pitch_obs - pitch_model)) if pitch_obs > 0 else float("nan"),
+                "count_err": int(abs(n_obs - n_model)) if n_obs > 0 else -1,
+                "span_err_mm": float(span_err),
+                "length_err_mm": float(length_err),
             }
     return best
 
