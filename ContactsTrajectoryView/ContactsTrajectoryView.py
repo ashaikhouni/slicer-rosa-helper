@@ -89,6 +89,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
         self.lastPeakDriftFlags = []
+        # User-chosen model per trajectory name. Persists across
+        # `_populate_contact_table` rebuilds (Refresh, source change,
+        # rename) so the manual choice doesn't get clobbered by
+        # Auto Fit's `Rosa.BestModelId` suggestion.
+        self._userModelOverrides: dict[str, str] = {}
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -540,8 +545,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _bind_model_length_update(self, model_combo, row):
         # Both the electrode-length cell AND the # Contacts spinbox
-        # auto-update when the model selection changes.
+        # auto-update when the model selection changes. The user
+        # override is recorded too so the choice survives the next
+        # ``_populate_contact_table`` rebuild — without this, Refresh
+        # / source change / rename all silently revert to Auto Fit's
+        # ``Rosa.BestModelId`` suggestion.
         def _on_model_change(_arg, row_index=row):
+            if not self._updatingContactTable:
+                self._record_user_model_override(row_index)
             self._update_electrode_length_cell(row_index)
             self._update_contact_count_cell(row_index)
 
@@ -549,6 +560,20 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             model_combo.currentTextChanged.connect(_on_model_change)
         else:
             model_combo.currentIndexChanged.connect(_on_model_change)
+
+    def _record_user_model_override(self, row):
+        name_item = self.contactTable.item(row, 1)
+        if name_item is None:
+            return
+        name = str(name_item.text() or "").strip()
+        if not name:
+            return
+        combo = self.contactTable.cellWidget(row, 3)
+        model_id = widget_current_text(combo).strip() if combo else ""
+        if model_id:
+            self._userModelOverrides[name] = model_id
+        else:
+            self._userModelOverrides.pop(name, None)
 
     def _update_electrode_length_cell(self, row):
         model_combo = self.contactTable.cellWidget(row, 3)
@@ -618,7 +643,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            suggested_model = str(traj.get("best_model_id") or "").strip()
+            # Precedence: user's manual override > Auto-Fit suggestion >
+            # geometry-based suggest. Without this, manually-picked
+            # models silently revert to ``best_model_id`` on every
+            # populate cycle.
+            suggested_model = self._userModelOverrides.get(traj["name"], "")
+            if not suggested_model:
+                suggested_model = str(traj.get("best_model_id") or "").strip()
             if not suggested_model:
                 suggested_model = suggest_model_id_for_trajectory(
                     trajectory=traj,
@@ -705,6 +736,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
         self.loadedTrajectories[row]["name"] = new_name
         item.setData(qt.Qt.UserRole, new_name)
+        # Carry the model override across the rename so the manual
+        # choice doesn't get dropped just because the row got a new
+        # display name.
+        if old_name in self._userModelOverrides:
+            self._userModelOverrides[new_name] = self._userModelOverrides.pop(old_name)
         self.log(f"[trajectory] renamed {old_name} -> {new_name}")
         self._refresh_summary()
         self._schedule_follow_selected_trajectory()
