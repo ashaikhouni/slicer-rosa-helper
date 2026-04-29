@@ -719,6 +719,9 @@ class GuidedFitWidgetMixin:
                 missed_names.append(name)
                 continue
 
+            for warn in fit.get("warnings") or ():
+                self.log(f"[guided] {name}: warning — {warn}")
+
             if "skull_entry_ras" in fit:
                 line_start = np.asarray(fit["skull_entry_ras"], dtype=float)
             else:

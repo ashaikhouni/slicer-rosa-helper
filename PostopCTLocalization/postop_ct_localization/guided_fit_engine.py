@@ -267,6 +267,11 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     planned_length = float(np.linalg.norm(planned_vec))
     if planned_length < 1e-3:
         return {"success": False, "reason": "planned trajectory has zero length"}
+    # Structured warnings: any score-affecting fallback (failed deep-end
+    # refinement, bolt anchor, dist sampling, Frangi, frac-strong-metal)
+    # appends a one-line reason here. The caller surfaces these via
+    # ``self.log`` so a silent fallback can never mask a regression.
+    warnings: list[str] = []
     planned_axis = planned_vec / planned_length
 
     pts_ras = features.get("blob_pts_ras")
@@ -377,8 +382,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
         )
         if refined_end is not None:
             deep_ras = np.asarray(refined_end, dtype=float)
-    except Exception:
-        pass
+    except Exception as exc:
+        warnings.append(f"deep-end LoG refinement skipped: {exc}")
 
     # ---- Bolt anchor: produces bolt_tip_ras + skull_entry_ras -------
     # Try both orientations (shallow→deep and deep→shallow) and keep
@@ -412,8 +417,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
                 if skull_entry is not None:
                     skull_entry_ras = np.asarray(skull_entry, dtype=float)
                 bolt_n_vox = int(bolt.get("n_vox", 0))
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.append(f"bolt anchor skipped: {exc}")
 
     # Prefer the bolt_tip as the outer endpoint when available — that
     # matches Auto Fit's convention and lets downstream code compute
@@ -444,7 +449,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
             dist_min_mm = float(min(shallow_d, deep_d))
             dist_max_mm = float(max(shallow_d, deep_d))
             dist_mean_mm = float(0.5 * (shallow_d + deep_d))
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"dist sampling failed, using NaN: {exc}")
             dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
     else:
         dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
@@ -458,8 +464,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
             )
             frangi_mean_mm = float(f_mean)
             frangi_median_mm = float(f_med)
-        except Exception:
-            pass
+        except Exception as exc:
+            warnings.append(f"Frangi along-line skipped, using 0: {exc}")
     # Metal-continuity: fraction of axis samples saturating the unified
     # metal-evidence threshold.
     ct_arr_kji = features.get("ct_arr_kji")
@@ -469,7 +475,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
                 start_out, deep_ras,
                 features.get("log"), ct_arr_kji, ras_to_ijk,
             )
-        except Exception:
+        except Exception as exc:
+            warnings.append(f"frac_strong_metal skipped, using 0: {exc}")
             frac_strong = 0.0
     else:
         frac_strong = 0.0
@@ -528,4 +535,6 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
         result["skull_entry_ras"] = [float(v) for v in skull_entry_ras]
     if bolt_tip_ras is not None:
         result["bolt_tip_ras"] = [float(v) for v in bolt_tip_ras]
+    if warnings:
+        result["warnings"] = list(warnings)
     return result

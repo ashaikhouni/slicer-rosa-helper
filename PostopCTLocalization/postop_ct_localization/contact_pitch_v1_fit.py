@@ -2536,7 +2536,9 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     import numpy as _np
     # Re-derive LoG amplitudes at each contact-sized blob position —
     # pts_blobs is already the contact-filtered cloud, so indexing
-    # matches line["inlier_idx"].
+    # matches line["inlier_idx"]. If this fails (shape mismatch, etc.)
+    # the deep-end strong-contact clipping silently degrades to "no
+    # amplitude data" — log it loudly so a regression can't hide here.
     try:
         K, J, I = log1.shape
         h_all = _np.concatenate([pts_blobs, _np.ones((pts_blobs.shape[0], 1))], axis=1)
@@ -2545,14 +2547,22 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         jj = _np.clip(_np.round(ijk_all[:, 1]).astype(int), 0, J - 1)
         kk = _np.clip(_np.round(ijk_all[:, 2]).astype(int), 0, K - 1)
         blob_amps = _np.abs(log1[kk, jj, ii]).astype(_np.float32)
-    except Exception:
+    except Exception as exc:
+        _log(
+            f"warning: blob_amps re-derivation failed ({exc}); "
+            f"deep-end strong-contact clipping disabled for all stage-1 lines"
+        )
         blob_amps = None
     for l in stage1_lines:
         try:
             l["inlier_ras"] = _np.asarray(pts_blobs[l["inlier_idx"]], dtype=float)
             if blob_amps is not None:
                 l["inlier_amps"] = _np.asarray(blob_amps[l["inlier_idx"]], dtype=float)
-        except Exception:
+        except Exception as exc:
+            _log(
+                f"warning: line inlier_idx → blob lookup failed "
+                f"({exc}); inlier_ras / inlier_amps cleared for one line"
+            )
             l["inlier_ras"] = None
             l["inlier_amps"] = None
 
