@@ -123,12 +123,18 @@ Dataset-gated regressions (need a postop CT dataset on disk; set
 `ROSA_SEEG_DATASET` to the top-level directory):
 
 - `tests/deep_core/test_pipeline_dataset_contact_pitch_v1.py` — Auto
-  Fit regression on T22 / T2. Gates matched/FP counts against the
-  production detector.
+  Fit regression. Quick subject-level gates (`test_T22`, `test_T2`,
+  `test_T2_auto_strategy`, ~15 s combined) plus the slow full-dataset
+  gate `test_dataset_full` (22 subjects, ~70 s) that asserts recall
+  and the orphan budget. The full-dataset gate is the regression net for
+  refactor work; do not relax its asserts to make a refactor pass.
 - `tests/rosa_core/test_contact_peak_fit.py` — peak-driven contact
   detection. Synthetic unit tests + dataset tests asserting T22
   median per-contact error ≤ 1.75 mm and T2 ≤ 1.5 mm vs. the
   subject's `contacts.tsv` ground truth.
+
+For the canonical project state, current pipeline version, and
+score-band policy, see [`HANDOFF.md`](HANDOFF.md).
 
 Probes (diagnostic, not asserted):
 

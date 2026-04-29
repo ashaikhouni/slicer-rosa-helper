@@ -1,17 +1,22 @@
-"""End-to-end regression for contact_pitch_v1 two-stage LoG+Frangi pipeline.
+"""End-to-end regression for the contact_pitch_v1 detector.
 
-Matches the probe's axis-based acceptance criterion (``angle ≤ 10°`` and
-``mid_d ≤ 8 mm``). Start/end errors are deliberately NOT gated: stage-1
-lines span the contact range, which is typically offset from the GT
-bolt-entry/deep-tip endpoints. Extending endpoints to match GT is a
-separate pending task.
+Matches the probe's axis-based acceptance criterion (``angle ≤ 10°``
+and ``mid_d ≤ 8 mm``). Start/end errors are deliberately NOT gated:
+stage-1 lines span the contact range, which is typically offset from
+the GT bolt-entry/deep-tip endpoints.
 
-Baselines (tuned probe + hull-endpoint / deep-tip priors):
+Two test surfaces:
 
-  - T22: 8/8 matched, ≤ 10 FP
-  - T2:  12/12 matched, ≤ 10 FP
+  - Per-subject quick gates (``test_T22``, ``test_T2``,
+    ``test_T2_auto_strategy``) — fast iteration for code changes
+    on Auto Fit. Combined runtime ≈ 15 s.
+  - Full-dataset gate (``test_dataset_full``) — runs all 22 subjects
+    (T17 / T19 / T21 excluded; their GT is unreliable per
+    ``feedback_gt_completeness.md``), asserts recall + orphan budget.
+    Runtime ≈ 70 s. This is the regression net for refactor work.
 
-See ``slicer-rosa-helper/docs/DEEP_CORE_V2_HANDOFF.md``.
+See ``slicer-rosa-helper/docs/HANDOFF.md`` for current pipeline
+state, recall numbers, and the score-band policy.
 """
 import os
 import sys
@@ -175,6 +180,82 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
             n_fp, 20,
             f"contact_pitch_v1 auto-strategy FP count regressed: {n_fp}",
         )
+
+    # Subjects with GT considered unreliable per
+    # ``feedback_gt_completeness.md`` — excluded from the full-dataset
+    # gate so orphan-vs-real-shank ambiguity doesn't poison the budget.
+    DATASET_EXCLUDED_SUBJECTS = frozenset({"T17", "T19", "T21"})
+
+    # Full-dataset gate baseline (pipeline 1.0.29, 2026-04-29):
+    #   295 / 295 matched, 15 orphans, ~70 s on a 22-subject run.
+    # Bumping this without an accompanying memory entry explaining
+    # WHY the budget moved is a regression smell — see
+    # ``feedback_gt_completeness.md``: orphans are FPs, not "shanks
+    # GT missed", so the budget should drop or hold over time, never
+    # silently grow.
+    DATASET_REQUIRED_RECALL = 295
+    DATASET_ORPHAN_BUDGET = 20
+
+    def test_dataset_full(self):
+        from eval_seeg_localization import iter_subject_rows
+
+        rows = [
+            r for r in iter_subject_rows(DATASET_ROOT, None)
+            if str(r["subject_id"]) not in self.DATASET_EXCLUDED_SUBJECTS
+        ]
+        self.assertGreater(
+            len(rows), 0,
+            f"no subjects in manifest at {SUBJECTS_TSV}",
+        )
+
+        total_matched = 0
+        total_gt = 0
+        total_orphans = 0
+        # Per-subject failures are logged so a regression report shows
+        # WHICH subject(s) lost shanks, not just the dataset totals.
+        per_subject = []
+        for row in rows:
+            sid = str(row["subject_id"])
+            gt, trajs, n_matched, n_fp = self._run_subject(sid)
+            n_total = len(gt)
+            total_matched += n_matched
+            total_gt += n_total
+            total_orphans += n_fp
+            per_subject.append((sid, n_matched, n_total, n_fp))
+
+        # Total recall over the dataset. Because each subject's matched
+        # count is bounded by its GT count, ``total_matched ≥ total_gt``
+        # implies every subject hit 100 % of its GT — there is no way
+        # for one subject's loss to be hidden by another's gain.
+        if total_matched < self.DATASET_REQUIRED_RECALL:
+            misses = [
+                f"{sid}: {m}/{n}"
+                for sid, m, n, _ in per_subject if m < n
+            ]
+            self.fail(
+                f"contact_pitch_v1 dataset recall regressed: "
+                f"{total_matched}/{total_gt} matched (need ≥ "
+                f"{self.DATASET_REQUIRED_RECALL}). Per-subject misses: "
+                + ", ".join(misses)
+            )
+        self.assertGreaterEqual(total_gt, self.DATASET_REQUIRED_RECALL)
+
+        # Orphan budget. Tightening this asserts the score framework
+        # is doing its job — every orphan above the budget is an FP we
+        # don't have a story for.
+        if total_orphans > self.DATASET_ORPHAN_BUDGET:
+            sorted_offenders = sorted(
+                per_subject, key=lambda r: r[3], reverse=True,
+            )[:6]
+            offenders = [
+                f"{sid}: {fp} orphans"
+                for sid, _m, _n, fp in sorted_offenders if fp > 0
+            ]
+            self.fail(
+                f"contact_pitch_v1 dataset orphan count regressed: "
+                f"{total_orphans} > budget {self.DATASET_ORPHAN_BUDGET}. "
+                f"Top offenders: " + ", ".join(offenders)
+            )
 
 
 if __name__ == "__main__":
