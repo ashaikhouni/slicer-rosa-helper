@@ -1,6 +1,19 @@
-"""Subcommand dispatcher for ``python -m rosa_agent``.
+"""Subcommand dispatcher for ``rosa-agent`` / ``python -m rosa_agent``.
 
-Top-level usage::
+Two ways to run:
+
+* **Installed (recommended)**: ``pip install .`` (or ``-e .``) at the
+  repo root creates a ``rosa-agent`` console script and makes
+  ``rosa_agent`` / ``rosa_core`` / ``rosa_detect`` / ``shank_core``
+  importable normally — no PYTHONPATH gymnastics needed.
+
+* **Repo-mode (legacy / dev iteration)**: when the package isn't
+  installed, the boot path below detects that ``rosa_core`` isn't on
+  sys.path and falls back to injecting ``<repo>/CommonLib`` so the
+  CLI still works against a fresh checkout. This fallback is for
+  developer convenience only; production use should ``pip install``.
+
+Subcommands::
 
     rosa-agent load     <ros_folder>           [--out manifest.json]
     rosa-agent detect   <ct.nii> [--seeds tsv]  --out trajectories.tsv
@@ -16,14 +29,29 @@ import sys
 from pathlib import Path
 
 
-# ``cli/`` is on sys.path when invoked as ``python -m rosa_agent`` (the
-# package is at ``cli/rosa_agent``). The CommonLib path is added here
-# so end users don't need to set PYTHONPATH manually.
-_HERE = Path(__file__).resolve()
-_REPO = _HERE.parents[2]  # cli/rosa_agent/main.py -> repo root
-_LIB = _REPO / "CommonLib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
+def _ensure_commonlib_importable() -> None:
+    """Repo-mode fallback for un-installed checkouts.
+
+    When the package has been ``pip install``-ed, ``rosa_core`` is
+    already importable and we leave sys.path alone. When running from
+    a checkout WITHOUT install (e.g. ``python -m rosa_agent ...`` from
+    cli/ on a fresh clone) and ``rosa_core`` isn't on sys.path, look
+    for ``<repo>/CommonLib`` next to the cli/ package and inject it.
+    """
+    try:
+        import rosa_core  # noqa: F401  (probe import — discarded)
+        return
+    except ImportError:
+        pass
+
+    here = Path(__file__).resolve()
+    # cli/rosa_agent/main.py → repo root is parents[2].
+    common = here.parents[2] / "CommonLib"
+    if common.exists() and str(common) not in sys.path:
+        sys.path.insert(0, str(common))
+
+
+_ensure_commonlib_importable()
 
 
 SUBCOMMANDS = {

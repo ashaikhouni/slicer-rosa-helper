@@ -7,6 +7,11 @@ __pycache__/
 build/
 *.s4ext
 
+# pyproject / setuptools build artifacts (rosa-agent install).
+*.egg-info/
+dist/
+*.egg
+
 # Local-only session notes — handoff + resume prompts, Claude memory,
 # and any per-session scratch docs. Keep these out of the public repo.
 docs/CONTACT_PITCH_V1_HANDOFF.md

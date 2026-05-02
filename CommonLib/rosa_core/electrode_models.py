@@ -20,12 +20,24 @@ _REQUIRED_MODEL_KEYS = {
 
 
 def default_electrode_library_path() -> Path:
-    """Return canonical bundled electrode model library path."""
+    """Return canonical bundled electrode model library path.
+
+    Searches three locations in order:
+      1. ``rosa_core/resources/electrodes/`` — inside the package (the
+         pip-installed location; ships with the wheel via package-data).
+      2. ``CommonLib/resources/electrodes/`` — legacy repo layout.
+      3. Even older module-local copy.
+
+    The first existing path wins; if none exist the package-internal
+    path is returned so the resulting error message points at the
+    canonical location.
+    """
     here = Path(__file__).resolve()
     filename = "electrode_models.json"
     candidates = [
-        here.parents[1] / "resources" / "electrodes" / filename,  # CommonLib/rosa_core -> CommonLib/resources
-        here.parents[3] / "CommonLib" / "resources" / "electrodes" / filename,  # legacy module-local copy
+        here.parent / "resources" / "electrodes" / filename,  # rosa_core/resources/...
+        here.parents[1] / "resources" / "electrodes" / filename,  # CommonLib/resources/...
+        here.parents[3] / "CommonLib" / "resources" / "electrodes" / filename,  # legacy
     ]
     for path in candidates:
         if path.exists():

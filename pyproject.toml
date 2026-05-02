@@ -1,0 +1,108 @@
+# Package metadata for the headless ``rosa-agent`` CLI + the pure-Python
+# subset of CommonLib it depends on. The Slicer extension modules
+# (RosaHelper/, ContactImport/, ExportCenter/, etc.) are NOT pip-installable
+# — they ship as Slicer ScriptedLoadableModules through Slicer's own
+# Extension Manager. This pyproject only packages what runs without Slicer:
+#
+#   * rosa_agent       — the CLI (cli/rosa_agent/)
+#   * rosa_core        — pure-Python algorithm + transforms + IO helpers
+#   * rosa_detect      — detection algorithm package (no slicer/vtk/qt)
+#   * shank_core       — CT mask + IO helpers
+#
+# rosa_scene/ and rosa_workflow/ are deliberately excluded — they import
+# from __main__ slicer/vtk/qt and have no value in a headless install.
+#
+# Install (editable, recommended for dev):
+#     pip install -e .
+#
+# Install (release):
+#     pip install .
+#
+# Smoke test after install:
+#     rosa-agent --help
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosa-agent"
+version = "0.1.0"
+description = "Pure-Python CLI agent for the ROSA viewer SEEG localization pipeline (load, detect, contacts, label) — runs without Slicer."
+readme = "cli/README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Ammar Shaikhouni", email = "ashaikhouni@gmail.com" },
+]
+keywords = ["seeg", "stereo-eeg", "neurosurgery", "epilepsy", "ROSA", "slicer", "ct"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+# Hard dependencies — CLI fails to start without these.
+dependencies = [
+    "numpy >= 1.24",
+    "SimpleITK >= 2.2",
+    "nibabel >= 5.0",
+    "scipy >= 1.10",
+]
+
+[project.optional-dependencies]
+# Optional / ergonomic extras.
+test = [
+    "pytest >= 7.0",
+]
+
+[project.scripts]
+# Entry point — installs a ``rosa-agent`` shell command pointing at
+# rosa_agent.main:main. After ``pip install .`` users invoke
+# ``rosa-agent pipeline T22 --out-dir ...`` directly; no PYTHONPATH
+# manipulation, no python -m incantation needed.
+rosa-agent = "rosa_agent.main:main"
+
+[project.urls]
+Repository = "https://github.com/ashaikhouni/slicer-rosa-helper"
+
+# ---------------------------------------------------------------------
+# setuptools configuration
+# ---------------------------------------------------------------------
+#
+# The headless packages live in two source roots:
+#   * cli/rosa_agent       (the CLI itself)
+#   * CommonLib/{rosa_core, rosa_detect, shank_core}
+#
+# Multi-root discovery via ``where = ["cli", "CommonLib"]`` lets
+# setuptools find both without a layout migration. Slicer-coupled
+# subpackages (rosa_scene, rosa_workflow) are explicitly excluded.
+
+[tool.setuptools.packages.find]
+where = ["cli", "CommonLib"]
+include = [
+    "rosa_agent*",
+    "rosa_core*",
+    "rosa_detect*",
+    "shank_core*",
+]
+exclude = [
+    "rosa_scene*",
+    "rosa_workflow*",
+    "tests*",
+]
+
+# Non-Python data files that ship inside packages — currently the
+# bundled electrode-model library JSON. ``rosa_core/resources/...``
+# was the canonical path before this pyproject; setuptools will pick
+# it up via package-data because it's inside the rosa_core/ tree.
+[tool.setuptools.package-data]
+rosa_core = ["resources/**/*.json"]

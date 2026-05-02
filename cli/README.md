@@ -3,9 +3,27 @@
 A pure-Python command-line agent that runs the SEEG localization
 pipeline end-to-end without Slicer.
 
+## Install
+
 ```bash
+pip install .            # release install
+pip install -e .         # editable / dev install
+```
+
+The install creates a `rosa-agent` console script and registers the
+headless packages (`rosa_agent`, `rosa_core`, `rosa_detect`,
+`shank_core`) so they're importable from anywhere — no PYTHONPATH
+needed. Run it from any cwd:
+
+```bash
+rosa-agent <subcommand> ...
+# or equivalently
 python -m rosa_agent <subcommand> ...
 ```
+
+The `pyproject.toml` lives at the repo root (`slicer-rosa-helper/`)
+and explicitly excludes the Slicer-coupled packages
+(`rosa_scene`, `rosa_workflow`) so the install stays headless.
 
 Subcommands:
 
@@ -17,11 +35,14 @@ Subcommands:
 | `label`   | Assign atlas labels to a contacts TSV                       |
 | `pipeline`| Run all four stages end-to-end                              |
 
-## Inputs
+## Repo-mode (no install)
 
-The agent assumes the [CommonLib](../CommonLib/) directory is on
-`PYTHONPATH`. The package adds it automatically when invoked as
-`python -m rosa_agent`.
+`python -m rosa_agent ...` from the repo root still works without
+`pip install` — the boot path detects an un-installed checkout and
+adds `CommonLib/` to `sys.path` as a fallback. This is for dev
+iteration only; production use should `pip install`.
+
+## Inputs
 
 Coordinates are RAS millimeters except inside the JSON manifest's
 `planned_trajectories` which exposes both `*_lps` (the raw ROSA frame)
