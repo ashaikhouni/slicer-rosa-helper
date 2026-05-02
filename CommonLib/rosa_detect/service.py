@@ -7,7 +7,11 @@ The rest of the codebase (Slicer modules, CLI, tests) calls one of:
 
 Swapping the detection algorithm later means changing the body of this
 file — nothing outside ``rosa_detect/`` should need to be touched as
-long as the new algorithm produces the same ``DetectionResult`` shape.
+long as the new algorithm produces the same ``DetectionResult`` shape
+(see ``rosa_detect.contracts.DetectedTrajectory`` for the trajectory
+contract; in particular, future curved-shank algorithms can populate
+the optional ``path_ras`` polyline without breaking callers that read
+``start_ras`` / ``end_ras`` today).
 
 Inputs (``DetectionContext``):
     ct.path or arr_kji + spacing_xyz   - voxel data
@@ -16,10 +20,12 @@ Inputs (``DetectionContext``):
     logger                              - optional progress callable
 
 Outputs (``DetectionResult``):
-    trajectories[]   - public list of {start_ras, end_ras, confidence,
-                       confidence_label, model_id, ...}
-    contacts[]       - reserved (currently unused; algorithm-side)
-    diagnostics      - timing/counts/notes (extras is opaque to callers)
+    trajectories[]   - list of ``DetectedTrajectory`` dicts (see
+                       contracts.py for the public field set; algorithm-
+                       private fields stamped on the same dict ARE NOT
+                       part of the contract).
+    contacts[]       - reserved (currently unused; algorithm-side).
+    diagnostics      - timing/counts/notes; ``extras`` is opaque.
 """
 
 from __future__ import annotations
