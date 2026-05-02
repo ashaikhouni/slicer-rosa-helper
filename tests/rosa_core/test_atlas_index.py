@@ -17,6 +17,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
 
 
+def _try_imports() -> bool:
+    try:
+        import numpy  # noqa: F401
+        from rosa_core import atlas_index  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+DEPS_AVAILABLE = _try_imports()
+
+
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy / rosa_core not importable in this environment.",
+)
 class AtlasIndexTests(unittest.TestCase):
     def test_compute_label_centroids_basic(self):
         import numpy as np

@@ -194,6 +194,10 @@ class GuidedFitDatasetRegressionTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/SimpleITK/rosa_detect not importable in this environment.",
+)
 class SitkGeometryParityTests(unittest.TestCase):
     """Pin the LPS-flip helper that bridges Slicer node matrices and SITK.
 
@@ -214,13 +218,10 @@ class SitkGeometryParityTests(unittest.TestCase):
     """
 
     def test_apply_geometry_is_noop_when_matrix_matches_header(self):
-        try:
-            import numpy as np
-            import SimpleITK as sitk
-            from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.service import stamp_ijk_to_ras_on_sitk
-        except ImportError:
-            self.skipTest("numpy/SimpleITK/rosa_detect not importable")
+        import numpy as np
+        import SimpleITK as sitk
+        from shank_core.io import image_ijk_ras_matrices
+        from rosa_detect.service import stamp_ijk_to_ras_on_sitk
 
         # Synthetic 5x6x7 volume with a non-trivial spacing + LPS origin
         # and direction (positive identity in LPS).
@@ -247,13 +248,10 @@ class SitkGeometryParityTests(unittest.TestCase):
 
     def test_apply_geometry_round_trips_through_node_matrix(self):
         """Stamp a custom ijk_to_ras, then derive matrices back; must match."""
-        try:
-            import numpy as np
-            import SimpleITK as sitk
-            from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.service import stamp_ijk_to_ras_on_sitk
-        except ImportError:
-            self.skipTest("numpy/SimpleITK/rosa_detect not importable")
+        import numpy as np
+        import SimpleITK as sitk
+        from shank_core.io import image_ijk_ras_matrices
+        from rosa_detect.service import stamp_ijk_to_ras_on_sitk
 
         img = sitk.GetImageFromArray(np.zeros((4, 5, 6), dtype=np.float32))
         img.SetSpacing((1.0, 1.0, 1.0))

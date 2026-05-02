@@ -273,8 +273,22 @@ class RegistrationDirectionTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/SimpleITK/rosa_core not importable in this environment.",
+)
 class TransformPointsTests(unittest.TestCase):
-    """Pin the LPS<->RAS bridge in ``transform_to_4x4_ras``."""
+    """Pin the LPS<->RAS bridge in ``transform_to_4x4_ras``.
+
+    Three cases here split by what they actually need:
+      * test_apply_identity_4x4_is_a_noop / test_apply_pure_ras_translation
+        — pure numpy. Skipped only if numpy itself is missing.
+      * test_translation_round_trip_through_lps_conversion — needs
+        SimpleITK to construct the rigid transform.
+    Wrapped under one DEPS_AVAILABLE guard since the probe at module
+    top imports both libs together; loosening per-test would just be
+    fragmenting the same skip semantics.
+    """
 
     def test_apply_identity_4x4_is_a_noop(self):
         import numpy as np
