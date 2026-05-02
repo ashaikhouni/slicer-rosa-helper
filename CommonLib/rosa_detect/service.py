@@ -123,7 +123,11 @@ def feature_volume_node_name(
 # ---------------------------------------------------------------------
 
 
-def _vtk_matrix_to_numpy(m_vtk) -> np.ndarray:
+def vtk_matrix4x4_to_numpy(m_vtk) -> np.ndarray:
+    """Convert a vtkMatrix4x4 (or any object with ``GetElement(r, c)``)
+    to a numpy 4x4 float matrix. Public — Slicer modules and the CLI
+    use the same pattern; keep one implementation.
+    """
     mat = np.eye(4, dtype=float)
     for r in range(4):
         for c in range(4):
@@ -131,31 +135,39 @@ def _vtk_matrix_to_numpy(m_vtk) -> np.ndarray:
     return mat
 
 
-def _volume_node_ijk_to_ras_matrix(volume_node) -> np.ndarray:
+def volume_node_geometry(volume_node) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(ijk_to_ras_4x4, ras_to_ijk_4x4)`` for a Slicer volume node.
+
+    Lazy-imports vtk, preferring the Slicer-injected ``__main__.vtk``
+    over a pip ``vtk`` install. Public seam used by Auto Fit, Guided
+    Fit, and ContactsTrajectoryView; never call vtk directly from
+    Slicer modules — go through this helper so any future migration to
+    a non-vtk matrix source happens in one place.
+    """
     try:
         from __main__ import vtk
     except ImportError:
         import vtk
-    m = vtk.vtkMatrix4x4()
-    volume_node.GetIJKToRASMatrix(m)
-    return _vtk_matrix_to_numpy(m)
+    m_ijk = vtk.vtkMatrix4x4()
+    volume_node.GetIJKToRASMatrix(m_ijk)
+    m_ras = vtk.vtkMatrix4x4()
+    volume_node.GetRASToIJKMatrix(m_ras)
+    return vtk_matrix4x4_to_numpy(m_ijk), vtk_matrix4x4_to_numpy(m_ras)
 
 
-def _volume_node_ras_to_ijk_matrix(volume_node) -> np.ndarray:
-    try:
-        from __main__ import vtk
-    except ImportError:
-        import vtk
-    m = vtk.vtkMatrix4x4()
-    volume_node.GetRASToIJKMatrix(m)
-    return _vtk_matrix_to_numpy(m)
-
-
-def _apply_slicer_geometry_to_sitk(img, ijk_to_ras: np.ndarray) -> None:
+def apply_slicer_geometry_to_sitk(img, ijk_to_ras: np.ndarray) -> None:
     """Overwrite SITK image origin + direction so they match the Slicer
     volume node's IJK->RAS matrix (converted to LPS). Does not resample.
-    Without this, ``prepare_volume`` inherits the on-disk header geometry
-    and the feature volumes end up offset from the displayed CT.
+
+    Without this, downstream resample/canonicalization inherits the
+    on-disk header geometry and the feature volumes end up offset from
+    the displayed CT — for ROSA-imported volumes the header origin and
+    the registered node origin differ, and Auto Fit / Guided Fit /
+    LoG-cache reads ALL silently mis-localize otherwise.
+
+    Public seam — all three callers (rosa_detect.service load path,
+    PostopCT guided_fit, ContactsTrajectoryView LoG compute) use this
+    one implementation. See feedback_cli_slicer_parity.md.
     """
     try:
         spacing = np.array(img.GetSpacing(), dtype=float)
@@ -178,9 +190,63 @@ def _apply_slicer_geometry_to_sitk(img, ijk_to_ras: np.ndarray) -> None:
         pass
 
 
-def _load_image_and_matrices(ctx: DetectionContext):
-    """Return (sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4) from ``ctx``."""
+def image_from_volume_node(volume_node) -> tuple[Any, np.ndarray, np.ndarray]:
+    """Build an SITK image from a Slicer volume node, with the node's
+    IJK->RAS matrix stamped into origin/direction (LPS-flipped).
 
+    Returns ``(sitk_image, ijk_to_ras, ras_to_ijk)`` ready to feed into
+    ``guided_fit_engine.compute_features`` or any other rosa_detect
+    entry point. Single source of truth for the Slicer-side parity
+    invariant; callers must not roll their own copy.
+    """
+    import SimpleITK as sitk
+    # Local import keeps slicer.* off the CLI path — this function is
+    # only called from Slicer modules where ``slicer`` is already in
+    # ``__main__``.
+    try:
+        from __main__ import slicer
+    except ImportError:
+        import slicer  # type: ignore[no-redef]
+
+    arr_kji = np.asarray(
+        slicer.util.arrayFromVolume(volume_node), dtype=np.float32,
+    )
+    img = sitk.GetImageFromArray(arr_kji)
+    img.SetSpacing(tuple(float(v) for v in volume_node.GetSpacing()))
+    ijk_to_ras, ras_to_ijk = volume_node_geometry(volume_node)
+    apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+    return img, ijk_to_ras, ras_to_ijk
+
+
+# ---------------------------------------------------------------------
+# Internal aliases (the original underscore names) — kept so callers
+# inside this file don't churn. New code should call the public names.
+# ---------------------------------------------------------------------
+
+_vtk_matrix_to_numpy = vtk_matrix4x4_to_numpy
+_apply_slicer_geometry_to_sitk = apply_slicer_geometry_to_sitk
+
+
+def _volume_node_ijk_to_ras_matrix(volume_node) -> np.ndarray:
+    return volume_node_geometry(volume_node)[0]
+
+
+def _volume_node_ras_to_ijk_matrix(volume_node) -> np.ndarray:
+    return volume_node_geometry(volume_node)[1]
+
+
+def load_image_and_matrices(ctx: DetectionContext):
+    """Return ``(sitk_image, ijk_to_ras_4x4, ras_to_ijk_4x4)`` from ``ctx``.
+
+    Public entry point. ``ctx`` is the same shape as ``DetectionContext``:
+    either ``ctx['ct'].path`` (preferred) or ``ctx['arr_kji']`` +
+    ``ctx['spacing_xyz']``. When ``ctx['extras']['volume_node']`` is
+    set, the Slicer node's IJK->RAS overrides the header.
+
+    The split between voxel data (always from disk when path is given)
+    and IJK->RAS matrix (Slicer node when present, header otherwise) is
+    the CLI/Slicer parity invariant — see feedback_cli_slicer_parity.md.
+    """
     import SimpleITK as sitk
     from shank_core.io import image_ijk_ras_matrices
 
@@ -191,9 +257,8 @@ def _load_image_and_matrices(ctx: DetectionContext):
     if ct_path:
         img = sitk.ReadImage(str(ct_path))
         if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-            ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
-            ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
-            _apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+            ijk_to_ras, ras_to_ijk = volume_node_geometry(volume_node)
+            apply_slicer_geometry_to_sitk(img, ijk_to_ras)
         else:
             ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
         return (
@@ -207,9 +272,8 @@ def _load_image_and_matrices(ctx: DetectionContext):
     img.SetSpacing(tuple(float(v) for v in ctx["spacing_xyz"]))
 
     if volume_node is not None and hasattr(volume_node, "GetIJKToRASMatrix"):
-        ijk_to_ras = _volume_node_ijk_to_ras_matrix(volume_node)
-        ras_to_ijk = _volume_node_ras_to_ijk_matrix(volume_node)
-        _apply_slicer_geometry_to_sitk(img, ijk_to_ras)
+        ijk_to_ras, ras_to_ijk = volume_node_geometry(volume_node)
+        apply_slicer_geometry_to_sitk(img, ijk_to_ras)
     else:
         ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
 
@@ -218,6 +282,9 @@ def _load_image_and_matrices(ctx: DetectionContext):
         np.asarray(ijk_to_ras, dtype=float),
         np.asarray(ras_to_ijk, dtype=float),
     )
+
+
+_load_image_and_matrices = load_image_and_matrices
 
 
 # ---------------------------------------------------------------------

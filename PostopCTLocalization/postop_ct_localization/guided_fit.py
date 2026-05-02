@@ -588,54 +588,13 @@ class GuidedFitWidgetMixin:
     # ---- Fitting ------------------------------------------------------
 
     def _guided_fit_volume_matrices(self, volume_node):
-        import SimpleITK as sitk
-        arr_kji = np.asarray(
-            slicer.util.arrayFromVolume(volume_node), dtype=np.float32
-        )
-        img = sitk.GetImageFromArray(arr_kji)
-        img.SetSpacing(tuple(float(v) for v in volume_node.GetSpacing()))
+        # Single source of truth for the LPS-flip + matrix bundling.
+        # The previous inline copy was the third duplicate of this
+        # logic and a known parity-bug surface — see
+        # feedback_cli_slicer_parity.md.
+        from rosa_detect.service import image_from_volume_node
 
-        try:
-            import vtk
-        except ImportError:
-            from __main__ import vtk
-        m = vtk.vtkMatrix4x4()
-        volume_node.GetIJKToRASMatrix(m)
-        ijk_to_ras = np.array([
-            [float(m.GetElement(r, c)) for c in range(4)] for r in range(4)
-        ], dtype=float)
-        m2 = vtk.vtkMatrix4x4()
-        volume_node.GetRASToIJKMatrix(m2)
-        ras_to_ijk = np.array([
-            [float(m2.GetElement(r, c)) for c in range(4)] for r in range(4)
-        ], dtype=float)
-        # Write the volume node's IJK->RAS into the SITK image's
-        # origin/direction. Without this, the SITK image carries the
-        # identity defaults from `sitk.GetImageFromArray`, and
-        # `prepare_volume`'s resample inherits that identity geometry
-        # — `image_ijk_ras_matrices(resampled_img)` then returns a
-        # matrix unrelated to the real CT, and the blob cloud projects
-        # to bogus RAS coords. Mirror what
-        # `ContactPitchV1Pipeline._apply_slicer_geometry_to_sitk` does
-        # for Auto Fit's path.
-        try:
-            spacing = np.array(img.GetSpacing(), dtype=float)
-            origin_ras = ijk_to_ras[:3, 3].copy()
-            dir_ras = np.zeros((3, 3), dtype=float)
-            for k in range(3):
-                dir_ras[:, k] = ijk_to_ras[:3, k] / max(1e-9, float(spacing[k]))
-            # SITK images live in LPS; flip X and Y from the RAS form.
-            origin_lps = np.array(
-                [-origin_ras[0], -origin_ras[1], origin_ras[2]], dtype=float,
-            )
-            dir_lps = dir_ras.copy()
-            dir_lps[0, :] *= -1.0
-            dir_lps[1, :] *= -1.0
-            img.SetOrigin(tuple(float(v) for v in origin_lps.tolist()))
-            img.SetDirection(tuple(float(v) for v in dir_lps.flatten().tolist()))
-        except Exception:
-            pass
-        return img, ijk_to_ras, ras_to_ijk
+        return image_from_volume_node(volume_node)
 
     @staticmethod
     def _seed_start_end_ras(traj):

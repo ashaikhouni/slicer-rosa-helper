@@ -1157,14 +1157,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _ras_to_ijk_matrix_np(self, volume_node):
         """Return the 4x4 RAS→IJK matrix of a scalar volume as numpy."""
-        import numpy as np
-        m = vtk.vtkMatrix4x4()
-        volume_node.GetRASToIJKMatrix(m)
-        out = np.zeros((4, 4), dtype=float)
-        for i in range(4):
-            for j in range(4):
-                out[i, j] = m.GetElement(i, j)
-        return out
+        from rosa_detect.service import volume_node_geometry
+
+        return volume_node_geometry(volume_node)[1]
 
     def _candidate_ids_from_default_combo(self):
         """Return the electrode ids matching the vendor token of the
