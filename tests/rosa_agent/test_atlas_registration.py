@@ -169,5 +169,74 @@ class AtlasBaseRegistrationTests(unittest.TestCase):
         self.assertIn("resampled labelmap", log_text)
 
 
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy / nibabel / SimpleITK / rosa_agent not importable",
+)
+class NoScipyFallbackTests(unittest.TestCase):
+    """Pin the no-scipy nearest-neighbor fallback in atlas_provider_headless.
+
+    The provider's ``_build_kdtree`` prefers ``scipy.spatial.cKDTree`` and
+    falls back to brute-force NumPy when scipy isn't installed. A 2026-05-02
+    refactor (extracting shared helpers into rosa_core.atlas_index) dropped
+    the ``import math`` that the fallback's ``math.sqrt`` call still needed,
+    so any sample_contact() call in a no-scipy environment would NameError.
+
+    We force the fallback path by hiding scipy from the import system, then
+    exercise sample_contact() to confirm it produces a sensible answer.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+        import numpy as np
+        # Tiny labelmap with two labels at known positions.
+        arr = np.zeros((10, 10, 10), dtype=np.int16)
+        arr[2:5, 2:5, 2:5] = 17
+        arr[6:9, 6:9, 6:9] = 18
+        affine = np.eye(4, dtype=float)
+        affine[3, 3] = 1.0
+        self.label_path = self.tmp / "labelmap.nii.gz"
+        _write_nifti(arr, affine, self.label_path)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_fallback_query_works_without_scipy(self):
+        import sys
+        from rosa_agent.services import atlas_provider_headless
+
+        # Block scipy so ``_build_kdtree``'s ``from scipy.spatial import
+        # cKDTree`` raises ImportError and the fallback path runs. Save
+        # and restore any pre-imported scipy modules so we don't poison
+        # the test process.
+        saved = {
+            name: sys.modules[name]
+            for name in list(sys.modules)
+            if name == "scipy" or name.startswith("scipy.")
+        }
+        for name in saved:
+            del sys.modules[name]
+        sys.modules["scipy"] = None  # type: ignore[assignment]
+        sys.modules["scipy.spatial"] = None  # type: ignore[assignment]
+        try:
+            prov = atlas_provider_headless.LabelmapAtlasProvider(
+                source_id="freesurfer", display_name="FS",
+                label_path=self.label_path,
+                label_names={17: "Left-Hippo", 18: "Left-Amyg"},
+            )
+            sample = prov.sample_contact([3.0, 3.0, 3.0])
+        finally:
+            sys.modules.pop("scipy", None)
+            sys.modules.pop("scipy.spatial", None)
+            sys.modules.update(saved)
+
+        self.assertEqual(sample["label_value"], 17)
+        self.assertEqual(sample["label"], "Left-Hippo")
+        # Querying at the cube center should give zero distance.
+        self.assertAlmostEqual(sample["distance_to_voxel_mm"], 0.0, places=5)
+
+
 if __name__ == "__main__":
     unittest.main()

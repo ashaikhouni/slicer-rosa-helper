@@ -98,7 +98,12 @@ def _build_kdtree(points_ras):
             p = np.asarray(point, dtype=float).reshape(3)
             d2 = ((pts - p) ** 2).sum(axis=1)
             idx = int(np.argmin(d2))
-            return idx, float(math.sqrt(float(d2[idx])))
+            # ``np.sqrt`` over ``math.sqrt``: keeps the import surface
+            # to (numpy,) — used to import ``math`` here, but the
+            # 2026-05-02 atlas_index extraction moved the centroid /
+            # distance helpers to rosa_core and the local ``import math``
+            # went with them. Using np.sqrt sidesteps re-adding it.
+            return idx, float(np.sqrt(float(d2[idx])))
 
         return _query
 
