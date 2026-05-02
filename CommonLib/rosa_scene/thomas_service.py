@@ -23,18 +23,10 @@ class ThomasService:
     def _load_label_volume_node(self, path):
         """Load one THOMAS mask as labelmap volume, with legacy fallback path."""
         try:
-            result = slicer.util.loadLabelVolume(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                return node if ok else None
-            return result
+            return slicer.util.loadLabelVolume(path)
         except Exception:
             try:
-                result = slicer.util.loadVolume(path, properties={"labelmap": True}, returnNode=True)
-                if isinstance(result, tuple):
-                    ok, node = result
-                    return node if ok else None
-                return result
+                return slicer.util.loadVolume(path, properties={"labelmap": True})
             except Exception:
                 return None
 

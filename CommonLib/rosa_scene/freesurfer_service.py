@@ -31,75 +31,6 @@ class FreeSurferService:
         """Return first node with exact name and class, or None."""
         return find_node_by_name(node_name=node_name, class_name=class_name)
 
-    def _cli_success(self, cli_node):
-        """Return True when a CLI node finished without errors."""
-        if cli_node is None:
-            return False
-        status = (cli_node.GetStatusString() or "").lower()
-        return ("completed" in status) and ("error" not in status)
-
-    def run_brainsfit_rigid_registration(
-        self,
-        fixed_volume_node,
-        moving_volume_node,
-        output_transform_node,
-        initialize_mode="useGeometryAlign",
-        logger=None,
-    ):
-        """Run BRAINSFit rigid registration for moving->fixed and return transform node."""
-
-        def log(msg):
-            if logger:
-                logger(msg)
-
-        if fixed_volume_node is None or moving_volume_node is None:
-            raise ValueError("Fixed and moving volumes are required.")
-        if output_transform_node is None:
-            raise ValueError("Output transform node is required.")
-        if not hasattr(slicer.modules, "brainsfit"):
-            raise RuntimeError("BRAINSFit module is not available in this Slicer install.")
-
-        identity = vtk.vtkMatrix4x4()
-        output_transform_node.SetMatrixTransformToParent(identity)
-
-        base = {
-            "fixedVolume": fixed_volume_node.GetID(),
-            "movingVolume": moving_volume_node.GetID(),
-            "initializeTransformMode": initialize_mode or "useGeometryAlign",
-            "samplingPercentage": 0.02,
-            "minimumStepLength": 0.001,
-            "maximumStepLength": 0.2,
-        }
-        variants = [
-            dict(base, linearTransform=output_transform_node.GetID(), useRigid=True),
-            dict(base, outputTransform=output_transform_node.GetID(), useRigid=True),
-            dict(base, linearTransform=output_transform_node.GetID(), transformType="Rigid"),
-            dict(base, outputTransform=output_transform_node.GetID(), transformType="Rigid"),
-        ]
-
-        last_error = "Unknown BRAINSFit error"
-        for i, params in enumerate(variants, start=1):
-            cli_node = None
-            try:
-                cli_node = slicer.cli.runSync(slicer.modules.brainsfit, None, params)
-                if self._cli_success(cli_node):
-                    log(f"[fs] BRAINSFit variant {i}/{len(variants)} succeeded")
-                    return output_transform_node
-                status = cli_node.GetStatusString() if cli_node is not None else "no status"
-                err_text = ""
-                if cli_node is not None and hasattr(cli_node, "GetErrorText"):
-                    err_text = cli_node.GetErrorText() or ""
-                last_error = f"{status} {err_text}".strip()
-                log(f"[fs] BRAINSFit variant {i}/{len(variants)} failed: {last_error}")
-            except Exception as exc:
-                last_error = str(exc)
-                log(f"[fs] BRAINSFit variant {i}/{len(variants)} exception: {last_error}")
-            finally:
-                if cli_node is not None and cli_node.GetScene() is not None:
-                    slicer.mrmlScene.RemoveNode(cli_node)
-
-        raise RuntimeError(f"BRAINSFit rigid registration failed: {last_error}")
-
     def _resolve_freesurfer_surf_dir(self, subject_dir):
         """Resolve FreeSurfer surf directory from subject root or direct surf path."""
         root = os.path.abspath(subject_dir)
@@ -148,23 +79,15 @@ class FreeSurferService:
     def _load_parcellation_volume_node(self, path):
         """Load one FreeSurfer parcellation volume as labelmap when possible."""
         try:
-            result = slicer.util.loadLabelVolume(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                if ok and node is not None:
-                    return node
-            elif result is not None:
-                return result
+            node = slicer.util.loadLabelVolume(path)
+            if node is not None:
+                return node
         except Exception:
             pass
 
         # Fallback to scalar load if labelmap import path is unavailable.
         try:
-            result = slicer.util.loadVolume(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                return node if ok else None
-            return result
+            return slicer.util.loadVolume(path)
         except Exception:
             return None
 
@@ -388,14 +311,8 @@ class FreeSurferService:
 
     def _load_model_node(self, path):
         """Load one model path using multiple reader entrypoints."""
-        node = None
         try:
-            result = slicer.util.loadModel(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                node = node if ok else None
-            else:
-                node = result
+            node = slicer.util.loadModel(path)
         except Exception:
             node = None
         if node is not None:

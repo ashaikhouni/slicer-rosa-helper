@@ -167,14 +167,7 @@ class CaseLoaderService:
 
     def load_volume(self, path):
         """Load scalar volume by path and return MRML node."""
-        try:
-            result = slicer.util.loadVolume(path, returnNode=True)
-            if isinstance(result, tuple):
-                ok, node = result
-                return node if ok else None
-            return result
-        except TypeError:
-            return slicer.util.loadVolume(path)
+        return slicer.util.loadVolume(path)
 
     def center_volume(self, volume_node):
         """Center volume origin (Volumes module equivalent)."""

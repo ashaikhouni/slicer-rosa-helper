@@ -1,17 +1,21 @@
-"""Registration and FreeSurfer-parcellation helpers for atlas workflows."""
+"""FreeSurfer-parcellation/surface helpers + thin registration facade.
+
+Registration internals live in `RegistrationService`. This class keeps a
+single object handle (`logic.registration_service`) so callers don't need
+to wire two services.
+"""
 
 from __future__ import annotations
 
-from __main__ import slicer
-
 from .freesurfer_service import FreeSurferService
+from .registration_service import RegistrationService
 
 
 class AtlasRegistrationService:
-    """Registration and FreeSurfer loading operations."""
+    """Combined facade over RegistrationService + FreeSurferService."""
 
     def __init__(self, module_dir=None):
-        """Initialize service wrapper around `FreeSurferService`."""
+        self.registration = RegistrationService(module_dir=module_dir)
         self.fs_service = FreeSurferService(module_dir=module_dir)
 
     def run_brainsfit_rigid_registration(
@@ -22,8 +26,8 @@ class AtlasRegistrationService:
         initialize_mode="useGeometryAlign",
         logger=None,
     ):
-        """Run rigid BRAINSFit registration via FreeSurfer service helper."""
-        return self.fs_service.run_brainsfit_rigid_registration(
+        """Run rigid BRAINSFit registration via shared RegistrationService."""
+        return self.registration.run_brainsfit_rigid_registration(
             fixed_volume_node=fixed_volume_node,
             moving_volume_node=moving_volume_node,
             output_transform_node=output_transform_node,
@@ -84,14 +88,6 @@ class AtlasRegistrationService:
 
     def apply_transform_to_nodes(self, nodes, transform_node, harden=False):
         """Apply one transform to nodes and optionally harden in-place."""
-        if transform_node is None:
-            raise ValueError("Transform node is required.")
-        transform_id = transform_node.GetID()
-        for node in nodes or []:
-            if node is None:
-                continue
-            if hasattr(node, "SetAndObserveTransformNodeID"):
-                node.SetAndObserveTransformNodeID(transform_id)
-                if bool(harden):
-                    slicer.vtkSlicerTransformLogic().hardenTransform(node)
-        return nodes
+        return self.registration.apply_transform_to_nodes(
+            nodes=nodes, transform_node=transform_node, harden=harden,
+        )

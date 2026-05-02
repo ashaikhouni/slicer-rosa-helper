@@ -64,14 +64,9 @@ class DicomIOService:
         if node is None:
             for path in files:
                 try:
-                    result = slicer.util.loadVolume(path, returnNode=True)
-                    if isinstance(result, tuple):
-                        ok, candidate = result
-                        if ok and candidate is not None:
-                            node = candidate
-                            break
-                    elif result is not None:
-                        node = result
+                    candidate = slicer.util.loadVolume(path)
+                    if candidate is not None:
+                        node = candidate
                         break
                 except Exception:
                     continue

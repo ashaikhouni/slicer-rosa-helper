@@ -10,6 +10,7 @@ from .dicom_io_service import DicomIOService
 from .electrode_scene import ElectrodeSceneService
 from .freesurfer_service import FreeSurferService
 from .layout_service import LayoutService
+from .registration_service import RegistrationService
 from .scene_utils import (
     find_node_by_name,
     get_or_create_linear_transform,
@@ -32,6 +33,7 @@ __all__ = [
     "ElectrodeSceneService",
     "FreeSurferService",
     "LayoutService",
+    "RegistrationService",
     "find_node_by_name",
     "get_or_create_linear_transform",
     "preselect_base_volume",

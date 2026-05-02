@@ -367,12 +367,7 @@ class ExportCenterWidget(ScriptedLoadableModuleWidget):
         if not path:
             return
         try:
-            node = slicer.util.loadVolume(path, returnNode=False)
-        except TypeError:
-            # Older Slicer signature — returns (success, node).
-            ok, node = slicer.util.loadVolume(path, returnNode=True)
-            if not ok:
-                node = None
+            node = slicer.util.loadVolume(path)
         except Exception as exc:
             qt.QMessageBox.critical(
                 slicer.util.mainWindow(), "Curry export",
@@ -420,12 +415,11 @@ class ExportCenterWidget(ScriptedLoadableModuleWidget):
                 "Curry MRI and ROSA base T1 are the same volume.",
             )
             return
-        # Reuse RosaHelper's BRAINSFit wrapper via the shared
-        # FreeSurfer service. Same code path RosaHelper uses for
-        # custom-volume registration, but we leave the transform
-        # APPLIED (not hardened) so the export can invert it.
-        from rosa_scene.freesurfer_service import FreeSurferService
-        fs = FreeSurferService()
+        # Same BRAINSFit path RosaHelper uses for custom-volume
+        # registration, but we leave the transform APPLIED (not
+        # hardened) so the export can invert it on the way out.
+        from rosa_scene.registration_service import RegistrationService
+        reg = RegistrationService()
         transform_name = f"{curry_ref.GetName()}_to_{ros_base.GetName()}_curry"
         # Re-use any existing transform with this name (idempotent
         # re-runs); else create a new one.
@@ -435,7 +429,7 @@ class ExportCenterWidget(ScriptedLoadableModuleWidget):
                 "vtkMRMLLinearTransformNode", transform_name,
             )
         try:
-            fs.run_brainsfit_rigid_registration(
+            reg.run_brainsfit_rigid_registration(
                 fixed_volume_node=ros_base,
                 moving_volume_node=curry_ref,
                 output_transform_node=transform_node,

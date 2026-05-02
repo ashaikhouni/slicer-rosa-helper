@@ -31,7 +31,7 @@ from rosa_core import (
     lps_to_ras_point,
 )
 from rosa_scene.case_loader_service import CaseLoaderService
-from rosa_scene.freesurfer_service import FreeSurferService
+from rosa_scene.registration_service import RegistrationService
 from rosa_scene.scene_utils import find_node_by_name
 from rosa_scene.trajectory_scene import TrajectorySceneService
 from rosa_workflow.workflow_publish import WorkflowPublisher
@@ -587,7 +587,7 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         self.case_loader = CaseLoaderService()
         self.workflow_state = WorkflowState()
         self.workflow_publish = WorkflowPublisher(self.workflow_state)
-        self.fs_service = FreeSurferService(module_dir=MODULE_DIR)
+        self.registration = RegistrationService(module_dir=MODULE_DIR)
         self.trajectory_scene = TrajectorySceneService()
 
     def load_case(
@@ -644,8 +644,8 @@ class RosaHelperLogic(ScriptedLoadableModuleLogic):
         initialize_mode="useGeometryAlign",
         logger=None,
     ):
-        """Run rigid BRAINSFit registration through shared FreeSurfer service."""
-        return self.fs_service.run_brainsfit_rigid_registration(
+        """Run rigid BRAINSFit registration via shared RegistrationService."""
+        return self.registration.run_brainsfit_rigid_registration(
             fixed_volume_node=fixed_volume_node,
             moving_volume_node=moving_volume_node,
             output_transform_node=output_transform_node,
