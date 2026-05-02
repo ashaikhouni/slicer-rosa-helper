@@ -1144,16 +1144,17 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _compute_log_volume_from_ct(self, ct_node):
         """Compute LoG sigma=1 on the CT node's image data, in memory."""
         import numpy as np
-        import SimpleITK as sitk
+        from rosa_core.contact_peak_fit import compute_log_sigma1_volume
+
         arr_kji = slicer.util.arrayFromVolume(ct_node)
         if arr_kji is None:
             raise RuntimeError("CT volume has no array data")
-        img = sitk.GetImageFromArray(np.asarray(arr_kji, dtype=np.float32))
         spacing = [0.0, 0.0, 0.0]
         ct_node.GetSpacing(spacing)
-        img.SetSpacing(tuple(float(s) for s in spacing))
-        log_img = sitk.LaplacianRecursiveGaussian(img, sigma=1.0)
-        return sitk.GetArrayFromImage(log_img).astype(np.float32)
+        return compute_log_sigma1_volume(
+            np.asarray(arr_kji, dtype=np.float32),
+            spacing_xyz=tuple(float(s) for s in spacing),
+        )
 
     def _ras_to_ijk_matrix_np(self, volume_node):
         """Return the 4x4 RAS→IJK matrix of a scalar volume as numpy."""

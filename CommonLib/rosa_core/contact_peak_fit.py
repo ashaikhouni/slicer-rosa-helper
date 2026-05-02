@@ -37,6 +37,53 @@ from .volume_sampling import sample_trilinear_at_ras
 
 
 # ---------------------------------------------------------------------
+# LoG sigma=1 — shared SITK convenience used by every consumer.
+# ---------------------------------------------------------------------
+#
+# Auto Fit publishes a ``ContactPitch_LoG_sigma1`` feature volume; when
+# that's not in the scene (CLI agent, peak-driven path with no prior
+# Auto Fit run, dataset evaluation), the consumer must compute the same
+# LoG itself. Three call sites used to do this — CLI's
+# ``commands/contacts.py`` and Slicer's
+# ``ContactsTrajectoryView._compute_log_volume_from_ct`` plus an inline
+# block in ``rosa_detect.contact_pitch_v1_fit``. Same SITK kernel each
+# time (sigma=1 mm, LaplacianRecursiveGaussian on a float32 view); a
+# single helper keeps them in lockstep.
+
+
+def compute_log_sigma1_volume(img_or_array, spacing_xyz=None):
+    """Compute LoG sigma=1 mm on a CT volume.
+
+    Accepts either:
+      * a SimpleITK image (spacing carried by the image), or
+      * a numpy KJI array + ``spacing_xyz=(sx, sy, sz)`` mm tuple.
+
+    Returns a numpy ``float32`` KJI array of the same shape as the input.
+    Sigma is fixed at 1 mm because that is the canonical contact_pitch_v1
+    feature scale; do not parameterize it without updating the Auto Fit
+    feature-volume publication contract too.
+    """
+    import SimpleITK as sitk
+
+    if spacing_xyz is None:
+        # Treat as SimpleITK image.
+        img = img_or_array
+        arr_kji_in = sitk.GetArrayFromImage(img)
+        # Float32 input is required so the recursive Gaussian doesn't
+        # quantize a HU-int CT.
+        if arr_kji_in.dtype != np.float32:
+            img = sitk.GetImageFromArray(arr_kji_in.astype(np.float32))
+            img.CopyInformation(img_or_array)
+    else:
+        arr = np.asarray(img_or_array, dtype=np.float32)
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing(tuple(float(s) for s in spacing_xyz))
+
+    log_img = sitk.LaplacianRecursiveGaussian(img, sigma=1.0)
+    return sitk.GetArrayFromImage(log_img).astype(np.float32)
+
+
+# ---------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------
 

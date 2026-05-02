@@ -24,13 +24,12 @@ def _stderr(msg: str) -> None:
 
 def _compute_log_volume(ct_path: str | Path):
     """Return (log_kji_float32, ras_to_ijk_4x4)."""
-    import numpy as np
     import SimpleITK as sitk
+    from rosa_core.contact_peak_fit import compute_log_sigma1_volume
     from shank_core.io import image_ijk_ras_matrices
 
     img = sitk.ReadImage(str(ct_path))
-    log_img = sitk.LaplacianRecursiveGaussian(img, sigma=1.0)
-    log_arr = sitk.GetArrayFromImage(log_img).astype(np.float32)
+    log_arr = compute_log_sigma1_volume(img)
     _, ras_to_ijk = image_ijk_ras_matrices(img)
     return log_arr, ras_to_ijk
 
