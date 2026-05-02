@@ -287,6 +287,7 @@ def run_pipeline(
     freesurfer_lut: str | None = None,
     wm_path: str | None = None,
     wm_lut: str | None = None,
+    atlas_base_path: str | None = None,
 ) -> dict[str, Any]:
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -382,6 +383,10 @@ def run_pipeline(
             freesurfer_lut=freesurfer_lut,
             wm_path=wm_path,
             wm_lut=wm_lut,
+            atlas_base_path=atlas_base_path,
+            # The working CT is the natural target volume — that's the
+            # frame the contacts (and any --output-frame transform) live in.
+            target_volume_path=str(ct_path) if atlas_base_path else None,
         )
         if any(p is not None and p.is_ready() for p in providers.values()):
             label_rows = label_contacts(contacts, providers)
@@ -441,6 +446,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--freesurfer-lut", default="", help="FreeSurfer LUT")
     parser.add_argument("--wm", default="", help="White-matter labelmap")
     parser.add_argument("--wm-lut", default="", help="WM LUT")
+    parser.add_argument(
+        "--atlas-base", default="",
+        help="T1 / base volume the FreeSurfer / WM atlases were reconned on. "
+             "When passed, the FS / WM labelmaps are rigidly registered + "
+             "resampled onto the working-CT grid before sampling, so atlas "
+             "labels align with contacts that live in CT RAS.",
+    )
     args = parser.parse_args(argv)
 
     summary = run_pipeline(
@@ -456,6 +468,7 @@ def main(argv: list[str] | None = None) -> int:
         freesurfer_lut=args.freesurfer_lut or None,
         wm_path=args.wm or None,
         wm_lut=args.wm_lut or None,
+        atlas_base_path=args.atlas_base or None,
     )
     print(json.dumps(summary, indent=2))
     return 0

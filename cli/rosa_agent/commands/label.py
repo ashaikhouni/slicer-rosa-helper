@@ -56,7 +56,17 @@ def _build_providers(
     freesurfer_lut: str | None,
     wm_path: str | None,
     wm_lut: str | None,
+    atlas_base_path: str | None = None,
+    target_volume_path: str | None = None,
 ) -> dict[str, Any]:
+    """Construct the headless atlas providers.
+
+    When ``atlas_base_path`` and ``target_volume_path`` are both passed,
+    the FreeSurfer / WM labelmaps are rigidly registered + resampled
+    onto the target volume's grid (so contacts in target RAS align with
+    atlas labels). THOMAS skips this — its segmentations are typically
+    already in the same frame as the labelmap they're paired with.
+    """
     providers: dict[str, Any] = {}
 
     if thomas_dir:
@@ -76,10 +86,14 @@ def _build_providers(
                 display_name="FreeSurfer",
                 label_path=freesurfer_path,
                 lut_path=freesurfer_lut,
+                atlas_base_path=atlas_base_path,
+                target_volume_path=target_volume_path,
+                logger=_stderr,
             )
             _stderr(
                 f"[label] freesurfer: ready "
                 f"({len(providers['freesurfer']._labels)} voxels)"
+                f"{' (registered)' if atlas_base_path else ''}"
             )
         except Exception as exc:
             _stderr(f"[label] freesurfer provider failed: {exc}")
@@ -94,6 +108,9 @@ def _build_providers(
                 display_name="WM",
                 label_path=wm_path,
                 lut_path=wm_lut,
+                atlas_base_path=atlas_base_path,
+                target_volume_path=target_volume_path,
+                logger=_stderr,
             )
             _stderr(f"[label] wm: ready ({len(providers['wm']._labels)} voxels)")
         except Exception as exc:
@@ -164,8 +181,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--freesurfer-lut", default="", help="FreeSurfer color LUT (optional)")
     parser.add_argument("--wm", default="", help="White-matter labelmap (optional)")
     parser.add_argument("--wm-lut", default="", help="White-matter LUT (optional)")
+    parser.add_argument(
+        "--atlas-base", default="",
+        help="T1 / base volume the FreeSurfer / WM atlases were reconned on. "
+             "When passed alongside --target-volume, the atlases are rigidly "
+             "registered to the target before sampling.",
+    )
+    parser.add_argument(
+        "--target-volume", default="",
+        help="Volume the contacts live in (typically the postop CT). "
+             "Required when --atlas-base is passed.",
+    )
     parser.add_argument("--out", "-o", required=True, help="Output labels TSV")
     args = parser.parse_args(argv)
+
+    if bool(args.atlas_base) != bool(args.target_volume):
+        parser.error("--atlas-base and --target-volume must be passed together")
 
     contacts = read_tsv_rows(args.contacts_tsv)
     if not contacts:
@@ -179,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
         freesurfer_lut=args.freesurfer_lut or None,
         wm_path=args.wm or None,
         wm_lut=args.wm_lut or None,
+        atlas_base_path=args.atlas_base or None,
+        target_volume_path=args.target_volume or None,
     )
     if not any(p is not None and p.is_ready() for p in providers.values()):
         _stderr("[label] no atlas providers configured — nothing to label")

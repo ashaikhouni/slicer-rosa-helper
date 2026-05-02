@@ -108,8 +108,84 @@ def _build_kdtree(points_ras):
 # ---------------------------------------------------------------------
 
 
+def _register_and_resample_labelmap_to_temp(
+    label_path: str | Path,
+    atlas_base_path: str | Path,
+    target_volume_path: str | Path,
+    *,
+    logger=None,
+) -> Path:
+    """Register ``atlas_base`` to ``target_volume`` (rigid + Mattes MI),
+    resample ``label_path`` through the same transform onto the target
+    volume's grid (nearest-neighbor), and write the result to a NamedTemp
+    NIfTI. Returns that path.
+
+    This is the bridge between FreeSurfer / THOMAS atlases (which were
+    reconned on a T1 in the patient's MRI frame) and SEEG contacts
+    (which live in the postop CT's frame). Without it, sampling the
+    raw parcellation at CT-frame contact RAS coords gives nonsense.
+    """
+    import tempfile
+    import SimpleITK as sitk
+    from rosa_core.registration import register_rigid_mi, resample_volume
+
+    target_img = sitk.ReadImage(str(target_volume_path))
+    base_img = sitk.ReadImage(str(atlas_base_path))
+    label_img = sitk.ReadImage(str(label_path))
+
+    if logger is not None:
+        logger(
+            f"[atlas-reg] registering {Path(atlas_base_path).name} -> "
+            f"{Path(target_volume_path).name} (rigid + MI)…"
+        )
+    reg_result = register_rigid_mi(
+        fixed=target_img, moving=base_img,
+        logger=logger,
+    )
+    if logger is not None:
+        logger(
+            f"[atlas-reg] done: metric={reg_result.final_metric:+.5f} "
+            f"iters={reg_result.n_iterations} "
+            f"({reg_result.converged_reason})"
+        )
+
+    resampled_label = resample_volume(
+        label_img, reg_result.transform,
+        reference=target_img,
+        interp="nearest",
+    )
+    # NamedTemporaryFile delete=False so the path survives until the
+    # caller (Provider.__init__) can read it back via nibabel; the
+    # provider keeps a reference so the file is preserved for the
+    # provider's lifetime.
+    tmp = tempfile.NamedTemporaryFile(suffix=".nii.gz", delete=False)
+    tmp.close()
+    sitk.WriteImage(resampled_label, tmp.name)
+    if logger is not None:
+        logger(
+            f"[atlas-reg] resampled labelmap written to {tmp.name} "
+            f"(target grid, nearest-neighbor)"
+        )
+    return Path(tmp.name)
+
+
 class LabelmapAtlasProvider:
-    """Atlas provider for one label volume (FreeSurfer parcellation, WM, etc.)."""
+    """Atlas provider for one label volume (FreeSurfer parcellation, WM, etc.).
+
+    Optional ``atlas_base_path`` + ``target_volume_path`` arguments
+    trigger an in-line rigid-registration pass at construction time:
+    the atlas base (e.g. the T1 FreeSurfer's recon was run on) is
+    registered to the target volume (typically the postop CT the
+    contacts live in), the labelmap is resampled through that
+    transform onto the target grid (nearest-neighbor), and the
+    resampled NIfTI is what the provider then queries. This is the
+    standard fix for "FreeSurfer parcellation is in T1 RAS but my
+    contacts are in CT RAS".
+
+    When both atlas_base / target paths are omitted (default), the
+    labelmap is loaded as-is and assumed to already be in the
+    contact-frame RAS.
+    """
 
     def __init__(
         self,
@@ -119,10 +195,30 @@ class LabelmapAtlasProvider:
         *,
         lut_path: str | Path | None = None,
         label_names: dict[int, str] | None = None,
+        atlas_base_path: str | Path | None = None,
+        target_volume_path: str | Path | None = None,
+        logger=None,
     ) -> None:
         self.source_id = str(source_id)
         self.display_name = str(display_name)
         self.label_path = str(label_path)
+        # Holds the resampled labelmap temp file (when registration ran)
+        # so it survives for the provider's lifetime.
+        self._registered_labelmap_path: Path | None = None
+
+        if atlas_base_path is not None and target_volume_path is not None:
+            self._registered_labelmap_path = _register_and_resample_labelmap_to_temp(
+                label_path=label_path,
+                atlas_base_path=atlas_base_path,
+                target_volume_path=target_volume_path,
+                logger=logger,
+            )
+            label_path = self._registered_labelmap_path
+        elif (atlas_base_path is None) != (target_volume_path is None):
+            raise ValueError(
+                "atlas_base_path and target_volume_path must be passed "
+                "together (both, or neither)."
+            )
 
         np = _require_numpy()
         self._np = np
