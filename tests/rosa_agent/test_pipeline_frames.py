@@ -125,6 +125,56 @@ class PipelineRosaFolderTests(unittest.TestCase):
                         "ROSA-folder mode must emit ct.nii.gz")
         self.assertTrue((self.out_dir / "manifest.json").exists())
 
+    def test_rosa_folder_with_external_ct_resolves_frame(self):
+        """Mode C: ROSA folder + --ct external.nii.gz with
+        --skip-registration. Pin the resolver — this exercises the
+        external-CT branch of _resolve_pipeline_frame, which is where
+        the working_ct_path = out_ct UnboundLocalError lived. We pass
+        ``--skip-registration`` so the test stays fast (no MI run on a
+        toy phantom).
+        """
+        import SimpleITK as sitk
+        import numpy as np
+        from rosa_agent.commands.pipeline import _resolve_pipeline_frame
+
+        # Synthesize an external CT NIfTI (any frame — skip-registration
+        # short-circuits the actual alignment check).
+        external_ct = self.tmp / "external_ct.nii.gz"
+        arr = np.zeros((20, 20, 20), dtype=np.float32)
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        sitk.WriteImage(img, str(external_ct))
+
+        out = self.tmp / "ext_out"
+        out.mkdir()
+        frame = _resolve_pipeline_frame(
+            str(self.case_dir),
+            out_dir=out,
+            ct_override=str(external_ct),
+            ref_volume="ref_vol",
+            skip_registration=True,
+        )
+        # The fix: working CT is the external CT, NOT the ROSA-reference
+        # NIfTI written into out_dir.
+        self.assertEqual(
+            Path(frame.working_ct_path).resolve(),
+            external_ct.resolve(),
+            "external CT path must be returned as the working CT",
+        )
+        # We must NOT have written a ct.nii.gz copy under out_dir for
+        # the external-CT path (per user's "no value duplicating a
+        # NIfTI the user already has on disk").
+        self.assertFalse(
+            (out / "ct.nii.gz").exists(),
+            "external CT must not be copied into out_dir",
+        )
+        # The ROSA-derived seeds should have been transformed into the
+        # working frame. With skip_registration the transform is
+        # identity, so seeds equal the ROSA-frame planned trajectories.
+        self.assertEqual(len(frame.seeds), 1)
+        self.assertEqual(frame.seeds[0]["name"], "T1")
+        np.testing.assert_allclose(frame.seeds[0]["start_ras"], [1.0, 2.0, 3.0])
+
     def test_dataset_mode_does_not_copy_ct(self):
         """Dataset-id mode: CT is already a NIfTI on disk; no copy."""
         import os

@@ -260,7 +260,10 @@ def _resolve_pipeline_frame(
 
     seeds_in_ct = _apply_4x4_to_seeds(rosa_seeds, rosa_to_working)
     return _PipelineFrame(
-        working_ct_path=out_ct,
+        # External CT path: working CT IS the user's CT on disk; we
+        # don't copy or rewrite it. ``out_ct`` only exists in the
+        # other branch (where we wrote the ROSA reference as NIfTI).
+        working_ct_path=ct_path,
         rosa_to_working_4x4=rosa_to_working,
         seeds=seeds_in_ct,
         manifest=manifest,
