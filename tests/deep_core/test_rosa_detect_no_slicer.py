@@ -68,6 +68,75 @@ class RosaDetectBoundaryTests(unittest.TestCase):
         self.assertEqual(rc, 0, f"subprocess crashed: {stdout=!r} {stderr=!r}")
         self.assertIn("OK", stdout, f"unexpected leak: {stdout} / {stderr}")
 
+    def test_import_rosa_detect_does_not_pull_numpy_eagerly(self):
+        """``import rosa_detect`` (alone — no submodule access) must NOT
+        cause numpy / scipy / SimpleITK to land in sys.modules.
+
+        The package's docstring says it depends on those numerical libs,
+        but eager-loading them in __init__ means ``import rosa_detect``
+        for type-only access (``DetectionContext``, ``DetectedTrajectory``)
+        fails in any minimal environment that ships only the lightweight
+        types but not the full scientific stack. The lazy ``__getattr__``
+        in __init__.py defers heavy imports until the heavy attribute is
+        actually used; this test pins that.
+        """
+        code = textwrap.dedent("""
+            import sys
+
+            # Reach into pure-Python types only — lazy __getattr__ should
+            # not fire for these (they're eager-imported from contracts /
+            # diagnostics, both stdlib).
+            import rosa_detect
+            from rosa_detect import (
+                DetectionContext, DetectedTrajectory, DetectionResult,
+                trajectory_path_points,
+            )
+
+            tainted = sorted(
+                m for m in sys.modules
+                if m == "numpy" or m.startswith("numpy.")
+                   or m == "scipy" or m.startswith("scipy.")
+                   or m == "SimpleITK" or m.startswith("SimpleITK.")
+                   or m.startswith("rosa_detect.service")
+                   or m.startswith("rosa_detect.contact_pitch_v1_fit")
+                   or m.startswith("rosa_detect.guided_fit_engine")
+            )
+            # Show count + first few so a leak is debuggable.
+            print(f"TAINTED_COUNT: {len(tainted)}")
+            print(f"TAINTED_SAMPLE: {tainted[:5]}")
+            print("OK" if not tainted else "LEAK")
+        """).strip()
+        rc, stdout, stderr = _run_in_subprocess(code)
+        self.assertEqual(rc, 0, f"subprocess crashed: {stdout=!r} {stderr=!r}")
+        self.assertIn("OK", stdout, f"eager heavy import: {stdout} / {stderr}")
+
+    def test_lazy_submodule_access_still_works(self):
+        """Accessing a heavy attribute via ``rosa_detect.<name>`` should
+        trigger the lazy import on demand. Pin both the
+        ``rosa_detect.run_contact_pitch_v1`` callable form and
+        ``rosa_detect.contact_pitch_v1_fit`` whole-module form.
+        """
+        code = textwrap.dedent("""
+            import sys
+            import rosa_detect
+
+            # Whole-module form (some probes / tests do this).
+            mod = rosa_detect.contact_pitch_v1_fit
+            assert mod.__name__ == "rosa_detect.contact_pitch_v1_fit"
+
+            # Callable form (Slicer / CLI entry).
+            fn = rosa_detect.run_contact_pitch_v1
+            assert callable(fn)
+
+            # After lazy access, the submodule is loaded.
+            assert "rosa_detect.contact_pitch_v1_fit" in sys.modules
+            assert "rosa_detect.service" in sys.modules
+            print("OK")
+        """).strip()
+        rc, stdout, stderr = _run_in_subprocess(code)
+        self.assertEqual(rc, 0, f"subprocess crashed: {stdout=!r} {stderr=!r}")
+        self.assertIn("OK", stdout, f"lazy access broke: {stdout} / {stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()
