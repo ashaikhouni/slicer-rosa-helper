@@ -156,16 +156,35 @@ def parse_ros_text(text: str) -> RosParseResult:
             disp["imagery_3dref"] = imagery_refs[i]
 
     trajectories: list[TrajectoryRecord] = []
-    for tok in tokens:
-        if tok["token"] not in ("TRAJECTORY", "ELLIPS"):
-            continue
+    rejects: list[dict] = []  # diagnostic — non-empty when parse fails
+    candidates = [
+        t for t in tokens
+        if t["token"] in ("TRAJECTORY", "ELLIPS")
+    ]
+    for tok in candidates:
         traj = _parse_trajectory(tok["content"])
         if traj:
             trajectories.append(traj)
+        else:
+            lines = [ln.strip() for ln in tok["content"].splitlines() if ln.strip()]
+            n_fields = len([f for f in lines[1].split(" ") if f]) if len(lines) >= 2 else 0
+            rejects.append({
+                "token": tok["token"],
+                "n_lines": len(lines),
+                "n_fields_line2": n_fields,
+                "first_line": lines[0] if lines else "",
+            })
+    # Token histogram lets the caller spot non-standard ROS dialects
+    # (e.g. trajectories under a different token name).
+    from collections import Counter
+    token_histogram = Counter(t["token"] for t in tokens)
 
     return {
         "displays": displays,
         "trajectories": trajectories,
+        "trajectory_candidates": len(candidates),
+        "trajectory_rejects": rejects,
+        "token_histogram": dict(token_histogram),
     }
 
 

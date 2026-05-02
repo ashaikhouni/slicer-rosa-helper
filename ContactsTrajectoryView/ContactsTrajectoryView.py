@@ -37,6 +37,7 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
+from rosa_core.electrode_classifier import classify_electrode_model
 from rosa_scene import (
     ElectrodeSceneService,
     LayoutService,
@@ -77,6 +78,24 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def setup(self):
         super().setup()
+        # Drop Slicer's default min/max width constraints on the module
+        # panel dock so the user can drag the splitter narrower (or
+        # wider than the viewport-imposed cap). Same trick as
+        # PostopCTLocalization; one-time global tweak per session.
+        try:
+            mw = slicer.util.mainWindow()
+            if mw is not None:
+                for dock in mw.findChildren(qt.QDockWidget):
+                    if dock.objectName() == "PanelDockWidget":
+                        dock.setMinimumWidth(0)
+                        dock.setMaximumWidth(16777215)
+                        inner = dock.widget()
+                        if inner is not None:
+                            inner.setMinimumWidth(0)
+                            inner.setMaximumWidth(16777215)
+                        break
+        except Exception:
+            pass
 
         self.logic = ContactsTrajectoryViewLogic()
         self.workflowState = self.logic.workflow_state
@@ -107,27 +126,55 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._workflowRefreshInFlight = False
 
         top_form = qt.QFormLayout()
+        top_form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.layout.addLayout(top_form)
 
         refresh_row = qt.QHBoxLayout()
-        self.refreshButton = qt.QPushButton("Refresh Workflow Inputs")
+        self.refreshButton = qt.QPushButton("Refresh")
         self.refreshButton.clicked.connect(self.onRefreshClicked)
         refresh_row.addWidget(self.refreshButton)
-        self.showPlannedCheck = qt.QCheckBox("Show planned trajectories")
+        self.showPlannedCheck = qt.QCheckBox("Show planned")
         self.showPlannedCheck.setChecked(False)
         self.showPlannedCheck.toggled.connect(self.onShowPlannedToggled)
         refresh_row.addWidget(self.showPlannedCheck)
+        # Reduce 3D-scene clutter — selected row's trajectory + contacts
+        # only, hide the rest. Default OFF so existing
+        # multi-shank-overview workflows are preserved.
+        self.isolateSelectedCheck = qt.QCheckBox("Isolate selected")
+        self.isolateSelectedCheck.setToolTip(
+            "When checked, only the selected row's trajectory + "
+            "contacts + electrode model are shown in the 3D scene; "
+            "all other shanks are hidden."
+        )
+        self.isolateSelectedCheck.setChecked(False)
+        self.isolateSelectedCheck.toggled.connect(self.onIsolateSelectedToggled)
+        refresh_row.addWidget(self.isolateSelectedCheck)
+        # TL ↔ TD slice intersections are auto-enabled by the layout
+        # service when the trajectory-focus 2×3 layout is applied
+        # (and auto-disabled on layout restore). No per-module
+        # checkbox needed.
         refresh_row.addStretch(1)
         top_form.addRow(refresh_row)
 
         self.summaryLabel = qt.QLabel("Workflow not scanned yet.")
         self.summaryLabel.wordWrap = True
+        self.summaryLabel.setMinimumWidth(0)
+        self.summaryLabel.setSizePolicy(
+            qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred,
+        )
         top_form.addRow("Workflow summary", self.summaryLabel)
 
         self.trajectorySourceCombo = qt.QComboBox()
         for key, label in TRAJECTORY_SOURCE_OPTIONS:
             self.trajectorySourceCombo.addItem(label, key)
         self.trajectorySourceCombo.currentIndexChanged.connect(self.onTrajectorySourceChanged)
+        self.trajectorySourceCombo.setMinimumContentsLength(8)
+        self.trajectorySourceCombo.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self.trajectorySourceCombo.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         top_form.addRow("Trajectory source", self.trajectorySourceCombo)
 
         self._build_contact_ui()
@@ -292,29 +339,60 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         section.collapsed = False
         self.layout.addWidget(section)
         form = qt.QFormLayout(section)
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         self.contactTable = qt.QTableWidget()
         self.contactTable.setColumnCount(8)
+        # Short header labels to fit narrow columns; tooltips on the
+        # header items carry the full meaning for the user to hover.
+        _contact_headers = [
+            ("Use",     "Use this trajectory for contact generation"),
+            ("Traj",    "Trajectory name"),
+            ("Len mm",  "Trajectory length (entry → tip) in mm"),
+            ("Model",   "Electrode model picked for this trajectory"),
+            ("# C",     "Number of contacts (read from the picked model)"),
+            ("Elec mm", "Active electrode length in mm"),
+            ("Tip At",  "Where the tip sits relative to the trajectory line "
+                        "(target vs entry)"),
+            ("Shift",   "Tip shift along the axis in mm"),
+        ]
         self.contactTable.setHorizontalHeaderLabels(
-            [
-                "Use",
-                "Trajectory",
-                "Traj Length (mm)",
-                "Electrode Model",
-                "# Contacts",
-                "Elec Length (mm)",
-                "Tip At",
-                "Tip Shift (mm)",
-            ]
+            [label for label, _ in _contact_headers]
         )
-        self.contactTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.Stretch)
-        self.contactTable.horizontalHeader().setSectionResizeMode(4, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(5, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(6, qt.QHeaderView.ResizeToContents)
-        self.contactTable.horizontalHeader().setSectionResizeMode(7, qt.QHeaderView.ResizeToContents)
+        for col, (_label, tip) in enumerate(_contact_headers):
+            item = self.contactTable.horizontalHeaderItem(col)
+            if item is not None:
+                item.setToolTip(tip)
+        # All columns Interactive with explicit narrow defaults — no
+        # column stretches, so the table doesn't sprawl when the panel
+        # is wide. User can drag column borders to resize. Horizontal
+        # scrollbar engages when the panel is narrower than total
+        # column width. setMinimumWidth(0) + Ignored size policy let
+        # the table shrink below its natural content width — without
+        # this the cell-widget sizeHints (model combo + spinboxes)
+        # pin the table (and hence the Slicer panel) to a wide
+        # minimum.
+        header = self.contactTable.horizontalHeader()
+        for col in range(self.contactTable.columnCount):
+            header.setSectionResizeMode(col, qt.QHeaderView.Interactive)
+        for col, width in (
+            (0, 40),    # Use
+            (1, 110),   # Trajectory
+            (2, 80),    # Traj Length
+            (3, 140),   # Electrode Model
+            (4, 70),    # # Contacts
+            (5, 90),    # Elec Length
+            (6, 70),    # Tip At
+            (7, 90),    # Tip Shift
+        ):
+            self.contactTable.setColumnWidth(col, width)
+        header.setStretchLastSection(False)
+        self.contactTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        # Expanding+Preferred + small min width keeps the table
+        # shrinkable AND shows the horizontal scrollbar when columns
+        # exceed viewport. (Ignored policy disabled the scrollbar.)
+        self.contactTable.setMinimumWidth(120)
+        self.contactTable.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
         self.contactTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.contactTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.contactTable.cellClicked.connect(self.onContactTableCellClicked)
@@ -331,6 +409,24 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         defaults_row.addWidget(self.applyModelAllButton)
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
+
+        # Restrict the model library used by the unified picker fallback
+        # for rows that arrive without a stamped `Rosa.BestModelId`
+        # (legacy planned / imported trajectories). Auto / Guided /
+        # Manual Fit each have their own copy of this combo, so
+        # restrictions apply per-module.
+        from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
+        self.contactsPitchStrategyCombo = qt.QComboBox()
+        for label, key in PITCH_STRATEGY_OPTIONS:
+            self.contactsPitchStrategyCombo.addItem(label, key)
+        self.contactsPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
+        self.contactsPitchStrategyCombo.setToolTip(
+            "Restrict the model library used by the unified electrode-"
+            "model picker fallback for unstamped rows. The Default "
+            "model dropdown above is unrestricted; this combo only "
+            "affects the fallback picker."
+        )
+        form.addRow("Pitch strategy", self.contactsPitchStrategyCombo)
 
         # Model-driven: synthesize contacts at the assigned electrode
         # model's nominal offsets along the fitted line.
@@ -356,7 +452,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # ``ElectrodeShaftModelNodes`` + ``ElectrodeContactModelNodes``
         # so the glyphs are pickable; cylinders remain in the scene
         # so re-checking the box doesn't require re-generating.
-        self.showModelsCheck = qt.QCheckBox("Show electrode models in viewers")
+        self.showModelsCheck = qt.QCheckBox("Show electrode models")
         self.showModelsCheck.setChecked(True)
         self.showModelsCheck.setToolTip(
             "Uncheck to hide the cylinder visualizations so contact "
@@ -367,11 +463,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         form.addRow("", self.showModelsCheck)
 
         button_row = qt.QHBoxLayout()
-        self.generateContactsButton = qt.QPushButton("Generate Contact Fiducials")
+        self.generateContactsButton = qt.QPushButton("Generate Contacts")
         self.generateContactsButton.clicked.connect(self.onGenerateContactsClicked)
         self.generateContactsButton.setEnabled(False)
         button_row.addWidget(self.generateContactsButton)
-        self.updateContactsButton = qt.QPushButton("Update From Edited Trajectories")
+        self.updateContactsButton = qt.QPushButton("Update From Edited")
         self.updateContactsButton.clicked.connect(self.onUpdateContactsClicked)
         self.updateContactsButton.setEnabled(False)
         button_row.addWidget(self.updateContactsButton)
@@ -401,6 +497,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.saveContactsAsGtButton.clicked.connect(self.onSaveContactsAsGtClicked)
         gt_row.addWidget(self.saveContactsAsGtButton)
         gt_row.addStretch(1)
+
+        # Curry .pom export lives in the dedicated Export Center
+        # module — a single home for all bundle-style outputs keeps
+        # the CTV contact panel focused on contact generation.
         form.addRow(gt_row)
 
     def _build_qc_ui(self):
@@ -410,6 +510,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.qcSection.collapsed = True
         self.layout.addWidget(self.qcSection)
         qf = qt.QFormLayout(self.qcSection)
+        qf.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         self.qcStatusLabel = qt.QLabel("QC disabled: generate contacts first.")
         self.qcStatusLabel.wordWrap = True
@@ -417,21 +518,43 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
         self.qcTable = qt.QTableWidget()
         self.qcTable.setColumnCount(8)
+        _qc_headers = [
+            ("Traj",      "Trajectory name"),
+            ("Entry RE",  "Entry residual error in mm"),
+            ("Target RE", "Target residual error in mm"),
+            ("Mean RE",   "Mean residual error in mm across all contacts"),
+            ("Max RE",    "Max residual error in mm"),
+            ("RMS RE",    "Root-mean-square residual error in mm"),
+            ("Angle°",    "Angle deviation from the planned trajectory in degrees"),
+            ("N",         "Number of contacts"),
+        ]
         self.qcTable.setHorizontalHeaderLabels(
-            [
-                "Trajectory",
-                "Entry RE (mm)",
-                "Target RE (mm)",
-                "Mean RE (mm)",
-                "Max RE (mm)",
-                "RMS RE (mm)",
-                "Angle (deg)",
-                "N",
-            ]
+            [label for label, _ in _qc_headers]
         )
-        self.qcTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
-        for col in range(1, 8):
-            self.qcTable.horizontalHeader().setSectionResizeMode(col, qt.QHeaderView.ResizeToContents)
+        for col, (_label, tip) in enumerate(_qc_headers):
+            item = self.qcTable.horizontalHeaderItem(col)
+            if item is not None:
+                item.setToolTip(tip)
+        # Interactive columns + scrollable + shrinkable size policy so
+        # the QC table doesn't pin the panel to its full content width.
+        qc_header = self.qcTable.horizontalHeader()
+        for col in range(self.qcTable.columnCount):
+            qc_header.setSectionResizeMode(col, qt.QHeaderView.Interactive)
+        for col, width in (
+            (0, 100),   # Trajectory
+            (1, 80),    # Entry RE
+            (2, 80),    # Target RE
+            (3, 80),    # Mean RE
+            (4, 70),    # Max RE
+            (5, 70),    # RMS RE
+            (6, 70),    # Angle
+            (7, 40),    # N
+        ):
+            self.qcTable.setColumnWidth(col, width)
+        qc_header.setStretchLastSection(False)
+        self.qcTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        self.qcTable.setMinimumWidth(120)
+        self.qcTable.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
         self.qcTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
         qf.addRow(self.qcTable)
         self._set_qc_enabled(False, "QC disabled: generate contacts first.")
@@ -443,8 +566,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         section.collapsed = False
         self.layout.addWidget(section)
         form = qt.QFormLayout(section)
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
-        volumes_row = qt.QHBoxLayout()
+        # Two MRML node selectors plus a button on a single row pinned
+        # the panel to ~500 px. Stack each selector on its own form
+        # row so the panel can narrow to a single combo width.
         self.focusBaseSelector = slicer.qMRMLNodeComboBox()
         self.focusBaseSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
         self.focusBaseSelector.noneEnabled = True
@@ -452,7 +578,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.focusBaseSelector.removeEnabled = False
         self.focusBaseSelector.renameEnabled = False
         self.focusBaseSelector.setMRMLScene(slicer.mrmlScene)
-        volumes_row.addWidget(self.focusBaseSelector, 1)
+        self.focusBaseSelector.setMinimumWidth(0)
+        form.addRow("Base", self.focusBaseSelector)
 
         self.focusPostopSelector = slicer.qMRMLNodeComboBox()
         self.focusPostopSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
@@ -461,24 +588,24 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.focusPostopSelector.removeEnabled = False
         self.focusPostopSelector.renameEnabled = False
         self.focusPostopSelector.setMRMLScene(slicer.mrmlScene)
-        volumes_row.addWidget(self.focusPostopSelector, 1)
+        self.focusPostopSelector.setMinimumWidth(0)
+        form.addRow("Postop", self.focusPostopSelector)
 
         self.applyFocusVolumesButton = qt.QPushButton("Set Base/Postop")
         self.applyFocusVolumesButton.clicked.connect(self.onApplyFocusVolumesClicked)
-        volumes_row.addWidget(self.applyFocusVolumesButton)
-        form.addRow("Base / Postop", volumes_row)
+        form.addRow(self.applyFocusVolumesButton)
 
         focus_row = qt.QHBoxLayout()
-        self.applyFocusLayoutButton = qt.QPushButton("Apply Focus Layout (2x3)")
+        self.applyFocusLayoutButton = qt.QPushButton("Apply 2×3 Layout")
         self.applyFocusLayoutButton.clicked.connect(self.onApplyFocusLayoutClicked)
         focus_row.addWidget(self.applyFocusLayoutButton)
-        self.restoreLayoutButton = qt.QPushButton("Restore Previous Layout")
+        self.restoreLayoutButton = qt.QPushButton("Restore Layout")
         self.restoreLayoutButton.clicked.connect(self.onResetFocusLayoutClicked)
         focus_row.addWidget(self.restoreLayoutButton)
         focus_row.addStretch(1)
         form.addRow(focus_row)
 
-        self.autoFollowTrajectoryCheck = qt.QCheckBox("Auto-follow selected trajectory")
+        self.autoFollowTrajectoryCheck = qt.QCheckBox("Auto-follow")
         self.autoFollowTrajectoryCheck.setChecked(True)
         self.autoFollowTrajectoryCheck.toggled.connect(self.onAutoFollowToggled)
         form.addRow(self.autoFollowTrajectoryCheck)
@@ -660,13 +787,19 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
             # Precedence: user's manual override > Auto-Fit suggestion >
-            # geometry-based suggest. Without this, manually-picked
-            # models silently revert to ``best_model_id`` on every
-            # populate cycle.
+            # unified PaCER-style picker run live (CT-aware). Without this,
+            # manually-picked models silently revert to `best_model_id`
+            # on every populate cycle, and rows imported from sources
+            # that didn't stamp `best_model_id` (legacy planned/imported
+            # without picker) get the unified picker as a one-shot here.
             suggested_model = self._userModelOverrides.get(traj["name"], "")
             if not suggested_model:
                 suggested_model = str(traj.get("best_model_id") or "").strip()
             if not suggested_model:
+                pick = self._classify_with_unified_picker(traj)
+                suggested_model = str(pick or "")
+            if not suggested_model:
+                # Last-ditch length-only fallback (no CT volume available).
                 suggested_model = suggest_model_id_for_trajectory(
                     trajectory=traj,
                     models_by_id=self.modelsById,
@@ -946,6 +1079,47 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             "PostopCT", workflow_node=self.workflowNode,
         )
         return nodes[0] if nodes else None
+
+    def _classify_with_unified_picker(self, traj):
+        """Run the unified electrode-model picker on one trajectory dict.
+
+        PaCER template-correlation against the canonical-resampled CT
+        when available, else the legacy length-only fallback (which the
+        caller does directly). Returns a model_id string or empty.
+        """
+        try:
+            ct_node = self._resolve_postop_ct_node()
+            if ct_node is None:
+                return ""
+            import SimpleITK as sitk
+            from shank_core.io import image_ijk_ras_matrices
+            from postop_ct_localization.contact_pitch_v1_fit import prepare_volume
+            arr = slicer.util.arrayFromVolume(ct_node)
+            img = sitk.GetImageFromArray(arr)
+            i2r, r2i = image_ijk_ras_matrices(ct_node)
+            img, _i2r_canon, r2i_canon = prepare_volume(img, i2r, r2i)
+            ct_arr_kji = sitk.GetArrayFromImage(img).astype("float32")
+            start_ras = traj.get("start_ras") or traj.get("start")
+            end_ras = traj.get("end_ras") or traj.get("end")
+            if not start_ras or not end_ras:
+                return ""
+            strategy = "auto"
+            combo = getattr(self, "contactsPitchStrategyCombo", None)
+            if combo is not None:
+                data = combo.currentData
+                if isinstance(data, str) and data:
+                    strategy = data
+            pick = classify_electrode_model(
+                start_ras=start_ras, end_ras=end_ras,
+                pitch_strategy=strategy,
+                ct_volume_kji=ct_arr_kji,
+                ras_to_ijk_mat=r2i_canon,
+            )
+            if pick is None:
+                return ""
+            return str(pick.get("model_id") or "")
+        except Exception:
+            return ""
 
     def _resolve_log_volume_node(self, ct_node):
         """Look up the Auto-Fit-stashed ``<CT>_ContactPitch_LoG_sigma1``
@@ -1676,9 +1850,61 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onContactTableCellClicked(self, _row, _col):
         self._schedule_follow_selected_trajectory()
+        self._apply_isolation_if_enabled()
 
     def onContactTableCurrentCellChanged(self, _currentRow, _currentColumn, _previousRow, _previousColumn):
         self._schedule_follow_selected_trajectory()
+        self._apply_isolation_if_enabled()
+
+    def onIsolateSelectedToggled(self, checked):
+        if not bool(checked):
+            # Restore everything — empty target set means show-all.
+            try:
+                self.logic.electrode_scene.apply_trajectory_isolation(set())
+            except Exception:
+                pass
+            return
+        self._apply_isolation_if_enabled()
+
+
+
+    def _apply_isolation_if_enabled(self):
+        if not getattr(self, "isolateSelectedCheck", None):
+            return
+        if not bool(self.isolateSelectedCheck.checked):
+            return
+        names = self._selected_trajectory_names_for_isolation()
+        try:
+            self.logic.electrode_scene.apply_trajectory_isolation(names)
+        except Exception:
+            pass
+
+    def _selected_trajectory_names_for_isolation(self):
+        """Return the set of trajectory names currently selected in
+        the contact table. Falls back to the current row when the
+        selection model is in single-selection mode (default).
+        """
+        names = set()
+        try:
+            sel = self.contactTable.selectionModel()
+            for idx in sel.selectedRows() if sel else []:
+                row = idx.row()
+                item = self.contactTable.item(row, 1)
+                if item:
+                    txt = (item.text() or "").strip()
+                    if txt:
+                        names.add(txt)
+            if not names:
+                row = self.contactTable.currentRow()
+                if row >= 0:
+                    item = self.contactTable.item(row, 1)
+                    if item:
+                        txt = (item.text() or "").strip()
+                        if txt:
+                            names.add(txt)
+        except Exception:
+            pass
+        return names
 
     def onAutoFollowToggled(self, checked):
         self._set_workflow_param_bool("TrajectoryFocusAutoFollow", bool(checked))

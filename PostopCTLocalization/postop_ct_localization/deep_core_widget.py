@@ -91,6 +91,7 @@ class ContactPitchV1WidgetMixin:
         tab = qt.QWidget()
         self.modeTabs.addTab(tab, "Auto Fit")
         form = qt.QFormLayout(tab)
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         help_text = qt.QLabel(
             "SEEG shank detection from the postop CT. Pipeline: LoG \u03c3=1 "
@@ -102,6 +103,10 @@ class ContactPitchV1WidgetMixin:
             "is shown in the Trajectory Set table below."
         )
         help_text.wordWrap = True
+        help_text.setMinimumWidth(0)
+        help_text.setSizePolicy(
+            qt.QSizePolicy.Preferred, qt.QSizePolicy.MinimumExpanding,
+        )
         form.addRow(help_text)
 
         button_row = qt.QHBoxLayout()
@@ -122,17 +127,9 @@ class ContactPitchV1WidgetMixin:
         # a subject with mixed families is handled in one pass.
         # "Auto-detect" estimates pitch from the intracranial blob
         # cloud's mutual-NN histogram.
+        from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.contactPitchStrategyCombo = qt.QComboBox()
-        for label, key in (
-            ("Dixi AM (3.5 mm)", "dixi"),
-            ("Dixi MM hybrid (3.9 / 4.8 / 6.1 mm)", "dixi_mm"),
-            ("Dixi all (AM + MM hybrid)", "dixi_all"),
-            ("PMT 2102-XX-091 (3.5 mm)", "pmt_35"),
-            ("PMT (3.5 / 3.97 / 4.43 mm)", "pmt"),
-            ("Mixed Dixi + PMT", "mixed"),
-            ("Medtronic DBS (2 / 3 / 7 mm)", "medtronic"),
-            ("Auto-detect pitch", "auto"),
-        ):
+        for label, key in PITCH_STRATEGY_OPTIONS:
             self.contactPitchStrategyCombo.addItem(label, key)
         self.contactPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
         self.contactPitchStrategyCombo.setToolTip(
@@ -140,6 +137,16 @@ class ContactPitchV1WidgetMixin:
             "results are identical across strategies that share the "
             "same pitch set; only the suggested electrode model id "
             "differs."
+        )
+        # Shrinkable: combos with long entries pin the form's minimum
+        # width unless we cap the contents length and let the widget
+        # narrow horizontally.
+        self.contactPitchStrategyCombo.setMinimumContentsLength(8)
+        self.contactPitchStrategyCombo.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self.contactPitchStrategyCombo.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
         )
         form.addRow("Pitch strategy:", self.contactPitchStrategyCombo)
 
@@ -151,6 +158,10 @@ class ContactPitchV1WidgetMixin:
         form.addRow("Progress:", self.contactPitchProgressBar)
         self.contactPitchStatusLabel = qt.QLabel("idle")
         self.contactPitchStatusLabel.wordWrap = True
+        self.contactPitchStatusLabel.setMinimumWidth(0)
+        self.contactPitchStatusLabel.setSizePolicy(
+            qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred,
+        )
         form.addRow("Status:", self.contactPitchStatusLabel)
 
     # Vendor sets implied by each strategy. Mirrors

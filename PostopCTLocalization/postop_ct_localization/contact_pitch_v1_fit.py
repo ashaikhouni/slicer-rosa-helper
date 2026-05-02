@@ -17,6 +17,22 @@ from typing import Any, Sequence
 
 import numpy as np
 
+# Electrode-model picker — single source of truth for Auto Fit, Guided Fit,
+# Manual Fit, and Contacts & Trajectory View. Re-exported here for
+# backwards-compat with callers that still import from this module
+# (`tests/deep_core/test_walker_signature_classifier.py` and others).
+from rosa_core.electrode_classifier import (  # noqa: F401
+    PITCH_STRATEGY_PITCHES_MM,
+    PITCH_STRATEGY_VENDORS,
+    VENDOR_ID_PREFIXES,
+    classify_by_count_and_span,
+    classify_by_walker_signature,
+    classify_electrode_model,
+    classify_pacer_template,
+    filter_models_for_strategy,
+    suggest_shortest_covering_model,
+)
+
 
 # ---- Config (match probe_two_stage.py + probe_blob_pitch.py) ----------
 
@@ -445,33 +461,10 @@ BOLT_BASE_MAX_DIST_MM = 10.0        # skull_entry_ras (= bolt base, the
 # ``detect_pitch_from_intracranial_blobs``). On a clean Dixi case the
 # auto detector returns ≈ 3.3 mm; the surrounding ±0.5 mm tolerance in
 # the walker absorbs the sub-bin localization bias.
-PITCH_STRATEGY_PITCHES_MM = {
-    "dixi":    (3.5,),
-    "pmt_35":  (3.5,),           # PMT 2102-XX-091 family — same pitch as Dixi
-    "pmt":     (3.5, 3.97, 4.43),
-    "mixed":   (3.5, 3.97, 4.43),
-    # Dixi hybrid micro-macro (MM08-09A33 / A40 / A51): 9-contact hybrids
-    # with 2 mm contacts and pitches 3.9 / 4.8 / 6.1 mm. Commonly placed
-    # at deep targets (centromedian nucleus etc.) where the contact
-    # cluster sits deep and a long wire section bridges to the bolt.
-    "dixi_mm": (3.9, 4.8, 6.1),
-    "dixi_all": (3.5, 3.9, 4.43, 4.8, 6.1),
-    # Medtronic DBS leads — 4-contact ring leads (3387 / 3389 / 3391)
-    # plus SenSight directional (B33005 / B33015 — directional split is
-    # below CT resolution; treated as 4-level rings). Pitches: 3389 +
-    # SenSight B33005 = 2 mm; 3387 + SenSight B33015 = 3 mm; 3391 = 7 mm.
-    "medtronic": (2.0, 3.0, 7.0),
-}
-PITCH_STRATEGY_VENDORS = {
-    "dixi":     ("Dixi",),
-    "pmt_35":   ("PMT",),
-    "pmt":      ("PMT",),
-    "mixed":    ("Dixi", "PMT"),
-    "dixi_mm":  ("Dixi",),
-    "dixi_all": ("Dixi",),
-    "medtronic": ("Medtronic",),
-    "auto":     ("Dixi", "PMT", "AdTech"),
-}
+# PITCH_STRATEGY_PITCHES_MM and PITCH_STRATEGY_VENDORS are now defined in
+# `rosa_core.electrode_classifier` and re-exported via the import block at
+# the top of this module.
+
 
 def library_bounds_for_strategy(strategy_key):
     """Return library-derived bounds filtered to the strategy's vendor
@@ -3109,56 +3102,54 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             intra = float(rec.get("intracranial_length_mm") or 0.0)
             if intra < 5.0:
                 continue
-            # Walker-signature classifier: matches against the model
-            # library using observed pitch + contact count + contact span +
-            # intracranial length jointly. Disambiguates models that
-            # share a covering length but differ on pitch (e.g. PMT-16A
-            # vs PMT-16B at 3.5 vs 3.97 mm) or count (DIXI-15CM vs
-            # DIXI-18AM at similar lengths). Falls back to length-only
-            # (``suggest_shortest_covering_model``) for wire-class
-            # records where pitch / inlier count are unavailable.
+            # Unified picker (`classify_electrode_model`): preferred
+            # path is PaCER template-correlation against the canonical-
+            # resampled CT volume; falls back to walker-signature joint
+            # scoring (when CT path returns no candidate), then to
+            # length-only with dura tolerance. Same picker is called
+            # from Manual Fit / Guided Fit / Contacts & Trajectory View.
             pitch_obs = float(rec.get("original_median_pitch_mm") or 0.0)
             n_obs = int(rec.get("n_inliers") or 0)
             span_obs = float(rec.get("contact_span_mm") or 0.0)
-            # Walker's raw ``contact_span_mm`` is the actual inlier-
-            # projection range — informative for CM/BM electrodes
-            # whose contact groups are separated by 9-13 mm structural
-            # gaps and whose span legitimately exceeds (n-1)*median_pitch.
-            # Span term distinguishes DIXI-15AM (span 49) from
-            # DIXI-15BM (60) from DIXI-15CM (68) at the same n=15
-            # and median pitch=3.5.
-            best = classify_by_walker_signature(
-                n_observed=n_obs,
-                pitch_observed_mm=pitch_obs,
-                contact_span_observed_mm=span_obs,
-                intracranial_length_mm=intra,
+            start_ras = rec.get("skull_entry_ras", rec.get("start_ras"))
+            end_ras = rec.get("end_ras")
+            walker_sig = (
+                (n_obs, pitch_obs, span_obs)
+                if (n_obs > 0 and pitch_obs > 0.0) else None
+            )
+            best = classify_electrode_model(
+                start_ras=start_ras, end_ras=end_ras,
                 models=_models_filtered,
                 vendors=vendors_for_suggest,
+                ct_volume_kji=ct_arr_kji,
+                ras_to_ijk_mat=ras_to_ijk_mat,
+                walker_signature=walker_sig,
+                intracranial_length_mm=intra,
             )
-            method = "walker_signature"
-            if best is None or pitch_obs <= 0.0 or n_obs <= 0:
-                # Wire-class or weak-signature: use the length-only
-                # fallback so the user still gets *some* model id.
-                fallback = suggest_shortest_covering_model(
-                    intra, _models_filtered, vendors=vendors_for_suggest,
-                )
-                if fallback is None:
-                    continue
-                rec["suggested_model_id"] = str(fallback["model_id"])
-                rec["suggested_model_method"] = "shortest_covering"
-                rec["suggested_model_length_mm"] = float(fallback["model_length_mm"])
-                rec["suggested_model_gap_mm"] = float(fallback["gap_mm"])
-                rec["suggested_model_score"] = float(abs(fallback["gap_mm"]))
-            else:
-                rec["suggested_model_id"] = str(best["model_id"])
-                rec["suggested_model_method"] = method
-                rec["suggested_model_length_mm"] = float(best["model_total_mm"])
-                rec["suggested_model_gap_mm"] = float(best["length_err_mm"])
-                rec["suggested_model_score"] = float(best["score"])
-                # Per-component diagnostics (logged + kept on rec for QC).
-                rec["suggested_model_pitch_err_mm"] = float(best["pitch_err_mm"])
-                rec["suggested_model_count_err"] = int(best["count_err"])
-                rec["suggested_model_span_err_mm"] = float(best["span_err_mm"])
+            if best is None:
+                continue
+            rec["suggested_model_id"] = str(best["model_id"])
+            rec["suggested_model_method"] = str(best.get("method") or "")
+            rec["suggested_model_score"] = float(best.get("score") or 0.0)
+            # Method-specific diagnostics — kept on rec for QC + logged.
+            if best.get("method") == "pacer_template":
+                rec["suggested_tip_arc_mm"] = float(best.get("tip_arc_mm") or 0.0)
+                rec["suggested_coverage"] = float(best.get("coverage") or 0.0)
+                rec["suggested_runner_up_id"] = str(best.get("runner_up_id") or "")
+                rec["suggested_margin"] = float(best.get("margin") or 0.0)
+                # PaCER also returns expected per-contact RAS positions —
+                # downstream contact-generation can reuse these without
+                # recomputing from scratch.
+                rec["suggested_contacts_ras"] = list(best.get("contacts_ras") or [])
+            elif best.get("method") == "walker_signature":
+                rec["suggested_model_length_mm"] = float(best.get("model_total_mm") or 0.0)
+                rec["suggested_model_gap_mm"] = float(best.get("length_err_mm") or 0.0)
+                rec["suggested_model_pitch_err_mm"] = float(best.get("pitch_err_mm") or 0.0)
+                rec["suggested_model_count_err"] = int(best.get("count_err") or 0)
+                rec["suggested_model_span_err_mm"] = float(best.get("span_err_mm") or 0.0)
+            elif best.get("method") == "shortest_covering":
+                rec["suggested_model_length_mm"] = float(best.get("model_length_mm") or 0.0)
+                rec["suggested_model_gap_mm"] = float(best.get("gap_mm") or 0.0)
             n_suggested += 1
         _log(
             f"suggested electrodes: {n_suggested} trajectories "
@@ -3226,67 +3217,20 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
 
 
 # ---- Post-detection electrode classification -------------------------
-
-VENDOR_ID_PREFIXES = {
-    "Dixi": "DIXI-",
-    "PMT": "PMT-",
-    "Medtronic": "Medtronic_",
-}
-
-
-def _vendor_prefixes(vendors):
-    return tuple(
-        VENDOR_ID_PREFIXES[v] for v in (vendors or ()) if v in VENDOR_ID_PREFIXES
-    )
-
-
-def suggest_shortest_covering_model(intracranial_length_mm, models,
-                                     vendors=("Dixi",),
-                                     dura_tolerance_mm=10.0):
-    """Pick the shortest electrode whose full exploration span plus a
-    dura tolerance covers the given intracranial length.
-
-    ``intracranial_length_mm`` is ``|skull_entry_ras − end_ras|`` — the
-    distance from the bone/dura band (where ``skull_entry_ras`` is
-    placed) to the detected deep tip. Because ``skull_entry_ras`` sits
-    inside the skull/dura band (``head_distance ≤ 10 mm``) rather than
-    exactly at the first contact, the observed length overstates the
-    electrode's active length by roughly 5–10 mm of soft-tissue margin.
-    ``dura_tolerance_mm`` absorbs that offset so a 15CM (70 mm active
-    length) still matches a 76 mm observed intracranial span.
-
-    Primary rule: smallest ``total_exploration_length_mm`` for which
-    ``total + dura_tolerance_mm ≥ intracranial_length_mm``.
-
-    Returns ``{"model_id", "model_length_mm", "gap_mm"}`` or ``None``
-    if no model is long enough (or no vendor selected).
-    """
-    prefixes = _vendor_prefixes(vendors)
-    if not prefixes:
-        return None
-    L = float(intracranial_length_mm)
-    tol = float(dura_tolerance_mm)
-    best = None
-    for model in models:
-        mid = str(model.get("id") or "")
-        if not mid.startswith(prefixes):
-            continue
-        total = model.get("total_exploration_length_mm")
-        if total is None:
-            offsets = model.get("contact_center_offsets_from_tip_mm") or []
-            if len(offsets) < 2:
-                continue
-            total = float(offsets[-1]) - float(offsets[0])
-        total = float(total)
-        if total + tol < L:
-            continue
-        if best is None or total < best["model_length_mm"]:
-            best = {
-                "model_id": mid,
-                "model_length_mm": total,
-                "gap_mm": total - L,
-            }
-    return best
+#
+# The constants (VENDOR_ID_PREFIXES, PITCH_STRATEGY_*), helper
+# (_vendor_prefixes, _model_pitch_median_mm), library filter
+# (filter_models_for_strategy), and scoring functions
+# (suggest_shortest_covering_model, classify_by_walker_signature,
+# classify_by_count_and_span, classify_pacer_template, and the unified
+# classify_electrode_model dispatcher) live in
+# `rosa_core.electrode_classifier`. Re-exported via the import block at
+# the top of this module so existing callers (probes, tests) keep
+# working unchanged.
+#
+# `refine_signature_via_axis_peaks` below stays here because it operates
+# on a feature volume passed in by the detection pipeline and is not
+# part of the picker's public surface.
 
 
 def refine_signature_via_axis_peaks(rec, log_arr, ras_to_ijk_mat,
@@ -3363,216 +3307,3 @@ def refine_signature_via_axis_peaks(rec, log_arr, ras_to_ijk_mat,
     }
 
 
-def filter_models_for_strategy(models, strategy_key,
-                                 pitch_tolerance_mm=0.25):
-    """Restrict the model library to those matching a pitch-strategy
-    selection — vendor prefix AND median pitch within ``pitch_tolerance_mm``
-    of one of the strategy's pitches.
-
-    The user picking "Dixi AM (3.5 mm)" wants suggestions only from the
-    Dixi 3.5 mm family — not DIXI-MM09A33 (3.9 mm) or DIXI-MM09A40
-    (4.8 mm), which share the Dixi vendor prefix but ride a different
-    pitch family. The vendor-only filter that
-    ``classify_by_walker_signature`` / ``suggest_shortest_covering_model``
-    apply via the ``vendors`` parameter is too loose for that intent;
-    this helper layers a pitch-set filter on top.
-
-    For ``strategy_key == "auto"`` (or unknown strategy) the model
-    library is returned unchanged — auto-detect makes no commitment to a
-    specific pitch set.
-    """
-    if not strategy_key:
-        return list(models)
-    key = str(strategy_key).strip().lower()
-    if key == "auto":
-        return list(models)
-    pitches = PITCH_STRATEGY_PITCHES_MM.get(key)
-    vendors = PITCH_STRATEGY_VENDORS.get(key)
-    if not pitches or not vendors:
-        return list(models)
-    prefixes = _vendor_prefixes(vendors)
-    if not prefixes:
-        return list(models)
-    out = []
-    for m in models:
-        mid = str(m.get("id") or "")
-        if not mid.startswith(prefixes):
-            continue
-        m_pitch = _model_pitch_median_mm(m)
-        if m_pitch <= 0.0:
-            continue
-        if not any(abs(m_pitch - float(p)) <= float(pitch_tolerance_mm)
-                   for p in pitches):
-            continue
-        out.append(m)
-    return out
-
-
-def _model_pitch_median_mm(model):
-    """Median inter-contact spacing for one electrode model.
-
-    Most library models are uniform-pitch (DIXI-AM 3.5 mm, PMT-16B 3.97 mm),
-    in which case the median equals the pitch. For non-uniform spacings
-    (DIXI-MM family) the median picks the dominant intercontact distance,
-    which is the right matcher target for the walker's
-    ``original_median_pitch_mm`` (also a median across blob NN spacings).
-    """
-    offsets = model.get("contact_center_offsets_from_tip_mm") or []
-    if len(offsets) < 2:
-        return 0.0
-    diffs = [
-        float(offsets[i + 1]) - float(offsets[i])
-        for i in range(len(offsets) - 1)
-    ]
-    if not diffs:
-        return 0.0
-    diffs.sort()
-    return float(diffs[len(diffs) // 2])
-
-
-def classify_by_walker_signature(n_observed, pitch_observed_mm,
-                                  contact_span_observed_mm,
-                                  intracranial_length_mm, models,
-                                  vendors=("Dixi",),
-                                  pitch_weight_mm=10.0,
-                                  count_weight_mm=3.5,
-                                  span_weight=1.0,
-                                  length_weight=0.5,
-                                  dura_tolerance_mm=10.0,
-                                  span_shoulder_mm=2.0):
-    """Pick the electrode model best explained by the walker's full
-    signature: ``(n_inliers, original_median_pitch_mm, contact_span_mm,
-    intracranial_length_mm)`` against each model's
-    ``(contact_count, median_pitch, contact_span, total_exploration_length)``.
-
-    Score (mm-equivalent units, lower better) =
-        pitch_err * pitch_weight_mm
-      + count_err * count_weight_mm
-      + max(0, span_err - span_shoulder_mm) * span_weight
-      + max(0, length_err - dura_tolerance_mm) * length_weight
-
-    Pitch dominates because it is the strongest within-vendor
-    discriminator (DIXI AM 3.5 vs DIXI MM 3.9/4.8/6.1; PMT 3.5 vs PMT
-    3.97 vs PMT 4.43). Count breaks pitch ties (PMT-8 vs PMT-12 at the
-    same 3.5 mm pitch). Span and length sit on shoulders so a snug fit
-    inside the tolerance window contributes 0 — they only penalize
-    flagrant mismatches, not normal scanner / skull-entry noise.
-
-    Wire-class fallback: when ``pitch_observed_mm <= 0`` or
-    ``n_observed <= 0`` (no walker validation), the corresponding
-    component is skipped — the score reduces to span + length only,
-    matching the behaviour of ``classify_by_count_and_span`` /
-    ``suggest_shortest_covering_model`` on those records.
-
-    ``vendors`` filters models by vendor-id prefix (same convention as
-    the other classifiers in this module).
-
-    Returns ``{"model_id", "score", "model_pitch_mm", "model_n",
-    "model_span_mm", "model_total_mm"}`` or ``None``.
-    """
-    prefixes = _vendor_prefixes(vendors)
-    if not prefixes:
-        return None
-    n_obs = int(n_observed) if n_observed and n_observed > 0 else 0
-    pitch_obs = float(pitch_observed_mm) if pitch_observed_mm and pitch_observed_mm > 0 else 0.0
-    span_obs = float(contact_span_observed_mm or 0.0)
-    length_obs = float(intracranial_length_mm or 0.0)
-    best = None
-    for model in models:
-        mid = str(model.get("id") or "")
-        if not mid.startswith(prefixes):
-            continue
-        offsets = model.get("contact_center_offsets_from_tip_mm") or []
-        if len(offsets) < 2:
-            continue
-        n_model = int(model.get("contact_count") or len(offsets))
-        span_model = float(offsets[-1]) - float(offsets[0])
-        pitch_model = _model_pitch_median_mm(model)
-        total_model = model.get("total_exploration_length_mm")
-        if total_model is None:
-            total_model = span_model
-        total_model = float(total_model)
-
-        # Pitch + count: only when the walker actually saw contacts.
-        pitch_term = 0.0
-        if pitch_obs > 0.0 and pitch_model > 0.0:
-            pitch_term = float(pitch_weight_mm) * abs(pitch_obs - pitch_model)
-        count_term = 0.0
-        if n_obs > 0:
-            count_term = float(count_weight_mm) * abs(n_obs - n_model)
-        # Span + length: shoulder-trapezoid so small mismatches are free.
-        # Skip span when not observed (wire-class without walker span).
-        span_term = 0.0
-        span_err = 0.0
-        if span_obs > 0.0:
-            span_err = abs(span_obs - span_model)
-            span_term = float(span_weight) * max(0.0, span_err - float(span_shoulder_mm))
-        length_err = abs(length_obs - total_model) if length_obs > 0.0 else 0.0
-        length_term = (
-            float(length_weight) * max(0.0, length_err - float(dura_tolerance_mm))
-            if length_obs > 0.0 else 0.0
-        )
-
-        score = pitch_term + count_term + span_term + length_term
-        if best is None or score < best["score"]:
-            best = {
-                "model_id": mid,
-                "score": float(score),
-                "model_pitch_mm": float(pitch_model),
-                "model_n": int(n_model),
-                "model_span_mm": float(span_model),
-                "model_total_mm": float(total_model),
-                "pitch_err_mm": float(abs(pitch_obs - pitch_model)) if pitch_obs > 0 else float("nan"),
-                "count_err": int(abs(n_obs - n_model)) if n_obs > 0 else -1,
-                "span_err_mm": float(span_err),
-                "length_err_mm": float(length_err),
-            }
-    return best
-
-
-def classify_by_count_and_span(n_observed, span_observed_mm,
-                                models, vendors=("Dixi",),
-                                count_weight_mm=3.5):
-    """Pick the electrode model best explained by an observed
-    (contact-count, span) pair.
-
-    Score = ``|N_model − n_observed| * count_weight_mm +
-    |span_model − span_observed_mm|``. ``count_weight_mm=3.5`` means
-    1 missing contact is worth ~1 pitch of span error, so models
-    that match on count dominate.
-
-    ``span_model = offsets[-1] − offsets[0]``, the tip-contact-to-deep-
-    contact span (NOT the full electrode exploration length).
-
-    ``vendors`` filters models by vendor-id prefix ("Dixi" → "DIXI-",
-    "PMT" → "PMT-"). Models outside the prefix set are skipped.
-
-    Returns ``{"model_id", "score", "count_err", "span_err"}`` or
-    ``None`` if no candidate survives the vendor filter.
-    """
-    prefixes = _vendor_prefixes(vendors)
-    if not prefixes:
-        return None
-    best = None
-    for model in models:
-        mid = str(model.get("id") or "")
-        if not mid.startswith(prefixes):
-            continue
-        offsets = model.get("contact_center_offsets_from_tip_mm") or []
-        if len(offsets) < 2:
-            continue
-        n_model = int(model.get("contact_count") or len(offsets))
-        span_model = float(offsets[-1]) - float(offsets[0])
-        count_err = abs(int(n_observed) - n_model)
-        span_err = abs(float(span_observed_mm) - span_model)
-        score = count_err * float(count_weight_mm) + span_err
-        if best is None or score < best["score"]:
-            best = {
-                "model_id": mid,
-                "score": float(score),
-                "count_err": int(count_err),
-                "span_err": float(span_err),
-                "n_model": n_model,
-                "span_model_mm": span_model,
-            }
-    return best

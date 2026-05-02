@@ -53,9 +53,14 @@ class GuidedFitWidgetMixin:
             "entry + deep tip)."
         )
         info.wordWrap = True
+        info.setMinimumWidth(0)
+        info.setSizePolicy(
+            qt.QSizePolicy.Preferred, qt.QSizePolicy.MinimumExpanding,
+        )
         layout.addWidget(info)
 
         form = qt.QFormLayout()
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         layout.addLayout(form)
 
         # Seed source. Entries are "<Label> (<N>)" with empty sources
@@ -84,13 +89,28 @@ class GuidedFitWidgetMixin:
         self.guidedSeedTable = qt.QTableWidget()
         self.guidedSeedTable.setColumnCount(4)
         self.guidedSeedTable.setHorizontalHeaderLabels(
-            ["Fit", "Name", "Length (mm)", "Status"]
+            ["Fit", "Name", "Len mm", "Status"]
         )
-        self.guidedSeedTable.horizontalHeader().setStretchLastSection(True)
+        seed_header = self.guidedSeedTable.horizontalHeader()
+        for col in range(self.guidedSeedTable.columnCount):
+            seed_header.setSectionResizeMode(col, qt.QHeaderView.Interactive)
+        for col, width in (
+            (0, 40),    # Fit
+            (1, 110),   # Name
+            (2, 70),    # Len mm
+            (3, 90),    # Status
+        ):
+            self.guidedSeedTable.setColumnWidth(col, width)
+        seed_header.setStretchLastSection(False)
         self.guidedSeedTable.verticalHeader().setVisible(False)
         self.guidedSeedTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         self.guidedSeedTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
         self.guidedSeedTable.setMinimumHeight(140)
+        self.guidedSeedTable.setMinimumWidth(120)
+        self.guidedSeedTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        self.guidedSeedTable.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred,
+        )
         layout.addWidget(self.guidedSeedTable)
 
         # Fit knobs.
@@ -107,6 +127,10 @@ class GuidedFitWidgetMixin:
             "that axis drops cross-shank contamination before the "
             "final fit."
         )
+        self.guidedRoiRadiusSpin.setMinimumWidth(0)
+        self.guidedRoiRadiusSpin.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         form.addRow("ROI radius:", self.guidedRoiRadiusSpin)
 
         self.guidedMaxAngleSpin = qt.QDoubleSpinBox()
@@ -116,6 +140,10 @@ class GuidedFitWidgetMixin:
         self.guidedMaxAngleSpin.setSuffix(" deg")
         self.guidedMaxAngleSpin.setToolTip(
             "Maximum tilt of the fitted axis vs the seed axis."
+        )
+        self.guidedMaxAngleSpin.setMinimumWidth(0)
+        self.guidedMaxAngleSpin.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
         )
         form.addRow("Max axis tilt:", self.guidedMaxAngleSpin)
 
@@ -129,7 +157,32 @@ class GuidedFitWidgetMixin:
         self.guidedMaxLateralShiftSpin.setToolTip(
             "Maximum lateral shift of the fitted midpoint vs the seed midpoint."
         )
+        self.guidedMaxLateralShiftSpin.setMinimumWidth(0)
+        self.guidedMaxLateralShiftSpin.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         form.addRow("Max lateral shift:", self.guidedMaxLateralShiftSpin)
+
+        # Local pitch-strategy combo so the user can restrict the
+        # picker library directly from Guided Fit (used to require
+        # flipping to the Auto Fit tab to change it).
+        from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
+        self.guidedPitchStrategyCombo = qt.QComboBox()
+        for label, key in PITCH_STRATEGY_OPTIONS:
+            self.guidedPitchStrategyCombo.addItem(label, key)
+        self.guidedPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
+        self.guidedPitchStrategyCombo.setToolTip(
+            "Restrict the model library used by the per-trajectory "
+            "PaCER picker on Fit. Vendor + pitch-set filter."
+        )
+        self.guidedPitchStrategyCombo.setMinimumContentsLength(8)
+        self.guidedPitchStrategyCombo.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self.guidedPitchStrategyCombo.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
+        form.addRow("Pitch strategy:", self.guidedPitchStrategyCombo)
 
         fitRow = qt.QHBoxLayout()
         self.fitSelectedButton = qt.QPushButton("Fit Checked")
@@ -143,6 +196,10 @@ class GuidedFitWidgetMixin:
 
         self.guidedFitStatusLabel = qt.QLabel("idle")
         self.guidedFitStatusLabel.wordWrap = True
+        self.guidedFitStatusLabel.setMinimumWidth(0)
+        self.guidedFitStatusLabel.setSizePolicy(
+            qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred,
+        )
         form.addRow("Status:", self.guidedFitStatusLabel)
 
         # Seed cache. Only trajectories for the currently-selected seed
@@ -904,6 +961,45 @@ class GuidedFitWidgetMixin:
                         node.SetAttribute("Rosa.MatchedAutoName", matched_name)
             except Exception:
                 pass
+            # Unified electrode-model picker (same code path as Auto Fit
+            # and Manual Fit). PaCER template-correlation against the
+            # canonical CT volume is the preferred mode; walker signature
+            # / length-only are fallbacks. Phase 2 match-against-auto
+            # already inherits the matched auto trajectory's attributes
+            # via the auto-source path; only PCA fallback needs to pick
+            # here.
+            try:
+                from rosa_core.electrode_classifier import classify_electrode_model
+                walker_sig = None
+                n_obs = int(fit.get("n_inliers") or 0)
+                pitch_obs = float(fit.get("original_median_pitch_mm") or 0.0)
+                span_obs = float(fit.get("contact_span_mm") or 0.0)
+                if n_obs > 0 and pitch_obs > 0.0:
+                    walker_sig = (n_obs, pitch_obs, span_obs)
+                strategy = "auto"
+                combo = getattr(self, "guidedPitchStrategyCombo", None)
+                if combo is not None:
+                    data = combo.currentData
+                    if isinstance(data, str) and data:
+                        strategy = data
+                else:
+                    fallback = getattr(self, "_selected_contact_pitch_strategy", None)
+                    if callable(fallback):
+                        strategy = str(fallback() or "auto")
+                pick = classify_electrode_model(
+                    start_ras=line_start, end_ras=line_end,
+                    pitch_strategy=strategy,
+                    ct_volume_kji=features.get("ct_arr_kji"),
+                    ras_to_ijk_mat=ras_to_ijk,
+                    walker_signature=walker_sig,
+                )
+                if pick is not None:
+                    node.SetAttribute("Rosa.BestModelId", str(pick.get("model_id") or ""))
+                    method = str(pick.get("method") or "")
+                    if method:
+                        node.SetAttribute("Rosa.SuggestedElectrodeMethod", method)
+            except Exception as exc:
+                self.log(f"[guided] {name}: model-pick warning — {exc}")
             applied_nodes.append(node)
             self._set_seed_status(row, True)
             anchored = "bolt" if fit.get("bolt_anchored") else "no-bolt"

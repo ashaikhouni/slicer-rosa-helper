@@ -25,6 +25,11 @@ from .contact_peak_fit import (
     ras_contacts_to_contact_records,
     sample_axis_profile,
 )
+from .curry_export import (
+    contacts_to_pom_points,
+    trajectory_endpoints_to_pom_points,
+    write_curry_pom,
+)
 from .electrode_models import default_electrode_library_path, load_electrode_library, model_map
 from .exporters import build_fcsv_rows, build_markups_lines, build_markups_document
 from .ros_parser import parse_ros_file
@@ -57,6 +62,9 @@ from .types import (
 __all__ = [
     "apply_affine",
     "build_fcsv_rows",
+    "contacts_to_pom_points",
+    "trajectory_endpoints_to_pom_points",
+    "write_curry_pom",
     "build_markups_document",
     "build_markups_lines",
     "candidate_ids_for_vendors",

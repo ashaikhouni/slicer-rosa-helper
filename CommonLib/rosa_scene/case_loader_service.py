@@ -56,6 +56,35 @@ class CaseLoaderService:
         trajectories = parsed["trajectories"]
         if not displays:
             raise ValueError("No TRdicomRdisplay/VOLUME entries found in ROS file")
+        # Diagnostic: surface why trajectory parsing came up empty so
+        # users on non-standard ROSA dialects can see which token name
+        # holds the trajectories. (The parser only knows TRAJECTORY /
+        # ELLIPS today.)
+        if load_trajectories and not trajectories:
+            n_candidates = int(parsed.get("trajectory_candidates", 0) or 0)
+            histogram = parsed.get("token_histogram") or {}
+            rejects = parsed.get("trajectory_rejects") or []
+            log(
+                f"[ros] 0 trajectories parsed "
+                f"(TRAJECTORY/ELLIPS candidates: {n_candidates})"
+            )
+            traj_like = sorted(
+                (k for k in histogram
+                 if any(s in k.upper()
+                        for s in ("TRAJ", "ELECTRODE", "PLAN", "POINT"))),
+                key=lambda k: -histogram[k],
+            )
+            if traj_like:
+                log(
+                    "[ros] possible trajectory-like tokens in this file: "
+                    + ", ".join(f"{k}×{histogram[k]}" for k in traj_like[:6])
+                )
+            for r in rejects[:3]:
+                log(
+                    f"[ros]   reject [{r['token']}] "
+                    f"n_lines={r['n_lines']} fields_line2={r['n_fields_line2']} "
+                    f"first='{r['first_line'][:60]}'"
+                )
 
         reference_volume = choose_reference_volume(displays, preferred=reference)
         root_index = resolve_reference_index(displays, reference_volume)

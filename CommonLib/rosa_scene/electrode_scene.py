@@ -48,11 +48,11 @@ class ElectrodeSceneService:
 
         display_node = node.GetDisplayNode()
         if display_node:
-            # Glyph picking in slice views requires the cursor on the
-            # glyph itself; the prior 2.0 scale was too small to grab
-            # reliably on tightly-spaced DBS / SEEG contacts.
-            display_node.SetGlyphScale(4.00)
-            display_node.SetTextScale(1.50)
+            # Compact default — large enough to click reliably on
+            # tightly-spaced contacts but not overwhelming the slice
+            # view. Earlier 4.0 was too prominent on screenshots.
+            display_node.SetGlyphScale(2.00)
+            display_node.SetTextScale(2.50)
         return node
 
     def create_contacts_fiducials_nodes_by_trajectory(self, contacts, node_prefix="ROSA_Contacts"):
@@ -441,6 +441,15 @@ class ElectrodeSceneService:
                 elif hasattr(contacts_display, "SetSliceIntersectionVisibility"):
                     contacts_display.SetSliceIntersectionVisibility(True)
 
+            # Stamp the trajectory name on each model node so the
+            # isolation API (`apply_trajectory_isolation`) can match
+            # without parsing the node's display name.
+            try:
+                shaft_node.SetAttribute("Rosa.TrajectoryName", str(traj_name))
+                contacts_node.SetAttribute("Rosa.TrajectoryName", str(traj_name))
+            except Exception:
+                pass
+
             created[traj_name] = {"shaft": shaft_node, "contacts": contacts_node}
 
         return created
@@ -568,3 +577,45 @@ class ElectrodeSceneService:
             display = node.GetDisplayNode()
             if display:
                 display.SetVisibility(bool(visible))
+
+    def apply_trajectory_isolation(self, isolated_names):
+        """Show only nodes belonging to `isolated_names`; hide all
+        others. Pass an empty / None set to restore everything.
+
+        Affects every node tagged with `Rosa.TrajectoryName`:
+          - trajectory line markups (Auto Fit / Guided Fit / Manual /
+            Imported / Planned)
+          - contact fiducial nodes (`ROSA_Contacts_<traj_name>`)
+          - electrode shaft + contact model nodes
+            (`ROSA_Contacts_<traj_name>_shaft` /  `_contacts`)
+
+        Used by the trajectory tables in PostopCTLocalization and
+        Contacts & Trajectory View to reduce 3D-scene clutter when
+        the user wants to focus on one shank at a time.
+        """
+        targets = set()
+        if isolated_names:
+            for n in isolated_names:
+                if n:
+                    targets.add(str(n).strip())
+        all_visible = not targets  # empty set = show all
+
+        def _apply(node):
+            if node is None:
+                return
+            attr = (node.GetAttribute("Rosa.TrajectoryName") or "").strip()
+            if not attr:
+                return
+            display = node.GetDisplayNode()
+            if display is None:
+                return
+            visible = all_visible or (attr in targets)
+            display.SetVisibility(bool(visible))
+
+        for cls in (
+            "vtkMRMLMarkupsLineNode",
+            "vtkMRMLMarkupsFiducialNode",
+            "vtkMRMLModelNode",
+        ):
+            for node in slicer.util.getNodesByClass(cls):
+                _apply(node)

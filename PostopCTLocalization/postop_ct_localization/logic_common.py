@@ -109,7 +109,7 @@ class PostopCTLocalizationLogicBaseMixin:
     MANUAL_ORIENTATION_TARGET_FIRST = "target_first"
 
     def sync_manual_trajectories_to_workflow(
-        self, workflow_node=None, orientation="auto"
+        self, workflow_node=None, orientation="auto", pitch_strategy="auto",
     ):
         """Tag/publish scene-authored line markups as manual trajectories.
 
@@ -139,6 +139,33 @@ class PostopCTLocalizationLogicBaseMixin:
                 mode = self.MANUAL_ORIENTATION_ENTRY_FIRST
         nodes = []
         n_reoriented = 0
+        # Pre-load the postop CT once so we can run the unified electrode-
+        # model picker on every synced manual line. PaCER template
+        # correlation needs (volume_kji, ras_to_ijk_mat, start_ras,
+        # end_ras); Manual Fit's user-drawn endpoints are the seed.
+        ct_arr_kji = None
+        ras_to_ijk_for_pick = None
+        try:
+            ct_volume_for_pick = volume_node or self._find_postop_ct_volume_node(
+                workflow_node=wf,
+            )
+            if ct_volume_for_pick is not None:
+                import SimpleITK as _sitk
+                from shank_core.io import image_ijk_ras_matrices
+                # Pull the canonical-resampled volume from the same
+                # `prepare_volume` path that detection uses, so manual
+                # picks stay consistent with Auto / Guided picks.
+                from postop_ct_localization.contact_pitch_v1_fit import prepare_volume
+                _img = _sitk.GetImageFromArray(
+                    slicer.util.arrayFromVolume(ct_volume_for_pick)
+                )
+                _i2r, _r2i = image_ijk_ras_matrices(ct_volume_for_pick)
+                _img, _i2r, _r2i = prepare_volume(_img, _i2r, _r2i)
+                ct_arr_kji = _sitk.GetArrayFromImage(_img).astype("float32")
+                ras_to_ijk_for_pick = _r2i
+        except Exception:
+            ct_arr_kji = None
+            ras_to_ijk_for_pick = None
         for row in rows:
             node = slicer.mrmlScene.GetNodeByID(row.get("node_id", ""))
             if node is None:
@@ -152,6 +179,33 @@ class PostopCTLocalizationLogicBaseMixin:
                 origin=node.GetAttribute("Rosa.TrajectoryOrigin") or "manual_scene",
             )
             node.SetAttribute("Rosa.ManualOrientation", mode)
+            # Stamp the unified picker's model id so Contacts &
+            # Trajectory View can read `Rosa.BestModelId` directly
+            # instead of falling back to length-only guessing on every
+            # populate.
+            try:
+                if ct_arr_kji is not None:
+                    traj = self.trajectory_scene.trajectory_from_line_node("", node)
+                    if traj is not None:
+                        from rosa_core.electrode_classifier import classify_electrode_model
+                        pick = classify_electrode_model(
+                            start_ras=traj["start_ras"],
+                            end_ras=traj["end_ras"],
+                            pitch_strategy=str(pitch_strategy or "auto"),
+                            ct_volume_kji=ct_arr_kji,
+                            ras_to_ijk_mat=ras_to_ijk_for_pick,
+                        )
+                        if pick is not None:
+                            node.SetAttribute(
+                                "Rosa.BestModelId", str(pick.get("model_id") or ""),
+                            )
+                            method = str(pick.get("method") or "")
+                            if method:
+                                node.SetAttribute(
+                                    "Rosa.SuggestedElectrodeMethod", method,
+                                )
+            except Exception:
+                pass
             nodes.append(node)
         self.workflow_publish.publish_nodes(
             role="ManualTrajectoryLines",

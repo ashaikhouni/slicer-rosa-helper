@@ -11,257 +11,555 @@
       "reference": "D08-05AM",
       "type": "AM",
       "contact_count": 5,
-      "groups": [5],
+      "groups": [
+        5
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 16.0,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0
+      ]
     },
     {
       "id": "DIXI-8AM",
       "reference": "D08-08AM",
       "type": "AM",
       "contact_count": 8,
-      "groups": [8],
+      "groups": [
+        8
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 26.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5
+      ]
     },
     {
       "id": "DIXI-10AM",
       "reference": "D08-10AM",
       "type": "AM",
       "contact_count": 10,
-      "groups": [10],
+      "groups": [
+        10
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5
+      ]
     },
     {
       "id": "DIXI-12AM",
       "reference": "D08-12AM",
       "type": "AM",
       "contact_count": 12,
-      "groups": [12],
+      "groups": [
+        12
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5
+      ]
     },
     {
       "id": "PMT-8",
       "reference": "PMT-8",
       "type": "PMT",
       "contact_count": 8,
-      "groups": [8],
+      "groups": [
+        8
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 26.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5
+      ]
     },
     {
       "id": "PMT-10",
       "reference": "PMT-10",
       "type": "PMT",
       "contact_count": 10,
-      "groups": [10],
+      "groups": [
+        10
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5
+      ]
     },
     {
       "id": "PMT-12",
       "reference": "PMT-12",
       "type": "PMT",
       "contact_count": 12,
-      "groups": [12],
+      "groups": [
+        12
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5
+      ]
     },
     {
       "id": "PMT-14",
       "reference": "PMT-14",
       "type": "PMT",
       "contact_count": 14,
-      "groups": [14],
+      "groups": [
+        14
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 47.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5, 43.0, 46.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5,
+        43.0,
+        46.5
+      ]
     },
     {
       "id": "PMT-16A",
       "reference": "PMT-16A",
       "type": "PMT",
       "contact_count": 16,
-      "groups": [16],
+      "groups": [
+        16
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 54.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5, 43.0, 46.5, 50.0, 53.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5,
+        43.0,
+        46.5,
+        50.0,
+        53.5
+      ]
     },
     {
       "id": "PMT-16B",
       "reference": "PMT-16B",
       "type": "PMT",
       "contact_count": 16,
-      "groups": [16],
+      "groups": [
+        16
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.97,
       "center_to_center_separation_mm": 3.97,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 61.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.97, 8.94, 12.91, 16.88, 20.85, 24.82, 28.79, 32.76, 36.73, 40.70, 44.67, 48.64, 52.61, 56.58, 60.55]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.97,
+        8.94,
+        12.91,
+        16.88,
+        20.85,
+        24.82,
+        28.79,
+        32.76,
+        36.73,
+        40.7,
+        44.67,
+        48.64,
+        52.61,
+        56.58,
+        60.55
+      ]
     },
     {
       "id": "PMT-16C",
       "reference": "PMT-16C",
       "type": "PMT",
       "contact_count": 16,
-      "groups": [16],
+      "groups": [
+        16
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 2.43,
       "center_to_center_separation_mm": 4.43,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 68.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 5.43, 9.86, 14.29, 18.72, 23.15, 27.58, 32.01, 36.44, 40.87, 45.30, 49.73, 54.16, 58.59, 63.02, 67.45]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        5.43,
+        9.86,
+        14.29,
+        18.72,
+        23.15,
+        27.58,
+        32.01,
+        36.44,
+        40.87,
+        45.3,
+        49.73,
+        54.16,
+        58.59,
+        63.02,
+        67.45
+      ]
     },
     {
       "id": "DIXI-15AM",
       "reference": "D08-15AM",
       "type": "AM",
       "contact_count": 15,
-      "groups": [15],
+      "groups": [
+        15
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 51.0,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5, 43.0, 46.5, 50.0]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5,
+        43.0,
+        46.5,
+        50.0
+      ]
     },
     {
       "id": "DIXI-18AM",
       "reference": "D08-18AM",
       "type": "AM",
       "contact_count": 18,
-      "groups": [18],
+      "groups": [
+        18
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 61.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 22.0, 25.5, 29.0, 32.5, 36.0, 39.5, 43.0, 46.5, 50.0, 53.5, 57.0, 60.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        22.0,
+        25.5,
+        29.0,
+        32.5,
+        36.0,
+        39.5,
+        43.0,
+        46.5,
+        50.0,
+        53.5,
+        57.0,
+        60.5
+      ]
     },
     {
       "id": "DIXI-15BM",
       "reference": "D08-15BM",
       "type": "BM",
       "contact_count": 15,
-      "groups": [5, 5, 5],
+      "groups": [
+        5,
+        5,
+        5
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": 7.0,
       "total_exploration_length_mm": 62.0,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 24.0, 27.5, 31.0, 34.5, 38.0, 47.0, 50.5, 54.0, 57.5, 61.0]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        24.0,
+        27.5,
+        31.0,
+        34.5,
+        38.0,
+        47.0,
+        50.5,
+        54.0,
+        57.5,
+        61.0
+      ]
     },
     {
       "id": "DIXI-15CM",
       "reference": "D08-15CM",
       "type": "CM",
       "contact_count": 15,
-      "groups": [5, 5, 5],
+      "groups": [
+        5,
+        5,
+        5
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": 11.0,
       "total_exploration_length_mm": 70.0,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 28.0, 31.5, 35.0, 38.5, 42.0, 55.0, 58.5, 62.0, 65.5, 69.0]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        28.0,
+        31.5,
+        35.0,
+        38.5,
+        42.0,
+        55.0,
+        58.5,
+        62.0,
+        65.5,
+        69.0
+      ]
     },
     {
       "id": "DIXI-18CM",
       "reference": "D08-18CM",
       "type": "CM",
       "contact_count": 18,
-      "groups": [6, 6, 6],
+      "groups": [
+        6,
+        6,
+        6
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
       "inter_group_insulation_mm": 11.0,
       "total_exploration_length_mm": 80.5,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.5, 8.0, 11.5, 15.0, 18.5, 31.5, 35.0, 38.5, 42.0, 45.5, 49.0, 62.0, 65.5, 69.0, 72.5, 76.0, 79.5]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5,
+        15.0,
+        18.5,
+        31.5,
+        35.0,
+        38.5,
+        42.0,
+        45.5,
+        49.0,
+        62.0,
+        65.5,
+        69.0,
+        72.5,
+        76.0,
+        79.5
+      ]
     },
     {
       "id": "DIXI-MM09A33",
       "reference": "MM08-09A33",
       "type": "MM",
       "contact_count": 9,
-      "groups": [9],
+      "groups": [
+        9
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.9,
       "center_to_center_separation_mm": 3.9,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.2,
-      "contact_center_offsets_from_tip_mm": [1.0, 4.9, 8.8, 12.7, 16.6, 20.5, 24.4, 28.3, 32.2]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.9,
+        8.8,
+        12.7,
+        16.6,
+        20.5,
+        24.4,
+        28.3,
+        32.2
+      ]
     },
     {
       "id": "DIXI-MM09A40",
       "reference": "MM08-09A40",
       "type": "MM",
       "contact_count": 9,
-      "groups": [9],
+      "groups": [
+        9
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 2.8,
       "center_to_center_separation_mm": 4.8,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.4,
-      "contact_center_offsets_from_tip_mm": [1.0, 5.8, 10.6, 15.4, 20.2, 25.0, 29.8, 34.6, 39.4]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        5.8,
+        10.6,
+        15.4,
+        20.2,
+        25.0,
+        29.8,
+        34.6,
+        39.4
+      ]
     },
     {
       "id": "DIXI-MM09A51",
       "reference": "MM08-09A51",
       "type": "MM",
       "contact_count": 9,
-      "groups": [9],
+      "groups": [
+        9
+      ],
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 4.1,
       "center_to_center_separation_mm": 6.1,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 50.8,
-      "contact_center_offsets_from_tip_mm": [1.0, 7.1, 13.2, 19.3, 25.4, 31.5, 37.6, 43.7, 49.8]
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        7.1,
+        13.2,
+        19.3,
+        25.4,
+        31.5,
+        37.6,
+        43.7,
+        49.8
+      ]
     },
     {
       "id": "Medtronic_3387",
@@ -269,15 +567,27 @@
       "vendor": "Medtronic",
       "type": "ring_4",
       "contact_count": 4,
-      "groups": [4],
+      "groups": [
+        4
+      ],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 12.0,
-      "contact_center_offsets_from_tip_mm": [2.25, 5.25, 8.25, 11.25],
-      "contact_labels": ["0", "1", "2", "3"]
+      "contact_center_offsets_from_tip_mm": [
+        2.25,
+        5.25,
+        8.25,
+        11.25
+      ],
+      "contact_labels": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ]
     },
     {
       "id": "Medtronic_3389",
@@ -285,15 +595,27 @@
       "vendor": "Medtronic",
       "type": "ring_4",
       "contact_count": 4,
-      "groups": [4],
+      "groups": [
+        4
+      ],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 0.5,
       "center_to_center_separation_mm": 2.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 9.0,
-      "contact_center_offsets_from_tip_mm": [2.25, 4.25, 6.25, 8.25],
-      "contact_labels": ["0", "1", "2", "3"]
+      "contact_center_offsets_from_tip_mm": [
+        2.25,
+        4.25,
+        6.25,
+        8.25
+      ],
+      "contact_labels": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ]
     },
     {
       "id": "Medtronic_3391",
@@ -301,15 +623,27 @@
       "vendor": "Medtronic",
       "type": "ring_4",
       "contact_count": 4,
-      "groups": [4],
+      "groups": [
+        4
+      ],
       "contact_length_mm": 3.0,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 4.0,
       "center_to_center_separation_mm": 7.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 25.5,
-      "contact_center_offsets_from_tip_mm": [3.0, 10.0, 17.0, 24.0],
-      "contact_labels": ["0", "1", "2", "3"]
+      "contact_center_offsets_from_tip_mm": [
+        3.0,
+        10.0,
+        17.0,
+        24.0
+      ],
+      "contact_labels": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ]
     },
     {
       "id": "Medtronic_SenSight_B33005",
@@ -317,15 +651,27 @@
       "vendor": "Medtronic",
       "type": "directional_1_3_3_1",
       "contact_count": 4,
-      "groups": [4],
+      "groups": [
+        4
+      ],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
       "intra_contact_insulation_mm": 0.5,
       "center_to_center_separation_mm": 2.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 8.5,
-      "contact_center_offsets_from_tip_mm": [1.75, 3.75, 5.75, 7.75],
-      "contact_labels": ["0", "1", "2", "3"]
+      "contact_center_offsets_from_tip_mm": [
+        1.75,
+        3.75,
+        5.75,
+        7.75
+      ],
+      "contact_labels": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ]
     },
     {
       "id": "Medtronic_SenSight_B33015",
@@ -333,15 +679,85 @@
       "vendor": "Medtronic",
       "type": "directional_1_3_3_1",
       "contact_count": 4,
-      "groups": [4],
+      "groups": [
+        4
+      ],
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
       "intra_contact_insulation_mm": 1.5,
       "center_to_center_separation_mm": 3.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 11.5,
-      "contact_center_offsets_from_tip_mm": [1.75, 4.75, 7.75, 10.75],
-      "contact_labels": ["0", "1", "2", "3"]
+      "contact_center_offsets_from_tip_mm": [
+        1.75,
+        4.75,
+        7.75,
+        10.75
+      ],
+      "contact_labels": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ]
+    },
+    {
+      "id": "NeuroPace_DL_3.5",
+      "reference": "DL-330-3.5 / DL-344-3.5",
+      "vendor": "NeuroPace",
+      "type": "depth_4_3.5mm",
+      "contact_count": 4,
+      "groups": [
+        4
+      ],
+      "contact_length_mm": 2.0,
+      "diameter_mm": 1.27,
+      "intra_contact_insulation_mm": 1.5,
+      "center_to_center_separation_mm": 3.5,
+      "inter_group_insulation_mm": null,
+      "total_exploration_length_mm": 11.5,
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        4.5,
+        8.0,
+        11.5
+      ],
+      "contact_labels": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "notes": "Specs verified against NIH BRAIN Initiative RNS Device Info (2018) and NeuroPace RNS System User Manual (Table 7): depth contact 1.27 mm dia x 2.0 mm length, 0.08 cm^2 surface. Contact dimensions are identical between the 3.5 mm and 10 mm inter-contact spacing variants \u2014 only spacing differs. The 30 vs 44 cm in DL-330 vs DL-344 is the lead-body length, not the contact region."
+    },
+    {
+      "id": "NeuroPace_DL_10",
+      "reference": "DL-330-10 / DL-344-10",
+      "vendor": "NeuroPace",
+      "type": "depth_4_10mm",
+      "contact_count": 4,
+      "groups": [
+        4
+      ],
+      "contact_length_mm": 2.0,
+      "diameter_mm": 1.27,
+      "intra_contact_insulation_mm": 8.0,
+      "center_to_center_separation_mm": 10.0,
+      "inter_group_insulation_mm": null,
+      "total_exploration_length_mm": 31.0,
+      "contact_center_offsets_from_tip_mm": [
+        1.0,
+        11.0,
+        21.0,
+        31.0
+      ],
+      "contact_labels": [
+        "1",
+        "2",
+        "3",
+        "4"
+      ],
+      "notes": "Specs verified against NIH BRAIN Initiative RNS Device Info (2018) and NeuroPace RNS System User Manual (Table 7): depth contact 1.27 mm dia x 2.0 mm length, 0.08 cm^2 surface. Contact dimensions are identical between the 3.5 mm and 10 mm inter-contact spacing variants \u2014 only spacing differs. The 30 vs 44 cm in DL-330 vs DL-344 is the lead-body length, not the contact region."
     }
   ]
 }

@@ -15,3 +15,8 @@ docs/*_HANDOFF.md
 docs/*_SESSION_*.md
 CLAUDE.md
 .claude/
+
+# Test fixture binaries: large NIfTI volumes (T22 CT etc.) live alongside
+# tracked tsv/txt fixtures. Keep them on local disk only.
+tests/data/**/*.nii
+tests/data/**/*.nii.gz

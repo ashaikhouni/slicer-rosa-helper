@@ -30,9 +30,37 @@ from rosa_workflow.workflow_registry import table_to_dict_rows
 
 from .constants import GUIDED_SOURCE_OPTIONS
 
+def _relax_module_panel_size_constraints():
+    """Drop minimum-width / maximum-width constraints on Slicer's module
+    panel dock so the splitter can drag both narrower and wider than
+    Slicer's defaults.
+
+    Default Slicer dock pins min ~250 px and the viewport's parent
+    splitter can cap max width below the screen — both prevent
+    docked-panel resizing for our wide ROSA workflows. Relaxing them
+    is a one-time global tweak; it persists for the Slicer session.
+    """
+    try:
+        mw = slicer.util.mainWindow()
+        if mw is None:
+            return
+        for dock in mw.findChildren(qt.QDockWidget):
+            if dock.objectName() == "PanelDockWidget":
+                dock.setMinimumWidth(0)
+                dock.setMaximumWidth(16777215)  # Qt QWIDGETSIZE_MAX
+                inner = dock.widget()
+                if inner is not None:
+                    inner.setMinimumWidth(0)
+                    inner.setMaximumWidth(16777215)
+                break
+    except Exception:
+        pass
+
+
 class PostopCTLocalizationWidgetBaseMixin:
     def setup(self):
         super().setup()
+        _relax_module_panel_size_constraints()
         self.logic = self._create_logic()
         self.workflowState = self.logic.workflow_state
         self.workflowPublisher = self.logic.workflow_publish
@@ -50,6 +78,11 @@ class PostopCTLocalizationWidgetBaseMixin:
         self._lastDeepCoreProposalResult = None
 
         form = qt.QFormLayout()
+        # macOS default `FieldsStayAtSizeHint` pins every field at its
+        # preferred width — neither grows nor shrinks with the panel.
+        # `AllNonFixedFieldsGrow` makes fields obey the size policies
+        # we set on each widget.
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
         self.layout.addLayout(form)
 
         self.ctSelector = slicer.qMRMLNodeComboBox()
@@ -60,13 +93,17 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.ctSelector.setMRMLScene(slicer.mrmlScene)
         self.ctSelector.setToolTip("Postop CT used for Auto Fit / Guided Fit.")
         self.ctSelector.currentNodeChanged.connect(self.onCtSelectorChanged)
+        self.ctSelector.setMinimumWidth(0)
+        self.ctSelector.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         form.addRow("Postop CT", self.ctSelector)
 
         topRow = qt.QHBoxLayout()
-        self.refreshButton = qt.QPushButton("Refresh Workflow Inputs")
+        self.refreshButton = qt.QPushButton("Refresh")
         self.refreshButton.clicked.connect(self.onRefreshClicked)
         topRow.addWidget(self.refreshButton)
-        self.applyFocusLayoutButton = qt.QPushButton("Apply Focus Layout (2x3)")
+        self.applyFocusLayoutButton = qt.QPushButton("Apply 2×3 Layout")
         self.applyFocusLayoutButton.clicked.connect(self.onApplyFocusLayoutClicked)
         topRow.addWidget(self.applyFocusLayoutButton)
         topRow.addStretch(1)
@@ -74,10 +111,18 @@ class PostopCTLocalizationWidgetBaseMixin:
 
         self.summaryLabel = qt.QLabel("Workflow not scanned yet.")
         self.summaryLabel.wordWrap = True
+        self.summaryLabel.setMinimumWidth(0)
+        self.summaryLabel.setSizePolicy(
+            qt.QSizePolicy.Ignored, qt.QSizePolicy.Preferred,
+        )
         form.addRow("Workflow summary", self.summaryLabel)
 
         self.modeTabs = qt.QTabWidget()
         self.modeTabs.currentChanged.connect(self.onModeTabChanged)
+        self.modeTabs.setMinimumWidth(0)
+        self.modeTabs.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Expanding,
+        )
         self.layout.addWidget(self.modeTabs)
         self._build_guided_fit_tab()
         self._build_contact_pitch_v1_tab()
@@ -87,6 +132,10 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.statusText = qt.QPlainTextEdit()
         self.statusText.setReadOnly(True)
         self.statusText.setMaximumBlockCount(2000)
+        self.statusText.setMinimumWidth(0)
+        self.statusText.setSizePolicy(
+            qt.QSizePolicy.Ignored, qt.QSizePolicy.Expanding,
+        )
         self.layout.addWidget(self.statusText)
         self.layout.addStretch(1)
 
@@ -108,11 +157,19 @@ class PostopCTLocalizationWidgetBaseMixin:
         section.collapsed = False
         self.layout.addWidget(section)
         form = qt.QFormLayout(section)
+        form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         self.guidedSourceCombo = qt.QComboBox()
         for key, label in GUIDED_SOURCE_OPTIONS:
             self.guidedSourceCombo.addItem(label, key)
         self.guidedSourceCombo.currentIndexChanged.connect(self.onGuidedSourceChanged)
+        self.guidedSourceCombo.setMinimumContentsLength(8)
+        self.guidedSourceCombo.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self.guidedSourceCombo.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         form.addRow("Trajectory source", self.guidedSourceCombo)
 
         # Confidence filter — auto-checks "Use" only for trajectories at
@@ -131,17 +188,59 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.confidenceFilterCombo.currentIndexChanged.connect(
             self.onConfidenceFilterChanged
         )
+        self.confidenceFilterCombo.setMinimumContentsLength(8)
+        self.confidenceFilterCombo.setSizeAdjustPolicy(
+            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
+        )
+        self.confidenceFilterCombo.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
+        )
         form.addRow("Confidence filter", self.confidenceFilterCombo)
 
         self.guidedTrajectoryTable = qt.QTableWidget()
         self.guidedTrajectoryTable.setColumnCount(4)
+        _shared_headers = [
+            ("Mark",     "Mark this row for bulk Remove / etc."),
+            ("Traj",     "Trajectory name"),
+            ("Len mm",   "Trajectory length (entry → tip) in mm"),
+            ("Conf",     "Confidence band: high / medium / low (Auto Fit + Guided Fit only)"),
+        ]
         self.guidedTrajectoryTable.setHorizontalHeaderLabels(
-            ["Mark", "Trajectory", "Length (mm)", "Confidence"]
+            [label for label, _ in _shared_headers]
         )
-        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(0, qt.QHeaderView.ResizeToContents)
-        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Stretch)
-        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(2, qt.QHeaderView.ResizeToContents)
-        self.guidedTrajectoryTable.horizontalHeader().setSectionResizeMode(3, qt.QHeaderView.ResizeToContents)
+        for col, (_label, tip) in enumerate(_shared_headers):
+            item = self.guidedTrajectoryTable.horizontalHeaderItem(col)
+            if item is not None:
+                item.setToolTip(tip)
+        # All columns Interactive with explicit narrow defaults — no
+        # column stretches by default so the table doesn't sprawl when
+        # the panel is wide. User can drag the column borders to
+        # resize, and the horizontal scrollbar engages when the panel
+        # is narrower than total column width. (Earlier
+        # ResizeToContents blocked panel resizing; subsequent Stretch
+        # on the Trajectory column made that column gobble all extra
+        # space — the screenshot you sent.)
+        guided_header = self.guidedTrajectoryTable.horizontalHeader()
+        for col in range(self.guidedTrajectoryTable.columnCount):
+            guided_header.setSectionResizeMode(col, qt.QHeaderView.Interactive)
+        for col, width in (
+            (0, 40),    # Mark
+            (1, 140),   # Trajectory (was Stretch — sprawled)
+            (2, 90),    # Length
+            (3, 90),    # Confidence
+        ):
+            self.guidedTrajectoryTable.setColumnWidth(col, width)
+        guided_header.setStretchLastSection(False)
+        self.guidedTrajectoryTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
+        # Expanding+Preferred size policy with a small explicit minimum
+        # width gives a SHRINKABLE table that ALSO shows a horizontal
+        # scrollbar when columns exceed viewport. (Ignored size policy
+        # made Qt ignore the scrollbar metric — table shrank but no
+        # scrollbar ever appeared.)
+        self.guidedTrajectoryTable.setMinimumWidth(120)
+        self.guidedTrajectoryTable.setSizePolicy(
+            qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred,
+        )
         self.guidedTrajectoryTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
         # ExtendedSelection: Ctrl-click to add to selection, Shift-click
         # to extend a range. Combined with the "Mark Selected" button
@@ -157,6 +256,10 @@ class PostopCTLocalizationWidgetBaseMixin:
         # click on "Remove Marked Trajectories" does nothing — users
         # have to explicitly mark first. Multi-select + the "Mark
         # Selected" button is the fast path for marking multiple rows.
+        # Two rows of controls so the bottom strip doesn't pin a wide
+        # minimum on the Slicer panel — narrow panels can't shrink
+        # below the widest row.
+        actions_box = qt.QVBoxLayout()
         actions_row = qt.QHBoxLayout()
         self.markSelectedButton = qt.QPushButton("Mark Selected")
         self.markSelectedButton.setToolTip(
@@ -178,11 +281,37 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.unmarkAllButton.clicked.connect(self.onUnmarkAllClicked)
         actions_row.addWidget(self.unmarkAllButton)
 
-        self.removeCheckedButton = qt.QPushButton("Remove Marked Trajectories")
+        self.removeCheckedButton = qt.QPushButton("Remove Marked")
         self.removeCheckedButton.clicked.connect(self.onRemoveCheckedClicked)
         actions_row.addWidget(self.removeCheckedButton)
+        actions_row.addStretch(1)
+        actions_box.addLayout(actions_row)
 
-        self.revertToAutoFitButton = qt.QPushButton("Revert to Auto Fit")
+        # Second row: visibility/view toggles + Revert. Splits the
+        # cluttered single bottom strip into two narrower lines.
+        view_row = qt.QHBoxLayout()
+
+        # Reduce 3D-scene clutter: hide every trajectory line + electrode
+        # node except the one(s) currently selected in the table.
+        # Default OFF so existing multi-shank-overview workflows keep
+        # working without surprise.
+        self.isolateSelectedCheck = qt.QCheckBox("Isolate selected")
+        self.isolateSelectedCheck.setToolTip(
+            "When checked, only the trajectory line(s) for the rows "
+            "currently selected in this table are shown in the 3D "
+            "scene; all other shanks (and their contacts/electrode "
+            "models) are hidden. Useful for reviewing one shank at "
+            "a time on a dense implant."
+        )
+        self.isolateSelectedCheck.setChecked(False)
+        self.isolateSelectedCheck.toggled.connect(self.onIsolateSelectedToggled)
+        view_row.addWidget(self.isolateSelectedCheck)
+
+        # TL↔TD intersection lines are auto-enabled by the layout
+        # service when the focus 2x3 layout is applied — no checkbox
+        # needed in this module.
+
+        self.revertToAutoFitButton = qt.QPushButton("Revert")
         self.revertToAutoFitButton.setToolTip(
             "Reset the endpoints of every selected row back to the "
             "Auto Fit baseline (Rosa.AutoFitStartRas / "
@@ -190,10 +319,11 @@ class PostopCTLocalizationWidgetBaseMixin:
             "(manual / imported / pre-baseline auto rows) are skipped."
         )
         self.revertToAutoFitButton.clicked.connect(self.onRevertToAutoFitClicked)
-        actions_row.addWidget(self.revertToAutoFitButton)
+        view_row.addWidget(self.revertToAutoFitButton)
 
-        actions_row.addStretch(1)
-        form.addRow(actions_row)
+        view_row.addStretch(1)
+        actions_box.addLayout(view_row)
+        form.addRow(actions_box)
 
     def _load_electrode_library(self):
         try:
@@ -442,11 +572,32 @@ class PostopCTLocalizationWidgetBaseMixin:
         self._apply_guided_source_visibility(source_key)
         self._apply_primary_slice_layers()
         self._refresh_summary()
+        # Auto-apply the trajectory-focus 2x3 layout (Red/Yellow/Green
+        # on top, TrajectoryLong/TrajectoryDown/3D on the bottom). Same
+        # convention as Contacts & Trajectory View — trajectory review
+        # works best with the focus ports always visible. Skip when
+        # already active so we don't churn the user's layout when they
+        # hit Refresh repeatedly.
+        if not self.logic.layout_service.has_focus_slice_views():
+            self._schedule_apply_focus_layout()
         self._schedule_guided_follow()
         self.log(
             f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)} "
             f"assignments={len(self.assignmentMap)}"
         )
+
+    def _schedule_apply_focus_layout(self):
+        if getattr(self, "_pendingFocusLayoutApply", False):
+            return
+        self._pendingFocusLayoutApply = True
+        qt.QTimer.singleShot(0, self._run_scheduled_apply_focus_layout)
+
+    def _run_scheduled_apply_focus_layout(self):
+        self._pendingFocusLayoutApply = False
+        try:
+            self.onApplyFocusLayoutClicked()
+        except Exception:
+            pass
 
     def enter(self):
         """Ensure base+postop overlay and focus behavior each time module is opened."""
@@ -457,6 +608,12 @@ class PostopCTLocalizationWidgetBaseMixin:
         self.logic.layout_service.sanitize_focus_layout_state()
         self._sync_ct_selector_from_workflow()
         self._apply_primary_slice_layers()
+        # Switch to the trajectory-focus 2x3 layout when the module is
+        # opened (same as Contacts & Trajectory View). Skip when
+        # already active to avoid churning the user's layout if they
+        # toggle modules quickly.
+        if not self.logic.layout_service.has_focus_slice_views():
+            self._schedule_apply_focus_layout()
         self._schedule_guided_follow()
 
     def onGuidedSourceChanged(self, _idx):
@@ -485,6 +642,51 @@ class PostopCTLocalizationWidgetBaseMixin:
 
     def onGuidedTrajectoryTableCellClicked(self, _row, _col):
         self._schedule_guided_follow()
+        self._apply_isolation_if_enabled()
 
     def onGuidedTrajectoryTableCurrentCellChanged(self, _currentRow, _currentColumn, _previousRow, _previousColumn):
         self._schedule_guided_follow()
+        self._apply_isolation_if_enabled()
+
+    def onIsolateSelectedToggled(self, checked):
+        if not bool(checked):
+            try:
+                self.logic.electrode_scene.apply_trajectory_isolation(set())
+            except Exception:
+                pass
+            return
+        self._apply_isolation_if_enabled()
+
+
+    def _apply_isolation_if_enabled(self):
+        check = getattr(self, "isolateSelectedCheck", None)
+        if check is None or not bool(check.checked):
+            return
+        names = self._selected_trajectory_names_for_isolation()
+        try:
+            self.logic.electrode_scene.apply_trajectory_isolation(names)
+        except Exception:
+            pass
+
+    def _selected_trajectory_names_for_isolation(self):
+        names = set()
+        try:
+            sel = self.guidedTrajectoryTable.selectionModel()
+            for idx in sel.selectedRows() if sel else []:
+                row = idx.row()
+                item = self.guidedTrajectoryTable.item(row, 1)
+                if item:
+                    txt = (item.text() or "").strip()
+                    if txt:
+                        names.add(txt)
+            if not names:
+                row = self.guidedTrajectoryTable.currentRow()
+                if row >= 0:
+                    item = self.guidedTrajectoryTable.item(row, 1)
+                    if item:
+                        txt = (item.text() or "").strip()
+                        if txt:
+                            names.add(txt)
+        except Exception:
+            pass
+        return names
