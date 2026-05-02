@@ -10,6 +10,10 @@ Without Slicer / VTK we use ``nibabel`` to load the labelmap NIfTI and a
 ``scipy.spatial.cKDTree`` (when scipy is available) to answer
 nearest-labeled-voxel queries. Brute-force NumPy is the fallback.
 
+Centroid math, sample-result formatting, and FreeSurfer LUT parsing
+delegate to ``rosa_core.atlas_index`` so this side and the Slicer side
+share one implementation of those concerns.
+
 Two concrete providers:
 
 * ``LabelmapAtlasProvider`` — single labelmap volume + LUT (FreeSurfer
@@ -22,9 +26,15 @@ Two concrete providers:
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any, Sequence
+
+from rosa_core.atlas_index import (
+    compute_label_centroids,
+    distance_to_centroid_mm,
+    format_atlas_sample,
+    parse_freesurfer_lut,
+)
 
 
 def _require_numpy():
@@ -94,30 +104,6 @@ def _build_kdtree(points_ras):
 
 
 # ---------------------------------------------------------------------
-# LUT parsing — FreeSurferColorLUT format (id, name, R, G, B, A).
-# ---------------------------------------------------------------------
-
-
-def parse_freesurfer_lut(path: str | Path) -> dict[int, str]:
-    """Parse a FreeSurfer color LUT file into ``{label_value: label_name}``."""
-    out: dict[int, str] = {}
-    text = Path(path).read_text(encoding="utf-8", errors="ignore")
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        try:
-            value = int(parts[0])
-        except ValueError:
-            continue
-        out[value] = parts[1]
-    return out
-
-
-# ---------------------------------------------------------------------
 # Single-labelmap provider.
 # ---------------------------------------------------------------------
 
@@ -156,15 +142,7 @@ class LabelmapAtlasProvider:
         else:
             self._label_names = {}
 
-        # Per-label centroid in RAS for ``distance_to_centroid_mm``.
-        self._centroids: dict[int, Any] = {}
-        if ras.shape[0]:
-            unique = np.unique(labels)
-            for value in unique:
-                mask = labels == int(value)
-                if not mask.any():
-                    continue
-                self._centroids[int(value)] = ras[mask].mean(axis=0)
+        self._centroids = compute_label_centroids(ras, labels)
 
     def is_ready(self) -> bool:
         return self._query is not None
@@ -176,23 +154,18 @@ class LabelmapAtlasProvider:
         label_value = int(self._labels[idx])
         label_name = self._label_names.get(label_value, f"Label_{label_value}")
         centroid = self._centroids.get(label_value)
-        if centroid is None:
-            distance_to_centroid = 0.0
-        else:
-            dx = float(point_world_ras[0]) - float(centroid[0])
-            dy = float(point_world_ras[1]) - float(centroid[1])
-            dz = float(point_world_ras[2]) - float(centroid[2])
-            distance_to_centroid = math.sqrt(dx * dx + dy * dy + dz * dz)
-        return {
-            "source": self.source_id,
-            "label": str(label_name),
-            "label_value": label_value,
-            "distance_to_voxel_mm": float(distance_mm),
-            "distance_to_centroid_mm": float(distance_to_centroid),
+        return format_atlas_sample(
+            source_id=self.source_id,
+            label_value=label_value,
+            label_name=label_name,
+            distance_to_voxel_mm=float(distance_mm),
+            distance_to_centroid_mm=distance_to_centroid_mm(
+                point_world_ras, centroid,
+            ),
             # Headless agent: native and world coordinates coincide
             # (no per-volume Slicer transform stack).
-            "native_ras": [float(v) for v in point_world_ras],
-        }
+            native_ras=point_world_ras,
+        )
 
 
 # ---------------------------------------------------------------------
@@ -254,13 +227,7 @@ class ThomasAtlasProvider:
             self._query = _build_kdtree(self._points_ras)
 
         self._label_names = label_names
-        self._centroids: dict[int, Any] = {}
-        if self._points_ras.shape[0]:
-            for value in np.unique(self._labels):
-                mask = self._labels == int(value)
-                if not mask.any():
-                    continue
-                self._centroids[int(value)] = self._points_ras[mask].mean(axis=0)
+        self._centroids = compute_label_centroids(self._points_ras, self._labels)
 
     def is_ready(self) -> bool:
         return self._query is not None
@@ -272,18 +239,13 @@ class ThomasAtlasProvider:
         label_value = int(self._labels[idx])
         label_name = self._label_names.get(label_value, f"Label_{label_value}")
         centroid = self._centroids.get(label_value)
-        if centroid is None:
-            distance_to_centroid = 0.0
-        else:
-            dx = float(point_world_ras[0]) - float(centroid[0])
-            dy = float(point_world_ras[1]) - float(centroid[1])
-            dz = float(point_world_ras[2]) - float(centroid[2])
-            distance_to_centroid = math.sqrt(dx * dx + dy * dy + dz * dz)
-        return {
-            "source": self.source_id,
-            "label": str(label_name),
-            "label_value": label_value,
-            "distance_to_voxel_mm": float(distance_mm),
-            "distance_to_centroid_mm": float(distance_to_centroid),
-            "native_ras": [float(v) for v in point_world_ras],
-        }
+        return format_atlas_sample(
+            source_id=self.source_id,
+            label_value=label_value,
+            label_name=label_name,
+            distance_to_voxel_mm=float(distance_mm),
+            distance_to_centroid_mm=distance_to_centroid_mm(
+                point_world_ras, centroid,
+            ),
+            native_ras=point_world_ras,
+        )

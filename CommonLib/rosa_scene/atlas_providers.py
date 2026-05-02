@@ -12,6 +12,11 @@ except ImportError:  # pragma: no cover
 
 from __main__ import slicer, vtk
 
+from rosa_core.atlas_index import (
+    compute_label_centroids,
+    distance_to_centroid_mm,
+)
+
 from .atlas_provider_types import AtlasSampleResult
 
 
@@ -32,12 +37,7 @@ def _query_index(index_cache, point_ras):
     label_value = int(index_cache["labels"][point_id])
     label_name = index_cache["label_names"].get(label_value, f"Label_{label_value}")
     centroid = index_cache["centroids"].get(label_value)
-    dc = 0.0
-    if centroid is not None:
-        cx = float(point_ras[0]) - float(centroid[0])
-        cy = float(point_ras[1]) - float(centroid[1])
-        cz = float(point_ras[2]) - float(centroid[2])
-        dc = math.sqrt(cx * cx + cy * cy + cz * cz)
+    dc = distance_to_centroid_mm(point_ras, centroid)
 
     return {
         "label": str(label_name),
@@ -110,13 +110,8 @@ class VolumeLabelAtlasProvider:
         locator.SetDataSet(poly)
         locator.BuildLocator()
 
-        centroids = {}
+        centroids = compute_label_centroids(ras, labels)
         label_values = np.unique(labels)
-        for label_value in label_values:
-            xyz = ras[labels == int(label_value)]
-            if xyz.size:
-                centroids[int(label_value)] = xyz.mean(axis=0)
-
         label_names = {}
         for value in label_values:
             name = self._volume_label_lookup_name(int(value))
@@ -258,11 +253,7 @@ class ThomasSegmentationAtlasProvider:
         locator.SetDataSet(poly)
         locator.BuildLocator()
 
-        centroids = {}
-        for value in np.unique(labels_all):
-            xyz = ras_all[labels_all == int(value)]
-            if xyz.size:
-                centroids[int(value)] = xyz.mean(axis=0)
+        centroids = compute_label_centroids(ras_all, labels_all)
 
         return {
             "locator": locator,
