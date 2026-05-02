@@ -35,7 +35,12 @@ from .contracts import (
     trajectory_path_points,
 )
 from .diagnostics import DiagnosticsCollector, StageExecutionError
-from .service import run_contact_pitch_v1, run_contact_pitch_v1_with_features
+from .service import (
+    feature_volume_node_name,
+    feature_volume_spec,
+    run_contact_pitch_v1,
+    run_contact_pitch_v1_with_features,
+)
 
 __all__ = [
     "VolumeRef",
@@ -59,6 +64,8 @@ __all__ = [
     "to_jsonable",
     "run_contact_pitch_v1",
     "run_contact_pitch_v1_with_features",
+    "feature_volume_spec",
+    "feature_volume_node_name",
     "contact_pitch_v1_fit",
     "guided_fit_engine",
 ]

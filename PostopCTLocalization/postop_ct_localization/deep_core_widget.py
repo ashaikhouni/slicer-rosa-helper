@@ -15,39 +15,41 @@ from __main__ import qt, slicer
 
 
 class ContactPitchV1WidgetMixin:
-    def _register_contact_pitch_feature_volumes(self, reference_volume_node, features):
-        """Register LoG / Frangi / head-distance / masks / bolts as Slicer
-        scalar volumes named ``<CT>_ContactPitch_<feature>`` so they can
-        be inspected in the 3D + slice views.
+    def _register_contact_pitch_feature_volumes(
+        self, reference_volume_node, features, pipeline_id="contact_pitch_v1",
+    ):
+        """Register the algorithm's published feature volumes (LoG /
+        Frangi / masks / etc.) as Slicer scalar volumes so they can be
+        inspected in the 3D + slice views and reused by downstream
+        modules (e.g. ContactsTrajectoryView's cached-LoG lookup).
+
+        The feature-set + naming convention is owned by ``rosa_detect``
+        per pipeline_id; a future v2 algorithm declares a different
+        spec there and this publisher iterates whatever's listed.
         """
         if not features or reference_volume_node is None:
             return
+        from rosa_detect.service import feature_volume_node_name, feature_volume_spec
+        spec = feature_volume_spec(pipeline_id)
         base = reference_volume_node.GetName() or "ContactPitch"
         # Pipeline supplies the IJK->RAS for the grid the feature arrays
         # actually live on. Differs from the input volume's matrix when
         # canonical-1mm resampling fired on raw sub-mm input; without
         # this the LoG / Frangi volumes display offset from the CT.
         feature_ijk_to_ras = features.get("ijk_to_ras_mat")
-        feature_labels = (
-            ("log_sigma1", "LoG_sigma1", True),
-            ("frangi_sigma1", "Frangi_sigma1", True),
-            ("head_distance", "HeadDistance_mm", True),
-            ("intracranial", "IntracranialMask", False),
-            ("hull", "HullMask", False),
-            ("bolt_mask", "BoltMask", False),
-        )
         registered = []
-        for key, label, percentile_wl in feature_labels:
+        for key, label, percentile_wl in spec.get("volumes", []):
             arr = features.get(key)
             if arr is None:
                 continue
+            node_name = feature_volume_node_name(base, label, pipeline_id)
             try:
                 node = self.logic._update_scalar_volume_from_array(
-                    reference_volume_node, f"{base}_ContactPitch_{label}", arr,
+                    reference_volume_node, node_name, arr,
                     ijk_to_ras_mat=feature_ijk_to_ras,
                 )
             except Exception as exc:
-                self.log(f"[contact-pitch-v1] skipped feature {label}: {exc}")
+                self.log(f"[{pipeline_id}] skipped feature {label}: {exc}")
                 continue
             if node is None:
                 continue
@@ -55,7 +57,7 @@ class ContactPitchV1WidgetMixin:
                 self._set_percentile_window_level(node, arr)
             registered.append(label)
         if registered:
-            self.log(f"[contact-pitch-v1] feature volumes: {', '.join(registered)}")
+            self.log(f"[{pipeline_id}] feature volumes: {', '.join(registered)}")
 
     @staticmethod
     def _set_percentile_window_level(node, array):

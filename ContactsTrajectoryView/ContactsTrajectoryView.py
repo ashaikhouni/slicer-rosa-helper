@@ -1122,16 +1122,19 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             return ""
 
     def _resolve_log_volume_node(self, ct_node):
-        """Look up the Auto-Fit-stashed ``<CT>_ContactPitch_LoG_sigma1``
-        volume node in the scene if it exists, matching by base name of
-        ``ct_node``. Returns None when missing.
+        """Look up the Auto-Fit-stashed LoG volume in the scene by the
+        canonical name owned by ``rosa_detect``. Returns None when
+        missing — caller falls back to recomputing.
         """
         if ct_node is None:
             return None
         base = ct_node.GetName() or ""
         if not base:
             return None
-        candidate_name = f"{base}_ContactPitch_LoG_sigma1"
+        from rosa_detect.service import feature_volume_node_name, feature_volume_spec
+        spec = feature_volume_spec()
+        log_label = str(spec.get("log_label") or "LoG_sigma1")
+        candidate_name = feature_volume_node_name(base, log_label)
         found = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
         for node in found:
             if node.GetName() == candidate_name:

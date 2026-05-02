@@ -52,6 +52,67 @@ PIPELINE_VERSION = "1.0.29"
 
 
 # ---------------------------------------------------------------------
+# Feature-volume publication spec
+#
+# Slicer publishes the algorithm's intermediate feature volumes (LoG,
+# Frangi, masks, ...) into the scene under canonical names so they can
+# be inspected in 3D / slice views and reused by later modules
+# (ContactsTrajectoryView caches LoG by name).
+#
+# Per-pipeline spec keeps both the names and the field set in this
+# package — the day a v2 lands with a different feature set, only this
+# table changes; the Slicer-side publisher and the LoG cache lookup in
+# ContactsTrajectoryView don't.
+# ---------------------------------------------------------------------
+
+
+FEATURE_VOLUME_SPECS: dict[str, dict[str, Any]] = {
+    "contact_pitch_v1": {
+        # Slicer node name = f"{ct_volume_name}_{name_prefix}_{label}".
+        "name_prefix": "ContactPitch",
+        # (features_dict_key, label, use_percentile_window_level).
+        "volumes": [
+            ("log_sigma1",    "LoG_sigma1",       True),
+            ("frangi_sigma1", "Frangi_sigma1",    True),
+            ("head_distance", "HeadDistance_mm",  True),
+            ("intracranial",  "IntracranialMask", False),
+            ("hull",          "HullMask",         False),
+            ("bolt_mask",     "BoltMask",         False),
+        ],
+        # Convenience: the LoG label callers can reuse instead of
+        # hardcoding "LoG_sigma1" themselves (see
+        # ContactsTrajectoryView._resolve_log_volume_node).
+        "log_label": "LoG_sigma1",
+    },
+}
+
+
+def feature_volume_spec(pipeline_id: str = PIPELINE_ID) -> dict[str, Any]:
+    """Return the feature-volume publication spec for one pipeline.
+
+    Falls back to the default pipeline's spec for unknown ids so older
+    Slicer code that doesn't know about a new pipeline still publishes
+    something sensible.
+    """
+    return FEATURE_VOLUME_SPECS.get(pipeline_id, FEATURE_VOLUME_SPECS[PIPELINE_ID])
+
+
+def feature_volume_node_name(
+    base_volume_name: str,
+    label: str,
+    pipeline_id: str = PIPELINE_ID,
+) -> str:
+    """Canonical Slicer node name for one published feature volume.
+
+    Single source of truth for the naming convention so publishers and
+    consumers (e.g. cached-LoG lookup) can't drift.
+    """
+    spec = feature_volume_spec(pipeline_id)
+    prefix = str(spec.get("name_prefix") or "Detect")
+    return f"{base_volume_name}_{prefix}_{label}"
+
+
+# ---------------------------------------------------------------------
 # Image + matrix loading
 #
 # The split between voxel data (always from disk when path is given) and
