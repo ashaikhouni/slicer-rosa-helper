@@ -30,10 +30,10 @@ from rosa_core.electrode_models import load_electrode_library  # noqa: E402
 from shank_core.io import image_ijk_ras_matrices, kji_to_ras_points_matrix, ras_to_ijk_float_matrix, read_volume  # noqa: E402
 from shank_core.masking import build_preview_masks  # noqa: E402
 from tools.refine_shank_ground_truth_guided import (  # noqa: E402
-    _choose_model,
     _lps_to_ras,
-    _orient_entry_target,
     _ras_to_lps,
+    choose_model_for_shank,
+    orient_entry_target,
     read_tsv_rows,
 )
 
@@ -100,10 +100,10 @@ def main() -> None:
 
     start_ras = np.asarray([float(row["start_x"]), float(row["start_y"]), float(row["start_z"])], dtype=float)
     end_ras = np.asarray([float(row["end_x"]), float(row["end_y"]), float(row["end_z"])], dtype=float)
-    entry_ras, target_ras = _orient_entry_target(start_ras, end_ras, depth_map_kji, ras_to_ijk_fn)
+    entry_ras, target_ras = orient_entry_target(start_ras, end_ras, depth_map_kji, ras_to_ijk_fn)
 
     models = list((load_electrode_library().get("models") or []))
-    model = _choose_model(
+    model = choose_model_for_shank(
         models,
         contact_count=int(row.get("contact_count") or 0),
         mean_intercontact_mm=float(row.get("mean_intercontact_mm") or 0.0),

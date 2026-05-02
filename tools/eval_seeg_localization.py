@@ -30,12 +30,7 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 from rosa_core.electrode_models import load_electrode_library, model_map  # noqa: E402
-from shank_core.io import (  # noqa: E402
-    image_ijk_ras_matrices,
-    kji_to_ras_points_matrix,
-    ras_to_ijk_float_matrix,
-    read_volume,
-)
+from shank_core.io import read_volume  # noqa: E402
 from rosa_detect.contracts import VolumeRef
 from rosa_detect.service import run_contact_pitch_v1
 
@@ -443,19 +438,20 @@ def match_shanks(
 
 
 def build_detection_context(ct_path: str, run_id: str, config: dict[str, Any], extras: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-    img, arr_kji, spacing_xyz = read_volume(ct_path)
-    ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
-    size_xyz = img.GetSize()
-    center_ijk = [0.5 * (float(size_xyz[0]) - 1.0), 0.5 * (float(size_xyz[1]) - 1.0), 0.5 * (float(size_xyz[2]) - 1.0)]
-    center_ras = kji_to_ras_points_matrix([[center_ijk[2], center_ijk[1], center_ijk[0]]], ijk_to_ras)[0].tolist()
+    # Path-only ctx: rosa_detect.service.load_image_and_matrices reads
+    # the CT off disk and derives IJK<->RAS matrices itself. The legacy
+    # arr_kji / spacing_xyz / ijk_kji_to_ras_fn / ras_to_ijk_fn /
+    # center_ras fields are no longer consumed by the detection
+    # algorithm; carrying them here was dead bloat (and a parity hazard
+    # if they ever drifted from what the service derives).
+    img, _arr, spacing_xyz = read_volume(ct_path)
     ctx = {
         "run_id": run_id,
-        "ct": VolumeRef(volume_id=Path(ct_path).stem, path=str(ct_path), spacing_xyz=tuple(float(v) for v in spacing_xyz)),
-        "arr_kji": arr_kji,
-        "spacing_xyz": tuple(float(v) for v in spacing_xyz),
-        "ijk_kji_to_ras_fn": lambda ijk_kji: kji_to_ras_points_matrix(ijk_kji, ijk_to_ras),
-        "ras_to_ijk_fn": lambda ras_xyz: ras_to_ijk_float_matrix(ras_xyz, ras_to_ijk),
-        "center_ras": center_ras,
+        "ct": VolumeRef(
+            volume_id=Path(ct_path).stem,
+            path=str(ct_path),
+            spacing_xyz=tuple(float(v) for v in spacing_xyz),
+        ),
         "config": config,
         "extras": extras,
     }

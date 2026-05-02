@@ -88,7 +88,7 @@ def _center_pitch_from_model(model: dict[str, Any]) -> float | None:
     return None
 
 
-def _choose_model(models: list[dict[str, Any]], contact_count: int, mean_intercontact_mm: float, span_mm: float) -> dict[str, Any] | None:
+def choose_model_for_shank(models: list[dict[str, Any]], contact_count: int, mean_intercontact_mm: float, span_mm: float) -> dict[str, Any] | None:
     best = None
     best_score = None
     for model in models:
@@ -264,7 +264,7 @@ def _depth_at_ras(point_ras: np.ndarray, depth_map_kji: np.ndarray | None, ras_t
     return value if math.isfinite(value) else None
 
 
-def _orient_entry_target(start_ras: np.ndarray, end_ras: np.ndarray, depth_map_kji: np.ndarray | None, ras_to_ijk) -> tuple[np.ndarray, np.ndarray]:
+def orient_entry_target(start_ras: np.ndarray, end_ras: np.ndarray, depth_map_kji: np.ndarray | None, ras_to_ijk) -> tuple[np.ndarray, np.ndarray]:
     d0 = _depth_at_ras(start_ras, depth_map_kji, ras_to_ijk)
     d1 = _depth_at_ras(end_ras, depth_map_kji, ras_to_ijk)
     if d0 is not None and d1 is not None and abs(d0 - d1) > 1e-3:
@@ -320,8 +320,8 @@ def refine_subject_shanks(
     for row in shank_rows:
         start_ras = np.asarray([float(row["start_x"]), float(row["start_y"]), float(row["start_z"])], dtype=float)
         end_ras = np.asarray([float(row["end_x"]), float(row["end_y"]), float(row["end_z"])], dtype=float)
-        entry_ras, target_ras = _orient_entry_target(start_ras, end_ras, depth_map_kji, ras_to_ijk_fn)
-        model = _choose_model(
+        entry_ras, target_ras = orient_entry_target(start_ras, end_ras, depth_map_kji, ras_to_ijk_fn)
+        model = choose_model_for_shank(
             models,
             contact_count=int(row.get("contact_count") or 0),
             mean_intercontact_mm=float(row.get("mean_intercontact_mm") or 0.0),

@@ -17,10 +17,7 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 from shank_core.io import (  # noqa: E402
-    image_ijk_ras_matrices,
-    kji_to_ras_points_matrix,
     kji_to_ras_points,
-    ras_to_ijk_float_matrix,
     read_volume,
     write_mask_like,
     write_points_csv,
@@ -198,11 +195,9 @@ def cmd_preview_masks(args):
 def cmd_detect(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
-    img, arr_kji, spacing_xyz = read_volume(args.ct)
-    ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
-    size_xyz = img.GetSize()
-    center_ijk = [0.5 * (float(size_xyz[0]) - 1.0), 0.5 * (float(size_xyz[1]) - 1.0), 0.5 * (float(size_xyz[2]) - 1.0)]
-    center_ras = kji_to_ras_points_matrix([[center_ijk[2], center_ijk[1], center_ijk[0]]], ijk_to_ras)[0].tolist()
+    # Read once for the masks/summary outputs below; the detection
+    # service rereads from the path itself (see VolumeRef in ctx).
+    img, _arr, spacing_xyz = read_volume(args.ct)
 
     models_by_id = None
     if bool(args.use_model_score):
@@ -241,13 +236,17 @@ def cmd_detect(args):
         "min_model_score": float(args.min_model_score) if bool(args.use_model_score) else None,
         "debug_masks": False,
     }
+    # Path-only DetectionContext (legacy arr/lambdas dropped — service
+    # derives them from the path; see CommonLib/rosa_detect/service.py).
+    from rosa_detect.contracts import VolumeRef
+
     ctx = {
         "run_id": str(args.run_id),
-        "arr_kji": arr_kji,
-        "spacing_xyz": spacing_xyz,
-        "ijk_kji_to_ras_fn": lambda ijk_kji: kji_to_ras_points_matrix(ijk_kji, ijk_to_ras),
-        "ras_to_ijk_fn": lambda ras_xyz: ras_to_ijk_float_matrix(ras_xyz, ras_to_ijk),
-        "center_ras": center_ras,
+        "ct": VolumeRef(
+            volume_id=os.path.splitext(os.path.basename(args.ct))[0],
+            path=str(args.ct),
+            spacing_xyz=tuple(float(v) for v in spacing_xyz),
+        ),
         "config": config,
         "extras": extras,
     }
