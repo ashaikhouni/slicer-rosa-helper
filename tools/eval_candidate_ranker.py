@@ -25,8 +25,6 @@ from eval_seeg_localization import (  # type: ignore
     iter_subject_rows,
     load_ground_truth_shanks,
     match_shanks,
-    register_builtin_pipelines,
-    PipelineRegistry,
 )
 
 
@@ -214,13 +212,13 @@ def evaluate_selected(subject_id: str, gt_shanks: list[Any], selected: list[dict
     }
 
 
-def collect_subject_candidates(row: dict[str, str], *, pipeline_key: str, registry: PipelineRegistry, config: dict[str, Any], extras: dict[str, Any], label_end_mm: float, label_start_mm: float, label_angle_deg: float) -> dict[str, Any]:
+def collect_subject_candidates(row: dict[str, str], *, pipeline_key: str = "contact_pitch_v1", config: dict[str, Any], extras: dict[str, Any], label_end_mm: float, label_start_mm: float, label_angle_deg: float) -> dict[str, Any]:
     subject_id = str(row["subject_id"])
     gt_shanks = load_ground_truth_shanks(row["labels_path"], row.get("shanks_path"))
     run_cfg = dict(config)
     run_cfg["return_candidate_lines"] = True
     ctx, _ = build_detection_context(row["ct_path"], run_id=f"ranker_{subject_id}_{pipeline_key}", config=run_cfg, extras=dict(extras))
-    result = registry.run(pipeline_key, ctx)
+    result = run_contact_pitch_v1(ctx)
     if str(result.get("status", "ok")).lower() == "error":
         err = dict(result.get("error") or {})
         raise RuntimeError(f"{subject_id}: {err.get('message', 'Detection failed')} (stage={err.get('stage', 'pipeline')})")
@@ -323,9 +321,6 @@ def main() -> None:
     if not rows:
         raise SystemExit("No subjects matched the requested filter")
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
-
     if not hasattr(args, "selection_target_count"):
         args.selection_target_count = None
     config = default_detection_config(args)
@@ -338,7 +333,6 @@ def main() -> None:
         subject_data[sid] = collect_subject_candidates(
             row,
             pipeline_key=str(args.pipeline_key),
-            registry=registry,
             config=config,
             extras=extras,
             label_end_mm=float(args.label_end_mm),

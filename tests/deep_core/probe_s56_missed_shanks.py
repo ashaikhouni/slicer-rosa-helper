@@ -37,7 +37,7 @@ sys.path.insert(0, str(ROOT / "PostopCTLocalization"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
+from rosa_detect import contact_pitch_v1_fit as cpfit
 from shank_core.io import image_ijk_ras_matrices
 
 S56_CT = Path("/Users/ammar/Documents/Data/imaging/S56/Post_CT/S56_CT.nii.gz")

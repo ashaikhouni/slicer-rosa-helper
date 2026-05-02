@@ -27,7 +27,7 @@ if LIB_DIR not in sys.path:
     sys.path.insert(0, LIB_DIR)
 
 from shank_core.masking import build_preview_masks  # noqa: E402
-from shank_engine.lineage_tracking import build_lineages, extract_threshold_levels, summarize_lineages  # noqa: E402
+from _lineage_tracking import build_lineages, extract_threshold_levels, summarize_lineages  # noqa: E402
 from tools.eval_seeg_localization import (  # noqa: E402
     GroundTruthShank,
     _point_to_segment_distance,

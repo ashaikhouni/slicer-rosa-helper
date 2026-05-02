@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT / "CommonLib"))
 sys.path.insert(0, str(ROOT / "PostopCTLocalization"))
 sys.path.insert(0, str(ROOT / "tools"))
 
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import (  # noqa: E402
     build_detection_context,
     iter_subject_rows,
@@ -123,13 +123,11 @@ def main() -> int:
     if not rows:
         print("T22 not in dataset", file=sys.stderr)
         return 1
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     ctx, _ = build_detection_context(
         rows[0]["ct_path"], run_id="contact_pitch_T22_probe", config={}, extras={},
     )
     ctx["contact_pitch_v1_pitch_strategy"] = "dixi"
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     if result.get("status") != "ok":
         print(f"Pipeline failed: {result.get('error')}", file=sys.stderr)
         return 1

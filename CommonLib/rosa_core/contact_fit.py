@@ -89,17 +89,33 @@ def filter_points_in_segment_cylinder(
     return pts[keep]
 
 
-def fit_axis_pca(points: np.ndarray | list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
-    """Fit principal axis by PCA and return `(center, axis_unit)`."""
+def fit_axis_pca(
+    points: np.ndarray | list[list[float]],
+    weights: np.ndarray | list[float] | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit principal axis by PCA and return ``(center, axis_unit)``.
+
+    With ``weights=None``: unweighted covariance + ``eigh``.
+    With weights: amplitude-weighted centroid + SVD on the weighted
+    centered matrix (matches the prior ``guided_fit_engine._pca_axis``).
+    """
     pts = np.asarray(points, dtype=float).reshape(-1, 3)
     if pts.shape[0] < 3:
         raise ValueError("At least 3 points are required for axis fitting")
-    center = np.mean(pts, axis=0)
+    if weights is None:
+        center = np.mean(pts, axis=0)
+        centered = pts - center
+        cov = centered.T @ centered / max(pts.shape[0] - 1, 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        axis = eigvecs[:, int(np.argmax(eigvals))]
+        return center, unit(axis)
+    w = np.asarray(weights, dtype=float).reshape(-1)
+    w = w / float(w.sum() or 1.0)
+    center = np.sum(pts * w[:, None], axis=0)
     centered = pts - center
-    cov = centered.T @ centered / max(pts.shape[0] - 1, 1)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    axis = eigvecs[:, int(np.argmax(eigvals))]
-    return center, unit(axis)
+    weighted = centered * w[:, None]
+    _U, _S, Vt = np.linalg.svd(weighted, full_matrices=False)
+    return center, unit(Vt[0])
 
 
 def build_slab_centroids(

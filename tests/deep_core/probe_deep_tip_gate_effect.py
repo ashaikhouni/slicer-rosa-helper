@@ -32,13 +32,13 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import numpy as np
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
+from rosa_detect import contact_pitch_v1_fit as cpfit
 from eval_seeg_localization import (
     iter_subject_rows,
     load_reference_ground_truth_shanks,
     build_detection_context,
 )
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect.service import run_contact_pitch_v1
 
 DATASET_ROOT = Path(
     os.environ.get(
@@ -87,8 +87,6 @@ def _greedy_match(gt_shanks, trajs):
 
 
 def _run_dataset(label, *, return_per_traj=False):
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     rows = iter_subject_rows(DATASET_ROOT, None)
     rows = [r for r in rows if str(r["subject_id"]) not in EXCLUDE]
     rows.sort(key=lambda r: str(r["subject_id"]))
@@ -105,7 +103,7 @@ def _run_dataset(label, *, return_per_traj=False):
             config={}, extras={},
         )
         ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-        result = registry.run("contact_pitch_v1", ctx)
+        result = run_contact_pitch_v1(ctx)
         trajs = list(result.get("trajectories") or [])
         matched = _greedy_match(gt, trajs)
         n_match = len(matched)

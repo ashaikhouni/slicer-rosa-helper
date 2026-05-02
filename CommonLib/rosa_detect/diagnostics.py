@@ -72,7 +72,7 @@ class DiagnosticsCollector:
             return fn()
         except StageExecutionError:
             raise
-        except Exception as exc:  # pragma: no cover - exercised via pipeline tests
+        except Exception as exc:
             self.add_reason("stage_exception", 1)
             raise StageExecutionError(stage=name, message=str(exc)) from exc
         finally:

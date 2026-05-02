@@ -201,7 +201,7 @@ class ContactPitchV1WidgetMixin:
             pass
         try:
             self.log("[contact-pitch-v1] running two-stage LoG+Frangi detector...")
-            pipeline = self.logic.pipeline_registry.create_pipeline("contact_pitch_v1")
+            from rosa_detect.service import run_contact_pitch_v1_with_features
             ctx = self.logic.build_detection_context(volume_node)
             strategy_key = self._selected_contact_pitch_strategy()
             ctx["contact_pitch_v1_pitch_strategy"] = strategy_key
@@ -221,7 +221,7 @@ class ContactPitchV1WidgetMixin:
                     pass
             ctx["logger"] = _progress
 
-            det_result = pipeline.run(ctx)
+            det_result, features = run_contact_pitch_v1_with_features(ctx)
             if det_result.get("status") == "error":
                 raise RuntimeError(det_result.get("error", {}).get("message", "unknown"))
             trajectories = list(det_result.get("trajectories") or [])
@@ -229,8 +229,7 @@ class ContactPitchV1WidgetMixin:
                 f"[contact-pitch-v1] {len(trajectories)} trajectories"
             )
 
-            features = getattr(pipeline, "_last_feature_arrays", None) or {}
-            self._register_contact_pitch_feature_volumes(volume_node, features)
+            self._register_contact_pitch_feature_volumes(volume_node, features or {})
 
             self.logic.trajectory_scene.remove_preview_lines()
             self.logic.register_postop_ct(volume_node, workflow_node=self.workflowNode)

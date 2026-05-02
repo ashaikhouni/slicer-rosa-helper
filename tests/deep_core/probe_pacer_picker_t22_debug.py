@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "CommonLib"))
 sys.path.insert(0, str(ROOT / "PostopCTLocalization"))
 sys.path.insert(0, str(ROOT / "tools"))
 
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import build_detection_context, iter_subject_rows
 from rosa_core.contact_peak_fit import sample_axis_profile
 from rosa_core.electrode_classifier import (
@@ -78,13 +78,11 @@ def main() -> int:
     gt = load_gt_trajectories(GT_FILE)
     print("Running Auto Fit on T22…")
     rows = iter_subject_rows(DATASET_ROOT, {"T22"})
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     ctx, _ = build_detection_context(
         rows[0]["ct_path"], run_id="contact_pitch_T22_debug", config={}, extras={},
     )
     ctx["contact_pitch_v1_pitch_strategy"] = "dixi"
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     trajs = list(result.get("trajectories") or [])
     matched = match_trajectories(gt, trajs)
     print(f"Matched {len(matched)}/{len(gt)}")

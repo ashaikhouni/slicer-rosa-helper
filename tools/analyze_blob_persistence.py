@@ -20,7 +20,7 @@ if LIB_DIR not in sys.path:
 
 from shank_core.io import image_ijk_ras_matrices, read_volume  # noqa: E402
 from shank_core.masking import build_preview_masks  # noqa: E402
-from shank_engine.lineage_tracking import extract_threshold_levels, build_lineages, summarize_lineages  # noqa: E402
+from _lineage_tracking import extract_threshold_levels, build_lineages, summarize_lineages  # noqa: E402
 
 
 def _read_tsv_rows(path: str | Path) -> list[dict[str, str]]:

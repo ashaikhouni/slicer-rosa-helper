@@ -24,7 +24,7 @@ LIBRARY_PATH = (
 class WalkerSignatureClassifierTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from postop_ct_localization.contact_pitch_v1_fit import (
+        from rosa_detect.contact_pitch_v1_fit import (
             classify_by_walker_signature,
             suggest_shortest_covering_model,
         )
@@ -124,7 +124,7 @@ class StrategyLibraryFilterTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from postop_ct_localization.contact_pitch_v1_fit import (
+        from rosa_detect.contact_pitch_v1_fit import (
             filter_models_for_strategy, classify_by_walker_signature,
         )
         cls.filter = staticmethod(filter_models_for_strategy)

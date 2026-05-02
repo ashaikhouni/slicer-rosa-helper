@@ -20,8 +20,8 @@ from __main__ import qt, slicer
 
 from rosa_core import lps_to_ras_point, trajectory_length_mm
 
-from . import contact_pitch_v1_fit as cpfit
-from . import guided_fit_engine as gfe
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect import guided_fit_engine as gfe
 
 
 # Seed sources the Guided Fit tab offers. Excludes "working" and

@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import numpy as np
 
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import (
     build_detection_context, iter_subject_rows,
     load_reference_ground_truth_shanks,
@@ -84,9 +84,6 @@ def main():
     rows = [r for r in rows if str(r["subject_id"]) not in EXCLUDE]
     rows.sort(key=lambda r: int(str(r["subject_id"]).lstrip("T")))
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
-
     matched_by_band = Counter()
     orphan_by_band = Counter()
     matched_by_source = Counter()
@@ -104,7 +101,7 @@ def main():
             config={}, extras={},
         )
         ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-        result = registry.run("contact_pitch_v1", ctx)
+        result = run_contact_pitch_v1(ctx)
         trajs = list(result.get("trajectories") or [])
         matched = _greedy_match(gt, trajs)
         total_gt += len(gt)

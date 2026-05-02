@@ -24,8 +24,8 @@ import numpy as np
 import SimpleITK as sitk
 from scipy.ndimage import map_coordinates
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect.service import run_contact_pitch_v1
 from shank_core.io import image_ijk_ras_matrices
 from eval_seeg_localization import (
     build_detection_context, iter_subject_rows,
@@ -113,13 +113,11 @@ def main():
     row = rows[0]
     gt, _ = load_reference_ground_truth_shanks(row)
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     ctx, raw_img = build_detection_context(
         row["ct_path"], run_id="probe_t1_orphans", config={}, extras={},
     )
     ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     trajs = list(result.get("trajectories") or [])
     matched = _greedy_match(gt, trajs)
 

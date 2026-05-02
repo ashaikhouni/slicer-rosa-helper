@@ -32,6 +32,12 @@ from rosa_core.electrode_classifier import (  # noqa: F401
     filter_models_for_strategy,
     suggest_shortest_covering_model,
 )
+from rosa_core.volume_sampling import (
+    clip_to_voxel,
+    iter_axis_points,
+    ras_to_ijk_pt,
+    sample_nearest_at_ras,
+)
 
 
 # ---- Config (match probe_two_stage.py + probe_blob_pitch.py) ----------
@@ -825,13 +831,7 @@ def _unit(v):
 
 def _sample_dist_at_ras(dist_arr, ras_to_ijk_mat, ras_xyz):
     """Look up head_distance at a RAS point (nearest voxel)."""
-    K, J, I = dist_arr.shape
-    h = np.array([float(ras_xyz[0]), float(ras_xyz[1]), float(ras_xyz[2]), 1.0])
-    ijk = (ras_to_ijk_mat @ h)[:3]
-    i = int(np.clip(round(ijk[0]), 0, I - 1))
-    j = int(np.clip(round(ijk[1]), 0, J - 1))
-    k = int(np.clip(round(ijk[2]), 0, K - 1))
-    return float(dist_arr[k, j, i])
+    return sample_nearest_at_ras(dist_arr, ras_to_ijk_mat, ras_xyz)
 
 
 def _orient_shallow_to_deep(start_ras, end_ras, dist_arr, ras_to_ijk_mat):
@@ -932,6 +932,23 @@ def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
                 amp=-val, n_vox=1,
             ))
     return blobs
+
+
+def extract_blob_cloud_ras(log_arr, ijk_to_ras_mat, threshold=LOG_BLOB_THRESHOLD):
+    """Return the RAS centroids and amplitudes of every LoG regional
+    minimum strong enough to be a contact candidate. Public wrapper
+    around ``extract_blobs`` so Auto Fit, Guided Fit, and Contacts &
+    Trajectory View can share one entry point for "blobs as RAS points".
+    """
+    blobs = extract_blobs(log_arr, threshold=threshold)
+    if not blobs:
+        return np.empty((0, 3), dtype=float), np.empty((0,), dtype=float)
+    kji = np.array([b["kji"] for b in blobs], dtype=float)
+    amps = np.array([b["amp"] for b in blobs], dtype=float)
+    ij_k = np.stack([kji[:, 2], kji[:, 1], kji[:, 0]], axis=1)
+    h = np.concatenate([ij_k, np.ones((ij_k.shape[0], 1))], axis=1)
+    ras = (np.asarray(ijk_to_ras_mat, dtype=float) @ h.T).T[:, :3]
+    return ras, amps
 
 
 def _walk_with_pitch_precomputed(proj, within_perp, amps, pitch, ax_tol, max_k):
@@ -1088,25 +1105,16 @@ def _frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
     interpolation. Returns (0.0, 0.0) when the segment is too short or
     both endpoints fall outside the volume.
     """
-    K, J, I = frangi_arr.shape
-    s = np.asarray(start_ras, dtype=float)
-    e = np.asarray(end_ras, dtype=float)
-    d = e - s
-    L = float(np.linalg.norm(d))
+    L = float(np.linalg.norm(np.asarray(end_ras) - np.asarray(start_ras)))
     if L < step_mm:
         return 0.0, 0.0
-    u = d / L
-    n = max(2, int(L / step_mm) + 1)
-    vals = np.empty(n, dtype=np.float32)
-    for idx in range(n):
-        t = idx * step_mm if idx < n - 1 else L
-        p = s + t * u
-        h = np.array([p[0], p[1], p[2], 1.0])
-        ijk = (ras_to_ijk_mat @ h)[:3]
-        ic = int(np.clip(round(ijk[0]), 0, I - 1))
-        jc = int(np.clip(round(ijk[1]), 0, J - 1))
-        kc = int(np.clip(round(ijk[2]), 0, K - 1))
-        vals[idx] = float(frangi_arr[kc, jc, ic])
+    vals = np.array(
+        [
+            sample_nearest_at_ras(frangi_arr, ras_to_ijk_mat, p)
+            for _t, p in iter_axis_points(start_ras, end_ras, step_mm)
+        ],
+        dtype=np.float32,
+    )
     return float(vals.mean()), float(np.median(vals))
 
 
@@ -1133,27 +1141,19 @@ def _frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
     p50 ≈ 0.65). Hull-skimming bone-assembled chains and synth-extended
     FPs have near-zero saturation (orphan p50 ≈ 0.01).
     """
-    K, J, I = log_arr.shape
-    s = np.asarray(start_ras, dtype=float)
-    e = np.asarray(end_ras, dtype=float)
-    L = float(np.linalg.norm(e - s))
+    L = float(np.linalg.norm(np.asarray(end_ras) - np.asarray(start_ras)))
     if L < step_mm:
         return 0.0
-    u = (e - s) / L
-    n = max(2, int(L / step_mm) + 1)
     n_strong = 0
-    for idx in range(n):
-        t = idx * step_mm if idx < n - 1 else L
-        p = s + t * u
-        h = np.array([p[0], p[1], p[2], 1.0])
-        ijk = (ras_to_ijk_mat @ h)[:3]
-        ic = int(np.clip(round(ijk[0]), 0, I - 1))
-        jc = int(np.clip(round(ijk[1]), 0, J - 1))
-        kc = int(np.clip(round(ijk[2]), 0, K - 1))
+    n = 0
+    for _t, p in iter_axis_points(start_ras, end_ras, step_mm):
+        i, j, k = ras_to_ijk_pt(ras_to_ijk_mat, p)
+        kc, jc, ic = clip_to_voxel(log_arr.shape, i, j, k)
         log_norm = abs(float(log_arr[kc, jc, ic])) / LOG_BOLT_NORMALIZER
         hu_norm = max(0.0, float(ct_arr[kc, jc, ic])) / HU_BOLT_NORMALIZER
         if max(log_norm, hu_norm) >= METAL_BOLT_THRESHOLD:
             n_strong += 1
+        n += 1
     return float(n_strong) / float(n)
 
 

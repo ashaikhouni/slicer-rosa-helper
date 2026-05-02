@@ -28,8 +28,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import numpy as np
 
-from shank_engine import PipelineRegistry, register_builtin_pipelines
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
+from rosa_detect.service import run_contact_pitch_v1
+from rosa_detect import contact_pitch_v1_fit as cpfit
 from eval_seeg_localization import build_detection_context, iter_subject_rows
 
 DATASET_ROOT = Path(
@@ -92,8 +92,6 @@ def _run_t4(threshold: float):
     orig = cpfit.LOG_BLOB_THRESHOLD
     cpfit.LOG_BLOB_THRESHOLD = float(threshold)
     try:
-        registry = PipelineRegistry()
-        register_builtin_pipelines(registry)
         rows = iter_subject_rows(DATASET_ROOT, {"T4"})
         assert rows, "T4 not in manifest"
         row = rows[0]
@@ -102,7 +100,7 @@ def _run_t4(threshold: float):
             config={}, extras={},
         )
         ctx["contact_pitch_v1_pitch_strategy"] = "dixi"
-        result = registry.run("contact_pitch_v1", ctx)
+        result = run_contact_pitch_v1(ctx)
         return list(result.get("trajectories") or [])
     finally:
         cpfit.LOG_BLOB_THRESHOLD = orig

@@ -37,8 +37,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import numpy as np
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import (
     build_detection_context, iter_subject_rows,
     load_reference_ground_truth_shanks,
@@ -189,9 +189,6 @@ def main():
         return 1
 
     state, restore = _hook_volumes()
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
-
     # collected_records[T] is a list of records (one per emitted trajectory)
     collected = {T: [] for T in T_BOLT_SWEEP}
     # Trajectory metadata (subject, ti, name, matched, current bolt_source).
@@ -206,7 +203,7 @@ def main():
                 config={}, extras={},
             )
             ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-            result = registry.run("contact_pitch_v1", ctx)
+            result = run_contact_pitch_v1(ctx)
             trajs = list(result.get("trajectories") or [])
             matched = _greedy_match(gt, trajs)
 

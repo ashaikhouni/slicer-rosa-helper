@@ -27,7 +27,7 @@ from shank_core.io import (  # noqa: E402
 )
 from shank_core.masking import build_preview_masks  # noqa: E402
 from rosa_core.electrode_models import load_electrode_library, model_map  # noqa: E402
-from shank_engine import PipelineRegistry, register_builtin_pipelines  # noqa: E402
+from rosa_detect.service import run_contact_pitch_v1
 
 
 def _add_common_mask_args(parser):
@@ -209,8 +209,6 @@ def cmd_detect(args):
         lib = load_electrode_library(args.electrode_library)
         models_by_id = model_map(lib)
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     extras = {"models_by_id": models_by_id} if isinstance(models_by_id, dict) else {}
     config = {
         "threshold": float(args.metal_threshold_hu),
@@ -253,7 +251,7 @@ def cmd_detect(args):
         "config": config,
         "extras": extras,
     }
-    engine_result = registry.run(str(args.pipeline_key), ctx)
+    engine_result = run_contact_pitch_v1(ctx)
     if str(engine_result.get("status", "ok")).lower() == "error":
         err = dict(engine_result.get("error") or {})
         stage = str(err.get("stage") or "pipeline")

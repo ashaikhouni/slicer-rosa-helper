@@ -24,7 +24,6 @@ from rosa_core.contact_fit import fit_electrode_axis_and_tip
 from rosa_scene import ElectrodeSceneService, LayoutService, TrajectoryFocusController, TrajectorySceneService
 from shank_core.blob_candidates import build_blob_labelmap, extract_blob_candidates
 from shank_core.masking import build_preview_masks, compute_head_distance_map_kji, largest_component_binary
-from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 
@@ -48,9 +47,6 @@ class PostopCTLocalizationLogicBaseMixin:
             electrode_scene=self.electrode_scene,
             layout_service=self.layout_service,
         )
-        self.pipeline_registry = PipelineRegistry()
-        register_builtin_pipelines(self.pipeline_registry)
-
     def build_detection_context(self, volume_node):
         """Build a minimal ``DetectionContext`` dict for ``contact_pitch_v1``.
 
@@ -155,7 +151,7 @@ class PostopCTLocalizationLogicBaseMixin:
                 # Pull the canonical-resampled volume from the same
                 # `prepare_volume` path that detection uses, so manual
                 # picks stay consistent with Auto / Guided picks.
-                from postop_ct_localization.contact_pitch_v1_fit import prepare_volume
+                from rosa_detect.contact_pitch_v1_fit import prepare_volume
                 _img = _sitk.GetImageFromArray(
                     slicer.util.arrayFromVolume(ct_volume_for_pick)
                 )

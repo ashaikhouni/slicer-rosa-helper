@@ -36,7 +36,8 @@ from shank_core.io import (  # noqa: E402
     ras_to_ijk_float_matrix,
     read_volume,
 )
-from shank_engine import PipelineRegistry, VolumeRef, register_builtin_pipelines  # noqa: E402
+from rosa_detect.contracts import VolumeRef
+from rosa_detect.service import run_contact_pitch_v1
 
 
 @dataclass(frozen=True)
@@ -510,8 +511,7 @@ def iter_subject_rows(dataset_root: Path, subjects_filter: set[str] | None) -> l
 def evaluate_subject(
     row: dict[str, str],
     *,
-    pipeline_key: str,
-    registry: PipelineRegistry,
+    pipeline_key: str = "contact_pitch_v1",
     config: dict[str, Any],
     extras: dict[str, Any],
     match_distance_mm: float,
@@ -521,7 +521,7 @@ def evaluate_subject(
     subject_id = str(row["subject_id"])
     gt_shanks, gt_source_path = load_reference_ground_truth_shanks(row, guided_gt_root)
     ctx, _img = build_detection_context(row["ct_path"], run_id=f"eval_{subject_id}_{pipeline_key}", config=config, extras=dict(extras))
-    result = registry.run(pipeline_key, ctx)
+    result = run_contact_pitch_v1(ctx)
     if str(result.get("status", "ok")).lower() == "error":
         err = dict(result.get("error") or {})
         raise RuntimeError(f"{subject_id}: {err.get('message', 'Detection failed')} (stage={err.get('stage', 'pipeline')})")
@@ -624,8 +624,6 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     subjects_filter = {s.strip() for s in str(args.subjects).split(",") if s.strip()} or None
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     config = default_detection_config(args)
     extras: dict[str, Any] = {}
     if bool(args.use_model_score):
@@ -641,7 +639,6 @@ def main() -> None:
         summary, assignments, artifact_payload = evaluate_subject(
             row,
             pipeline_key=str(args.pipeline_key),
-            registry=registry,
             config=config,
             extras=extras,
             match_distance_mm=float(args.match_distance_mm),

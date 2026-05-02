@@ -94,7 +94,7 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None)
     frangi_s1 = cpfit.frangi_single(img, sigma=cpfit.FRANGI_STAGE1_SIGMA)
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
 
-    pts_ras, amps = _extract_blob_cloud_ras(log1, ijk_to_ras_mat)
+    pts_ras, amps = cpfit.extract_blob_cloud_ras(log1, ijk_to_ras_mat)
 
     # ``spacing_xyz`` overrides the (now-canonical) image spacing only
     # when the caller has a reason to lie about it. Default: trust the
@@ -136,33 +136,15 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None)
     }
 
 
-def _extract_blob_cloud_ras(log_arr, ijk_to_ras_mat,
-                              threshold=cpfit.LOG_BLOB_THRESHOLD):
-    """Return the RAS centroids and amplitudes of all LoG regional
-    minima strong enough to be contact candidates.
-    """
-    blobs = cpfit.extract_blobs(log_arr, threshold=threshold)
-    if not blobs:
-        return np.empty((0, 3), dtype=float), np.empty((0,), dtype=float)
-    kji = np.array([b["kji"] for b in blobs], dtype=float)
-    amps = np.array([b["amp"] for b in blobs], dtype=float)
-    # kji → ras via the 4×4 ijk-to-ras matrix.
-    ij_k = np.stack([kji[:, 2], kji[:, 1], kji[:, 0]], axis=1)
-    h = np.concatenate([ij_k, np.ones((ij_k.shape[0], 1))], axis=1)
-    ras = (ijk_to_ras_mat @ h.T).T[:, :3]
-    return ras, amps
-
-
 def _pca_axis(points, weights):
     """Amplitude-weighted PCA principal axis of an Nx3 RAS point cloud.
-    Returns (centroid, axis_unit).
+    Returns (centroid, axis_unit). Thin wrapper around the canonical
+    ``rosa_core.contact_fit.fit_axis_pca`` so Auto Fit, Guided Fit, and
+    callers in tools/tests share one implementation.
     """
-    w = weights / float(weights.sum() or 1.0)
-    centroid = np.sum(points * w[:, None], axis=0)
-    X = points - centroid
-    Xw = X * w[:, None]
-    _U, _S, Vt = np.linalg.svd(Xw, full_matrices=False)
-    return centroid, _unit(Vt[0])
+    from rosa_core.contact_fit import fit_axis_pca
+
+    return fit_axis_pca(points, weights=weights)
 
 
 def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
@@ -300,7 +282,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     amps = features.get("blob_amps")
     if pts_ras is None or amps is None:
         # Lazy extraction if compute_features was skipped
-        pts_ras, amps = _extract_blob_cloud_ras(
+        pts_ras, amps = cpfit.extract_blob_cloud_ras(
             features["log"], np.asarray(ijk_to_ras_mat, dtype=float),
         )
     if pts_ras.shape[0] == 0:

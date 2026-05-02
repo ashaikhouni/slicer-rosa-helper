@@ -29,7 +29,7 @@ def _reload_local_support_modules():
     """Hot-reload local helper modules when the scripted module is reimported."""
     importlib.invalidate_caches()
     roots = tuple(os.path.abspath(path) for path in PATH_CANDIDATES if os.path.isdir(path))
-    prefixes = ("rosa_core", "rosa_scene", "shank_engine", "rosa_workflow", "postop_ct_localization")
+    prefixes = ("rosa_core", "rosa_scene", "rosa_detect", "rosa_workflow", "postop_ct_localization")
     to_reload = []
     for name, module in list(sys.modules.items()):
         if not any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes):

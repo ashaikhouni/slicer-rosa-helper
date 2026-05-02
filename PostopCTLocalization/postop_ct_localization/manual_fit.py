@@ -24,7 +24,6 @@ from rosa_core.contact_fit import fit_electrode_axis_and_tip
 from rosa_scene import ElectrodeSceneService, LayoutService, TrajectoryFocusController, TrajectorySceneService
 from shank_core.blob_candidates import build_blob_labelmap, extract_blob_candidates
 from shank_core.masking import build_preview_masks, compute_head_distance_map_kji, largest_component_binary
-from shank_engine import PipelineRegistry, register_builtin_pipelines
 from rosa_workflow import WorkflowPublisher, WorkflowState
 from rosa_workflow.workflow_registry import table_to_dict_rows
 

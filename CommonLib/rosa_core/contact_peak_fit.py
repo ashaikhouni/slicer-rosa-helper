@@ -33,6 +33,7 @@ import numpy as np
 
 from .transforms import lps_to_ras_point
 from .types import ContactRecord, ElectrodeModel, TrajectoryRecord
+from .volume_sampling import sample_trilinear_at_ras
 
 
 # ---------------------------------------------------------------------
@@ -107,32 +108,6 @@ def _orthonormal_basis(direction_unit):
     return u, v
 
 
-def _sample_trilinear(arr_kji, k, j, i):
-    s = arr_kji.shape
-    if not (0 <= k < s[0] - 1 and 0 <= j < s[1] - 1 and 0 <= i < s[2] - 1):
-        return float("nan")
-    k0, j0, i0 = int(k), int(j), int(i)
-    dk, dj, di = k - k0, j - j0, i - i0
-    v000 = arr_kji[k0, j0, i0]; v001 = arr_kji[k0, j0, i0 + 1]
-    v010 = arr_kji[k0, j0 + 1, i0]; v011 = arr_kji[k0, j0 + 1, i0 + 1]
-    v100 = arr_kji[k0 + 1, j0, i0]; v101 = arr_kji[k0 + 1, j0, i0 + 1]
-    v110 = arr_kji[k0 + 1, j0 + 1, i0]; v111 = arr_kji[k0 + 1, j0 + 1, i0 + 1]
-    c00 = v000 * (1 - di) + v001 * di
-    c01 = v010 * (1 - di) + v011 * di
-    c10 = v100 * (1 - di) + v101 * di
-    c11 = v110 * (1 - di) + v111 * di
-    c0 = c00 * (1 - dj) + c01 * dj
-    c1 = c10 * (1 - dj) + c11 * dj
-    return float(c0 * (1 - dk) + c1 * dk)
-
-
-def _ras_to_kji_pt(ras_to_ijk_mat, p):
-    h = np.array([p[0], p[1], p[2], 1.0])
-    ijk = ras_to_ijk_mat @ h
-    # matrix is in IJK (i, j, k) order; numpy arr is [k, j, i].
-    return float(ijk[2]), float(ijk[1]), float(ijk[0])
-
-
 def sample_axis_profile(volume_kji, ras_to_ijk_mat, start_ras, end_ras,
                         step_mm=PEAK_STEP_MM,
                         disk_radius_mm=PEAK_DISK_RADIUS_MM,
@@ -177,11 +152,10 @@ def sample_axis_profile(volume_kji, ras_to_ijk_mat, start_ras, end_ras,
     profile = np.full(n_steps, np.nan, dtype=float)
     for idx in range(n_steps):
         center = start + arc_mm[idx] * axis
-        samples = []
-        for off in disk_offsets:
-            p = center + off
-            k, j, i = _ras_to_kji_pt(ras_to_ijk_mat, p)
-            samples.append(_sample_trilinear(volume_kji, k, j, i))
+        samples = [
+            sample_trilinear_at_ras(volume_kji, ras_to_ijk_mat, center + off)
+            for off in disk_offsets
+        ]
         s = np.asarray(samples, dtype=float)
         s = s[np.isfinite(s)]
         if s.size == 0:

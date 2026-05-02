@@ -42,10 +42,7 @@ def _try_imports():
     try:
         import numpy  # noqa: F401
         import SimpleITK  # noqa: F401
-        from shank_engine import (  # noqa: F401
-            PipelineRegistry,
-            register_builtin_pipelines,
-        )
+        from rosa_detect.service import run_contact_pitch_v1  # noqa: F401
         return True
     except ImportError:
         return False
@@ -60,15 +57,12 @@ DEPS_AVAILABLE = _try_imports()
 )
 @unittest.skipUnless(
     DEPS_AVAILABLE,
-    "numpy/SimpleITK/shank_engine not importable in this environment.",
+    "numpy/SimpleITK/rosa_detect not importable in this environment.",
 )
 class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from shank_engine import PipelineRegistry, register_builtin_pipelines
-
-        cls.registry = PipelineRegistry()
-        register_builtin_pipelines(cls.registry)
+        pass
 
     def _run_subject(self, subject_id, *, max_angle_deg=10.0,
                       max_mid_mm=8.0, deep_core_config_overrides=None,
@@ -98,7 +92,8 @@ class ContactPitchV1DatasetRegressionTests(unittest.TestCase):
         )
         if pitch_strategy:
             ctx["contact_pitch_v1_pitch_strategy"] = pitch_strategy
-        result = self.registry.run("contact_pitch_v1", ctx)
+        from rosa_detect.service import run_contact_pitch_v1
+        result = run_contact_pitch_v1(ctx)
         self.assertEqual(
             result.get("status"), "ok",
             f"Pipeline failed: {result.get('error')}",

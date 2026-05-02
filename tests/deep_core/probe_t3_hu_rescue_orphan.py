@@ -36,8 +36,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import (
     build_detection_context,
     iter_subject_rows,
@@ -144,13 +144,11 @@ def main():
     row = rows[0]
 
     gt, _ = load_reference_ground_truth_shanks(row)
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     ctx, raw_img = build_detection_context(
         row["ct_path"], run_id="probe_t3_hu_rescue", config={}, extras={},
     )
     ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     trajs = list(result.get("trajectories") or [])
     print(f"T3: {len(gt)} GT shanks, pipeline emitted {len(trajs)} trajectories")
 

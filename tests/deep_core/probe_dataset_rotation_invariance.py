@@ -42,8 +42,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect.service import run_contact_pitch_v1
 from eval_seeg_localization import (
     build_detection_context,
     iter_subject_rows,
@@ -222,9 +222,6 @@ def _classify(traj, img):
 
 
 def main():
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
-
     rows = iter_subject_rows(DATASET_ROOT, None)
     rows = [r for r in rows if str(r["subject_id"]) not in EXCLUDE]
     rows.sort(key=lambda r: int(str(r["subject_id"]).lstrip("T")))
@@ -253,7 +250,7 @@ def main():
             extras={},
         )
         ctx["contact_pitch_v1_pitch_strategy"] = "auto"
-        result = registry.run("contact_pitch_v1", ctx)
+        result = run_contact_pitch_v1(ctx)
         if str(result.get("status", "ok")).lower() == "error":
             err = dict(result.get("error") or {})
             print(f"  {subject_id}: PIPELINE ERROR {err.get('message')}")

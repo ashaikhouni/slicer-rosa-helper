@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
+from rosa_detect import contact_pitch_v1_fit as cpfit
 from eval_seeg_localization import iter_subject_rows, image_ijk_ras_matrices
 
 DATASET_ROOT = Path("/Users/ammar/Dropbox/thalamus_subjects/seeg_localization")

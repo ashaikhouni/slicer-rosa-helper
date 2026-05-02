@@ -39,8 +39,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization import contact_pitch_v1_fit as cpfit
-from postop_ct_localization import guided_fit_engine as gfe
+from rosa_detect import contact_pitch_v1_fit as cpfit
+from rosa_detect import guided_fit_engine as gfe
 from eval_seeg_localization import (
     iter_subject_rows, image_ijk_ras_matrices,
     load_reference_ground_truth_shanks,

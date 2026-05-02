@@ -32,7 +32,7 @@ sys.path.insert(0, str(REPO_ROOT / "tools"))
 import numpy as np  # noqa: E402
 
 from eval_seeg_localization import build_detection_context  # noqa: E402
-from shank_engine import PipelineRegistry, register_builtin_pipelines  # noqa: E402
+from rosa_detect.service import run_contact_pitch_v1
 
 
 DEFAULT_CT = "/Users/ammar/Dropbox/MRI-Pipeline/inbox/brunner/FREESURFER/AMC099/NIfTI/CT/CT.nii.gz"
@@ -155,9 +155,6 @@ def main() -> int:
     gt_rows = load_rosa_gt_csv(args.gt)
     print(f"GT trajectories: {len(gt_rows)} ({[r['name'] for r in gt_rows]})")
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
-
     t0 = time.perf_counter()
     ctx, img = build_detection_context(
         args.ct, run_id=f"amc099_{args.pitch_strategy}",
@@ -168,7 +165,7 @@ def main() -> int:
     t_ctx = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     t_run = time.perf_counter() - t0
 
     print(f"\nload+context: {t_ctx:.2f} s")

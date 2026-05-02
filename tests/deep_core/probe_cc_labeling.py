@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT / "PostopCTLocalization"))
 import numpy as np
 import SimpleITK as sitk
 
-from postop_ct_localization.contact_pitch_v1_fit import (
+from rosa_detect.contact_pitch_v1_fit import (
     build_masks, log_sigma,
     LOG_SIGMA_MM, HU_CLIP_MAX,
 )

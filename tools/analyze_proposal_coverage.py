@@ -13,14 +13,12 @@ from typing import Any
 import numpy as np
 
 from eval_seeg_localization import (  # type: ignore
-    PipelineRegistry,
     build_detection_context,
     compare_shanks,
     default_detection_config,
     iter_subject_rows,
     load_ground_truth_shanks,
     match_shanks,
-    register_builtin_pipelines,
 )
 
 
@@ -148,8 +146,6 @@ def main() -> None:
     if not rows:
         raise SystemExit("No subjects matched the requested filter")
 
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     if not hasattr(args, "selection_target_count"):
         args.selection_target_count = None
     args.use_head_mask = True
@@ -189,7 +185,7 @@ def main() -> None:
         sid = str(row["subject_id"])
         gt_shanks = load_ground_truth_shanks(row["labels_path"], row.get("shanks_path"))
         ctx, _ = build_detection_context(row["ct_path"], run_id=f"proposal_{sid}", config=config, extras={"electrode_library": None})
-        result = registry.run(str(args.pipeline_key), ctx)
+        result = run_contact_pitch_v1(ctx)
         if str(result.get("status", "ok")).lower() == "error":
             err = dict(result.get("error") or {})
             raise RuntimeError(f"{sid}: {err.get('message', 'Detection failed')} (stage={err.get('stage', 'pipeline')})")

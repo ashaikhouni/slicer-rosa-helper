@@ -22,7 +22,7 @@ from eval_seeg_localization import (
     iter_subject_rows,
     load_reference_ground_truth_shanks,
 )
-from shank_engine import PipelineRegistry, register_builtin_pipelines
+from rosa_detect.service import run_contact_pitch_v1
 
 
 DATASET_ROOT = Path(
@@ -47,7 +47,7 @@ def _match_one(row, registry):
     ctx, _ = build_detection_context(
         row["ct_path"], run_id=f"contact_pitch_{sid}", config={}, extras={}
     )
-    result = registry.run("contact_pitch_v1", ctx)
+    result = run_contact_pitch_v1(ctx)
     assert result.get("status") == "ok", f"{sid}: {result.get('error')}"
     trajs = list(result.get("trajectories") or [])
 
@@ -84,8 +84,6 @@ def _match_one(row, registry):
 
 
 def main():
-    registry = PipelineRegistry()
-    register_builtin_pipelines(registry)
     rows = [
         r for r in iter_subject_rows(DATASET_ROOT, None)
         if str(r["subject_id"]) not in EXCLUDED
