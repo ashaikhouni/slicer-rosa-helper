@@ -20,22 +20,33 @@ import sys
 import unittest
 from pathlib import Path
 
-import numpy as np
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
 sys.path.insert(0, str(REPO_ROOT / "PostopCTLocalization"))
 sys.path.insert(0, str(REPO_ROOT / "tools"))
 
-from rosa_core.contact_peak_fit import (  # noqa: E402
-    _match_peaks_to_offsets,
-    _match_tip_direction,
-    candidate_ids_for_vendors,
-    detect_peaks_1d,
-    fit_best_electrode,
+
+# Wrap top-level scientific imports so the module loads in minimal
+# envs (no numpy / rosa_core). The class-level skipUnless guards
+# below prevent test bodies from running when names are unbound.
+try:
+    import numpy as np  # noqa: E402
+    from rosa_core.contact_peak_fit import (  # noqa: E402
+        _match_peaks_to_offsets,
+        _match_tip_direction,
+        candidate_ids_for_vendors,
+        detect_peaks_1d,
+        fit_best_electrode,
+    )
+    DEPS_AVAILABLE_CORE = True
+except ImportError:
+    DEPS_AVAILABLE_CORE = False
+
+
+@unittest.skipUnless(
+    DEPS_AVAILABLE_CORE,
+    "numpy / rosa_core.contact_peak_fit not importable in this environment.",
 )
-
-
 class PeakPickingTests(unittest.TestCase):
     def test_detect_peaks_finds_local_minima(self):
         # 10 mm profile, step 0.25 mm, two strong negative dips 3.5 mm apart.
@@ -81,6 +92,10 @@ class PeakPickingTests(unittest.TestCase):
         self.assertAlmostEqual(peaks[0], 2.5, places=2)
 
 
+@unittest.skipUnless(
+    DEPS_AVAILABLE_CORE,
+    "numpy / rosa_core.contact_peak_fit not importable in this environment.",
+)
 class ModelMatchTests(unittest.TestCase):
     def test_matches_dixi5_offsets(self):
         # 5 peaks at Dixi AM offsets from tip arc-length 0.0.
