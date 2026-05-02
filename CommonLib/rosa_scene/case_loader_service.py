@@ -170,21 +170,39 @@ class CaseLoaderService:
         return slicer.util.loadVolume(path)
 
     def center_volume(self, volume_node):
-        """Center volume origin (Volumes module equivalent)."""
+        """Center volume origin (Volumes module equivalent).
+
+        Prefers Slicer's built-in ``slicer.modules.volumes.logic()
+        .CenterVolume()`` when available — that's the same algorithm
+        the CLI's ``rosa_core.case_loader.centering_translation_4x4``
+        encodes. The Slicer built-in mutates the volume node directly
+        and is the canonical Slicer-side way to do this.
+
+        Fallback (when Slicer's logic is unavailable, e.g. under some
+        test harnesses): compute the centering translation via the
+        pure-Python ``centering_translation_4x4`` helper and apply it
+        to the node's IJK->RAS matrix in place. Both paths produce
+        the same effective IJK->RAS — the helper is the single
+        source of truth shared with the CLI's
+        ``load_rosa_volume_as_sitk``.
+        """
         logic = slicer.modules.volumes.logic()
         if logic and hasattr(logic, "CenterVolume"):
             logic.CenterVolume(volume_node)
             return
 
-        ijk_to_ras = vtk.vtkMatrix4x4()
-        volume_node.GetIJKToRASMatrix(ijk_to_ras)
+        from rosa_core.case_loader import centering_translation_4x4
+
+        ijk_to_ras_vtk = vtk.vtkMatrix4x4()
+        volume_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
+        ijk_to_ras_np = self.vtk_matrix_to_numpy(ijk_to_ras_vtk)
         dims = volume_node.GetImageData().GetDimensions()
-        center_ijk = [(dims[0] - 1) / 2.0, (dims[1] - 1) / 2.0, (dims[2] - 1) / 2.0, 1.0]
-        center_ras = [0.0, 0.0, 0.0, 0.0]
-        ijk_to_ras.MultiplyPoint(center_ijk, center_ras)
-        for i in range(3):
-            ijk_to_ras.SetElement(i, 3, ijk_to_ras.GetElement(i, 3) - center_ras[i])
-        volume_node.SetIJKToRASMatrix(ijk_to_ras)
+        centering = centering_translation_4x4(ijk_to_ras_np, tuple(dims[:3]))
+        new_ijk_to_ras = centering @ ijk_to_ras_np
+        for r in range(4):
+            for c in range(4):
+                ijk_to_ras_vtk.SetElement(r, c, float(new_ijk_to_ras[r, c]))
+        volume_node.SetIJKToRASMatrix(ijk_to_ras_vtk)
 
     def apply_transform(self, volume_node, matrix4x4):
         """Assign a new linear transform node built from a 4x4 matrix."""

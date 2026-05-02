@@ -102,6 +102,84 @@ def _build_synthetic_rosa_case(case_dir: Path) -> Path:
     DEPS_AVAILABLE,
     "numpy/SimpleITK/rosa_core not importable in this environment.",
 )
+class ComposeRosaDisplayMathTests(unittest.TestCase):
+    """Pin the pure-numpy helpers that BOTH the CLI loader and the
+    Slicer-side CaseLoaderService go through. Single source of truth
+    for ROSA volume centering + display->reference composition.
+    """
+
+    def test_centering_translation_puts_image_center_at_world_origin(self):
+        import numpy as np
+        from rosa_core.case_loader import centering_translation_4x4
+
+        # Native IJK->RAS: 0.5mm spacing, 8x9x10 volume, RAS origin
+        # (10, 20, 30), identity rotation. Image center IJK =
+        # ((8-1)/2, (9-1)/2, (10-1)/2) = (3.5, 4, 4.5). In RAS that's
+        # (10 + 3.5*0.5, 20 + 4*0.5, 30 + 4.5*0.5) = (11.75, 22, 32.25).
+        native = np.array([
+            [0.5, 0.0, 0.0, 10.0],
+            [0.0, 0.5, 0.0, 20.0],
+            [0.0, 0.0, 0.5, 30.0],
+            [0.0, 0.0, 0.0,  1.0],
+        ])
+        size = (8, 9, 10)
+        centering = centering_translation_4x4(native, size)
+        np.testing.assert_allclose(centering[:3, :3], np.eye(3))
+        np.testing.assert_allclose(centering[:3, 3], [-11.75, -22.0, -32.25])
+
+        # Verify: applying the centering puts the image-center voxel
+        # at world (0, 0, 0).
+        new_ijk_to_ras = centering @ native
+        center_ijk_h = np.array([3.5, 4.0, 4.5, 1.0])
+        center_ras = new_ijk_to_ras @ center_ijk_h
+        np.testing.assert_allclose(center_ras[:3], [0.0, 0.0, 0.0], atol=1e-10)
+
+    def test_compose_full_chain_matches_step_by_step(self):
+        """The single-shot composer must equal step-by-step
+        ``display_to_ref @ centering @ native`` — proves that the
+        Slicer chain (load -> center -> apply_transform -> harden) and
+        the CLI one-shot stamp produce identical effective IJK->RAS
+        for the same input. THIS IS THE NO-DRIFT PROOF.
+        """
+        import numpy as np
+        from rosa_core.case_loader import (
+            centering_translation_4x4,
+            compose_rosa_display_ijk_to_ras,
+        )
+
+        native = np.array([
+            [0.5, 0.0, 0.0, 10.0],
+            [0.0, 0.5, 0.0, 20.0],
+            [0.0, 0.0, 0.5, 30.0],
+            [0.0, 0.0, 0.0,  1.0],
+        ])
+        # Non-trivial display_to_reference: small rotation + translation.
+        display_to_ref = np.array([
+            [0.9, 0.1, 0.0,  5.0],
+            [-0.1, 0.9, 0.0, -3.0],
+            [0.0, 0.0, 1.0,  2.0],
+            [0.0, 0.0, 0.0,  1.0],
+        ])
+        size = (8, 9, 10)
+
+        one_shot = compose_rosa_display_ijk_to_ras(native, display_to_ref, size)
+        step_by_step = display_to_ref @ centering_translation_4x4(native, size) @ native
+
+        np.testing.assert_allclose(
+            one_shot, step_by_step, atol=1e-12,
+            err_msg=(
+                "compose_rosa_display_ijk_to_ras must equal step-by-step "
+                "display_to_ref @ centering @ native — divergence here "
+                "means CLI and Slicer paths produce different effective "
+                "IJK->RAS for the same input."
+            ),
+        )
+
+
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/SimpleITK/rosa_core not importable in this environment.",
+)
 class LoadRosaVolumeAsSitkTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

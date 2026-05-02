@@ -130,6 +130,80 @@ def build_effective_matrices(displays: list[DisplayRecord], root_index: int = 0)
 
 
 # ---------------------------------------------------------------------
+# Shared geometry helpers — single source of truth for ROSA volume
+# centering + display->reference composition. The Slicer side
+# (rosa_scene.CaseLoaderService) and the CLI side
+# (load_rosa_volume_as_sitk below) BOTH go through these helpers so
+# the math can't drift between the two implementations.
+#
+# The Slicer side composes the chain step-by-step on a vtkMRMLScalarVolumeNode
+# (load_volume -> center_volume -> apply_transform -> harden). The CLI
+# computes the final IJK->RAS in one shot and stamps it into a SITK
+# image. Both produce the SAME effective IJK->RAS for the same input.
+
+
+def centering_translation_4x4(
+    native_ijk_to_ras: Any,
+    image_size_xyz: tuple[int, int, int],
+) -> Any:
+    """Return a 4x4 translation matrix that, left-multiplied onto a
+    volume's IJK->RAS, shifts the origin so the image-center voxel
+    lands at world (0, 0, 0).
+
+    Slicer's ``slicer.modules.volumes.logic().CenterVolume()`` does
+    exactly this (in-place on a volume node); the CLI inlines the
+    math via this helper. Both sides converge here.
+
+    Pure numpy — no Slicer / VTK / SITK dependencies.
+    """
+    import numpy as np
+
+    m = np.asarray(native_ijk_to_ras, dtype=float)
+    center_ijk_h = np.array([
+        (image_size_xyz[0] - 1) * 0.5,
+        (image_size_xyz[1] - 1) * 0.5,
+        (image_size_xyz[2] - 1) * 0.5,
+        1.0,
+    ], dtype=float)
+    center_ras = m @ center_ijk_h
+    out = np.eye(4, dtype=float)
+    out[:3, 3] = -center_ras[:3]
+    return out
+
+
+def compose_rosa_display_ijk_to_ras(
+    native_ijk_to_ras: Any,
+    display_to_reference_ras: Any,
+    image_size_xyz: tuple[int, int, int],
+) -> Any:
+    """Compose the full ROSA load chain into one 4x4 IJK->RAS matrix.
+
+    Returns ``display_to_reference @ centering @ native_ijk_to_ras``.
+
+    The chain mirrors what Slicer's CaseLoaderService.load_case does
+    on a volume node:
+      1. load_volume(path)                         -> native IJK->RAS
+      2. center_volume(node)                       -> centering applied
+      3. apply_transform(node, display_to_ref)     -> on top
+      4. hardenTransform(node)                     -> baked in
+
+    Use this when you want the final-state IJK->RAS as a single matrix
+    (the CLI path: stamp into a SITK image's origin/direction). Use
+    ``centering_translation_4x4`` alone when you only need the
+    centering piece (the Slicer path: feed each piece to its own
+    vtkMRMLScalarVolumeNode method).
+
+    Pure numpy.
+    """
+    import numpy as np
+
+    native = np.asarray(native_ijk_to_ras, dtype=float)
+    centering = centering_translation_4x4(native, image_size_xyz)
+    display_to_ref = np.asarray(display_to_reference_ras, dtype=float)
+    return display_to_ref @ centering @ native
+
+
+# ---------------------------------------------------------------------
 # ROSA volume loading (Analyze .img/.hdr -> in-memory SITK image)
 # ---------------------------------------------------------------------
 #
@@ -239,48 +313,28 @@ def load_rosa_volume_as_sitk(
         )
     img = sitk.ReadImage(str(img_path))
 
-    # Stamp the IJK->RAS matrix that puts this volume in the ROSA-planning
-    # coordinate frame:
-    #
-    #     centered_native_ijk_to_ras  — voxel center sits at world origin
-    #                                   (Slicer's "Center Volume" step)
-    #     display_to_reference_ras    — composed TRdicomRdisplay chain
-    #     final = display_to_reference_ras @ centered_native_ijk_to_ras
-    #
-    # This mirrors what CaseLoaderService.load_case does on the Slicer
-    # side: load_volume -> center_volume -> apply_transform -> harden.
-    # Without the centering step, planned trajectories (which sit in
-    # the brain-centered frame ROSA stores) land hundreds of mm away
-    # from the imaged content (which sits in the image-corner-origin
-    # frame native to the Analyze header).
-    #
-    # Stamp logic is inlined (not importing
-    # ``rosa_detect.service.stamp_ijk_to_ras_on_sitk``) because
-    # rosa_core must not depend on rosa_detect — layer goes
-    # rosa_core <- rosa_detect, not the reverse.
+    # Compose the full ROSA load chain via the shared math helper.
+    # ``compose_rosa_display_ijk_to_ras`` is the single source of
+    # truth — both this CLI path and Slicer's CaseLoaderService go
+    # through it (Slicer via ``centering_translation_4x4`` +
+    # ``apply_transform``), so the centering + display->reference
+    # composition can never drift between the two sides.
     import numpy as np
     from shank_core.io import image_ijk_ras_matrices
 
     ijk_to_ras_native, _ = image_ijk_ras_matrices(img)
+    ijk_to_ras_final = compose_rosa_display_ijk_to_ras(
+        native_ijk_to_ras=ijk_to_ras_native,
+        display_to_reference_ras=matrix_ras,
+        image_size_xyz=img.GetSize(),
+    )
 
-    # Center: shift origin so the image-center voxel lands at world (0, 0, 0).
-    size = img.GetSize()
-    center_ijk_h = np.array([
-        (size[0] - 1) * 0.5,
-        (size[1] - 1) * 0.5,
-        (size[2] - 1) * 0.5,
-        1.0,
-    ], dtype=float)
-    center_ras = ijk_to_ras_native @ center_ijk_h
-    centering = np.eye(4, dtype=float)
-    centering[:3, 3] = -center_ras[:3]
-    ijk_to_ras_centered = centering @ ijk_to_ras_native
-
-    # Compose with display->reference (identity for the reference vol;
-    # the chain matrix for everyone else).
-    m_xform = np.asarray(matrix_ras, dtype=float)
-    ijk_to_ras_final = m_xform @ ijk_to_ras_centered
-
+    # Stamp into the SITK image. (Slicer side instead splits the same
+    # final matrix across vtkMRMLScalarVolumeNode.SetIJKToRASMatrix +
+    # transform-node application — different mechanism, identical
+    # effective output.) Stamp logic is inlined here (no import from
+    # rosa_detect.service) because rosa_core must not depend on
+    # rosa_detect.
     spacing = np.array(img.GetSpacing(), dtype=float)
     origin_ras = ijk_to_ras_final[:3, 3].copy()
     dir_ras = np.zeros((3, 3), dtype=float)
