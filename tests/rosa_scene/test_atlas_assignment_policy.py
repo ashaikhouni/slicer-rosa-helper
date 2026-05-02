@@ -4,9 +4,9 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "CommonLib" / "rosa_scene"))
+sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
 
-from atlas_assignment_policy import (  # noqa: E402
+from rosa_core.atlas_assignment_policy import (  # noqa: E402
     build_assignment_row,
     choose_closest_sample,
     collect_provider_samples,

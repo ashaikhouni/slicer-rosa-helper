@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from rosa_core import lps_to_ras_point
-from rosa_workflow import WorkflowState
-
-from .atlas_assignment_policy import (
+from rosa_core.atlas_assignment_policy import (
     build_assignment_row,
     choose_closest_sample,
     collect_provider_samples,
 )
+from rosa_workflow import WorkflowState
 from .atlas_provider_registry import AtlasProviderRegistry
 from .electrode_scene import ElectrodeSceneService
 
