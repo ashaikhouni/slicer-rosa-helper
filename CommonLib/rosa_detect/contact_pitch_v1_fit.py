@@ -42,10 +42,11 @@ from rosa_core.volume_sampling import (
 
 # ---- Config (match probe_two_stage.py + probe_blob_pitch.py) ----------
 
-# Preprocessing constants + functions live in rosa_detect.preprocessing
-# now. Re-exported below for backwards compat with the many test/probe
-# files that import via cpfit.<symbol>.
-from .preprocessing import (  # noqa: F401
+# Preprocessing + bolt-anchor primitives live under the strategy-
+# agnostic rosa_detect.primitives package. Re-exported below for
+# backwards compat with the many test/probe files that read symbols
+# via ``cpfit.<symbol>``.
+from .primitives.preprocessing import (  # noqa: F401
     CANONICAL_SPACING_MM,
     FRANGI_STAGE1_SIGMA,
     HU_CLIP_MAX,
@@ -56,8 +57,7 @@ from .preprocessing import (  # noqa: F401
     log_sigma,
     prepare_volume,
 )
-# Bolt-anchor constants + functions live in rosa_detect.bolt_anchor.
-from .bolt_anchor import (  # noqa: F401
+from .primitives.bolt_anchor import (  # noqa: F401
     BOLT_BASE_MAX_DIST_MM,
     BOLT_HULL_PROXIMITY_MM,
     BOLT_MAX_INWARD_ALONG_MM,
@@ -94,7 +94,7 @@ from .bolt_anchor import (  # noqa: F401
 LOG_BLOB_THRESHOLD = 500.0
 LOG_BLOB_MAX_VOXELS = 500
 
-# HU_CLIP_MAX, CANONICAL_SPACING_MM moved to rosa_detect.preprocessing
+# HU_CLIP_MAX, CANONICAL_SPACING_MM moved to rosa_detect.primitives.preprocessing
 # and re-exported above. See that module for the calibration rationale.
 
 PITCH_MM = 3.5
@@ -321,7 +321,7 @@ POST_ANCHOR_DEDUP_ANG_DEG = 8.0  # 5° was too tight: auto-pitch
                                   # have midpoint perp >> 3 mm).
 
 # LOG_BOLT_NORMALIZER, HU_BOLT_NORMALIZER, METAL_BOLT_THRESHOLD moved to
-# rosa_detect.bolt_anchor and re-exported above.
+# rosa_detect.primitives.bolt_anchor and re-exported above.
 
 AXIS_SKULL_SYNTH_STEP_MM = 0.5      # Synth fallback (only path remaining
 AXIS_SKULL_SYNTH_MAX_OUTWARD_MM = 80.0
@@ -335,7 +335,7 @@ AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM = 15.0
                                     # outside the CT acquisition window.
 
 # BOLT_MIN_VOXELS through BOLT_BASE_MAX_DIST_MM moved to
-# rosa_detect.bolt_anchor and re-exported above.
+# rosa_detect.primitives.bolt_anchor and re-exported above.
 
 
 # ---- Pitch strategy + auto-detection ---------------------------------
