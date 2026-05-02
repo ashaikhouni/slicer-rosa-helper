@@ -239,29 +239,62 @@ def load_rosa_volume_as_sitk(
         )
     img = sitk.ReadImage(str(img_path))
 
-    # Stamp the composed display->reference matrix into the SITK image's
-    # origin/direction. Same algorithm as
-    # rosa_detect.service.stamp_ijk_to_ras_on_sitk; we keep this
-    # local rather than import because rosa_core shouldn't depend on
-    # rosa_detect (layer ordering).
-    if loaded_index != root_index:
-        import numpy as np
-        spacing = np.array(img.GetSpacing(), dtype=float)
-        m_ras = np.asarray(matrix_ras, dtype=float)
-        origin_ras = m_ras[:3, 3].copy()
-        dir_ras = np.zeros((3, 3), dtype=float)
-        for k in range(3):
-            dir_ras[:, k] = m_ras[:3, k] / max(1e-9, float(spacing[k]))
-        # SITK lives in LPS: flip X and Y of both origin and direction.
-        origin_lps = np.array(
-            [-origin_ras[0], -origin_ras[1], origin_ras[2]],
-            dtype=float,
-        )
-        dir_lps = dir_ras.copy()
-        dir_lps[0, :] *= -1.0
-        dir_lps[1, :] *= -1.0
-        img.SetOrigin(tuple(float(v) for v in origin_lps.tolist()))
-        img.SetDirection(tuple(float(v) for v in dir_lps.flatten().tolist()))
+    # Stamp the IJK->RAS matrix that puts this volume in the ROSA-planning
+    # coordinate frame:
+    #
+    #     centered_native_ijk_to_ras  — voxel center sits at world origin
+    #                                   (Slicer's "Center Volume" step)
+    #     display_to_reference_ras    — composed TRdicomRdisplay chain
+    #     final = display_to_reference_ras @ centered_native_ijk_to_ras
+    #
+    # This mirrors what CaseLoaderService.load_case does on the Slicer
+    # side: load_volume -> center_volume -> apply_transform -> harden.
+    # Without the centering step, planned trajectories (which sit in
+    # the brain-centered frame ROSA stores) land hundreds of mm away
+    # from the imaged content (which sits in the image-corner-origin
+    # frame native to the Analyze header).
+    #
+    # Stamp logic is inlined (not importing
+    # ``rosa_detect.service.stamp_ijk_to_ras_on_sitk``) because
+    # rosa_core must not depend on rosa_detect — layer goes
+    # rosa_core <- rosa_detect, not the reverse.
+    import numpy as np
+    from shank_core.io import image_ijk_ras_matrices
+
+    ijk_to_ras_native, _ = image_ijk_ras_matrices(img)
+
+    # Center: shift origin so the image-center voxel lands at world (0, 0, 0).
+    size = img.GetSize()
+    center_ijk_h = np.array([
+        (size[0] - 1) * 0.5,
+        (size[1] - 1) * 0.5,
+        (size[2] - 1) * 0.5,
+        1.0,
+    ], dtype=float)
+    center_ras = ijk_to_ras_native @ center_ijk_h
+    centering = np.eye(4, dtype=float)
+    centering[:3, 3] = -center_ras[:3]
+    ijk_to_ras_centered = centering @ ijk_to_ras_native
+
+    # Compose with display->reference (identity for the reference vol;
+    # the chain matrix for everyone else).
+    m_xform = np.asarray(matrix_ras, dtype=float)
+    ijk_to_ras_final = m_xform @ ijk_to_ras_centered
+
+    spacing = np.array(img.GetSpacing(), dtype=float)
+    origin_ras = ijk_to_ras_final[:3, 3].copy()
+    dir_ras = np.zeros((3, 3), dtype=float)
+    for k in range(3):
+        dir_ras[:, k] = ijk_to_ras_final[:3, k] / max(1e-9, float(spacing[k]))
+    # SITK lives in LPS: flip X and Y of both origin and direction.
+    origin_lps = np.array(
+        [-origin_ras[0], -origin_ras[1], origin_ras[2]], dtype=float,
+    )
+    dir_lps = dir_ras.copy()
+    dir_lps[0, :] *= -1.0
+    dir_lps[1, :] *= -1.0
+    img.SetOrigin(tuple(float(v) for v in origin_lps.tolist()))
+    img.SetDirection(tuple(float(v) for v in dir_lps.flatten().tolist()))
 
     # Convert planned trajectories LPS -> RAS once so downstream callers
     # don't have to repeat the flip per use.

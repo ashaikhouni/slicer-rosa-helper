@@ -111,7 +111,13 @@ class LoadRosaVolumeAsSitkTests(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def test_loads_reference_volume_with_identity_geometry(self):
+    def test_loads_reference_volume_with_centered_geometry(self):
+        """Reference volume — no display transform, but the IJK->RAS
+        gets centered (image center voxel sits at world origin) to
+        match Slicer's CaseLoaderService behavior. ROSA-planned
+        trajectories live in this brain-centered frame, NOT the
+        on-disk image-corner-origin frame.
+        """
         import numpy as np
         from rosa_core import load_rosa_volume_as_sitk
         from shank_core.io import image_ijk_ras_matrices
@@ -123,16 +129,36 @@ class LoadRosaVolumeAsSitkTests(unittest.TestCase):
         self.assertEqual(meta["reference_volume"], "ref_vol")
         self.assertTrue(meta["is_reference"])
         self.assertEqual(meta["display_index"], 0)
-        # Reference volume — display_to_reference is identity in RAS.
         np.testing.assert_allclose(
             np.asarray(meta["display_to_reference_ras"]), np.eye(4),
         )
-        # IJK->RAS for the reference volume should equal whatever the
-        # on-disk header derives — the helper does NOT stamp anything.
+
+        # _write_synthetic_analyze uses size=(8, 9, 10) at unit spacing.
+        # Centered IJK->RAS: image-center IJK = ((size-1)/2). With
+        # SITK's LPS-flipped on-disk geometry the post-centering RAS
+        # origin lands at (-(size-1)/2 * spacing, ...). The image center
+        # sampled in the new frame must be exactly (0, 0, 0).
         ijk_to_ras, _ = image_ijk_ras_matrices(img)
-        self.assertEqual(ijk_to_ras.shape, (4, 4))
+        size = img.GetSize()
+        center_ijk_h = np.array([
+            (size[0] - 1) * 0.5,
+            (size[1] - 1) * 0.5,
+            (size[2] - 1) * 0.5,
+            1.0,
+        ])
+        center_ras = ijk_to_ras @ center_ijk_h
+        np.testing.assert_allclose(
+            center_ras[:3], [0.0, 0.0, 0.0], atol=1e-6,
+            err_msg=(
+                "Reference volume's image-center voxel should land at "
+                "world origin after centering; got {}".format(center_ras[:3])
+            ),
+        )
 
     def test_loads_native_volume_with_composed_transform(self):
+        """Native (non-reference) volume — centered first, then the
+        display->reference transform is composed on top.
+        """
         import numpy as np
         from rosa_core import load_rosa_volume_as_sitk
         from shank_core.io import image_ijk_ras_matrices
@@ -146,19 +172,33 @@ class LoadRosaVolumeAsSitkTests(unittest.TestCase):
 
         # The .ros file specified TRdicomRdisplay = translate +5 in
         # LPS-X for native_vol relative to ref_vol. In RAS that's a -5
-        # in R (LPS-L = +X = -RAS-X). The composed display->ref matrix
-        # in RAS form must reflect that flipped sign.
+        # in R (LPS-L = +X). The composed display->ref matrix in RAS
+        # form must reflect that flipped sign.
         m_ras = np.asarray(meta["display_to_reference_ras"])
         np.testing.assert_allclose(m_ras[:3, 3], [-5.0, 0.0, 0.0])
         np.testing.assert_allclose(m_ras[:3, :3], np.eye(3))
 
-        # The SITK image must have its origin/direction stamped so the
-        # derived IJK->RAS matrix equals the composed transform applied
-        # to the on-disk identity geometry. With identity-spacing and a
-        # zero on-disk origin, the resulting IJK->RAS should equal the
-        # composed transform.
+        # native_vol is the same size as ref_vol with unit spacing. After
+        # centering its image-center voxel sits at native-RAS (0, 0, 0).
+        # Then the display transform shifts that point by (-5, 0, 0).
+        # So in the post-stamp IJK->RAS the image-center voxel should
+        # land at world (-5, 0, 0).
         ijk_to_ras, _ = image_ijk_ras_matrices(img)
-        np.testing.assert_allclose(ijk_to_ras[:3, 3], [-5.0, 0.0, 0.0], atol=1e-6)
+        size = img.GetSize()
+        center_ijk_h = np.array([
+            (size[0] - 1) * 0.5,
+            (size[1] - 1) * 0.5,
+            (size[2] - 1) * 0.5,
+            1.0,
+        ])
+        center_ras = ijk_to_ras @ center_ijk_h
+        np.testing.assert_allclose(
+            center_ras[:3], [-5.0, 0.0, 0.0], atol=1e-6,
+            err_msg=(
+                "Native vol's center should land at the display->ref "
+                "translation in world frame; got {}".format(center_ras[:3])
+            ),
+        )
 
     def test_invert_flag_inverts_composed_transform(self):
         import numpy as np
@@ -194,6 +234,106 @@ class LoadRosaVolumeAsSitkTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             load_rosa_volume_as_sitk(str(self.case_dir), volume_name="not_a_volume")
         self.assertIn("not_a_volume", str(ctx.exception))
+
+    def test_non_unit_spacing_volume_stamps_correct_geometry(self):
+        """Pin the bug the s57 ROSA case caught: when a non-reference
+        display volume has non-unit spacing (e.g. 0.415mm CT), the
+        composed display->reference matrix must be applied to the
+        IJK->RAS matrix BEFORE stamping — not directly substituted as
+        the IJK->RAS matrix. The previous version conflated the two
+        and produced direction columns off by 1/spacing.
+        """
+        import numpy as np
+        import SimpleITK as sitk
+        import textwrap
+        from shank_core.io import image_ijk_ras_matrices
+        from rosa_core import load_rosa_volume_as_sitk
+
+        # Tiny separate case with a non-unit-spacing native volume.
+        analyze_root = self.case_dir / "DICOM" / "uid_b"
+        analyze_root.mkdir(parents=True, exist_ok=True)
+        # Reference vol: unit spacing (matches the existing setUp ref_vol
+        # path we already use for the simpler tests).
+        _write_synthetic_analyze(analyze_root / "ref_vol2", size=(8, 9, 10))
+        # Native vol: 0.5 mm spacing (so the spacing-divide bug would
+        # produce direction columns 2x what they should be).
+        _write_synthetic_analyze(analyze_root / "fine_vol", size=(8, 9, 10), spacing=(0.5, 0.5, 0.5))
+
+        ros_text = textwrap.dedent("""
+            [TRdicomRdisplay]
+            1 0 0 0
+            0 1 0 0
+            0 0 1 0
+            0 0 0 1
+            [VOLUME]
+            DICOM/uid_b/ref_vol2
+            [TRdicomRdisplay]
+            1 0 0 7
+            0 1 0 0
+            0 0 1 0
+            0 0 0 1
+            [VOLUME]
+            DICOM/uid_b/fine_vol
+            [IMAGERY_NAME]
+            ref_vol2
+            [IMAGERY_NAME]
+            fine_vol
+            [SERIE_UID]
+            uid_b
+            [SERIE_UID]
+            uid_b
+            [IMAGERY_3DREF]
+            0
+            [IMAGERY_3DREF]
+            0
+        """).strip()
+        (self.case_dir / "case.ros").write_text(ros_text)
+
+        img, meta = load_rosa_volume_as_sitk(
+            str(self.case_dir), volume_name="fine_vol",
+        )
+
+        # The post-stamp IJK->RAS for fine_vol applies BOTH centering
+        # (image-center voxel -> world origin) AND the display->ref
+        # translation (-7 in R axis). Verify two invariants:
+        #   1. Direction columns reflect spacing correctly (the
+        #      conflation bug would produce 2x magnitudes here).
+        #   2. The image-center voxel lands at the display->ref world
+        #      translation point (-7, 0, 0) — proves both centering AND
+        #      composition are wired correctly.
+        ijk_to_ras_after, _ = image_ijk_ras_matrices(img)
+
+        # Direction columns: SITK on-disk header is +x/+y/+z LPS at
+        # 0.5mm. After LPS->RAS flip, native IJK->RAS direction is
+        # diag(-0.5, -0.5, +0.5). The display->ref transform is pure
+        # translation, so direction is unchanged.
+        expected_dir = np.diag([-0.5, -0.5, 0.5])
+        np.testing.assert_allclose(
+            ijk_to_ras_after[:3, :3], expected_dir, atol=1e-6,
+            err_msg=(
+                "Stamped IJK->RAS direction drifted. Old buggy code "
+                "produced columns 2x the correct magnitude (1/spacing "
+                "scaling error)."
+            ),
+        )
+
+        # Image-center voxel location in world after the full
+        # centering + display->ref composition.
+        size = img.GetSize()
+        center_ijk_h = np.array([
+            (size[0] - 1) * 0.5,
+            (size[1] - 1) * 0.5,
+            (size[2] - 1) * 0.5,
+            1.0,
+        ])
+        center_ras = ijk_to_ras_after @ center_ijk_h
+        np.testing.assert_allclose(
+            center_ras[:3], [-7.0, 0.0, 0.0], atol=1e-6,
+            err_msg=(
+                "Image-center voxel should land at display->ref world "
+                "translation; got {}".format(center_ras[:3])
+            ),
+        )
 
 
 if __name__ == "__main__":

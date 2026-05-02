@@ -190,15 +190,8 @@ class PipelineRosaFolderTests(unittest.TestCase):
         from rosa_agent.commands.pipeline import _resolve_pipeline_frame
         from rosa_core import load_rosa_volume_as_sitk
 
-        # Load the synthetic ROSA reference volume to use as the
-        # 'moving' image. Construct an external CT by translating the
-        # ROSA volume +5 mm in LPS-X (i.e. -5 mm in RAS-X) so a ROSA
-        # feature at RAS X=q lives in CT at RAS X=q-5.
-        ref_img, ref_meta = load_rosa_volume_as_sitk(str(self.case_dir))
-        # Build a CT image with enough structure for MI to converge.
-        # The ref_vol from setUp is mostly empty; replace with the
-        # same 3-cube phantom test_registration uses, which we know
-        # converges to sub-mm under the default registration params.
+        # Replace the synthetic Analyze ref_vol from setUp with a 3-cube
+        # phantom that has enough structure for Mattes MI to converge.
         size = 80
         arr = np.zeros((size, size, size), dtype=np.float32)
         arr[16:28, 16:28, 16:28] = 1000.0
@@ -206,14 +199,28 @@ class PipelineRosaFolderTests(unittest.TestCase):
         arr[40:52, 56:72, 12:24] = 800.0
         ref_phantom = sitk.GetImageFromArray(arr)
         ref_phantom.SetSpacing((1.0, 1.0, 1.0))
-        # Overwrite the synthetic ROSA Analyze with the phantom.
         analyze_img = self.case_dir / "DICOM" / "uid_a" / "ref_vol.img"
         sitk.WriteImage(ref_phantom, str(analyze_img))
 
-        tx = sitk.TranslationTransform(3, [5.0, 0.0, 0.0])
-        ct_img = sitk.Resample(ref_phantom, ref_phantom, tx.GetInverse(), sitk.sitkLinear)
+        # Load the ROSA-centered reference image so we know its frame.
+        # The external CT we synthesize must live in the SAME centered
+        # frame (so registration recovers JUST the known +5 LPS shift,
+        # not the centering offset). Take the centered ref image, apply
+        # an additional +5 LPS-X translation to the SITK image's origin
+        # (no resample — pure affine relabel), and that's the external CT.
+        ref_img, _ref_meta = load_rosa_volume_as_sitk(
+            str(self.case_dir), volume_name="ref_vol",
+        )
+        ext_origin_lps = list(ref_img.GetOrigin())
+        ext_origin_lps[0] += 5.0   # shift in LPS-X
+        external_ct = sitk.GetImageFromArray(
+            sitk.GetArrayFromImage(ref_img)
+        )
+        external_ct.SetSpacing(ref_img.GetSpacing())
+        external_ct.SetDirection(ref_img.GetDirection())
+        external_ct.SetOrigin(tuple(float(v) for v in ext_origin_lps))
         external_ct_path = self.tmp / "external_ct.nii.gz"
-        sitk.WriteImage(ct_img, str(external_ct_path))
+        sitk.WriteImage(external_ct, str(external_ct_path))
 
         out = self.tmp / "ext_reg_out"
         out.mkdir()
