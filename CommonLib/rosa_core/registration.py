@@ -39,18 +39,26 @@ import numpy as np
 class RegistrationResult:
     """Output of ``register_rigid_mi``.
 
-    Carries both the SITK transform object (for direct reuse with
-    ``sitk.Resample``) and a 4×4 RAS-frame numpy matrix (for the rest of
-    the codebase, which works in RAS).
+    Direction is the only thing about this dataclass that ever bites
+    callers — SITK and "intuitive" usually point the opposite way. The
+    fields below are NAMED by direction so the call site can't be wrong:
 
     Attributes:
-        transform: ``sitk.Transform`` (Versor3D rigid) mapping fixed
-            physical-space points to moving physical-space points
-            in SITK's LPS convention. Pass to ``sitk.Resample`` directly.
-        matrix_ras_4x4: 4×4 RAS-frame numpy matrix mapping a *moving*
-            RAS point to its *fixed* RAS counterpart. Use this to push
-            seeds / contacts between the two RAS frames the rest of the
-            codebase speaks.
+        transform: ``sitk.Transform`` (Versor3D rigid) in SITK
+            convention — maps **fixed** physical-space points to
+            **moving** physical-space points (LPS internally). Pass to
+            ``sitk.Resample(moving, reference=fixed, transform=...)``
+            directly — that's the direction Resample expects.
+        fixed_to_moving_ras_4x4: 4×4 RAS-frame numpy matrix that maps a
+            *fixed-frame RAS* point to its *moving-frame RAS* point.
+            Numerically equivalent to ``transform`` (just basis-converted
+            and exposed as a numpy 4×4). Useful when you want to ask
+            "where in moving does this fixed-frame point live?".
+        moving_to_fixed_ras_4x4: numpy inverse of the above. Use this
+            when you want to push points / seeds from the moving frame
+            into the fixed frame (the typical "pipeline" direction —
+            we register a CT against a reference and want to push
+            reference-frame seeds into CT frame).
         final_metric: optimizer's final mutual-information value.
             More negative is a better fit.
         n_iterations: optimizer iterations actually consumed.
@@ -58,7 +66,8 @@ class RegistrationResult:
     """
 
     transform: Any  # sitk.Transform — kept loose so this module stays import-free for the docstring
-    matrix_ras_4x4: np.ndarray
+    fixed_to_moving_ras_4x4: np.ndarray
+    moving_to_fixed_ras_4x4: np.ndarray
     final_metric: float
     n_iterations: int
     converged_reason: str
@@ -95,16 +104,16 @@ def _itk_versor_to_4x4_lps(transform):
 def transform_to_4x4_ras(transform) -> np.ndarray:
     """Convert a SITK rigid transform into a 4×4 RAS-frame matrix.
 
-    The returned matrix maps a *moving-frame RAS point* to its *fixed-frame
-    RAS point*. (SITK's transform direction is "fixed → moving in physical
-    space"; combined with the LPS↔RAS flip and the registration's
-    moving→fixed alignment intent, the RAS-frame result moves points the
-    direction callers expect: from the moving volume's RAS frame into the
-    fixed volume's RAS frame.)
+    Returns the **fixed → moving** RAS matrix — same direction SITK's
+    transform points (basis conjugation preserves direction; only the
+    coordinate system changes).
+
+    To get the inverse direction (moving → fixed in RAS), call
+    ``numpy.linalg.inv`` on the result, or use
+    ``RegistrationResult.moving_to_fixed_ras_4x4`` which already does it.
     """
     lps = _itk_versor_to_4x4_lps(transform)
-    # RAS = flip @ LPS @ flip  (involution; conjugating the LPS transform
-    # back into RAS frame).
+    # RAS = flip @ LPS @ flip  (basis conjugation; direction unchanged).
     return _LPS_TO_RAS @ lps @ _RAS_TO_LPS
 
 
@@ -259,10 +268,12 @@ def register_rigid_mi(
         reg.AddCommand(sitk.sitkIterationEvent, _log_event)
 
     final_tx = reg.Execute(fixed_f, moving_f)
-    matrix_ras = transform_to_4x4_ras(final_tx)
+    fixed_to_moving = transform_to_4x4_ras(final_tx)
+    moving_to_fixed = np.linalg.inv(fixed_to_moving)
     return RegistrationResult(
         transform=final_tx,
-        matrix_ras_4x4=matrix_ras,
+        fixed_to_moving_ras_4x4=fixed_to_moving,
+        moving_to_fixed_ras_4x4=moving_to_fixed,
         final_metric=float(reg.GetMetricValue()),
         n_iterations=int(reg.GetOptimizerIteration()),
         converged_reason=str(reg.GetOptimizerStopConditionDescription()),

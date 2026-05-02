@@ -245,9 +245,12 @@ def _resolve_pipeline_frame(
             f"[pipeline] registering external CT to ROSA reference "
             f"{rosa_ref_name!r} (rigid + Mattes MI)…"
         )
-        # fixed = external CT, moving = ROSA reference. The result's
-        # matrix_ras_4x4 maps moving (ROSA) RAS -> fixed (external CT)
-        # RAS, which is exactly what we need to push seeds.
+        # fixed = external CT, moving = ROSA reference.
+        # We want to push ROSA-frame seeds INTO the CT frame: that's
+        # the moving -> fixed direction. moving_to_fixed_ras_4x4 is
+        # the SITK transform's *inverse*, which is exactly what we
+        # want here (SITK's transform itself maps fixed -> moving for
+        # use with sitk.Resample).
         reg_result = register_rigid_mi(
             fixed=ct_img, moving=ref_img,
             logger=_stderr,
@@ -256,7 +259,7 @@ def _resolve_pipeline_frame(
             f"[pipeline] registration done: metric={reg_result.final_metric:+.5f} "
             f"iters={reg_result.n_iterations} ({reg_result.converged_reason})"
         )
-        rosa_to_working = reg_result.matrix_ras_4x4
+        rosa_to_working = reg_result.moving_to_fixed_ras_4x4
 
     seeds_in_ct = _apply_4x4_to_seeds(rosa_seeds, rosa_to_working)
     return _PipelineFrame(

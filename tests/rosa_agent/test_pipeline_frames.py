@@ -175,6 +175,93 @@ class PipelineRosaFolderTests(unittest.TestCase):
         self.assertEqual(frame.seeds[0]["name"], "T1")
         np.testing.assert_allclose(frame.seeds[0]["start_ras"], [1.0, 2.0, 3.0])
 
+    def test_rosa_folder_with_registered_external_ct_pushes_seeds_correctly(self):
+        """Mode C with REAL registration: pin that ROSA-frame seeds end
+        up close to where they belong in the CT frame after registration.
+
+        Catches the direction error the user flagged: when the pipeline
+        mistakenly used ``fixed_to_moving_ras_4x4`` to push ROSA seeds
+        into the CT frame, seeds landed off by ~2× the true translation.
+        With the corrected ``moving_to_fixed_ras_4x4`` they land within
+        sub-voxel.
+        """
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.pipeline import _resolve_pipeline_frame
+        from rosa_core import load_rosa_volume_as_sitk
+
+        # Load the synthetic ROSA reference volume to use as the
+        # 'moving' image. Construct an external CT by translating the
+        # ROSA volume +5 mm in LPS-X (i.e. -5 mm in RAS-X) so a ROSA
+        # feature at RAS X=q lives in CT at RAS X=q-5.
+        ref_img, ref_meta = load_rosa_volume_as_sitk(str(self.case_dir))
+        # Build a CT image with enough structure for MI to converge.
+        # The ref_vol from setUp is mostly empty; replace with the
+        # same 3-cube phantom test_registration uses, which we know
+        # converges to sub-mm under the default registration params.
+        size = 80
+        arr = np.zeros((size, size, size), dtype=np.float32)
+        arr[16:28, 16:28, 16:28] = 1000.0
+        arr[48:64, 24:36, 44:56] = 1500.0
+        arr[40:52, 56:72, 12:24] = 800.0
+        ref_phantom = sitk.GetImageFromArray(arr)
+        ref_phantom.SetSpacing((1.0, 1.0, 1.0))
+        # Overwrite the synthetic ROSA Analyze with the phantom.
+        analyze_img = self.case_dir / "DICOM" / "uid_a" / "ref_vol.img"
+        sitk.WriteImage(ref_phantom, str(analyze_img))
+
+        tx = sitk.TranslationTransform(3, [5.0, 0.0, 0.0])
+        ct_img = sitk.Resample(ref_phantom, ref_phantom, tx.GetInverse(), sitk.sitkLinear)
+        external_ct_path = self.tmp / "external_ct.nii.gz"
+        sitk.WriteImage(ct_img, str(external_ct_path))
+
+        out = self.tmp / "ext_reg_out"
+        out.mkdir()
+
+        frame = _resolve_pipeline_frame(
+            str(self.case_dir),
+            out_dir=out,
+            ct_override=str(external_ct_path),
+            ref_volume="ref_vol",
+            skip_registration=False,   # the actual registration path
+        )
+
+        # The .ros TRAJECTORY had start LPS=(-1, -2, 3) -> RAS=(1, 2, 3),
+        # end LPS=(0, -10, -20) -> RAS=(0, 10, -20). Wait — re-checking
+        # _build_synthetic_rosa_case: start_lps=(-1,-2,3), end_lps
+        # depends on the numbers. Recompute from the ros file:
+        # T1 1 0 0 -1.0 -2.0 3.0 0 -10.0 -20.0 30.0
+        # fields[4..6] = start = (-1, -2, 3) LPS -> RAS (1, 2, 3)
+        # fields[8..10] = end = (-10, -20, 30) LPS -> RAS (10, 20, 30)
+        rosa_start_ras = np.array([1.0, 2.0, 3.0])
+        rosa_end_ras = np.array([10.0, 20.0, 30.0])
+
+        # Translation +5 LPS-X = -5 RAS-X. ROSA-RAS X=1 → CT-RAS X=1-5=-4.
+        expected_ct_start = rosa_start_ras + np.array([-5.0, 0.0, 0.0])
+        expected_ct_end = rosa_end_ras + np.array([-5.0, 0.0, 0.0])
+
+        self.assertEqual(len(frame.seeds), 1)
+        seed = frame.seeds[0]
+        got_start = np.asarray(seed["start_ras"], dtype=float)
+        got_end = np.asarray(seed["end_ras"], dtype=float)
+        # Sub-voxel recovery on a clean synthetic phantom. If this fails
+        # > 1 mm, the registration direction is reversed (the pre-fix
+        # bug pushed seeds in the wrong direction by ~2× the offset,
+        # which would land ~10 mm away on this test).
+        self.assertLess(
+            float(np.linalg.norm(got_start - expected_ct_start)),
+            1.5,
+            f"ROSA seed start pushed to wrong CT-frame location: "
+            f"got {got_start}, expected {expected_ct_start} "
+            f"(if off by ~10 mm, the registration direction is reversed)",
+        )
+        self.assertLess(
+            float(np.linalg.norm(got_end - expected_ct_end)),
+            1.5,
+            f"ROSA seed end pushed to wrong CT-frame location: "
+            f"got {got_end}, expected {expected_ct_end}",
+        )
+
     def test_dataset_mode_does_not_copy_ct(self):
         """Dataset-id mode: CT is already a NIfTI on disk; no copy."""
         import os

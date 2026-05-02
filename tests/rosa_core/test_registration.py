@@ -172,6 +172,107 @@ class RegisterRigidMITests(unittest.TestCase):
     DEPS_AVAILABLE,
     "numpy/SimpleITK/rosa_core not importable in this environment.",
 )
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/SimpleITK/rosa_core not importable in this environment.",
+)
+class RegistrationDirectionTests(unittest.TestCase):
+    """Pin the direction of fixed_to_moving / moving_to_fixed.
+
+    SITK's transform maps fixed → moving in physical space. Callers
+    (notably the CLI pipeline pushing ROSA-frame seeds into CT frame)
+    very often want the OPPOSITE direction. The registration result
+    exposes both — these tests pin which is which on a phantom with a
+    known offset, so a future "let me just refactor this" can't silently
+    swap them.
+    """
+
+    def _make_phantom(self):
+        # 3 non-axis-symmetric cubes — same shape RegisterRigidMITests
+        # uses, which we already know converges to sub-mm. Adding a
+        # fourth cube at certain positions creates a local-minimum trap
+        # that hurts translation recovery (verified empirically — the
+        # optimizer hits "step too small" after 32 iters with ~5°
+        # rotation drift).
+        import numpy as np
+        import SimpleITK as sitk
+
+        size = 80
+        arr = np.zeros((size, size, size), dtype=np.float32)
+        arr[16:28, 16:28, 16:28] = 1000.0
+        arr[48:64, 24:36, 44:56] = 1500.0
+        arr[40:52, 56:72, 12:24] = 800.0
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        return img
+
+    def test_directions_are_inverses(self):
+        """fixed_to_moving and moving_to_fixed must round-trip to identity."""
+        import numpy as np
+        from rosa_core.registration import register_rigid_mi
+        import SimpleITK as sitk
+
+        ref = self._make_phantom()
+        ct = sitk.Resample(
+            ref, ref, sitk.TranslationTransform(3, [-5.0, 0.0, 0.0]),
+            sitk.sitkLinear,
+        )
+        r = register_rigid_mi(fixed=ct, moving=ref)
+        np.testing.assert_allclose(
+            r.fixed_to_moving_ras_4x4 @ r.moving_to_fixed_ras_4x4,
+            np.eye(4), atol=1e-9,
+            err_msg="fixed_to_moving and moving_to_fixed are not inverses",
+        )
+
+    def test_moving_to_fixed_pushes_known_point_correctly(self):
+        """Pin the failure mode the user caught: when the pipeline used
+        the SITK-direction matrix to push ROSA-frame points into CT
+        frame, points landed off by ~2× the true translation. With
+        moving_to_fixed_ras_4x4, the same point lands within sub-voxel
+        of the true CT-frame location.
+        """
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_core.registration import register_rigid_mi
+
+        ref = self._make_phantom()
+        # Build a 'moved' image: feature at ref-LPS (q,0,0) ends up at
+        # ct-LPS (q+5, 0, 0). (Resample uses the inverse of tx, so passing
+        # tx.GetInverse() with tx-translation +5 shifts content by +5.)
+        tx = sitk.TranslationTransform(3, [5.0, 0.0, 0.0])
+        ct = sitk.Resample(ref, ref, tx.GetInverse(), sitk.sitkLinear)
+
+        result = register_rigid_mi(fixed=ct, moving=ref)
+
+        # A reference-frame cube center at ref-LPS (22, 22, 22) ↔
+        # ref-RAS (-22, -22, 22). Same physical content sits at
+        # ct-LPS (27, 22, 22) ↔ ct-RAS (-27, -22, 22).
+        ref_point_ras = np.array([-22.0, -22.0, 22.0])
+        expected_ct_ras = np.array([-27.0, -22.0, 22.0])
+
+        h = np.array([ref_point_ras[0], ref_point_ras[1], ref_point_ras[2], 1.0])
+        pushed_via_correct = (result.moving_to_fixed_ras_4x4 @ h)[:3]
+        pushed_via_wrong = (result.fixed_to_moving_ras_4x4 @ h)[:3]
+
+        # Correct direction — sub-voxel.
+        self.assertLess(
+            float(np.linalg.norm(pushed_via_correct - expected_ct_ras)),
+            1.0,
+            f"moving_to_fixed_ras_4x4 should land within 1 mm of expected CT frame; "
+            f"got {pushed_via_correct} vs expected {expected_ct_ras}",
+        )
+        # Wrong direction — should be off by roughly 2× the translation.
+        # Pin a lower bound (>5 mm) so the test would fail if someone
+        # ever swaps the two matrices.
+        self.assertGreater(
+            float(np.linalg.norm(pushed_via_wrong - expected_ct_ras)),
+            5.0,
+            f"fixed_to_moving_ras_4x4 used in moving_to_fixed direction should "
+            f"land far from expected; if this passes the two matrices have been "
+            f"swapped or made identical",
+        )
+
+
 class TransformPointsTests(unittest.TestCase):
     """Pin the LPS<->RAS bridge in ``transform_to_4x4_ras``."""
 
