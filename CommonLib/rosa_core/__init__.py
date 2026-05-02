@@ -2,6 +2,7 @@ from .case_loader import (
     build_effective_matrices,
     choose_reference_volume,
     find_ros_file,
+    load_rosa_volume_as_sitk,
     resolve_analyze_volume,
     resolve_reference_index,
 )
@@ -91,6 +92,7 @@ __all__ = [
     "lps_to_ras_point",
     "load_assignments",
     "load_electrode_library",
+    "load_rosa_volume_as_sitk",
     "model_map",
     "parse_ros_file",
     "resolve_analyze_volume",

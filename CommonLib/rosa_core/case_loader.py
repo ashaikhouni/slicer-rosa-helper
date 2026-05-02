@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import glob
 import os
+from typing import Any
 
 from .types import DisplayRecord, Matrix4x4
-from .transforms import identity_4x4, matmul_4x4
+from .transforms import identity_4x4, lps_to_ras_matrix, matmul_4x4
 
 
 def find_ros_file(case_dir: str) -> str:
@@ -126,3 +127,166 @@ def build_effective_matrices(displays: list[DisplayRecord], root_index: int = 0)
         to_root(i)
 
     return cache
+
+
+# ---------------------------------------------------------------------
+# ROSA volume loading (Analyze .img/.hdr -> in-memory SITK image)
+# ---------------------------------------------------------------------
+#
+# The Slicer-side ``CaseLoaderService.load_case`` (rosa_scene) loads
+# every Analyze volume in the .ros file and applies the composed
+# ``display_i -> reference_display`` 4×4 to the volume node as a
+# hardened linear transform. The CLI agent doesn't have a Slicer scene
+# but needs the same effect: read the chosen Analyze volume, return an
+# in-memory SITK image whose physical-space metadata reflects the
+# composed-display matrix so detection / sampling land in the ROSA
+# reference-display frame.
+#
+# This is purely an affine relabel (origin + direction stamped on the
+# SITK image). No voxel resampling — the on-disk pixel grid is
+# preserved.
+
+
+def load_rosa_volume_as_sitk(
+    case_dir: str,
+    *,
+    volume_name: str | None = None,
+    invert: bool = False,
+) -> tuple[Any, dict[str, Any]]:
+    """Load one ROSA-folder volume into an in-memory SITK image stamped
+    with the composed display->reference 4×4 matrix.
+
+    Args:
+        case_dir: ROSA case folder (the one containing the .ros file
+            and a DICOM/ Analyze tree).
+        volume_name: name of the display volume to load (e.g.
+            ``"postopCT"``). Defaults to the first display in the .ros
+            file (the same default ``CaseLoaderService`` uses).
+        invert: invert the composed matrix before stamping. Mirrors
+            RosaHelper's "Invert TRdicomRdisplay" UI checkbox; useful
+            if the .ros file's transform direction is opposite to what
+            the consumer expects.
+
+    Returns:
+        ``(sitk_image, metadata)`` where:
+          * ``sitk_image`` is a SITK image with origin/direction set so
+            its IJK->RAS matrix equals the composed display->reference
+            transform (LPS-stamped internally; sample with
+            ``shank_core.io.image_ijk_ras_matrices`` to get the RAS
+            matrix back).
+          * ``metadata`` carries useful provenance for callers:
+              - ``"ros_path"`` (str)
+              - ``"reference_volume"`` (str — chosen root display name)
+              - ``"loaded_volume"`` (str — name of the volume returned)
+              - ``"display_index"`` (int — the loaded volume's display index)
+              - ``"is_reference"`` (bool — True when loaded == reference)
+              - ``"display_to_reference_ras"`` (4×4 nested list)
+              - ``"trajectories"`` (list of {name, start_lps, end_lps,
+                start_ras, end_ras} — the planned trajectories from the
+                .ros file, RAS-converted for downstream guided-fit use)
+    """
+    import SimpleITK as sitk
+
+    # Local imports keep the heavy pipeline (parser + transforms) lazy.
+    from .ros_parser import parse_ros_file
+    from .transforms import lps_to_ras_point
+
+    case_dir = os.path.abspath(case_dir)
+    ros_path = find_ros_file(case_dir)
+    parsed = parse_ros_file(ros_path)
+    displays = parsed.get("displays") or []
+    if not displays:
+        raise ValueError(f"No TRdicomRdisplay/VOLUME entries in {ros_path}")
+
+    analyze_root = os.path.join(case_dir, "DICOM")
+    if not os.path.isdir(analyze_root):
+        raise ValueError(f"Analyze root not found under case dir: {analyze_root}")
+
+    # Resolve which display the caller wants.
+    if volume_name is None:
+        loaded = displays[0]
+    else:
+        target = str(volume_name).lower()
+        match = [d for d in displays if d["volume"].lower() == target]
+        if not match:
+            available = ", ".join(d["volume"] for d in displays)
+            raise ValueError(
+                f"Display volume {volume_name!r} not found in {ros_path}. "
+                f"Available: {available}"
+            )
+        loaded = match[0]
+    loaded_index = int(loaded.get("index", displays.index(loaded)))
+
+    # Compose display->reference matrices using the first display as the
+    # reference (matches CaseLoaderService default; can be overridden by
+    # passing the desired reference_volume to ``choose_reference_volume``
+    # at a higher level later if needed).
+    reference_volume = displays[0]["volume"]
+    root_index = 0
+    effective_lps = build_effective_matrices(displays, root_index=root_index)
+    matrix_lps = effective_lps[loaded_index]
+    if invert:
+        from .transforms import invert_4x4
+        matrix_lps = invert_4x4(matrix_lps)
+    matrix_ras = lps_to_ras_matrix(matrix_lps)
+
+    # Load the on-disk Analyze volume (.img/.hdr).
+    img_path = resolve_analyze_volume(analyze_root, loaded)
+    if not img_path:
+        raise ValueError(
+            f"Analyze .img file for display {loaded['volume']!r} not "
+            f"found under {analyze_root}"
+        )
+    img = sitk.ReadImage(str(img_path))
+
+    # Stamp the composed display->reference matrix into the SITK image's
+    # origin/direction. Same algorithm as
+    # rosa_detect.service.apply_slicer_geometry_to_sitk; we keep this
+    # local rather than import because rosa_core shouldn't depend on
+    # rosa_detect (layer ordering).
+    if loaded_index != root_index:
+        import numpy as np
+        spacing = np.array(img.GetSpacing(), dtype=float)
+        m_ras = np.asarray(matrix_ras, dtype=float)
+        origin_ras = m_ras[:3, 3].copy()
+        dir_ras = np.zeros((3, 3), dtype=float)
+        for k in range(3):
+            dir_ras[:, k] = m_ras[:3, k] / max(1e-9, float(spacing[k]))
+        # SITK lives in LPS: flip X and Y of both origin and direction.
+        origin_lps = np.array(
+            [-origin_ras[0], -origin_ras[1], origin_ras[2]],
+            dtype=float,
+        )
+        dir_lps = dir_ras.copy()
+        dir_lps[0, :] *= -1.0
+        dir_lps[1, :] *= -1.0
+        img.SetOrigin(tuple(float(v) for v in origin_lps.tolist()))
+        img.SetDirection(tuple(float(v) for v in dir_lps.flatten().tolist()))
+
+    # Convert planned trajectories LPS -> RAS once so downstream callers
+    # don't have to repeat the flip per use.
+    trajectories = []
+    for traj in parsed.get("trajectories", []):
+        start_lps = list(traj["start"])
+        end_lps = list(traj["end"])
+        trajectories.append({
+            "name": traj["name"],
+            "start_lps": [float(v) for v in start_lps],
+            "end_lps": [float(v) for v in end_lps],
+            "start_ras": [float(v) for v in lps_to_ras_point(start_lps)],
+            "end_ras": [float(v) for v in lps_to_ras_point(end_lps)],
+        })
+
+    metadata = {
+        "ros_path": ros_path,
+        "reference_volume": reference_volume,
+        "loaded_volume": loaded["volume"],
+        "loaded_volume_path": img_path,
+        "display_index": loaded_index,
+        "is_reference": loaded_index == root_index,
+        "display_to_reference_ras": [
+            [float(matrix_ras[r][c]) for c in range(4)] for r in range(4)
+        ],
+        "trajectories": trajectories,
+    }
+    return img, metadata
