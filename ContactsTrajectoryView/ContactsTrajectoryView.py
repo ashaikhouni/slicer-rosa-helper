@@ -1158,7 +1158,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _ras_to_ijk_matrix_np(self, volume_node):
         """Return the 4x4 RAS→IJK matrix of a scalar volume as numpy."""
-        from rosa_detect.service import volume_node_geometry
+        from rosa_scene.sitk_volume_adapter import volume_node_geometry
 
         return volume_node_geometry(volume_node)[1]
 

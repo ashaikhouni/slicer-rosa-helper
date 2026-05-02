@@ -588,11 +588,11 @@ class GuidedFitWidgetMixin:
     # ---- Fitting ------------------------------------------------------
 
     def _guided_fit_volume_matrices(self, volume_node):
-        # Single source of truth for the LPS-flip + matrix bundling.
-        # The previous inline copy was the third duplicate of this
-        # logic and a known parity-bug surface — see
-        # feedback_cli_slicer_parity.md.
-        from rosa_detect.service import image_from_volume_node
+        # Single source of truth for the LPS-flip + matrix bundling
+        # lives in the Slicer-side adapter (rosa_scene). The detection
+        # algorithm package (rosa_detect) is boundary-clean of vtk /
+        # slicer; it consumes plain (img, i2r, r2i) tuples.
+        from rosa_scene.sitk_volume_adapter import image_from_volume_node
 
         return image_from_volume_node(volume_node)
 

@@ -81,18 +81,38 @@ class DetectionResult(TypedDict, total=False):
 class DetectionContext(TypedDict, total=False):
     """Input shape for the detection service.
 
-    Two ways to provide pixel data: ``ct.path`` (preferred, loaded via
-    SimpleITK) or ``arr_kji + spacing_xyz`` (in-memory fallback for tests
-    and Slicer's pre-loaded volume node).
+    Three accepted ways to provide voxel data + matrices, in priority
+    order:
 
-    ``extras['volume_node']`` (Slicer) is honoured for IJK→RAS matrix
-    extraction. ``logger`` (callable) receives stage progress strings.
+    1. **Pre-built (Slicer adapter path)**: caller supplies ``img``
+       (SimpleITK image, already LPS-flipped if it came from a Slicer
+       volume node), ``ijk_to_ras_4x4`` (numpy 4×4), and optionally
+       ``ras_to_ijk_4x4``. The Slicer-side adapter
+       ``rosa_scene.sitk_volume_adapter.prepare_detection_context``
+       builds this form from a volume node. The algorithm package
+       never sees a vtkMRMLScalarVolumeNode this way.
+
+    2. **Path-based**: ``ct.path`` (preferred for CLI / regression).
+       SimpleITK reads from disk; matrices derive from the NIfTI
+       header.
+
+    3. **In-memory array**: ``arr_kji`` + ``spacing_xyz`` (for tests
+       and any caller that already has the data).
+
+    ``logger`` (callable) receives stage progress strings.
     """
 
     run_id: str
+    # Form 1 — pre-built.
+    img: Any  # SimpleITK image
+    ijk_to_ras_4x4: Any  # numpy 4×4
+    ras_to_ijk_4x4: Any  # numpy 4×4 (optional; computed by inverse if absent)
+    # Form 2 — path.
     ct: VolumeRef
+    # Form 3 — in-memory array.
     arr_kji: Any
     spacing_xyz: tuple[float, float, float]
+    # Common.
     config: dict[str, Any]
     params: dict[str, Any]
     extras: dict[str, Any]

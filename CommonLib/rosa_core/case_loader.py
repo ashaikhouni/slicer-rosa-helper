@@ -241,7 +241,7 @@ def load_rosa_volume_as_sitk(
 
     # Stamp the composed display->reference matrix into the SITK image's
     # origin/direction. Same algorithm as
-    # rosa_detect.service.apply_slicer_geometry_to_sitk; we keep this
+    # rosa_detect.service.stamp_ijk_to_ras_on_sitk; we keep this
     # local rather than import because rosa_core shouldn't depend on
     # rosa_detect (layer ordering).
     if loaded_index != root_index:

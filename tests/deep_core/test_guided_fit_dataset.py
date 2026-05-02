@@ -4,7 +4,7 @@ The guided-fit code path (``rosa_detect.guided_fit_engine``) is what
 PostopCT's "Guided Fit" button + the ROSA-folder mode of the CLI agent
 both call. It shares ``compute_features`` and the SITK-from-volume
 geometry helpers with Auto Fit, so any silent drift in the LPS-flip
-machinery (``rosa_detect.service._apply_slicer_geometry_to_sitk`` /
+machinery (``rosa_detect.service.stamp_ijk_to_ras_on_sitk`` /
 ``_load_image_and_matrices``) would mis-localize every guided fit even
 when Auto Fit still passes.
 
@@ -197,7 +197,7 @@ class GuidedFitDatasetRegressionTests(unittest.TestCase):
 class SitkGeometryParityTests(unittest.TestCase):
     """Pin the LPS-flip helper that bridges Slicer node matrices and SITK.
 
-    ``_apply_slicer_geometry_to_sitk`` rewrites the SITK origin/direction
+    ``stamp_ijk_to_ras_on_sitk`` rewrites the SITK origin/direction
     so an image read from disk inherits a Slicer volume node's IJK->RAS
     matrix instead of the on-disk header's. Three callers depend on this
     being correct:
@@ -218,7 +218,7 @@ class SitkGeometryParityTests(unittest.TestCase):
             import numpy as np
             import SimpleITK as sitk
             from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.service import _apply_slicer_geometry_to_sitk
+            from rosa_detect.service import stamp_ijk_to_ras_on_sitk
         except ImportError:
             self.skipTest("numpy/SimpleITK/rosa_detect not importable")
 
@@ -234,13 +234,13 @@ class SitkGeometryParityTests(unittest.TestCase):
         ijk_to_ras_before, _ = image_ijk_ras_matrices(img)
 
         # Apply the helper using the matrix the header already implies.
-        _apply_slicer_geometry_to_sitk(img, ijk_to_ras_before)
+        stamp_ijk_to_ras_on_sitk(img, ijk_to_ras_before)
 
         ijk_to_ras_after, _ = image_ijk_ras_matrices(img)
         np.testing.assert_allclose(
             ijk_to_ras_before, ijk_to_ras_after, atol=1e-6,
             err_msg=(
-                "apply_slicer_geometry_to_sitk(self_matrix) must round-trip "
+                "stamp_ijk_to_ras_on_sitk(self_matrix) must round-trip "
                 "to the same IJK->RAS — found drift."
             ),
         )
@@ -251,7 +251,7 @@ class SitkGeometryParityTests(unittest.TestCase):
             import numpy as np
             import SimpleITK as sitk
             from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.service import _apply_slicer_geometry_to_sitk
+            from rosa_detect.service import stamp_ijk_to_ras_on_sitk
         except ImportError:
             self.skipTest("numpy/SimpleITK/rosa_detect not importable")
 
@@ -266,13 +266,13 @@ class SitkGeometryParityTests(unittest.TestCase):
             [0.0, 0.0, 0.0, 1.0],
         ], dtype=float)
 
-        _apply_slicer_geometry_to_sitk(img, custom)
+        stamp_ijk_to_ras_on_sitk(img, custom)
 
         derived, _ = image_ijk_ras_matrices(img)
         np.testing.assert_allclose(
             derived, custom, atol=1e-6,
             err_msg=(
-                "After _apply_slicer_geometry_to_sitk(custom), the SITK "
+                "After stamp_ijk_to_ras_on_sitk(custom), the SITK "
                 "image's derived IJK->RAS must equal the custom matrix."
             ),
         )

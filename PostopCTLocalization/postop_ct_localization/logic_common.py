@@ -48,46 +48,23 @@ class PostopCTLocalizationLogicBaseMixin:
             layout_service=self.layout_service,
         )
     def build_detection_context(self, volume_node):
-        """Build a minimal ``DetectionContext`` dict for ``contact_pitch_v1``.
+        """Build a ``DetectionContext`` for ``contact_pitch_v1`` from a
+        Slicer volume node.
 
-        When the volume has a storage node pointing at a readable NIfTI,
-        populate ``ctx['ct']`` with the file path so the pipeline reads
-        via ``sitk.ReadImage`` — the identical path the CLI regression
-        uses. This sidesteps two sources of drift between Slicer and
-        CLI runs on the same file:
-
-          * ``slicer.util.arrayFromVolume`` returning a re-scaled /
-            re-oriented copy of the NIfTI voxel data (scl_slope/scl_inter
-            handling, axis reorientation).
-          * ``volume_node.GetIJKToRASMatrix`` returning a matrix that
-            Slicer may have flipped to a canonical RAS diagonal on load.
-
-        ``arr_kji`` / ``spacing_xyz`` stay on the context as a fallback
-        for any consumer that expects them (and for volumes that don't
-        have an on-disk source, e.g. scene-authored scalar volumes).
+        Delegates to ``rosa_scene.sitk_volume_adapter.prepare_detection_context``
+        — the canonical Slicer-side bridge that pre-builds the SITK
+        image + IJK↔RAS matrices (with the volume-node matrix stamped
+        into the SITK image's origin/direction so registered ROSA
+        volumes carry the right geometry), and packs them as the
+        algorithm-package's ``img`` / ``ijk_to_ras_4x4`` /
+        ``ras_to_ijk_4x4`` ctx keys. The detection package never sees
+        a vtkMRMLScalarVolumeNode this way — keeps rosa_detect
+        boundary-clean per the package's "no Slicer / VTK / Qt deps"
+        invariant.
         """
-        from types import SimpleNamespace
+        from rosa_scene.sitk_volume_adapter import prepare_detection_context
 
-        ct_ref = None
-        try:
-            storage = volume_node.GetStorageNode()
-            src = storage.GetFileName() if storage is not None else ""
-            if src and os.path.exists(src):
-                ct_ref = SimpleNamespace(
-                    volume_id=volume_node.GetName(), path=str(src),
-                )
-        except Exception:
-            ct_ref = None
-
-        ctx: dict = {
-            "run_id": f"contact_pitch_{volume_node.GetName()}",
-            "arr_kji": np.asarray(slicer.util.arrayFromVolume(volume_node), dtype=float),
-            "spacing_xyz": tuple(float(v) for v in volume_node.GetSpacing()),
-            "extras": {"volume_node": volume_node},
-        }
-        if ct_ref is not None:
-            ctx["ct"] = ct_ref
-        return ctx
+        return prepare_detection_context(volume_node)
 
     def register_postop_ct(self, volume_node, workflow_node=None):
         self.workflow_publish.register_volume(
