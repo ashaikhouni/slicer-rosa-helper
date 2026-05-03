@@ -16,6 +16,12 @@ date-released: 2026-05-03
 url: "https://github.com/ashaikhouni/slicer-rosa-helper"
 repository-code: "https://github.com/ashaikhouni/slicer-rosa-helper"
 license: MIT
+doi: "10.5281/zenodo.19994662"
+
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.19994662"
+    description: "Zenodo archive of the v0.1.0 release"
 
 authors:
   - family-names: Shaikhouni

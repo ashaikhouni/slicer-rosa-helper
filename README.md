@@ -1,5 +1,7 @@
 # SEEG / ROSA Toolkit
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19994662.svg)](https://doi.org/10.5281/zenodo.19994662)
+
 Last updated: 2026-05-02
 
 A modular toolkit for SEEG planning, localization, atlas labeling, and
