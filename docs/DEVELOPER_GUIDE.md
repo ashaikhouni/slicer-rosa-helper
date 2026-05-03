@@ -1,50 +1,95 @@
 # Developer Guide
 
-Last updated: 2026-04-19
+Last updated: 2026-05-02
 
 ## 1) Architecture Overview
 
-The extension is organized as:
-- thin module UIs (`RosaHelper`, `PostopCTLocalization`, `ContactsTrajectoryView`, etc.)
-- shared logic/services in `CommonLib`
-- shared scene contract via one `RosaWorkflow` MRML parameter node
+The repo ships two independent surfaces that share one algorithm core:
 
-Core design rule:
-- modules exchange data through workflow roles and registry tables, not through direct widget-to-widget state.
+- **Slicer extension** — thin module UIs (`RosaHelper`,
+  `PostopCTLocalization`, `ContactsTrajectoryView`, etc.) +
+  `CommonLib/rosa_scene` for scene services. Modules exchange data
+  through workflow roles + a single `RosaWorkflow` MRML parameter
+  node, not through direct widget-to-widget state.
+- **Headless CLI** (`cli/rosa_agent/`) — pure-Python `rosa-agent`
+  console script. Same algorithm + IO, no Slicer / VTK / Qt deps.
+  Installed via `pip install .` at the repo root; runs as
+  `rosa-agent pipeline ...` from any cwd. See `cli/README.md`.
+
+Both surfaces import from the same `CommonLib` packages; the
+boundary between Slicer-coupled and headless code is enforced by
+package layout (see Section 2) and pinned by subprocess-isolated
+boundary tests in `tests/deep_core/test_rosa_detect_no_slicer.py`
+and `tests/rosa_core/test_lazy_init.py`.
 
 ## 2) Shared Libraries
 
 Primary packages in `CommonLib`:
-- `rosa_core`: pure-python domain logic (parser, transforms, contact
-  generation, peak-driven contact detection via `contact_peak_fit`,
-  QC, exporters)
-- `shank_core`: pure-python CT shank detection utilities (masking, blob extraction)
-- `shank_engine`: detection pipeline framework — see `CommonLib/shank_engine/README.md`
-- `rosa_workflow`: workflow state/publish/resolve/registry/export services
-- `rosa_scene`: Slicer scene services (trajectory/electrode/atlas helpers)
-  - includes shared layout orchestration via `layout_service.py`
-  - long-axis slice view (`align_slice_to_trajectory(mode='long')`)
-    auto-fits FOV to the trajectory span so the whole shank is visible
 
-Key `rosa_core` entry points added this session:
-- `detect_contacts_on_axis`, `sample_axis_profile`, `detect_peaks_1d`,
-  `fit_best_electrode`, `candidate_ids_for_vendors`,
-  `ras_contacts_to_contact_records`, `PeakFitResult` —
-  all exported from `rosa_core` for the Contacts & Trajectory View
-  module's peak-driven mode. Reuses the LoG σ=1 volume that Auto Fit
-  stashes in the scene (`<CT>_ContactPitch_LoG_sigma1`), falls back
-  to SimpleITK recomputation when the cached volume is absent.
+- **`rosa_core`** — pure-Python domain logic. ROS parser + case
+  loader + transforms (LPS/RAS), contact placement
+  (`contact_peak_fit`, `contact_fit`), atlas-assignment policy +
+  shared atlas-index helpers (`atlas_assignment_policy`,
+  `atlas_index`), electrode classifier, registration helper
+  (`registration.register_rigid_mi` — rigid Versor3D + Mattes MI
+  mirroring BRAINSFit), volume sampling primitives. Lazy
+  `__init__.py` (PEP 562) so `from rosa_core.X import Y` for pure
+  modules doesn't pull NumPy as a side effect.
+- **`rosa_detect`** — pure-Python detection algorithm with a sealed
+  public seam:
+  - `from rosa_detect.service import run_contact_pitch_v1` is the
+    ONLY entry point external code uses.
+  - `contracts.DetectedTrajectory` (TypedDict) is the public output
+    shape; algorithm-private fields are documented as opaque.
+  - Lazy `__init__.py` keeps `import rosa_detect` cheap (only
+    pure-stdlib types load eagerly; `service` /
+    `contact_pitch_v1_fit` / `guided_fit_engine` import on first
+    attribute access).
+  - **No Slicer / VTK / Qt deps anywhere in this package** — pinned
+    by `tests/deep_core/test_rosa_detect_no_slicer.py`.
+- **`shank_core`** — CT helpers: masking, blob candidates, IO.
+  Pure-Python.
+- **`rosa_scene`** — Slicer-only scene services. Trajectory /
+  electrode publication, atlas providers (Slicer-VTK-based),
+  `RegistrationService` (BRAINSFit), case-loader scene service,
+  layout orchestration, **`sitk_volume_adapter`** (the bridge
+  between `vtkMRMLScalarVolumeNode` and the SITK-image inputs
+  `rosa_detect` consumes — single place where vtk + slicer get
+  imported on the algorithm-call path).
+- **`rosa_workflow`** — MRML workflow state + publish / resolve /
+  registry / export services.
+
+CLI / Slicer parity surfaces — single source of truth for math
+both sides go through:
+
+- `rosa_core.case_loader.compose_rosa_display_ijk_to_ras` +
+  `centering_translation_4x4` — ROSA volume centering + display↔reference
+  composition. CLI (`load_rosa_volume_as_sitk`) and Slicer
+  (`rosa_scene.case_loader_service.center_volume`) both delegate.
+- `rosa_detect.service.stamp_ijk_to_ras_on_sitk` — LPS-flip stamping
+  for an SITK image's origin / direction.
+- `rosa_core.atlas_index.{compute_label_centroids, format_atlas_sample,
+  parse_freesurfer_lut}` — atlas-provider math shared by Slicer's
+  `atlas_providers.py` and CLI's `atlas_provider_headless.py`.
+- `rosa_core.contact_peak_fit.compute_log_sigma1_volume` — single
+  LoG σ=1 kernel.
 
 Import rule:
+
 - modules should import shared services only from `CommonLib/...`
 - do not reintroduce module-local bridge imports from `RosaHelper/Lib/...`
+- Slicer modules MUST NOT inline vtk-from-volume-node logic — go
+  through `rosa_scene.sitk_volume_adapter` so all detection inputs
+  match the parity invariant (see `feedback_cli_slicer_parity.md`).
 
 ## 3) MRML Workflow Contract
 
 Canonical state node:
+
 - `vtkMRMLScriptedModuleNode` named `RosaWorkflow`
 
 Common role families:
+
 - defaults: `BaseVolume`, `PostopCT`
 - trajectories: `PlannedTrajectoryLines`, `WorkingTrajectoryLines`, grouped producer roles
 - contacts/models: `ContactFiducials`, shaft/contact model roles
@@ -52,10 +97,12 @@ Common role families:
 - tables: assignments, QC, atlas assignment
 
 Registry tables:
+
 - `RosaWorkflow_ImageRegistry`
 - `RosaWorkflow_TransformRegistry`
 
 Provenance attributes used on managed nodes:
+
 - `Rosa.Managed=1`
 - `Rosa.Source`
 - `Rosa.Role`
@@ -63,6 +110,8 @@ Provenance attributes used on managed nodes:
 - `Rosa.ContextId`
 
 ## 4) Module Responsibilities
+
+Slicer modules:
 
 - `01 Loader`: ROSA load, custom import, registration, default role assignment
 - `02 Contact Import`: ingest external contact/trajectory files
@@ -72,6 +121,13 @@ Provenance attributes used on managed nodes:
 - `02 Atlas Labeling`: contact-to-atlas assignment
 - `03 Navigation Burn`: THOMAS burn and DICOM export
 - `01 Export Center`: profile-driven output export
+
+Headless surface:
+
+- `cli/rosa_agent` — `rosa-agent` console script (5 subcommands:
+  `load`, `detect`, `contacts`, `label`, `pipeline`). Runs the same
+  algorithm against ROSA folders, dataset subjects, or external CTs
+  with no Slicer install required. See `cli/README.md`.
 
 Keep responsibilities separate. If a feature spans modules, connect through workflow roles.
 
@@ -87,18 +143,22 @@ To add a new atlas source:
 ## 6) Coding Standards
 
 Docstrings:
+
 - every module class and logic class should have a one-line responsibility docstring
 - non-trivial methods should include concise behavior docstrings
 
 Comments:
+
 - add comments only for non-obvious logic, transforms, or coordinate assumptions
 - avoid redundant comments that restate code
 
 Dates:
+
 - keep "Last updated" headers in root docs current
 - for major interface/contract changes, update this guide and the user guide in the same PR
 
 Compatibility:
+
 - preserve workflow role names unless migration is planned
 - if schema changes, update exporters and tests in the same change
 
