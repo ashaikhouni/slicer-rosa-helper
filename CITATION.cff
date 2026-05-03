@@ -1,0 +1,48 @@
+# Citation File Format (https://citation-file-format.github.io/)
+# GitHub renders this as a "Cite this repository" button on the project page
+# and exposes BibTeX / APA / RIS export to anyone who clicks it.
+#
+# When Zenodo mints the DOI for the v0.1.0 release, add it under the
+# top-level `doi:` field below + extend `identifiers:` with the version
+# DOI. The release page is at:
+#   https://github.com/ashaikhouni/slicer-rosa-helper/releases/tag/v0.1.0
+
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite it as below."
+title: "SEEG / ROSA Toolkit: 3D Slicer extension and headless rosa-agent CLI for stereo-EEG electrode localization"
+type: software
+version: "0.1.0"
+date-released: 2026-05-03
+url: "https://github.com/ashaikhouni/slicer-rosa-helper"
+repository-code: "https://github.com/ashaikhouni/slicer-rosa-helper"
+license: MIT
+
+authors:
+  - family-names: Shaikhouni
+    given-names: Ammar
+    email: ammar.shaikhouni@nationwidechildrens.org
+    orcid: "https://orcid.org/0000-0002-3527-4920"
+    affiliation: "Department of Neurosurgery, Nationwide Children's Hospital; The Ohio State University"
+
+keywords:
+  - SEEG
+  - stereo-EEG
+  - epilepsy
+  - neurosurgery
+  - electrode localization
+  - postop CT
+  - ROSA
+  - 3D Slicer
+  - medical image analysis
+
+abstract: >
+  A modular toolkit for SEEG planning, localization, atlas labeling,
+  and export workflows. Two surfaces share one pure-Python algorithm
+  core: a 3D Slicer extension with full clinical / research UI, and
+  a headless ``rosa-agent`` command-line interface for batch
+  processing and reproducible scripting. Includes ROSA case loading,
+  guided and de novo trajectory localization on postop CT, contact
+  generation with electrode model assignment, atlas labeling against
+  FreeSurfer / THOMAS / WM segmentations, and rigid registration
+  (Versor3D + Mattes mutual information) of external volumes into
+  the ROSA reference frame.
