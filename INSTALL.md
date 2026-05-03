@@ -1,24 +1,23 @@
 # Installation
 
-Last updated: 2026-04-19
+Last updated: 2026-05-02
+
+The repo ships two surfaces. Install whichever you need (or both —
+they share `CommonLib/`):
+
+- **Slicer extension** — for the full clinical / research UI.
+  Installed by adding the repo to Slicer's module path (no pip
+  install needed).
+- **`rosa-agent` CLI** — pure-Python `pip install`-able package for
+  headless / batch use. Standard Python install.
 
 ## Requirements
 
-- 3D Slicer 5.x
-- Local clone of this repository
-- Optional Python env for CLI tools and tests:
-  - `numpy`
-  - `SimpleITK`
-  - optional: `antspyx`
+- For the Slicer extension: 3D Slicer 5.x.
+- For the CLI: Python ≥ 3.10. Hard deps install automatically via
+  `pip` (`numpy`, `SimpleITK`, `nibabel`, `scipy`).
 
-Optional environment setup:
-
-```bash
-cd <repo>
-conda env update -f environment.yml
-```
-
-## Install into Slicer (manual module path)
+## Install the Slicer extension (manual module path)
 
 1. Open Slicer.
 2. Go to `Settings -> Modules`.
@@ -30,6 +29,37 @@ conda env update -f environment.yml
    - `ROSA.02 Localization`
    - `ROSA.03 Atlas`
    - `ROSA.04 Export`
+
+## Install the `rosa-agent` CLI
+
+```bash
+cd <repo>
+pip install .            # release install
+pip install -e .         # editable / dev install
+```
+
+Creates a `rosa-agent` console script and registers the headless
+packages (`rosa_agent`, `rosa_core`, `rosa_detect`, `shank_core`).
+Verify:
+
+```bash
+rosa-agent --help
+```
+
+The Slicer-coupled packages (`rosa_scene`, `rosa_workflow`) are
+deliberately NOT installed — they require Slicer's `__main__`
+namespace and have no value in a headless install.
+
+See [`cli/README.md`](cli/README.md) for usage.
+
+## Optional dev environment
+
+For running the regression tests + dataset-gated tests:
+
+```bash
+cd <repo>
+conda env update -f environment.yml
+```
 
 ## First Validation
 
