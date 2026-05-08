@@ -50,6 +50,37 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # contact_fit — numpy.
     "fit_electrode_axis_and_tip":                         ("contact_fit", "fit_electrode_axis_and_tip"),
     "refine_fit_batch_with_exclusive_terminal_assignment": ("contact_fit", "refine_fit_batch_with_exclusive_terminal_assignment"),
+    # contact_placement — numpy + (lazily) SimpleITK / rosa_detect features.
+    "ContactPlacementBatch":                              ("contact_placement", "ContactPlacementBatch"),
+    "ContactPlacementConfig":                             ("contact_placement", "ContactPlacementConfig"),
+    "ContactPlacementResult":                             ("contact_placement", "ContactPlacementResult"),
+    "assign_axis_owners":                                 ("contact_placement", "assign_axis_owners"),
+    "place_contacts_for_axis":                            ("contact_placement", "place_contacts_for_axis"),
+    "place_contacts_for_trajectories":                    ("contact_placement", "place_contacts_for_trajectories"),
+    # Bolt-end estimation building blocks.
+    "median_library_pitch_mm":                            ("contact_placement", "median_library_pitch_mm"),
+    "refine_axis_via_centroid":                           ("contact_placement", "refine_axis_via_centroid"),
+    "sample_disk_along_polyline":                         ("contact_placement", "sample_disk_along_polyline"),
+    "entry_arc_from_metal_mass":                          ("contact_placement", "entry_arc_from_metal_mass"),
+    "estimate_bolt_end_from_metal_mass":                  ("contact_placement", "estimate_bolt_end_from_metal_mass"),
+    # matched_filter — numpy. Single-knob library scoring (σ_contact ≈ 1 mm)
+    # via Pearson cross-correlation against a sum-of-Gaussians template at
+    # the candidate model's slot positions. Replaces the heuristic
+    # template_match_signal/_peaks scoring; see project memory note
+    # project_staged_walker_2026-05-05_evening.md.
+    "MatchedFilterResult":                                ("matched_filter", "MatchedFilterResult"),
+    "SIGMA_CONTACT_MM_DEFAULT":                           ("matched_filter", "SIGMA_CONTACT_MM_DEFAULT"),
+    "matched_filter_pick":                                ("matched_filter", "matched_filter_pick"),
+    # contact_placement_v2 — matched-filter scoring on a walker disk-stat
+    # signal. Composes estimate_bolt_end_from_metal_mass + the matched
+    # filter primitive. Bolt-less fallback handles CT-FOV-cropped bolts
+    # (project_autofit_misses_2026-05-06.md). The matcher's correlation
+    # score is the trajectory validator.
+    "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement_v2", "MIN_CORR_FOR_REAL_SHANK"),
+    "MAX_SLOT_CC_VOLUME_P90_MM3":                         ("contact_placement_v2", "MAX_SLOT_CC_VOLUME_P90_MM3"),
+    "MIN_SLOT_HU_MEAN":                                   ("contact_placement_v2", "MIN_SLOT_HU_MEAN"),
+    "PlacementV2Result":                                  ("contact_placement_v2", "PlacementV2Result"),
+    "place_contacts_for_seed_v2":                         ("contact_placement_v2", "place_contacts_for_seed_v2"),
     # contact_peak_fit — numpy + SimpleITK (LoG helper).
     "PeakFitResult":                                      ("contact_peak_fit", "PeakFitResult"),
     "candidate_ids_for_vendors":                          ("contact_peak_fit", "candidate_ids_for_vendors"),
@@ -62,6 +93,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "contacts_to_pom_points":                             ("curry_export", "contacts_to_pom_points"),
     "trajectory_endpoints_to_pom_points":                 ("curry_export", "trajectory_endpoints_to_pom_points"),
     "write_curry_pom":                                    ("curry_export", "write_curry_pom"),
+    # electrode_classifier — numpy.
+    "filter_models_for_strategy":                         ("electrode_classifier", "filter_models_for_strategy"),
+    "signal_derived_entry_arc":                           ("electrode_classifier", "signal_derived_entry_arc"),
     # electrode_models — light (pure Python).
     "default_electrode_library_path":                     ("electrode_models", "default_electrode_library_path"),
     "load_electrode_library":                             ("electrode_models", "load_electrode_library"),
