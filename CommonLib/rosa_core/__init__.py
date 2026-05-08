@@ -86,6 +86,15 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MIN_BLOBS_PER_LINE_UNIFIED":                         ("unified_detect", "MIN_BLOBS_PER_LINE_UNIFIED"),
     "UnifiedTrajectory":                                  ("unified_detect", "UnifiedTrajectory"),
     "detect_and_place_unified":                           ("unified_detect", "detect_and_place_unified"),
+    # emission_qc — per-emission QC for the unified-pipeline output.
+    # Used by QC notebooks and the CLI ``rosa-agent qc`` subcommand.
+    # Distinct from rosa_core.qc (planned-vs-final-trajectory QC).
+    "EmissionQC":                                         ("emission_qc", "EmissionQC"),
+    "PerModelCorr":                                       ("emission_qc", "PerModelCorr"),
+    "build_emission_qc":                                  ("emission_qc", "build_emission_qc"),
+    "build_subject_qc":                                   ("emission_qc", "build_subject_qc"),
+    "emission_qc_to_dict":                                ("emission_qc", "emission_qc_to_dict"),
+    "render_emission_figure":                             ("emission_qc", "render_emission_figure"),
     # contact_peak_fit — numpy + SimpleITK (LoG helper).
     "PeakFitResult":                                      ("contact_peak_fit", "PeakFitResult"),
     "candidate_ids_for_vendors":                          ("contact_peak_fit", "candidate_ids_for_vendors"),
