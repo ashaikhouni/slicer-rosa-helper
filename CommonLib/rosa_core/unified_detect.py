@@ -61,7 +61,7 @@ PRE_DEDUP_ANGLE_DEG = 6.0   # don't get merged before placement.
 
 # Stage 1 candidate floor. v1's default is _LIBRARY_BOUNDS["min_contacts"]=5,
 # calibrated when the validator was bolt-anchor + post-anchor Frangi-median.
-# In the unified pipeline the validator is matched-filter NCC ≥ 0.35 +
+# In the unified pipeline the validator is matched-filter NCC ≥ 0.30 +
 # HU=1500 floor, so the blob-count gate is duplicate work — it costs
 # AMC137/LPT (4-blob walker chain that _extend_deep_end completes to 5
 # blobs spanning ~22 mm). 4 is the sweet spot:
@@ -70,6 +70,22 @@ PRE_DEDUP_ANGLE_DEG = 6.0   # don't get merged before placement.
 #   MIN_BLOBS=3 → 81/82 / 10 orph (no extra TPs, just over-permissive)
 # See project_unified_pipeline_m9_2026-05-08.md.
 MIN_BLOBS_PER_LINE_UNIFIED = 4
+
+# Matched-filter corr threshold for the UNSEEDED pipeline. Looser than
+# rosa_core.contact_placement_v2.MIN_CORR_FOR_REAL_SHANK (0.35) because
+# stage-1 chains have geometric drift vs ground truth that drops corr by
+# ~0.10-0.20 even when the chain is genuinely a real shank. v1's bolt
+# anchor + walker-inlier refit doesn't fully close that gap. T4/RHH is
+# the canonical case: corr ≈ 0.305 on the unified-pipeline-emitted axis,
+# corr ≈ 0.510 on the GT axis — a real shank that scores below 0.35.
+# 0.30 is calibrated on the 7-subject benchmark:
+#   corr=0.35 → 81/82 / 7 orph (M9)
+#   corr=0.30 → 82/82 / 8 orph (M12) — full recall, +1 FP
+#   corr=0.25 → admits more FPs without recall gain (untested past 0.30)
+# The seeded pipeline (place_contacts_for_seed_v2 directly) keeps 0.35:
+# the caller vouches for the axis so we can demand a tighter match.
+# See project_unified_pipeline_m12_2026-05-08.md.
+MIN_CORR_FOR_REAL_SHANK_UNIFIED = 0.30
 
 
 @dataclass
@@ -207,7 +223,9 @@ def detect_and_place_unified(
             ``None`` → derive from ``library_models`` (set of unique
             ``pitch_mm``); empty fallback to ``[3.5]``.
         min_corr: matched-filter corr threshold. ``None`` → default
-            (``MIN_CORR_FOR_REAL_SHANK = 0.35``).
+            (``MIN_CORR_FOR_REAL_SHANK_UNIFIED = 0.30``). Looser than
+            the seeded-mode 0.35 to admit chains with sub-mm geometric
+            drift (e.g. T4/RHH).
         min_slot_hu_mean: per-slot HU floor cleanup. ``None`` →
             default (``MIN_SLOT_HU_MEAN = 1500``). Set to
             ``False``-ish via ``0.0`` or pass an explicit small value
@@ -244,12 +262,11 @@ def detect_and_place_unified(
     )
     from .contact_placement_v2 import (
         place_contacts_for_seed_v2,
-        MIN_CORR_FOR_REAL_SHANK,
         MIN_SLOT_HU_MEAN,
     )
 
     if min_corr is None:
-        min_corr = MIN_CORR_FOR_REAL_SHANK
+        min_corr = MIN_CORR_FOR_REAL_SHANK_UNIFIED
     if min_slot_hu_mean is None:
         min_slot_hu_mean = MIN_SLOT_HU_MEAN
 
