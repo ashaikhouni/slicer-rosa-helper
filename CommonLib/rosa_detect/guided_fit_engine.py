@@ -542,3 +542,153 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     if warnings:
         result["warnings"] = list(warnings)
     return result
+
+
+# ---------------------------------------------------------------------
+# Unified seed-fitting entry point — used by BOTH:
+#   * Slicer Guided Fit module (PostopCTLocalization/guided_fit.py)
+#   * CLI `rosa-agent detect --seeds` (cli/rosa_agent/commands/detect.py)
+#
+# Single source of truth so both surfaces have identical fit behavior.
+# ---------------------------------------------------------------------
+
+
+def fit_seeds_against_auto(
+    seeds,
+    features,
+    ijk_to_ras_mat,
+    ras_to_ijk_mat,
+    *,
+    auto_trajs=None,
+    auto_run_if_missing=True,
+    roi_radius_mm=DEFAULT_ROI_RADIUS_MM,
+    max_angle_deg=DEFAULT_MAX_ANGLE_DEG,
+    max_lateral_shift_mm=DEFAULT_MAX_LATERAL_SHIFT_MM,
+    min_inliers=DEFAULT_MIN_INLIERS,
+    progress_log=None,
+):
+    """Per-seed guided fit, match-against-auto then PCA fallback.
+
+    For each seed:
+      1. If an auto trajectory is in tolerance (`max_angle_deg` /
+         `max_lateral_shift_mm`), inherit its fit verbatim. Each auto
+         trajectory can be claimed by at most one seed.
+      2. Otherwise, run ``fit_trajectory`` (PCA-based walker fit).
+
+    The auto trajectory pool comes from:
+      * ``auto_trajs`` if explicitly supplied (Slicer passes its scene
+        cache; pass ``[]`` to disable match-against-auto entirely).
+      * ``run_contact_pitch_v1_with_features`` run internally on the
+        canonical CT in ``features["img"]`` when ``auto_trajs is None``
+        and ``auto_run_if_missing`` is True. This is what makes a fresh
+        Slicer "Fit All" or CLI ``rosa-agent detect --seeds`` invocation
+        produce auto-aware results without the caller having to remember
+        to run Auto Fit first.
+
+    Args:
+        seeds: list of dicts with keys ``name``, ``start_ras``, ``end_ras``.
+        features: dict from ``compute_features``. Must include ``img``,
+            ``ijk_to_ras_mat``, ``ras_to_ijk_mat`` if ``auto_run_if_missing``.
+        ijk_to_ras_mat / ras_to_ijk_mat: canonical-grid matrices (must
+            match those returned by ``compute_features``).
+        auto_trajs: pre-computed auto-fit trajectories (list of dicts with
+            ``start_ras`` / ``end_ras``), or ``None`` to auto-compute.
+        auto_run_if_missing: when ``auto_trajs is None``, whether to run
+            auto fit. Set False to disable match-against-auto entirely.
+        roi_radius_mm / max_angle_deg / max_lateral_shift_mm /
+            min_inliers: forwarded to ``fit_trajectory`` and used as
+            tolerances for ``match_seed_to_auto_traj``.
+        progress_log: callable taking one string; receives status lines
+            (auto-fit start/end, per-seed match/fail). Defaults to no-op.
+
+    Returns:
+        list of fit-result dicts in the same order as ``seeds``. Each
+        fit dict has the keys returned by ``match_seed_to_auto_traj``
+        or ``fit_trajectory`` (``success``, ``start_ras`` / ``end_ras``
+        on success, ``reason`` on failure), plus:
+          * ``name``: the seed's name
+          * ``matched_path``: ``'auto'`` / ``'pca'`` / ``'failed'``
+    """
+    log = progress_log if callable(progress_log) else (lambda _msg: None)
+
+    # Resolve the auto trajectory pool.
+    if auto_trajs is None:
+        if auto_run_if_missing:
+            from .service import run_contact_pitch_v1_with_features
+            log("[guided] no auto trajectories supplied; running auto fit")
+            try:
+                ctx = {
+                    "img": features.get("img"),
+                    "ijk_to_ras_4x4": np.asarray(ijk_to_ras_mat, dtype=float),
+                    "ras_to_ijk_4x4": np.asarray(ras_to_ijk_mat, dtype=float),
+                }
+                auto_result, _features = run_contact_pitch_v1_with_features(ctx)
+                auto_trajs = list(auto_result.get("trajectories") or [])
+                log(f"[guided] auto fit produced {len(auto_trajs)} trajectories")
+            except Exception as exc:
+                log(f"[guided] auto fit failed ({exc}); falling back to PCA-only")
+                auto_trajs = []
+        else:
+            auto_trajs = []
+    else:
+        auto_trajs = list(auto_trajs)
+
+    remaining = list(auto_trajs)
+    out: list[dict] = []
+    for seed in seeds:
+        name = str(seed.get("name") or f"seed_{len(out) + 1}")
+        ss = seed["start_ras"]
+        se = seed["end_ras"]
+        fit = None
+
+        if remaining:
+            try:
+                fit = match_seed_to_auto_traj(
+                    planned_start_ras=ss, planned_end_ras=se,
+                    auto_trajs=remaining,
+                    max_angle_deg=max_angle_deg,
+                    max_lateral_shift_mm=max_lateral_shift_mm,
+                )
+            except Exception as exc:
+                log(f"[guided] {name}: match-auto crashed ({exc})")
+                fit = None
+            if fit is not None:
+                # Remove the claimed auto traj from the pool so other
+                # seeds don't double-claim it.
+                claimed_start = list(fit.get("start_ras") or [])
+                claimed_end = list(fit.get("end_ras") or [])
+                consumed = False
+                next_remaining = []
+                for t in remaining:
+                    if (not consumed
+                            and list(t.get("start_ras") or []) == claimed_start
+                            and list(t.get("end_ras") or []) == claimed_end):
+                        consumed = True
+                        continue
+                    next_remaining.append(t)
+                remaining = next_remaining
+                fit = dict(fit)
+                fit["matched_path"] = "auto"
+
+        if fit is None:
+            try:
+                fit = fit_trajectory(
+                    planned_start_ras=ss, planned_end_ras=se,
+                    features=features,
+                    ijk_to_ras_mat=ijk_to_ras_mat,
+                    ras_to_ijk_mat=ras_to_ijk_mat,
+                    roi_radius_mm=roi_radius_mm,
+                    max_angle_deg=max_angle_deg,
+                    max_lateral_shift_mm=max_lateral_shift_mm,
+                    min_inliers=min_inliers,
+                )
+                fit = dict(fit)
+                fit["matched_path"] = "pca" if fit.get("success") else "failed"
+            except Exception as exc:
+                log(f"[guided] {name}: fit_trajectory crashed ({exc})")
+                fit = {"success": False, "reason": f"crash: {exc}", "matched_path": "failed"}
+
+        fit["name"] = name
+        out.append(fit)
+
+    return out
