@@ -49,12 +49,28 @@ WALK_TIP_PAD_MM = 3.0                    # tip slack for axis under-reach (stand
 WALK_HU_MIN = 1000.0                     # disk-sample min HU (above this = metal-ish)
 
 # Centerline snap to local metal centroid (Stage 3 in the staged-walker
-# pipeline). Recenters the polynomial centerline on local high-HU
-# centroids; fixes ~5-10% of standard-mode placement errors when the
-# auto-fit / polynomial axis is laterally offset by 1-2 mm from the
-# actual electrode (project_staged_walker_2026-05-05.md).
+# pipeline). Recenters the polynomial centerline on local
+# contact-bright centroids; fixes placements where the polynomial axis
+# is laterally offset by 1-2 mm from the actual electrode.
+#
+# The centroid signal is **−LoG σ=1**, not raw HU. LoG response is
+# calibrated by the σ=1 kernel and gives a sharp negative spike at
+# discrete contact centers (the same signal stage-1 blob extraction
+# uses). Raw HU varies subject-to-subject (different scanners,
+# acquisition protocols), and HU-based snap with the previous default
+# threshold (1000) chose the wrong library model on T4/RHH because
+# between-contact wire voxels (HU 500-1000) sit right at the boundary,
+# adding noise to the per-bin centroid. The −LoG of those wire voxels
+# is shallow, so they don't contribute to the LoG-based centroid.
+#
+# Probe results on T4/RHH (with 2 mm tip extension):
+#   HU-snap @ 1000 (old default): DIXI-18CM corr=0.338  (broken)
+#   HU-snap @ 1800-2000:           DIXI-12AM corr=0.87-0.90 (fragile, subject-tuned)
+#   −LoG-snap @ 500-1500:          DIXI-12AM corr=0.84-0.93 (robust 3× wider band)
+# 500 matches stage-1 LOG_BLOB_THRESHOLD: "this is a metal-bright
+# local minimum" — the codebase's existing calibration constant.
 SNAP_RADIUS_MM = 2.0
-SNAP_HU_THRESHOLD = 1000.0
+SNAP_LOG_THRESHOLD = 500.0
 SNAP_STEP_MM = 0.5
 SNAP_SMOOTH_WINDOW = 5
 
@@ -231,21 +247,29 @@ def _ortho_uv(tangent: np.ndarray):
 
 
 def _snap_centerline_to_centroid(
-    centerline: np.ndarray, ct_arr_kji, r2i,
+    centerline: np.ndarray, log_arr_kji, r2i,
     *, snap_radius_mm: float = SNAP_RADIUS_MM,
     step_mm: float = SNAP_STEP_MM,
-    hu_threshold: float = SNAP_HU_THRESHOLD,
+    log_threshold: float = SNAP_LOG_THRESHOLD,
     n_radii: int = 4, n_angles: int = 16,
     smooth_window: int = SNAP_SMOOTH_WINDOW,
 ) -> np.ndarray:
-    """Recenter ``centerline`` arc-by-arc on the local high-HU centroid.
+    """Recenter ``centerline`` arc-by-arc on the local LoG-bright centroid.
 
     Sample a perpendicular disk around each arc-position; weight each
-    in-disk voxel by ``max(0, HU - hu_threshold)``; shift the arc
-    position to the weighted centroid. Smooth the resulting polyline
-    with a uniform filter (window ``smooth_window``).
+    in-disk voxel by ``max(0, -LoG - log_threshold)`` (positive at metal-
+    bright local minima); shift the arc position to the weighted
+    centroid. Smooth the resulting polyline with a uniform filter
+    (window ``smooth_window``).
 
-    Lifted from the staged-walker notebook with no logic changes.
+    Why LoG (not raw HU): LoG σ=1 is a calibrated metal-bright detector
+    — its threshold (default ``LOG_BLOB_THRESHOLD = 500`` per stage 1)
+    is invariant to subject-level CT acquisition / windowing. Raw-HU
+    snap with the previous default (1000) admitted between-contact wire
+    voxels (HU 500-1000) into the centroid in some configurations and
+    chose the wrong library model on borderline cases like T4/RHH.
+    Switching to −LoG centroid gives a stable model pick across the
+    7-subject benchmark without subject-level threshold tuning.
     """
     from .volume_sampling import sample_trilinear_batch
     from scipy.ndimage import uniform_filter1d
@@ -273,10 +297,14 @@ def _snap_centerline_to_centroid(
         pts = (center[None, :]
                + off_u[:, None] * u[None, :]
                + off_v[:, None] * v[None, :])
-        hus = sample_trilinear_batch(ct_arr_kji, r2i, pts)
-        valid = np.isfinite(hus) & (hus > hu_threshold)
+        log_vals = sample_trilinear_batch(log_arr_kji, r2i, pts)
+        # LoG is NEGATIVE at metal-bright local minima. Negate so the
+        # centroid signal is positive at metal — same convention as HU
+        # would be (high = metal-like) but calibration-invariant.
+        sig = -log_vals
+        valid = np.isfinite(sig) & (sig > log_threshold)
         if np.any(valid):
-            w = hus[valid] - hu_threshold
+            w = sig[valid] - log_threshold
             mu = float((w * off_u[valid]).sum() / w.sum())
             mv = float((w * off_v[valid]).sum() / w.sum())
             snapped[ai] = center + mu * u + mv * v
@@ -402,6 +430,7 @@ def place_contacts_for_seed_v2(
         )
 
     ct_arr = features["ct_arr_kji"]
+    log_arr = features.get("log")  # LoG σ=1; used by the centerline snap
     r2i = np.asarray(features["ras_to_ijk_mat"], dtype=float)
 
     # Stage 1+2: bolt-end estimate.
@@ -459,7 +488,13 @@ def place_contacts_for_seed_v2(
         # Stage 3: snap polynomial centerline to local high-HU centroid
         # (recovers ~5-10% of placements where the polynomial axis is
         # 1-2 mm off the actual electrode axis).
-        centerline = _snap_centerline_to_centroid(centerline_poly, ct_arr, r2i)
+        if log_arr is not None:
+            centerline = _snap_centerline_to_centroid(centerline_poly, log_arr, r2i)
+        else:
+            # Caller passed features without 'log'; fall through with the
+            # polynomial centerline directly. Mirrors what callers got
+            # before the snap was added.
+            centerline = centerline_poly
         u_str = (e - s) / seed_len
         bolt_pt = s + float(bolt_end_straight) * u_str
         bolt_end_cl_arc = _project_to_polyline_arc(centerline, bolt_pt)
