@@ -79,6 +79,81 @@ def sample_trilinear_at_ras(arr_kji, ras_to_ijk_mat, ras_xyz):
     return float(c0 * (1 - dk) + c1 * dk)
 
 
+def sample_trilinear_batch(arr_kji, ras_to_ijk_mat, ras_points):
+    """Vectorized trilinear lookup for a batch of RAS points.
+
+    Args:
+        arr_kji: numpy array indexed [k, j, i].
+        ras_to_ijk_mat: 4x4 RAS→IJK matrix (i, j, k order in output).
+        ras_points: (N, 3) numpy array of RAS coordinates.
+
+    Returns:
+        (N,) numpy array of float values; NaN where the point is outside
+        the valid trilinear range (one voxel margin), matching the
+        single-point ``sample_trilinear_at_ras`` semantics exactly.
+
+    Replaces Python loops over ``sample_trilinear_at_ras`` calls. ~10×
+    faster on disk-sampling hot paths (`sample_disk_along_polyline`,
+    `_snap_centerline_to_centroid`, `refine_axis_via_centroid`).
+    """
+    pts = np.asarray(ras_points, dtype=float)
+    if pts.ndim == 1:
+        pts = pts.reshape(1, 3)
+    N = pts.shape[0]
+    if N == 0:
+        return np.zeros(0, dtype=float)
+    # RAS → IJK as one matmul.
+    homog = np.empty((N, 4), dtype=float)
+    homog[:, :3] = pts
+    homog[:, 3] = 1.0
+    ijk = homog @ ras_to_ijk_mat.T  # (N, 4); take :3
+    i = ijk[:, 0]; j = ijk[:, 1]; k = ijk[:, 2]
+    s = arr_kji.shape
+    K, J, I = s[0], s[1], s[2]
+    in_bounds = (
+        (k >= 0) & (k < K - 1)
+        & (j >= 0) & (j < J - 1)
+        & (i >= 0) & (i < I - 1)
+    )
+    out = np.full(N, np.nan, dtype=float)
+    if not np.any(in_bounds):
+        return out
+    # Floor-to-int corner indices and fractional parts (only for in-bounds).
+    ib = np.where(in_bounds)[0]
+    ki = k[ib]; ji = j[ib]; ii = i[ib]
+    k0 = ki.astype(np.int64); j0 = ji.astype(np.int64); i0 = ii.astype(np.int64)
+    # Match the single-point function's float32-when-array-is-float32
+    # promotion: numpy scalar*python-float keeps scalar dtype, but
+    # array*python-float follows weak typing too — except when the
+    # weight comes from a float64 numpy array (our `di` here). Cast
+    # weights to the array's dtype so the trilinear math stays in the
+    # volume's precision exactly as the scalar version does.
+    arr_dtype = arr_kji.dtype
+    dk = (ki - k0).astype(arr_dtype, copy=False)
+    dj = (ji - j0).astype(arr_dtype, copy=False)
+    di = (ii - i0).astype(arr_dtype, copy=False)
+    # Gather the 8 corner values via fancy indexing.
+    v000 = arr_kji[k0,     j0,     i0]
+    v001 = arr_kji[k0,     j0,     i0 + 1]
+    v010 = arr_kji[k0,     j0 + 1, i0]
+    v011 = arr_kji[k0,     j0 + 1, i0 + 1]
+    v100 = arr_kji[k0 + 1, j0,     i0]
+    v101 = arr_kji[k0 + 1, j0,     i0 + 1]
+    v110 = arr_kji[k0 + 1, j0 + 1, i0]
+    v111 = arr_kji[k0 + 1, j0 + 1, i0 + 1]
+    one = arr_dtype.type(1.0)
+    one_di = one - di
+    c00 = v000 * one_di + v001 * di
+    c01 = v010 * one_di + v011 * di
+    c10 = v100 * one_di + v101 * di
+    c11 = v110 * one_di + v111 * di
+    one_dj = one - dj
+    c0 = c00 * one_dj + c01 * dj
+    c1 = c10 * one_dj + c11 * dj
+    out[ib] = c0 * (one - dk) + c1 * dk
+    return out
+
+
 def iter_axis_points(start_ras, end_ras, step_mm):
     """Yield ``(t_mm, point_ras)`` evenly along [start_ras, end_ras].
 
