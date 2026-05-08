@@ -108,7 +108,14 @@ def matched_filter_pick(
             slots in the bolt zone.
         max_tip_override: hard cap on the model's deepest slot arc (used
             in bolt-less mode to clamp to the actual metal extent).
-        tie_eps: correlation tolerance for the shorter-wins-on-tie rule.
+        tie_eps: correlation tolerance for the hierarchical tie-break.
+            When two candidates' corrs are within this band, fall back
+            to (a) more n_covered slots wins, then (b) smaller n_slots
+            wins. (a) prevents the matcher from picking too-short models
+            on full-contact electrodes (e.g. DIXI-8AM beating DIXI-12AM
+            on a 12-contact shank because both score identical Pearson
+            NCC against a 12-peak signal); (b) blocks longer models
+            quietly covering the same contacts plus bolt-zone phantoms.
         add_valley_anti_template: if True, subtract Gaussians at the
             geometric midpoints between consecutive in-contact slots
             from the template. Real shanks have HU peaks at slots and
@@ -145,7 +152,22 @@ def matched_filter_pick(
         return _EMPTY
     inv_2sig2 = 1.0 / (2.0 * float(sigma_contact_mm) * float(sigma_contact_mm))
 
-    best = {"corr": -np.inf, "n_slots": float("inf")}
+    # Hierarchical tie-break: corr (primary) → n_covered (secondary,
+    # prefer the model that explains MORE contacts when corrs tie) →
+    # n_slots (tertiary, smallest electrode of equally-covering ones to
+    # block excessive bolt-zone extension).
+    #
+    # The previous "shorter n_slots wins" rule was the ONLY tie-break
+    # and caused the matcher to silently prefer DIXI-8AM over DIXI-12AM
+    # on a true 12-contact electrode (both score the same Pearson NCC
+    # because adding a 9th-12th aligned slot leaves the normalized
+    # comb-vs-comb correlation unchanged). For a real 12-contact shank
+    # we want the 12-contact model picked. Coverage as the secondary
+    # criterion fixes this without regressing the original purpose:
+    # when two models have equal n_covered, the smaller n_slots still
+    # wins (which is what blocks an 18-contact model from quietly
+    # covering 12 real contacts + 6 bolt-zone phantoms).
+    best = {"corr": -np.inf, "n_covered": -1, "n_slots": float("inf")}
     for m in library_models:
         offs = np.asarray(m["contact_center_offsets_from_tip_mm"], dtype=float)
         n_slots = len(offs)
@@ -184,10 +206,18 @@ def matched_filter_pick(
             if t_norm < 1e-9:
                 continue
             corr = float((sig_zm * t_zm).sum()) / (sig_norm * t_norm)
-            if corr > best["corr"] + tie_eps:
+            corr_delta = corr - best["corr"]
+            if corr_delta > tie_eps:
                 takes = True
-            elif abs(corr - best["corr"]) <= tie_eps and n_slots < best["n_slots"]:
-                takes = True
+            elif abs(corr_delta) <= tie_eps:
+                # Tie on corr → break by n_covered (more = better),
+                # then by n_slots (smaller = better) at equal coverage.
+                if n_covered > best["n_covered"]:
+                    takes = True
+                elif n_covered == best["n_covered"] and n_slots < best["n_slots"]:
+                    takes = True
+                else:
+                    takes = False
             else:
                 takes = False
             if takes:
