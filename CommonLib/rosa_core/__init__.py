@@ -81,11 +81,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MIN_SLOT_HU_MEAN":                                   ("contact_placement_v2", "MIN_SLOT_HU_MEAN"),
     "PlacementV2Result":                                  ("contact_placement_v2", "PlacementV2Result"),
     "place_contacts_for_seed_v2":                         ("contact_placement_v2", "place_contacts_for_seed_v2"),
-    # unified_detect — composes v1 stage1 + v2 placement (M12 architecture).
-    # See project_unified_pipeline_m9_2026-05-08.md and
-    # project_unified_pipeline_m12_2026-05-08.md.
+    # unified_detect — composes v1 stage1 + v2 placement (M9 architecture).
+    # See project_unified_pipeline_m9_2026-05-08.md.
     "MIN_BLOBS_PER_LINE_UNIFIED":                         ("unified_detect", "MIN_BLOBS_PER_LINE_UNIFIED"),
-    "MIN_CORR_FOR_REAL_SHANK_UNIFIED":                    ("unified_detect", "MIN_CORR_FOR_REAL_SHANK_UNIFIED"),
     "UnifiedTrajectory":                                  ("unified_detect", "UnifiedTrajectory"),
     "detect_and_place_unified":                           ("unified_detect", "detect_and_place_unified"),
     # contact_peak_fit — numpy + SimpleITK (LoG helper).

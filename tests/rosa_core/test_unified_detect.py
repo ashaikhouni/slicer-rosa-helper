@@ -52,11 +52,10 @@ class LazyExportTests(unittest.TestCase):
         self.assertIn("no_sitk", out)
 
     def test_lazy_attrs_resolve(self):
-        """The exported names from unified_detect resolve."""
+        """The three exported names from unified_detect resolve."""
         code = (
             "import rosa_core\n"
             "print(rosa_core.MIN_BLOBS_PER_LINE_UNIFIED)\n"
-            "print(rosa_core.MIN_CORR_FOR_REAL_SHANK_UNIFIED)\n"
             "print(rosa_core.UnifiedTrajectory.__name__)\n"
             "print(rosa_core.detect_and_place_unified.__name__)\n"
         )
@@ -66,9 +65,8 @@ class LazyExportTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         out = proc.stdout.splitlines()
         self.assertEqual(out[0], "4")
-        self.assertEqual(out[1], "0.3")
-        self.assertEqual(out[2], "UnifiedTrajectory")
-        self.assertEqual(out[3], "detect_and_place_unified")
+        self.assertEqual(out[1], "UnifiedTrajectory")
+        self.assertEqual(out[2], "detect_and_place_unified")
 
 
 @unittest.skipUnless(DEPS_AVAILABLE, "numpy not available")
