@@ -238,7 +238,13 @@ WALKER_GAP_SLACK_MM = 9.0          # 2 consecutive missed contacts at
                                     # (3.5 mm) plus walker drift; real
                                     # shanks rarely lose >2 in a row.
 
-MIN_BLOBS_PER_LINE = _LIBRARY_BOUNDS["min_contacts"]
+# Geometric chain-formation floor — independent of library bounds.
+# Set below the smallest library model (DIXI-5AM, PMT-8) so a real
+# shank with 1-2 under-resolved contacts (low HU, partial-volume,
+# or motion) still forms a chain and reaches the matched-filter
+# picker. Library bounds still constrain the model picker downstream;
+# they shouldn't double as the chain gate.
+MIN_BLOBS_PER_LINE = 3
 MIN_LINE_SPAN_MM = (
     _LIBRARY_BOUNDS["min_contact_span_mm"] - WALKER_SPAN_UNDER_SLACK_MM
 )
@@ -372,8 +378,12 @@ def _strategy_global_overrides(bounds):
     constants the detector actually reads. Mirrors the assignments at
     module load (lines 198-207, 252-257) so both paths stay in sync.
     """
+    # MIN_BLOBS_PER_LINE intentionally NOT in this swap — it is a
+    # geometric chain-formation floor (3), not a library-derived
+    # bound. Letting strategy bounds shadow it caused the AMC137/LPT
+    # parity bug: pmt_35 set MIN_BLOBS=8 (smallest PMT model) and
+    # rejected LPT's chain that had <8 visible blobs.
     return {
-        "MIN_BLOBS_PER_LINE": int(bounds["min_contacts"]),
         "MIN_LINE_SPAN_MM": float(bounds["min_contact_span_mm"]) - WALKER_SPAN_UNDER_SLACK_MM,
         "MAX_LINE_SPAN_MM": float(bounds["max_contact_span_mm"]) + WALKER_SPAN_OVER_SLACK_MM,
         "MAX_INLIER_GAP_MM": float(bounds["max_within_electrode_pitch_mm"]) + WALKER_GAP_SLACK_MM,
