@@ -85,12 +85,15 @@ def prepare_volume(img, ijk_to_ras_mat, ras_to_ijk_mat=None):
         rs.SetInterpolator(sitk.sitkLinear)
         rs.SetDefaultPixelValue(-1024)
         img = rs.Execute(img)
+        # Per-axis anti-alias σ. Replace 0-axes with a tiny epsilon so
+        # ITK accepts the call when at least one axis is already canonical
+        # (mixed-axis case: e.g. spacing (0.47, 0.47, 1.0) → sigmas
+        # (0.53, 0.53, 0.0) crashed before this guard).
         sigmas_per_axis = tuple(
-            float(max(0.0, CANONICAL_SPACING_MM - float(s)))
+            max(1e-9, float(max(0.0, CANONICAL_SPACING_MM - float(s))))
             for s in spacing
         )
-        if max(sigmas_per_axis) > 0:
-            img = sitk.SmoothingRecursiveGaussian(img, sigmas_per_axis)
+        img = sitk.SmoothingRecursiveGaussian(img, sigmas_per_axis)
         ijk_to_ras_mat, ras_to_ijk_mat = image_ijk_ras_matrices(img)
         ijk_to_ras_mat = np.asarray(ijk_to_ras_mat, dtype=float)
         ras_to_ijk_mat = np.asarray(ras_to_ijk_mat, dtype=float)
@@ -125,9 +128,21 @@ def build_masks(img):
     largest = sitk.Equal(cc, 1)
     closed = sitk.BinaryMorphologicalClosing(largest, kernelRadius=(3, 3, 3))
     hull = sitk.BinaryFillhole(closed)
-    dist = sitk.SignedMaurerDistanceMap(
-        hull, insideIsPositive=True, squaredDistance=False, useImageSpacing=True,
+    # Zero-pad the hull by 1 voxel before computing the SDF so the FOV
+    # boundary counts as background — Maurer otherwise treats voxels at
+    # the volume edge inside the mask as "interior" with no nearby
+    # transition, giving them artificially large hd values. For FOV-
+    # cropped bolts (e.g. AMC137/LPT) this matters: the visible bolt
+    # voxels at the FOV edge ARE physically at the imaging boundary
+    # (the head extends past the FOV), so they should report hd ≈ 0,
+    # not ≈ 22mm. Voxels far from any FOV edge are unaffected — their
+    # nearest hull-mask transition (an internal one) is still closer
+    # than the FOV edge.
+    hull_padded = sitk.ConstantPad(hull, [1, 1, 1], [1, 1, 1], 0)
+    dist_padded = sitk.SignedMaurerDistanceMap(
+        hull_padded, insideIsPositive=True, squaredDistance=False, useImageSpacing=True,
     )
+    dist = sitk.Crop(dist_padded, [1, 1, 1], [1, 1, 1])
     dist_arr = sitk.GetArrayFromImage(dist).astype(np.float32)
     hull_arr = sitk.GetArrayFromImage(hull).astype(bool)
     intracranial = dist_arr >= INTRACRANIAL_MIN_DISTANCE_MM
