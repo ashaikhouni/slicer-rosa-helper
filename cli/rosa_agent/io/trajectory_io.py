@@ -155,6 +155,42 @@ def read_seeds_tsv(path: str | Path) -> list[dict[str, Any]]:
             })
         return out
 
+    # rosa_helper_import format: ex/ey/ez (entry, bolt-side) and
+    # tx/ty/tz (target, deep tip). Same convention as the Slicer
+    # "Imported External" seed source. We map entry → start_ras and
+    # target → end_ras, matching `gfe.fit_trajectory`'s expected
+    # input.
+    if {"ex", "ey", "ez", "tx", "ty", "tz"}.issubset(cols):
+        out = []
+        for r in rows:
+            r_lower = {k.lower(): v for k, v in r.items()}
+            try:
+                start = (
+                    _coerce_float(r_lower["ex"]),
+                    _coerce_float(r_lower["ey"]),
+                    _coerce_float(r_lower["ez"]),
+                )
+                end = (
+                    _coerce_float(r_lower["tx"]),
+                    _coerce_float(r_lower["ty"]),
+                    _coerce_float(r_lower["tz"]),
+                )
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"malformed seed row: {r!r} ({exc})") from exc
+            name = (
+                r_lower.get("name")
+                or r_lower.get("shank")
+                or r_lower.get("trajectory")
+                or f"S{len(out) + 1:02d}"
+            )
+            out.append({
+                "name": str(name),
+                "start_ras": start,
+                "end_ras": end,
+                "electrode_model": r_lower.get("electrode_model") or "",
+            })
+        return out
+
     if {"x", "y", "z"}.issubset(cols):
         # Endpoint-pair form: group two rows per label into one seed.
         name_key = "label" if "label" in cols else (
@@ -200,7 +236,7 @@ def read_seeds_tsv(path: str | Path) -> list[dict[str, Any]]:
 
     raise ValueError(
         f"seed TSV {path}: header must contain start_x/end_x, "
-        f"or label+x/y/z (got {sorted(cols)})"
+        f"ex/ey/ez+tx/ty/tz, or label+x/y/z (got {sorted(cols)})"
     )
 
 
