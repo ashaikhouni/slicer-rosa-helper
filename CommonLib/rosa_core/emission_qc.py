@@ -118,10 +118,11 @@ def build_emission_qc(
     every library model against that signal so callers can see the
     full per-model corr breakdown (not just the picked model).
     """
-    from .contact_placement import estimate_bolt_end_from_metal_mass
-    from .contact_placement_v2 import (
-        _snap_centerline_to_centroid, _extend_centerline_tail,
-        _project_to_polyline_arc,
+    from .contact_placement import (
+        estimate_bolt_end_from_metal_mass,
+        snap_centerline_to_centroid,
+        extend_centerline_tail,
+        project_to_polyline_arc,
         WALK_DISK_RADIUS_MM, WALK_HU_MIN, WALK_N_RADII, WALK_N_ANGLES,
         WALK_TIP_PAD_MM, WALK_STEP_MM,
     )
@@ -149,10 +150,10 @@ def build_emission_qc(
         if be_arc is not None and cp is not None:
             cp = np.asarray(cp, dtype=float)
             if log_arr is not None:
-                centerline = _snap_centerline_to_centroid(cp, log_arr, r2i)
+                centerline = snap_centerline_to_centroid(cp, log_arr, r2i)
             else:
                 centerline = cp
-            cl_walker = _extend_centerline_tail(centerline, WALK_TIP_PAD_MM)
+            cl_walker = extend_centerline_tail(centerline, WALK_TIP_PAD_MM)
             walker_arcs, walker_max = _walker_profile(
                 cl_walker, ct_arr, r2i,
                 step_mm=WALK_STEP_MM,
@@ -160,11 +161,11 @@ def build_emission_qc(
                 n_radii=WALK_N_RADII, n_angles=WALK_N_ANGLES,
                 hu_min=WALK_HU_MIN,
             )
-            bolt_end_arc_mm = float(_project_to_polyline_arc(
+            bolt_end_arc_mm = float(project_to_polyline_arc(
                 centerline, es + float(be_arc) * seed_dir,
             ))
             for p in (emission.placed_ras or []):
-                placed_arcs.append(float(_project_to_polyline_arc(
+                placed_arcs.append(float(project_to_polyline_arc(
                     centerline, np.asarray(p, dtype=float),
                 )))
     except Exception as exc:

@@ -71,11 +71,19 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "MatchedFilterResult":                                ("matched_filter", "MatchedFilterResult"),
     "SIGMA_CONTACT_MM_DEFAULT":                           ("matched_filter", "SIGMA_CONTACT_MM_DEFAULT"),
     "matched_filter_pick":                                ("matched_filter", "matched_filter_pick"),
-    # contact_placement_v2 — matched-filter scoring on a walker disk-stat
-    # signal. Composes estimate_bolt_end_from_metal_mass + the matched
-    # filter primitive. Bolt-less fallback handles CT-FOV-cropped bolts
-    # (project_autofit_misses_2026-05-06.md). The matcher's correlation
-    # score is the trajectory validator.
+    # contact_placement (staged) — public 5-mode dispatcher + composer.
+    # See handoff_v3_production_lift_2026-05-09.md.
+    "PlacementCtx":                                       ("contact_placement", "PlacementCtx"),
+    "place_seed":                                         ("contact_placement", "place_seed"),
+    "run_two_pass":                                       ("contact_placement", "run_two_pass"),
+    "apply_subject_fft_normalization":                    ("contact_placement", "apply_subject_fft_normalization"),
+    # placement_modes — 5-mode user-facing API (mode 4 in Session 1).
+    "PlacedTrajectory":                                   ("placement_modes", "PlacedTrajectory"),
+    "PlacementBatch":                                     ("placement_modes", "PlacementBatch"),
+    "Seed":                                               ("placement_modes", "Seed"),
+    "place_seeg":                                         ("placement_modes", "place_seeg"),
+    # contact_placement_v2 — DEPRECATED shim (lazy-loaded only for
+    # unified_detect + the v2-specific test). Will be removed in Session 4.
     "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement_v2", "MIN_CORR_FOR_REAL_SHANK"),
     "MAX_SLOT_CC_VOLUME_P90_MM3":                         ("contact_placement_v2", "MAX_SLOT_CC_VOLUME_P90_MM3"),
     "MIN_SLOT_HU_MEAN":                                   ("contact_placement_v2", "MIN_SLOT_HU_MEAN"),

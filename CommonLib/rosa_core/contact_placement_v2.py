@@ -1,28 +1,35 @@
-"""V2 contact placement: matched-filter scoring on a walker-disk-stat signal.
+"""Backward-compatibility shim for ``contact_placement_v2``.
 
-Composes already-shipped primitives:
-  - ``estimate_bolt_end_from_metal_mass`` → bolt-end arc + polynomial centerline
-  - ``sample_disk_along_polyline`` → walker max-disk-stat signal along centerline
-  - ``matched_filter_pick`` → Pearson cross-correlation library scoring
+All algorithmic content has moved to the ``rosa_core.contact_placement``
+package as part of the 2026-05-09 staged-pipeline refactor (see
+``handoff_v3_production_lift_2026-05-09.md``). This file is a thin re-export
+layer kept so existing callers keep working through the migration:
 
-Replaces the older RANSAC + LoG-blob pipeline in ``contact_placement.py``
-with a single-knob (σ_contact ≈ 1 mm) matcher that doesn't depend on
-detected blob clusters.
+* ``rosa_core.unified_detect`` (will be deleted in Session 4)
+* ``rosa_core.emission_qc`` (will migrate in Session 4)
+* ``tests/rosa_core/test_contact_placement_v2.py`` (will be migrated /
+  superseded in Session 4)
+* External notebook code that has been updated to use the new package
+  directly is unaffected.
 
-Bolt-less fallback: when ``estimate_bolt_end_from_metal_mass`` returns
-``None`` or collapses the contact zone (bolt_end ≥ centerline length −
-``DEGENERATE_CONTACT_ZONE_MM``), treat the seed axis itself as the
-contact zone (``bolt_end_arc_mm = 0``, no tip extension, no synth bolt).
-This recovers shanks whose bolt is cropped at the CT FOV edge (per
-``project_autofit_misses_2026-05-06.md``: AMC137 LI/LPT/RI/RU).
+To migrate caller code, change:
 
-The matched filter's correlation score acts as the **trajectory
-validator**: high ``corr_score`` (≥ ``min_corr``) = real shank, low
-score = drop. No separate "must have bolt" / "must pass Frangi
-median" gates needed (per user 2026-05-06).
+    from rosa_core.contact_placement_v2 import (
+        _snap_centerline_to_centroid, _extend_centerline_tail, ...
+    )
 
-This module is **additive** — does not modify ``contact_placement.py``.
-Callers can adopt incrementally.
+to:
+
+    from rosa_core.contact_placement import (
+        snap_centerline_to_centroid, extend_centerline_tail, ...
+    )
+
+Note the leading-underscore drop — the helpers are public surface in the
+new package.
+
+The remaining live function is ``place_contacts_for_seed_v2`` itself, which
+``unified_detect`` still uses; once unified_detect is deleted, this whole
+file goes too.
 """
 from __future__ import annotations
 
@@ -31,6 +38,33 @@ from typing import Any, Sequence
 
 import numpy as np
 
+from .contact_placement import (
+    CC_HU_THRESHOLD,
+    CC_ROI_HALF_MM,
+    DEGENERATE_CONTACT_ZONE_MM,
+    MAX_SLOT_CC_VOLUME_P90_MM3,
+    MIN_CORR_FOR_REAL_SHANK,
+    MIN_SLOT_HU_MEAN,
+    SNAP_LOG_THRESHOLD,
+    SNAP_RADIUS_MM,
+    SNAP_SMOOTH_WINDOW,
+    SNAP_STEP_MM,
+    WALK_DISK_RADIUS_MM,
+    WALK_FIRST_CONTACT_MIN_MM,
+    WALK_HU_MIN,
+    WALK_N_ANGLES,
+    WALK_N_RADII,
+    WALK_STEP_MM,
+    WALK_TIP_PAD_MM,
+    extend_centerline_tail as _extend_centerline_tail,
+    polyline_at_arc as _polyline_pos_at_arc,
+    polyline_pos_tan as _polyline_pos_tan,
+    polyline_segments as _polyline_segments,
+    project_to_polyline_arc as _project_to_polyline_arc,
+    slot_cc_volume_mm3 as _slot_cc_volume_mm3,
+    snap_centerline_to_centroid as _snap_centerline_to_centroid,
+    straight_centerline as _straight_centerline,
+)
 from .matched_filter import (
     SIGMA_CONTACT_MM_DEFAULT,
     MatchedFilterResult,
@@ -38,100 +72,21 @@ from .matched_filter import (
 )
 
 
-# ---------------------------------------------------------------------
-# Defaults — physical, not tuned
-# ---------------------------------------------------------------------
-
-WALK_STEP_MM = 0.25                      # walker arc resolution
-WALK_DISK_RADIUS_MM = 1.0                # contact half-diameter
-WALK_FIRST_CONTACT_MIN_MM = 1.0          # bolt-to-first-contact gap
-WALK_TIP_PAD_MM = 3.0                    # tip slack for axis under-reach (standard mode)
-WALK_HU_MIN = 1000.0                     # disk-sample min HU (above this = metal-ish)
-
-# Centerline snap to local metal centroid (Stage 3 in the staged-walker
-# pipeline). Recenters the polynomial centerline on local
-# contact-bright centroids; fixes placements where the polynomial axis
-# is laterally offset by 1-2 mm from the actual electrode.
-#
-# The centroid signal is **−LoG σ=1**, not raw HU. LoG response is
-# calibrated by the σ=1 kernel and gives a sharp negative spike at
-# discrete contact centers (the same signal stage-1 blob extraction
-# uses). Raw HU varies subject-to-subject (different scanners,
-# acquisition protocols), and HU-based snap with the previous default
-# threshold (1000) chose the wrong library model on T4/RHH because
-# between-contact wire voxels (HU 500-1000) sit right at the boundary,
-# adding noise to the per-bin centroid. The −LoG of those wire voxels
-# is shallow, so they don't contribute to the LoG-based centroid.
-#
-# Probe results on T4/RHH (with 2 mm tip extension):
-#   HU-snap @ 1000 (old default): DIXI-18CM corr=0.338  (broken)
-#   HU-snap @ 1800-2000:           DIXI-12AM corr=0.87-0.90 (fragile, subject-tuned)
-#   −LoG-snap @ 500-1500:          DIXI-12AM corr=0.84-0.93 (robust 3× wider band)
-# 500 matches stage-1 LOG_BLOB_THRESHOLD: "this is a metal-bright
-# local minimum" — the codebase's existing calibration constant.
-SNAP_RADIUS_MM = 2.0
-SNAP_LOG_THRESHOLD = 500.0
-SNAP_STEP_MM = 0.5
-SNAP_SMOOTH_WINDOW = 5
-
-DEGENERATE_CONTACT_ZONE_MM = 5.0         # if cl_max - bolt_end < this, treat as bolt-less
-
-# Walker disk-stat sampling. n_radii × n_angles + 1 = sample count per
-# disk. The probe-tested config (3 × 12 + 1 = 37 samples) gives more
-# stable correlation than `sample_disk_along_polyline`'s defaults
-# (2 × 8 + 1 = 17 samples) — the matched filter Pearson correlation
-# is sensitive to sample noise at low signal arcs.
-WALK_N_RADII = 3
-WALK_N_ANGLES = 12
-
-# Validator threshold. Below this, the matcher's pick is too weak to
-# trust as a real shank. Calibrated 2026-05-06 on the 6-subject dataset:
-# real shanks score 0.5-0.95, AMC91/SuraceContacts (atypical) scores
-# 0.66, AMC137 cropped-bolt-less shanks score 0.37-0.69. Setting the
-# threshold to 0.35 keeps real shanks in and rejects no-signal cases.
-MIN_CORR_FOR_REAL_SHANK = 0.35
-
-# Per-slot HU floor for the unseeded validator. Real-shank slot HU is
-# 1500-3000+ across all contacts; cross-shank/bone FP chains average
-# 900-1500. 1500 cleanly drops 7 of 12 GENUINE_FP orphans on the dataset
-# at the cost of one TP (AMC91 / hetero shank with mean=1285). Set to
-# None to disable.
-MIN_SLOT_HU_MEAN = 1500.0
-
-# Per-slot connected-component volume cap. A real PMT/DIXI contact is a
-# 1.3 mm × 2 mm cylinder of platinum-iridium ≈ 2.6 mm³ of saturating-HU
-# metal. Adjacent contacts and the wire connecting them inflate the
-# saturating-HU CC up to ~140 mm³ within a 5 mm half-extent ROI. Bone-
-# spike chains, surgical clips, and multi-shank wire bundles do not
-# obey this physical bound — at least one slot lands in unbounded bone.
-#
-# We measure the 90th-percentile of per-slot CC volumes and cap it at
-# 150 mm³ — calibrated 2026-05-08 on the 6-subject dataset:
-#
-#   MATCHED (n=64): vol_p90 max=142.3 mm³  (real shanks)
-#   ORPHAN  (n=9):  vol_p90 min=166.1 mm³  (bone chains)
-#
-# This is direction A from the 2026-05-07 v2 handoff. The walker self-
-# aligns to peaks so per-slot HU thresholds share its blind spot, but
-# CC volume is a topological measurement the walker cannot fake.
-MAX_SLOT_CC_VOLUME_P90_MM3 = 150.0
-CC_HU_THRESHOLD = 1500.0
-CC_ROI_HALF_MM = 5.0
+# Underscore-prefixed alias for the legacy "_ortho_uv" name.
+def _ortho_uv(tangent: np.ndarray):
+    """Alias for the new public ``ortho_uv`` (kept for legacy import paths)."""
+    from .contact_placement.polyline import ortho_uv
+    return ortho_uv(tangent)
 
 
 # ---------------------------------------------------------------------
-# Result
+# Result dataclass — unchanged
 # ---------------------------------------------------------------------
 
 
 @dataclass
 class PlacementV2Result:
-    """Result of ``place_contacts_for_seed_v2``.
-
-    ``success=False`` indicates the matcher couldn't find a model OR the
-    correlation was below ``min_corr_for_real_shank``. ``corr_score``
-    is the Pearson correlation against the winning library template.
-    """
+    """Result of ``place_contacts_for_seed_v2``."""
 
     success: bool
     model_id: str | None
@@ -146,227 +101,8 @@ class PlacementV2Result:
 
 
 # ---------------------------------------------------------------------
-# Polyline helpers (also used by the walker)
+# Live function — kept until unified_detect is deleted in Session 4
 # ---------------------------------------------------------------------
-
-
-def _polyline_segments(polyline: np.ndarray):
-    """Returns (starts, dirs, lens, cum_start) for a (K,3) polyline."""
-    P = np.asarray(polyline, dtype=float)
-    if P.ndim != 2 or P.shape[1] != 3 or P.shape[0] < 2:
-        raise ValueError("polyline must be (K,3) with K>=2")
-    diffs = np.diff(P, axis=0)
-    lens = np.linalg.norm(diffs, axis=1)
-    keep = lens > 1e-9
-    if not keep.any():
-        raise ValueError("polyline has zero arc length")
-    starts = P[:-1][keep]
-    diffs = diffs[keep]
-    lens = lens[keep]
-    dirs = diffs / lens[:, None]
-    cum_start = np.concatenate([[0.0], np.cumsum(lens[:-1])])
-    return starts, dirs, lens, cum_start
-
-
-def _polyline_pos_at_arc(polyline: np.ndarray, arc_mm: float) -> np.ndarray:
-    """Position on the polyline at the given arc length."""
-    starts, dirs, lens, cum_start = _polyline_segments(polyline)
-    total = float(cum_start[-1] + lens[-1])
-    if arc_mm <= 0.0:
-        return starts[0].copy()
-    if arc_mm >= total:
-        return starts[-1] + lens[-1] * dirs[-1]
-    i = int(np.searchsorted(cum_start + lens, arc_mm, side="right"))
-    i = min(i, len(starts) - 1)
-    t = arc_mm - cum_start[i]
-    return starts[i] + t * dirs[i]
-
-
-def _project_to_polyline_arc(polyline: np.ndarray, point_ras: np.ndarray) -> float:
-    """Arc-length of the closest polyline point to ``point_ras``."""
-    starts, dirs, lens, cum_start = _polyline_segments(polyline)
-    pt = np.asarray(point_ras, dtype=float)
-    best_d = np.inf
-    best_arc = 0.0
-    for i in range(len(starts)):
-        a = starts[i]; L = lens[i]; u = dirs[i]
-        t = float(np.clip((pt - a) @ u, 0.0, L))
-        proj = a + t * u
-        d = float(np.linalg.norm(pt - proj))
-        if d < best_d:
-            best_d = d
-            best_arc = float(cum_start[i] + t)
-    return best_arc
-
-
-def _straight_centerline(start: np.ndarray, end: np.ndarray, n_points: int = 64) -> np.ndarray:
-    """Discretize a straight start→end segment into ``n_points``."""
-    s = np.asarray(start, dtype=float)
-    e = np.asarray(end, dtype=float)
-    ts = np.linspace(0.0, 1.0, n_points)
-    return np.array([s + t * (e - s) for t in ts])
-
-
-def _extend_centerline_tail(centerline: np.ndarray, extra_mm: float) -> np.ndarray:
-    """Extend the centerline past its deep endpoint by ``extra_mm`` along
-    the local tail tangent. Lets the walker sample signal slightly past
-    the auto-fit axis tip — allows the matched filter to evaluate model
-    tip positions that fall just past the polynomial endpoint.
-    """
-    if extra_mm <= 1e-6:
-        return centerline
-    cl = np.asarray(centerline, dtype=float)
-    tail_dir = cl[-1] - cl[-2]
-    tail_len = float(np.linalg.norm(tail_dir))
-    if tail_len < 1e-9:
-        return cl
-    tail_unit = tail_dir / tail_len
-    new_tip = cl[-1] + tail_unit * float(extra_mm)
-    return np.vstack([cl, new_tip[None, :]])
-
-
-def _polyline_pos_tan(polyline: np.ndarray, arc_mm: float):
-    """Position + unit tangent on the polyline at the given arc."""
-    starts, dirs, lens, cum_start = _polyline_segments(polyline)
-    total = float(cum_start[-1] + lens[-1])
-    if arc_mm <= 0.0:
-        return starts[0].copy(), dirs[0]
-    if arc_mm >= total:
-        return starts[-1] + lens[-1] * dirs[-1], dirs[-1]
-    i = int(np.searchsorted(cum_start + lens, arc_mm, side="right"))
-    i = min(i, len(starts) - 1)
-    t = arc_mm - cum_start[i]
-    return starts[i] + t * dirs[i], dirs[i]
-
-
-def _ortho_uv(tangent: np.ndarray):
-    any_v = np.array([1.0, 0.0, 0.0]) if abs(tangent[0]) <= 0.9 else np.array([0.0, 1.0, 0.0])
-    u = np.cross(tangent, any_v); u /= np.linalg.norm(u)
-    v = np.cross(tangent, u);     v /= np.linalg.norm(v)
-    return u, v
-
-
-def _snap_centerline_to_centroid(
-    centerline: np.ndarray, log_arr_kji, r2i,
-    *, snap_radius_mm: float = SNAP_RADIUS_MM,
-    step_mm: float = SNAP_STEP_MM,
-    log_threshold: float = SNAP_LOG_THRESHOLD,
-    n_radii: int = 4, n_angles: int = 16,
-    smooth_window: int = SNAP_SMOOTH_WINDOW,
-) -> np.ndarray:
-    """Recenter ``centerline`` arc-by-arc on the local LoG-bright centroid.
-
-    Sample a perpendicular disk around each arc-position; weight each
-    in-disk voxel by ``max(0, -LoG - log_threshold)`` (positive at metal-
-    bright local minima); shift the arc position to the weighted
-    centroid. Smooth the resulting polyline with a uniform filter
-    (window ``smooth_window``).
-
-    Why LoG (not raw HU): LoG σ=1 is a calibrated metal-bright detector
-    — its threshold (default ``LOG_BLOB_THRESHOLD = 500`` per stage 1)
-    is invariant to subject-level CT acquisition / windowing. Raw-HU
-    snap with the previous default (1000) admitted between-contact wire
-    voxels (HU 500-1000) into the centroid in some configurations and
-    chose the wrong library model on borderline cases like T4/RHH.
-    Switching to −LoG centroid gives a stable model pick across the
-    7-subject benchmark without subject-level threshold tuning.
-    """
-    from .volume_sampling import sample_trilinear_batch
-    from scipy.ndimage import uniform_filter1d
-
-    starts, dirs, lens, cum_start = _polyline_segments(centerline)
-    total_arc = float(cum_start[-1] + lens[-1])
-    arcs = np.arange(0.0, total_arc + 0.5 * step_mm, step_mm)
-    snapped = np.zeros((len(arcs), 3), dtype=float)
-    # Pre-compute disk offset templates in (u, v) basis once.
-    n_per_disk = n_radii * n_angles
-    off_u = np.zeros(n_per_disk, dtype=float)
-    off_v = np.zeros(n_per_disk, dtype=float)
-    idx = 0
-    for r_i in range(1, n_radii + 1):
-        rr = snap_radius_mm * r_i / n_radii
-        for a_i in range(n_angles):
-            ang = 2.0 * np.pi * a_i / n_angles
-            off_u[idx] = rr * np.cos(ang)
-            off_v[idx] = rr * np.sin(ang)
-            idx += 1
-    for ai, t in enumerate(arcs):
-        center, tangent = _polyline_pos_tan(centerline, float(t))
-        u, v = _ortho_uv(tangent)
-        # (n_per_disk, 3) batch of perpendicular-disk sample points.
-        pts = (center[None, :]
-               + off_u[:, None] * u[None, :]
-               + off_v[:, None] * v[None, :])
-        log_vals = sample_trilinear_batch(log_arr_kji, r2i, pts)
-        # LoG is NEGATIVE at metal-bright local minima. Negate so the
-        # centroid signal is positive at metal — same convention as HU
-        # would be (high = metal-like) but calibration-invariant.
-        sig = -log_vals
-        valid = np.isfinite(sig) & (sig > log_threshold)
-        if np.any(valid):
-            w = sig[valid] - log_threshold
-            mu = float((w * off_u[valid]).sum() / w.sum())
-            mv = float((w * off_v[valid]).sum() / w.sum())
-            snapped[ai] = center + mu * u + mv * v
-        else:
-            snapped[ai] = center
-    if smooth_window > 1:
-        snapped = uniform_filter1d(snapped, size=smooth_window, axis=0, mode="nearest")
-    return snapped
-
-
-# ---------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------
-
-
-def _slot_cc_volume_mm3(
-    ct_arr_kji: np.ndarray, r2i: np.ndarray, slot_ras: np.ndarray,
-    spacing_xyz: tuple[float, float, float],
-    hu_threshold: float = CC_HU_THRESHOLD,
-    roi_half_mm: float = CC_ROI_HALF_MM,
-) -> float:
-    """Volume (mm³) of the saturating-HU connected component containing
-    ``slot_ras`` (or the nearest above-threshold voxel) within a ROI cube
-    of half-extent ``roi_half_mm``.
-
-    Returns 0.0 if no above-threshold voxel exists in the ROI at all.
-    """
-    from scipy.ndimage import label as _cc_label
-
-    pt_h = np.array([slot_ras[0], slot_ras[1], slot_ras[2], 1.0])
-    ijk = (r2i @ pt_h)[:3]
-    i_idx = int(round(ijk[0])); j_idx = int(round(ijk[1])); k_idx = int(round(ijk[2]))
-
-    sx, sy, sz = float(spacing_xyz[0]), float(spacing_xyz[1]), float(spacing_xyz[2])
-    half_i = max(2, int(np.ceil(roi_half_mm / sx)))
-    half_j = max(2, int(np.ceil(roi_half_mm / sy)))
-    half_k = max(2, int(np.ceil(roi_half_mm / sz)))
-
-    K, J, I = ct_arr_kji.shape
-    k_lo = max(0, k_idx - half_k); k_hi = min(K, k_idx + half_k + 1)
-    j_lo = max(0, j_idx - half_j); j_hi = min(J, j_idx + half_j + 1)
-    i_lo = max(0, i_idx - half_i); i_hi = min(I, i_idx + half_i + 1)
-    if k_hi <= k_lo or j_hi <= j_lo or i_hi <= i_lo:
-        return 0.0
-
-    roi = ct_arr_kji[k_lo:k_hi, j_lo:j_hi, i_lo:i_hi]
-    mask = roi >= hu_threshold
-    if not mask.any():
-        return 0.0
-    labels, _ = _cc_label(mask)
-
-    rk = int(np.clip(k_idx - k_lo, 0, mask.shape[0] - 1))
-    rj = int(np.clip(j_idx - j_lo, 0, mask.shape[1] - 1))
-    ri = int(np.clip(i_idx - i_lo, 0, mask.shape[2] - 1))
-    slot_label = int(labels[rk, rj, ri])
-    if slot_label == 0:
-        ks, js, is_ = np.where(mask)
-        d = (ks - rk) ** 2 + (js - rj) ** 2 + (is_ - ri) ** 2
-        n = int(np.argmin(d))
-        slot_label = int(labels[ks[n], js[n], is_[n]])
-    cc_voxels = int((labels == slot_label).sum())
-    return cc_voxels * (sx * sy * sz)
 
 
 def place_contacts_for_seed_v2(
@@ -391,33 +127,15 @@ def place_contacts_for_seed_v2(
 ) -> PlacementV2Result:
     """Place contacts on a seed trajectory using the matched-filter pipeline.
 
-    Args:
-        seed_start_ras, seed_end_ras: trajectory endpoints in RAS.
-        features: dict from ``rosa_detect.guided_fit_engine.compute_features``
-            providing at minimum ``ct_arr_kji``, ``ras_to_ijk_mat``,
-            ``ijk_to_ras_mat``, ``head_distance``.
-        library_models: candidate electrode models.
-        sigma_contact_mm: matched-filter Gaussian σ (≈ contact half-length).
-        min_corr_for_real_shank: drop placements with corr below this.
-        min_slot_hu_mean: optional opt-in HU floor for the unseeded
-            validator. Set to ``MIN_SLOT_HU_MEAN`` (1500) on the
-            unseeded path; ``None`` (default) on the seeded path.
-        max_slot_cc_volume_p90_mm3: optional opt-in cap on the 90th
-            percentile of per-slot saturating-HU connected-component
-            volumes. Drops bone-spike chains and surgical-clip artifacts
-            that the matched filter can't distinguish from real shanks.
-            Set to ``MAX_SLOT_CC_VOLUME_P90_MM3`` (150) on the unseeded
-            path; ``None`` (default) on the seeded path.
-        cc_hu_threshold, cc_roi_half_mm: HU floor and ROI half-extent
-            for the CC measurement.
-        walk_*: walker disk-stat sampling knobs.
-
-    Returns:
-        ``PlacementV2Result``. ``success=False`` if the matcher rejects
-        or the correlation is below the threshold.
+    See module docstring — this function is being phased out in favor of
+    ``rosa_core.contact_placement.place_seed`` (the staged equivalent).
+    Kept identical to the pre-refactor implementation so unified_detect's
+    behavior is unchanged through the migration.
     """
-    from .contact_placement import estimate_bolt_end_from_metal_mass
-    from .contact_placement import sample_disk_along_polyline
+    from .contact_placement import (
+        estimate_bolt_end_from_metal_mass,
+        sample_disk_along_polyline,
+    )
 
     s = np.asarray(seed_start_ras, dtype=float)
     e = np.asarray(seed_end_ras, dtype=float)
@@ -430,23 +148,9 @@ def place_contacts_for_seed_v2(
         )
 
     ct_arr = features["ct_arr_kji"]
-    log_arr = features.get("log")  # LoG σ=1; used by the centerline snap
+    log_arr = features.get("log")
     r2i = np.asarray(features["ras_to_ijk_mat"], dtype=float)
 
-    # Stage 1+2: bolt-end estimate.
-    #
-    # ``estimate_bolt_end_from_metal_mass`` walks forward from the metal-
-    # mass peak assuming the bolt is at the seed start. When the seed is
-    # reversed (bolt at end), the walk falls off the end and returns
-    # None — v2 then falls into bolt_less mode unnecessarily, with worse
-    # centerline snap and contacts placed in low-HU positions.
-    #
-    # Stage1 chains are emitted in arbitrary direction (LoG-blob walk
-    # order, not ROSA convention) and several GT files label contacts
-    # deep-to-superficial — both produce reversed seeds. So always try
-    # both directions and take whichever yields a valid bolt_end with a
-    # non-degenerate contact zone. Verified 2026-05-08 on AMC135/hetero-
-    # mid-M and AMC137/LPT, both recoverable via seed-flip.
     def _try_bolt_end(seed_start, seed_end):
         try:
             be = estimate_bolt_end_from_metal_mass(
@@ -459,7 +163,6 @@ def place_contacts_for_seed_v2(
         cp = be.get("centerline")
         if be_arc is None or cp is None:
             return None, None
-        # Reject degenerate (no contact zone left after the bolt).
         cp_total = float(np.linalg.norm(np.diff(cp, axis=0), axis=1).sum())
         if cp_total - float(be_arc) < DEGENERATE_CONTACT_ZONE_MM:
             return None, None
@@ -467,15 +170,12 @@ def place_contacts_for_seed_v2(
 
     bolt_end_straight, cp = _try_bolt_end(s, e)
     if bolt_end_straight is None:
-        # Try reversed seed.
         be_rev, cp_rev = _try_bolt_end(e, s)
         if be_rev is not None:
-            # Adopt the reversed seed for the rest of the pipeline.
             s, e = e, s
             seed_len = float(np.linalg.norm(e - s))
             bolt_end_straight, cp = be_rev, cp_rev
 
-    # Decide bolt-less fallback vs standard.
     use_fallback = bolt_end_straight is None or cp is None
 
     if use_fallback:
@@ -485,15 +185,9 @@ def place_contacts_for_seed_v2(
         max_extend = 0.0
     else:
         centerline_poly = np.asarray(cp, dtype=float)
-        # Stage 3: snap polynomial centerline to local high-HU centroid
-        # (recovers ~5-10% of placements where the polynomial axis is
-        # 1-2 mm off the actual electrode axis).
         if log_arr is not None:
             centerline = _snap_centerline_to_centroid(centerline_poly, log_arr, r2i)
         else:
-            # Caller passed features without 'log'; fall through with the
-            # polynomial centerline directly. Mirrors what callers got
-            # before the snap was added.
             centerline = centerline_poly
         u_str = (e - s) / seed_len
         bolt_pt = s + float(bolt_end_straight) * u_str
@@ -501,14 +195,8 @@ def place_contacts_for_seed_v2(
         bolt_source = "metal"
         max_extend = walk_tip_pad_mm
 
-    # Centerline arc-length total (un-extended; this is the "true"
-    # contact-zone length the matcher considers via profile_end_arc).
     cl_max = float(np.linalg.norm(np.diff(centerline, axis=0), axis=1).sum())
 
-    # Stage 4: walker disk-stat sampling. Extend the centerline tail by
-    # ``walk_tip_pad_mm`` so the walker samples signal slightly past the
-    # auto-fit axis tip — lets the matched filter evaluate model tip
-    # positions that fall just past the polynomial endpoint.
     centerline_for_walker = _extend_centerline_tail(centerline, max_extend)
     arcs, max_b, _total_b = sample_disk_along_polyline(
         ct_arr, r2i, centerline_for_walker,
@@ -519,7 +207,6 @@ def place_contacts_for_seed_v2(
     )
     signal = max_b
 
-    # Stage 5: matched-filter library pick.
     match: MatchedFilterResult = matched_filter_pick(
         arcs, signal, library_models,
         bolt_end_arc=bolt_end_cl_arc,
@@ -539,7 +226,6 @@ def place_contacts_for_seed_v2(
             diagnostics={"cl_max_mm": cl_max, "in_zone_p75": float(np.percentile(signal, 75))},
         )
 
-    # Validator gate: matched-filter score is the trajectory check.
     if match.corr < float(min_corr_for_real_shank):
         return PlacementV2Result(
             success=False, model_id=match.best_model_id, placed_ras=[],
@@ -549,13 +235,9 @@ def place_contacts_for_seed_v2(
             rejected_reason=f"corr_below_threshold({match.corr:.3f}<{min_corr_for_real_shank:.3f})",
         )
 
-    # Convert slot arcs to RAS placements along the centerline.
     placed = [_polyline_pos_at_arc(centerline, float(a)).tolist()
-               for a in match.slot_arcs]
+              for a in match.slot_arcs]
 
-    # Per-slot HU floor: real-shank slot HU is consistently 1500-3000+;
-    # cross-shank/bone FP chains average lower. Optional opt-in filter
-    # (default off in seeded mode where caller has a known-good axis).
     if min_slot_hu_mean is not None:
         from .volume_sampling import sample_trilinear_at_ras
         slot_hus = []
@@ -576,9 +258,6 @@ def place_contacts_for_seed_v2(
                 diagnostics={"slot_hu_mean": slot_hu_mean},
             )
 
-    # Per-slot CC-volume cap: bone-spike chains and surgical-clip
-    # artifacts have at least one slot whose saturating-HU connected
-    # component spans 150+ mm³ (vs ≤140 mm³ for real shanks).
     if max_slot_cc_volume_p90_mm3 is not None and placed:
         spacing_xyz = features["img"].GetSpacing()
         slot_volumes = [
@@ -589,8 +268,7 @@ def place_contacts_for_seed_v2(
             )
             for pt in placed
         ]
-        slot_volumes_arr = np.asarray(slot_volumes, dtype=float)
-        slot_cc_p90 = float(np.percentile(slot_volumes_arr, 90))
+        slot_cc_p90 = float(np.percentile(np.asarray(slot_volumes, dtype=float), 90))
         if slot_cc_p90 > float(max_slot_cc_volume_p90_mm3):
             return PlacementV2Result(
                 success=False, model_id=match.best_model_id, placed_ras=[],
@@ -623,9 +301,35 @@ def place_contacts_for_seed_v2(
 
 
 __all__ = [
-    "MIN_CORR_FOR_REAL_SHANK",
+    # Constants — re-exported from new package.
+    "CC_HU_THRESHOLD",
+    "CC_ROI_HALF_MM",
+    "DEGENERATE_CONTACT_ZONE_MM",
     "MAX_SLOT_CC_VOLUME_P90_MM3",
+    "MIN_CORR_FOR_REAL_SHANK",
     "MIN_SLOT_HU_MEAN",
+    "SNAP_LOG_THRESHOLD",
+    "SNAP_RADIUS_MM",
+    "SNAP_SMOOTH_WINDOW",
+    "SNAP_STEP_MM",
+    "WALK_DISK_RADIUS_MM",
+    "WALK_FIRST_CONTACT_MIN_MM",
+    "WALK_HU_MIN",
+    "WALK_N_ANGLES",
+    "WALK_N_RADII",
+    "WALK_STEP_MM",
+    "WALK_TIP_PAD_MM",
+    # Helpers (legacy underscore-prefixed names).
+    "_extend_centerline_tail",
+    "_ortho_uv",
+    "_polyline_pos_at_arc",
+    "_polyline_pos_tan",
+    "_polyline_segments",
+    "_project_to_polyline_arc",
+    "_slot_cc_volume_mm3",
+    "_snap_centerline_to_centroid",
+    "_straight_centerline",
+    # Live API.
     "PlacementV2Result",
     "place_contacts_for_seed_v2",
 ]
