@@ -169,40 +169,29 @@ from .candidate_seeds.constants import (  # noqa: F401
 # BOLT_MIN_VOXELS, BOLT_BASE_MAX_DIST_MM, etc.) live in
 # primitives.bolt_anchor and are imported at the top.
 
-# Library bounds + strategy-scoped walker constants live in
-# candidate_seeds.pitch_library. Re-exported here for back-compat.
+# Library bounds + WalkerBounds dataclass live in
+# candidate_seeds.pitch_library. Re-exported here for back-compat with
+# legacy callers that read them via cpfit.<name>.
 from .candidate_seeds.pitch_library import (  # noqa: F401
+    DEFAULT_WALKER_BOUNDS,
     LIBRARY_BOUNDS as _LIBRARY_BOUNDS,
+    WalkerBounds,
+    bounds_for_strategy,
     compute_library_bounds as _compute_library_bounds,
     library_bounds_for_strategy,
     model_vendor as _model_vendor,
-    strategy_global_overrides as _strategy_global_overrides,
-    StrategyBoundsScope as _StrategyBoundsScope,
-    with_strategy_bounds as _with_strategy_bounds,
 )
 
-# Library-derived strategy-scoped walker bounds. These DO live here
-# (not in constants.py) because StrategyBoundsScope mutates them on
-# this module's __dict__ for the duration of one detection call —
-# the walker / orchestrator / score read them back from cpfit at
-# call time. Cleanup target (Step 2 of the post-Phase-B work):
-# replace StrategyBoundsScope with an explicit WalkerBounds dataclass
-# passed through the orchestrator.
-MIN_LINE_SPAN_MM = (
-    _LIBRARY_BOUNDS["min_contact_span_mm"] - WALKER_SPAN_UNDER_SLACK_MM
-)
-MAX_LINE_SPAN_MM = (
-    _LIBRARY_BOUNDS["max_contact_span_mm"] + WALKER_SPAN_OVER_SLACK_MM
-)
-MAX_INLIER_GAP_MM = (
-    _LIBRARY_BOUNDS["max_within_electrode_pitch_mm"] + WALKER_GAP_SLACK_MM
-)
-MIN_POST_ANCHOR_LEN_MM = (
-    _LIBRARY_BOUNDS["min_contact_span_mm"] + BOLT_PROTRUSION_MIN_MM
-)
-MAX_POST_ANCHOR_LEN_MM = (
-    _LIBRARY_BOUNDS["max_contact_span_mm"] + ANCHOR_TOTAL_OVERSHOOT_MM
-)
+# Library-derived SEEG-default walker bounds, exposed at module level
+# for back-compat with legacy callers (probes, tests) that read these
+# names directly. The active per-call bounds now flow through
+# WalkerBounds passed explicitly by the orchestrator; module-level
+# values here are no longer mutated.
+MIN_LINE_SPAN_MM = DEFAULT_WALKER_BOUNDS.min_line_span_mm
+MAX_LINE_SPAN_MM = DEFAULT_WALKER_BOUNDS.max_line_span_mm
+MAX_INLIER_GAP_MM = DEFAULT_WALKER_BOUNDS.max_inlier_gap_mm
+MIN_POST_ANCHOR_LEN_MM = DEFAULT_WALKER_BOUNDS.min_post_anchor_len_mm
+MAX_POST_ANCHOR_LEN_MM = DEFAULT_WALKER_BOUNDS.max_post_anchor_len_mm
 
 
 # ---- Pitch strategy + auto-detection ---------------------------------
@@ -271,8 +260,8 @@ from .candidate_seeds.confidence_score import (  # noqa: F401
     trapezoid_score as _trapezoid_score,
 )
 # Two-stage detection orchestrator (top-level entry point of the v1
-# detector). The function is `@with_strategy_bounds`-decorated inside
-# the new module, so the bound version flows through transparently.
+# detector). The orchestrator computes strategy-scoped WalkerBounds
+# at entry and threads them explicitly to every stage.
 from .candidate_seeds.orchestrator import (  # noqa: F401
     run_two_stage_detection,
 )

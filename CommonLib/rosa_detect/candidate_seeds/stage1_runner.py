@@ -33,10 +33,12 @@ from .constants import (
     STAGE1_DEDUP_PERP_MM,
 )
 from .frangi_sampling import frangi_along_line_stats, median_inlier_pitch
+from .pitch_library import DEFAULT_WALKER_BOUNDS, WalkerBounds
 from .walker import refit_line_from_inliers, walk_line
 
 
-def arbitrate_blob_ownership(stage1_lines, pts_c, amps_c):
+def arbitrate_blob_ownership(stage1_lines, pts_c, amps_c,
+                              bounds: WalkerBounds | None = None):
     """Resolve inlier contention. For each blob claimed by multiple
     lines, award it to the line whose axis is closest (smallest perp
     distance). Lines re-fit on reduced inlier sets; those below the
@@ -73,6 +75,7 @@ def arbitrate_blob_ownership(stage1_lines, pts_c, amps_c):
         new_line["inlier_idx"] = new_inliers
         refit = refit_line_from_inliers(
             new_line, pts_c, amps_c, min_blobs=MIN_BLOBS_POST_ARBITRATION,
+            bounds=bounds,
         )
         if refit is not None:
             kept.append(refit)
@@ -80,7 +83,8 @@ def arbitrate_blob_ownership(stage1_lines, pts_c, amps_c):
 
 
 def second_pass_orphan_walker(existing_lines, pts_c, amps_c,
-                               pitches_mm=(PITCH_MM,)):
+                               pitches_mm=(PITCH_MM,),
+                               bounds: WalkerBounds | None = None):
     """Re-run the pitch walker on blobs not claimed by any surviving
     line. Recovers electrodes whose only first-pass hypothesis was a
     bridging line that arbitration killed.
@@ -107,7 +111,7 @@ def second_pass_orphan_walker(existing_lines, pts_c, amps_c,
         iu, ju = np.where(np.triu(pair_mask, k=1))
         for pi, pj in zip(iu, ju):
             h = walk_line(int(pi), int(pj), orphan_pts, orphan_amps,
-                           pitch_mm=pitch)
+                           pitch_mm=pitch, bounds=bounds)
             if h is None:
                 continue
             h["inlier_idx"] = [int(orphan_idx[i]) for i in h["inlier_idx"]]
@@ -125,7 +129,8 @@ def extend_deep_end(line, pts_c, amps_c, claimed_blobs,
                      max_gap_mm: float = EXTEND_MAX_GAP_MM,
                      perp_tol_mm: float = EXTEND_PERP_TOL_MM,
                      max_extra: int = EXTEND_MAX_EXTRA,
-                     max_outer_iter: int = EXTEND_MAX_OUTER_ITER):
+                     max_outer_iter: int = EXTEND_MAX_OUTER_ITER,
+                     bounds: WalkerBounds | None = None):
     """Walk outward from the current deepest AND shallowest inliers,
     snapping to unclaimed blobs within ``max_gap_mm`` along the axis.
     Refits axis after each pass; iterates until convergence.
@@ -189,7 +194,7 @@ def extend_deep_end(line, pts_c, amps_c, claimed_blobs,
         if len(inliers) == n_pre:
             break  # converged
         line["inlier_idx"] = sorted(inliers)
-        refit = refit_line_from_inliers(line, pts_c, amps_c)
+        refit = refit_line_from_inliers(line, pts_c, amps_c, bounds=bounds)
         if refit is None:
             break
         line = refit
@@ -260,12 +265,15 @@ def dedup_stage1_lines(lines):
 
 
 def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
-                pitches_mm=None, frangi_arr=None):
+                pitches_mm=None, frangi_arr=None,
+                bounds: WalkerBounds | None = None):
     """Blob-pitch detector on the LoG σ=1 field.
 
     Returns ``(lines, pts_c)`` where pts_c are the contact-sized blob
     RAS positions used for stage-1 exclusion construction downstream.
     """
+    if bounds is None:
+        bounds = DEFAULT_WALKER_BOUNDS
     if pitches_mm is None or len(tuple(pitches_mm)) == 0:
         pitches_mm = (PITCH_MM,)
     pitches_mm = tuple(float(p) for p in pitches_mm)
@@ -292,7 +300,8 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
             pair_mask |= (dist >= lo) & (dist <= hi)
         iu, ju = np.where(np.triu(pair_mask, k=1))
         for pi, pj in zip(iu, ju):
-            h = walk_line(int(pi), int(pj), pts_c, amps_c, pitch_mm=pitch)
+            h = walk_line(int(pi), int(pj), pts_c, amps_c, pitch_mm=pitch,
+                           bounds=bounds)
             if h is not None:
                 h["seed_pitch_mm"] = float(pitch)
                 hyps.append(h)
@@ -313,7 +322,7 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
             l["original_median_pitch_mm"] = median_inlier_pitch(
                 pts_c[l["inlier_idx"]], l["axis"],
             )
-    lines = arbitrate_blob_ownership(lines, pts_c, amps_c)
+    lines = arbitrate_blob_ownership(lines, pts_c, amps_c, bounds=bounds)
 
     claimed: set[int] = set()
     for l in lines:
@@ -322,12 +331,13 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
     lines.sort(key=lambda l: -float(l.get("amp_sum", 0.0)))
     lines = [
         extend_deep_end(l, pts_c, amps_c, claimed,
-                         dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat)
+                         dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat,
+                         bounds=bounds)
         for l in lines
     ]
 
     second_pass_lines = second_pass_orphan_walker(
-        lines, pts_c, amps_c, pitches_mm=pitches_mm,
+        lines, pts_c, amps_c, pitches_mm=pitches_mm, bounds=bounds,
     )
     if second_pass_lines and frangi_arr is not None:
         kept_sp = []
@@ -351,7 +361,8 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
                 )
         second_pass_lines = [
             extend_deep_end(nl, pts_c, amps_c, claimed,
-                             dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat)
+                             dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat,
+                             bounds=bounds)
             for nl in second_pass_lines
         ]
         lines = lines + second_pass_lines

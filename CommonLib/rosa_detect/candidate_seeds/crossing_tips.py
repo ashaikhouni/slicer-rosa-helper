@@ -6,10 +6,10 @@ neighbour's contacts. :func:`retreat_crossing_tips` walks each such
 tip back along its own axis until clearance is restored AND the
 retreated tip sits on a real contact peak.
 
-Strategy-scoped ``MIN_POST_ANCHOR_LEN_MM`` is looked up via cpfit at
-call time so the ``StrategyBoundsScope`` context manager keeps working
-without this moved function needing to know about its mutation.
-Cleanup target for Move 7: pass bounds explicitly.
+The ``min_length_mm`` floor is the strategy-scoped
+``min_post_anchor_len_mm`` from :class:`WalkerBounds`; the orchestrator
+passes it explicitly. When omitted, falls back to
+``DEFAULT_WALKER_BOUNDS.min_post_anchor_len_mm``.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from .constants import (
     CROSSING_RETREAT_STEP_MM,
     CROSSING_TIP_CLEARANCE_MM,
 )
+from .pitch_library import DEFAULT_WALKER_BOUNDS
 
 
 def retreat_crossing_tips(anchored,
@@ -42,13 +43,11 @@ def retreat_crossing_tips(anchored,
        floating in the empty gap past it.
 
     Aborts on a given trajectory if retreat would shrink it below
-    ``min_length_mm`` (defaults to cpfit's current
-    ``MIN_POST_ANCHOR_LEN_MM`` so :class:`StrategyBoundsScope` swaps
-    are respected).
+    ``min_length_mm`` (defaults to
+    ``DEFAULT_WALKER_BOUNDS.min_post_anchor_len_mm``).
     """
     if min_length_mm is None:
-        from .. import contact_pitch_v1_fit as _cpfit
-        min_length_mm = _cpfit.MIN_POST_ANCHOR_LEN_MM
+        min_length_mm = DEFAULT_WALKER_BOUNDS.min_post_anchor_len_mm
 
     segs = []
     for rec in anchored:

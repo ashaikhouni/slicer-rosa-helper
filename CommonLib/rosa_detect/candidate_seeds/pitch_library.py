@@ -1,21 +1,21 @@
-"""Library bounds + strategy-scoped walker constants.
+"""Library bounds + per-strategy walker bounds.
 
 The v1 walker has bounds (min/max contacts, min/max span, max within-
-electrode pitch) derived from the bundled electrode-model library —
-filtered per pitch-strategy. The ``_with_strategy_bounds`` decorator +
-``_StrategyBoundsScope`` context manager swap module-level constants
-in cpfit for the duration of one detection call so the walker sees the
-bounds appropriate for the user-chosen strategy.
+electrode pitch) derived from the bundled electrode-model library and
+filtered per pitch-strategy. This module owns the library load and the
+``WalkerBounds`` immutable record threaded through the orchestrator
+into walker / score / crossing-tip retreat.
 
-Lifted from ``contact_pitch_v1_fit.py`` (Session 4 Phase B Move 3).
-The scope manager mutates ``contact_pitch_v1_fit.__dict__`` directly so
-the walker — which still reads constants as cpfit module-level names —
-sees the swapped values without having to be passed them. Will be
-cleaned up in Move 7 when the orchestrator owns this state.
+Earlier the same job was done by mutating ``contact_pitch_v1_fit``'s
+module dict for the duration of one call (via ``StrategyBoundsScope``
++ the ``with_strategy_bounds`` decorator). That pattern made the
+walker depend on cpfit at runtime. The dataclass below replaces it:
+the orchestrator computes a single ``WalkerBounds`` on entry and
+passes it explicitly to every stage that needs it.
 """
 from __future__ import annotations
 
-import inspect
+from dataclasses import dataclass
 
 from rosa_core.electrode_classifier import PITCH_STRATEGY_VENDORS
 
@@ -92,9 +92,7 @@ def compute_library_bounds(vendors=SEEG_VENDORS) -> dict:
     }
 
 
-# Module-load-time SEEG library bounds. Cpfit reads ``LIBRARY_BOUNDS``
-# from here and derives MIN_LINE_SPAN_MM etc. from it. Strategy-scoped
-# overrides happen at call time via ``_StrategyBoundsScope``.
+# Module-load-time SEEG library bounds.
 LIBRARY_BOUNDS: dict = compute_library_bounds()
 LIBRARY_PITCHES_MM: tuple = LIBRARY_BOUNDS["regular_pitches_mm"]
 
@@ -110,93 +108,86 @@ def library_bounds_for_strategy(strategy_key) -> dict:
     return compute_library_bounds(vendors)
 
 
-def strategy_global_overrides(bounds) -> dict:
-    """Translate a library-bounds dict into the module-level walker
-    constants the detector reads.
+@dataclass(frozen=True)
+class WalkerBounds:
+    """Library-derived strategy-scoped bounds threaded through the
+    detector pipeline.
 
-    NOTE: ``MIN_BLOBS_PER_LINE`` is intentionally NOT in this swap — it
-    is a geometric chain-formation floor (3), not a library-derived
-    bound. Letting strategy bounds shadow it caused the AMC137/LPT
-    parity bug: pmt_35 set MIN_BLOBS=8 (smallest PMT model) and rejected
-    LPT's chain that had <8 visible blobs.
+    Field-by-field meaning:
+
+    * ``min_line_span_mm`` / ``max_line_span_mm`` — accept-window for
+      the walker's pre-anchor inlier span (shallowest → deepest
+      contact). Library min/max contact span ± walker slack.
+    * ``max_inlier_gap_mm`` — largest axial gap allowed between
+      consecutive walker inliers. Library max within-electrode pitch +
+      slack for two consecutive missed contacts.
+    * ``min_post_anchor_len_mm`` / ``max_post_anchor_len_mm`` —
+      accept-window for the post-anchor total length (bolt-tip → deep
+      tip). Library contact span + bolt-protrusion / total-overshoot
+      slack.
+
+    Computed from a library-bounds dict by ``WalkerBounds.from_library``.
     """
-    return {
-        "MIN_LINE_SPAN_MM": float(bounds["min_contact_span_mm"]) - WALKER_SPAN_UNDER_SLACK_MM,
-        "MAX_LINE_SPAN_MM": float(bounds["max_contact_span_mm"]) + WALKER_SPAN_OVER_SLACK_MM,
-        "MAX_INLIER_GAP_MM": float(bounds["max_within_electrode_pitch_mm"]) + WALKER_GAP_SLACK_MM,
-        "MIN_POST_ANCHOR_LEN_MM": float(bounds["min_contact_span_mm"]) + BOLT_PROTRUSION_MIN_MM,
-        "MAX_POST_ANCHOR_LEN_MM": float(bounds["max_contact_span_mm"]) + ANCHOR_TOTAL_OVERSHOOT_MM,
-    }
+    min_line_span_mm: float
+    max_line_span_mm: float
+    max_inlier_gap_mm: float
+    min_post_anchor_len_mm: float
+    max_post_anchor_len_mm: float
+
+    @classmethod
+    def from_library(cls, bounds: dict) -> "WalkerBounds":
+        """Apply slack constants to a library-bounds dict and return
+        the immutable WalkerBounds record.
+
+        ``MIN_BLOBS_PER_LINE`` is intentionally NOT included — it is a
+        geometric chain-formation floor (3), not a library-derived
+        bound. Letting strategy bounds shadow it caused the AMC137/LPT
+        parity bug: pmt_35 set MIN_BLOBS=8 (smallest PMT model) and
+        rejected LPT's chain that had <8 visible blobs.
+        """
+        return cls(
+            min_line_span_mm=(
+                float(bounds["min_contact_span_mm"]) - WALKER_SPAN_UNDER_SLACK_MM
+            ),
+            max_line_span_mm=(
+                float(bounds["max_contact_span_mm"]) + WALKER_SPAN_OVER_SLACK_MM
+            ),
+            max_inlier_gap_mm=(
+                float(bounds["max_within_electrode_pitch_mm"]) + WALKER_GAP_SLACK_MM
+            ),
+            min_post_anchor_len_mm=(
+                float(bounds["min_contact_span_mm"]) + BOLT_PROTRUSION_MIN_MM
+            ),
+            max_post_anchor_len_mm=(
+                float(bounds["max_contact_span_mm"]) + ANCHOR_TOTAL_OVERSHOOT_MM
+            ),
+        )
 
 
-class StrategyBoundsScope:
-    """Context manager that swaps cpfit's module-level walker constants
-    to a strategy's vendor-filtered bounds for the duration of one
-    detection call.
+# Module-load default bounds = SEEG-vendor-filtered library bounds.
+# Used as the fallback when a stage gets no explicit bounds (CLI
+# defaults, unit tests, probe scripts).
+DEFAULT_WALKER_BOUNDS: WalkerBounds = WalkerBounds.from_library(LIBRARY_BOUNDS)
 
-    Pipeline calls are single-threaded per Slicer scene, so the scope
-    is safe; we restore the SEEG defaults on exit so a Medtronic call
-    can't leak into a subsequent Dixi call.
 
-    The scope mutates ``contact_pitch_v1_fit.__dict__`` directly because
-    the walker (still living in cpfit during the staged extraction) reads
-    its constants as module-level names. After Move 7 (orchestrator
-    extraction), this can become an explicit context object passed
-    through the stages.
+def bounds_for_strategy(strategy_key) -> WalkerBounds:
+    """Return the WalkerBounds for the user-chosen pitch strategy.
+
+    Resolves the strategy's vendor filter via
+    ``library_bounds_for_strategy`` and applies the slack constants.
+    Unknown / unset strategy keys fall back to ``DEFAULT_WALKER_BOUNDS``
+    (SEEG-vendor-filtered).
     """
-
-    def __init__(self, strategy_key):
-        self.strategy_key = strategy_key
-        self._saved = None
-        self.bounds = None
-
-    def __enter__(self):
-        from .. import contact_pitch_v1_fit as cpfit
-        self.bounds = library_bounds_for_strategy(self.strategy_key)
-        new_g = strategy_global_overrides(self.bounds)
-        g = cpfit.__dict__
-        self._saved = {k: g[k] for k in new_g}
-        g.update(new_g)
-        return self.bounds
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._saved is not None:
-            from .. import contact_pitch_v1_fit as cpfit
-            cpfit.__dict__.update(self._saved)
-            self._saved = None
-        return False
-
-
-def with_strategy_bounds(fn):
-    """Decorator: swap walker constants to the call's ``pitch_strategy``
-    for the duration of the decorated function, then restore the SEEG
-    default. Reads ``pitch_strategy`` via ``inspect.signature.bind`` so
-    it works for both positional and keyword callers.
-    """
-    sig = inspect.signature(fn)
-
-    def wrapper(*args, **kwargs):
-        try:
-            bound = sig.bind_partial(*args, **kwargs)
-            strategy = bound.arguments.get("pitch_strategy")
-        except TypeError:
-            strategy = kwargs.get("pitch_strategy")
-        with StrategyBoundsScope(strategy):
-            return fn(*args, **kwargs)
-
-    wrapper.__wrapped__ = fn
-    wrapper.__name__ = fn.__name__
-    wrapper.__doc__ = fn.__doc__
-    return wrapper
+    return WalkerBounds.from_library(library_bounds_for_strategy(strategy_key))
 
 
 __all__ = [
     "LIBRARY_BOUNDS",
     "LIBRARY_PITCHES_MM",
+    "WalkerBounds",
+    "DEFAULT_WALKER_BOUNDS",
     "model_vendor",
     "compute_library_bounds",
     "library_bounds_for_strategy",
-    "strategy_global_overrides",
-    "StrategyBoundsScope",
-    "with_strategy_bounds",
+    "bounds_for_strategy",
 ]

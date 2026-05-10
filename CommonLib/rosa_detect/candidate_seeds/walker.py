@@ -9,11 +9,10 @@ Three functions:
 * :func:`refit_line_from_inliers` — recompute axis / span / endpoints
   from the current inlier set after arbitration / extension.
 
-Strategy-scoped constants (``MIN_LINE_SPAN_MM``, ``MAX_LINE_SPAN_MM``,
-``MAX_INLIER_GAP_MM``) are looked up via cpfit at call time so the
-``StrategyBoundsScope`` context manager keeps working without these
-moved functions needing to know about its mutation. Cleanup target for
-Move 7: pass bounds explicitly instead of via cpfit module mutation.
+Strategy-scoped span / gap bounds are passed explicitly via
+:class:`WalkerBounds` (defaults to ``DEFAULT_WALKER_BOUNDS`` when
+omitted, so direct callers — unit tests, probes — keep their old
+signatures).
 """
 from __future__ import annotations
 
@@ -30,6 +29,7 @@ from .constants import (
     PITCH_MM,
     PITCH_TOL_MM,
 )
+from .pitch_library import DEFAULT_WALKER_BOUNDS, WalkerBounds
 
 
 def walk_with_pitch_precomputed(proj, within_perp, amps, pitch, ax_tol, max_k):
@@ -66,17 +66,20 @@ def walk_with_pitch_precomputed(proj, within_perp, amps, pitch, ax_tol, max_k):
     return dict(inliers=inliers, pitch=pitch, n_inliers=len(inliers))
 
 
-def walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm: float = PITCH_MM):
+def walk_line(seed_idx, neighbor_idx, pts, amps,
+              pitch_mm: float = PITCH_MM,
+              bounds: WalkerBounds | None = None):
     """Seed-pair walk: chain blobs along one pitch hypothesis.
 
-    Strategy-scoped span / gap bounds (``MIN_LINE_SPAN_MM`` /
-    ``MAX_LINE_SPAN_MM`` / ``MAX_INLIER_GAP_MM``) are looked up via
-    cpfit at call time so this function respects ``StrategyBoundsScope``.
+    Strategy-scoped span / gap bounds are read from the passed
+    :class:`WalkerBounds` (defaults to ``DEFAULT_WALKER_BOUNDS`` when
+    omitted).
     """
-    from .. import contact_pitch_v1_fit as _cpfit
-    MIN_LINE_SPAN_MM = _cpfit.MIN_LINE_SPAN_MM
-    MAX_LINE_SPAN_MM = _cpfit.MAX_LINE_SPAN_MM
-    MAX_INLIER_GAP_MM = _cpfit.MAX_INLIER_GAP_MM
+    if bounds is None:
+        bounds = DEFAULT_WALKER_BOUNDS
+    MIN_LINE_SPAN_MM = bounds.min_line_span_mm
+    MAX_LINE_SPAN_MM = bounds.max_line_span_mm
+    MAX_INLIER_GAP_MM = bounds.max_inlier_gap_mm
 
     p0 = pts[seed_idx]
     p1 = pts[neighbor_idx]
@@ -154,21 +157,24 @@ def walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm: float = PITCH_MM):
     )
 
 
-def refit_line_from_inliers(line, pts_c, amps_c, min_blobs: int | None = None):
+def refit_line_from_inliers(line, pts_c, amps_c,
+                            min_blobs: int | None = None,
+                            bounds: WalkerBounds | None = None):
     """Recompute axis / span / endpoints / amp_sum from the current
     ``inlier_idx`` list. Mutates ``line`` and returns it; returns None
     if the line has too few inliers or too short a span after refit.
 
-    ``min_blobs`` defaults to cpfit's current ``MIN_BLOBS_PER_LINE``
-    (resolved at call time so :class:`StrategyBoundsScope` swaps are
-    respected).
+    ``min_blobs`` defaults to ``MIN_BLOBS_PER_LINE`` (3). Strategy-scoped
+    span bounds come from the passed :class:`WalkerBounds` (defaults to
+    ``DEFAULT_WALKER_BOUNDS`` when omitted).
     """
-    from .. import contact_pitch_v1_fit as _cpfit
-    MIN_LINE_SPAN_MM = _cpfit.MIN_LINE_SPAN_MM
-    MAX_LINE_SPAN_MM = _cpfit.MAX_LINE_SPAN_MM
+    if bounds is None:
+        bounds = DEFAULT_WALKER_BOUNDS
+    MIN_LINE_SPAN_MM = bounds.min_line_span_mm
+    MAX_LINE_SPAN_MM = bounds.max_line_span_mm
 
     if min_blobs is None:
-        min_blobs = _cpfit.MIN_BLOBS_PER_LINE
+        min_blobs = MIN_BLOBS_PER_LINE
 
     inliers = list(line["inlier_idx"])
     if len(inliers) < min_blobs:

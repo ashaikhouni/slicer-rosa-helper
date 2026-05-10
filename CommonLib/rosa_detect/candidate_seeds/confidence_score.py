@@ -13,11 +13,10 @@ attached as metadata (``score``, ``confidence``, ``score_components``)
 on every survivor so downstream code can rank, filter, or surface the
 weakest emissions for review without changing detection behaviour.
 
-Strategy-scoped span / length bounds (``MIN_LINE_SPAN_MM``,
-``MAX_LINE_SPAN_MM``, ``MIN_POST_ANCHOR_LEN_MM``,
-``MAX_POST_ANCHOR_LEN_MM``) are looked up via cpfit at call time so
-``StrategyBoundsScope`` continues to work. Cleanup target for Move 7:
-pass bounds explicitly.
+Strategy-scoped span / length bounds (``min_line_span_mm``,
+``max_line_span_mm``, ``min_post_anchor_len_mm``,
+``max_post_anchor_len_mm``) are passed explicitly via the
+:class:`WalkerBounds` argument (defaults to ``DEFAULT_WALKER_BOUNDS``).
 """
 from __future__ import annotations
 
@@ -38,7 +37,12 @@ from .constants import (
     SCORE_SPAN_SHOULDER_MM,
     SCORE_WEIGHTS,
 )
-from .pitch_library import LIBRARY_BOUNDS, LIBRARY_PITCHES_MM
+from .pitch_library import (
+    DEFAULT_WALKER_BOUNDS,
+    LIBRARY_BOUNDS,
+    LIBRARY_PITCHES_MM,
+    WalkerBounds,
+)
 
 
 def trapezoid_score(value, lo, hi, shoulder_mm):
@@ -56,13 +60,14 @@ def bolt_source_score(src):
     return SCORE_BOLT_VALUES.get(str(src), 0.5)
 
 
-def compute_trajectory_score(rec):
+def compute_trajectory_score(rec, bounds: WalkerBounds | None = None):
     """Return (score, confidence, components) for one trajectory record."""
-    from .. import contact_pitch_v1_fit as _cpfit
-    MIN_LINE_SPAN_MM = _cpfit.MIN_LINE_SPAN_MM
-    MAX_LINE_SPAN_MM = _cpfit.MAX_LINE_SPAN_MM
-    MIN_POST_ANCHOR_LEN_MM = _cpfit.MIN_POST_ANCHOR_LEN_MM
-    MAX_POST_ANCHOR_LEN_MM = _cpfit.MAX_POST_ANCHOR_LEN_MM
+    if bounds is None:
+        bounds = DEFAULT_WALKER_BOUNDS
+    MIN_LINE_SPAN_MM = bounds.min_line_span_mm
+    MAX_LINE_SPAN_MM = bounds.max_line_span_mm
+    MIN_POST_ANCHOR_LEN_MM = bounds.min_post_anchor_len_mm
+    MAX_POST_ANCHOR_LEN_MM = bounds.max_post_anchor_len_mm
 
     components = {}
     is_wire_class = bool(rec.get("wire_class"))

@@ -13,12 +13,11 @@ Wires the candidate-seeds package together:
        signature -> length-only dispatcher)
     -> continuous physical-evidence confidence score per emission.
 
-Strategy-scoped walker constants (`MIN_POST_ANCHOR_LEN_MM`,
-`MAX_POST_ANCHOR_LEN_MM`, etc.) are looked up via cpfit at call time
-under the `with_strategy_bounds` decorator's
-`StrategyBoundsScope.__enter__` mutation. Cleanup target after Move 7:
-pass these through an explicit context object instead of mutating
-cpfit's module dict.
+Strategy-scoped walker bounds (span / length / gap) are computed once
+at entry from the caller's ``pitch_strategy`` via
+``bounds_for_strategy`` and threaded explicitly to every stage that
+needs them as a :class:`WalkerBounds` record. No module-global
+mutation, no decorator magic.
 """
 from __future__ import annotations
 
@@ -78,7 +77,7 @@ from .metal_evidence import (
     compute_metal_evidence_volume,
     frac_strong_metal_along_line,
 )
-from .pitch_library import with_strategy_bounds
+from .pitch_library import bounds_for_strategy
 from .pitch_resolution import (
     detect_pitch_from_intracranial_blobs,
     resolve_pitches_for_strategy,
@@ -87,7 +86,6 @@ from .stage1_runner import run_stage1
 from .synth_anchor import axis_to_skull_synth
 
 
-@with_strategy_bounds
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                             return_features=False, progress_logger=None,
                             suggestion_vendors=None,
@@ -111,11 +109,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         list[dict] or (list[dict], dict): trajectories list (always) and
         optionally a feature_arrays dict for debugging / visualization.
     """
-    # Strategy-scoped bounds resolved at call time so StrategyBoundsScope
-    # swaps are respected. Cleanup target: pass via explicit context.
-    from .. import contact_pitch_v1_fit as _cpfit
-    MIN_POST_ANCHOR_LEN_MM = _cpfit.MIN_POST_ANCHOR_LEN_MM
-    MAX_POST_ANCHOR_LEN_MM = _cpfit.MAX_POST_ANCHOR_LEN_MM
+    # Strategy-scoped walker bounds — computed once here, threaded
+    # explicitly to every stage that needs them.
+    bounds = bounds_for_strategy(pitch_strategy)
+    MIN_POST_ANCHOR_LEN_MM = bounds.min_post_anchor_len_mm
+    MAX_POST_ANCHOR_LEN_MM = bounds.max_post_anchor_len_mm
 
     def _log(msg):
         if progress_logger is not None:
@@ -213,6 +211,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         log1, kji_to_ras, dist_arr, ras_to_ijk_mat,
         pitches_mm=resolved_pitches,
         frangi_arr=frangi_s1,
+        bounds=bounds,
     )
     _log(f"stage 1: {len(stage1_lines)} candidate lines after walk + arbitrate + extend")
     # Attach inlier RAS coords AND LoG amplitudes to each stage-1 line
@@ -578,6 +577,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         anchored,
         log_arr=log1,
         ras_to_ijk_mat=ras_to_ijk_mat,
+        min_length_mm=bounds.min_post_anchor_len_mm,
         logger=_log,
     )
 
@@ -700,7 +700,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     # ``confidence`` is the numeric score (canonical engine schema
     # expects a float there); ``confidence_label`` carries the band.
     for rec in anchored:
-        score, label, components = compute_trajectory_score(rec)
+        score, label, components = compute_trajectory_score(rec, bounds=bounds)
         rec["confidence"] = score
         rec["confidence_label"] = label
         rec["score_components"] = components
