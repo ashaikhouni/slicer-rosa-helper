@@ -1294,9 +1294,21 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 f"[contacts:{log_context}] CT had no on-disk path; wrote to {ct_path}",
             )
 
-        # Build Seed list from the selected rows + their assignments. Use
-        # entry/target order: trajectories carry start/end in LPS, the
-        # placer wants RAS.
+        # Build Seed list from the selected rows + their assignments.
+        #
+        # Preferred seed start: ``bolt_tip_ras`` when present (Auto Fit
+        # stamps it on the line node so consumers can recover the
+        # original bolt-to-tip range — the line node itself is cropped
+        # to skull_entry → deep_tip for display). Falls back to the
+        # node's start endpoint otherwise.
+        #
+        # Why this matters: place_seeg's stage A anchor walker
+        # (estimate_bolt_end_from_metal_mass) walks from seed_start
+        # looking for the bolt. With seed_start = skull_entry (already
+        # past the bolt), the walker can't find it → falls back to
+        # bolt_less, producing different placements than the notebook
+        # flow (which uses the full bolt-to-tip range).
+        n_with_bolt_tip = 0
         assignment_by_name = {
             row.get("trajectory", ""): row for row in assignments.get("assignments", [])
         }
@@ -1305,9 +1317,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             name = traj.get("name", "")
             row = assignment_by_name.get(name)
             assigned_model = (row.get("model_id") if row else "") or None
-            start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+            bolt_tip_ras = traj.get("bolt_tip_ras")
+            if bolt_tip_ras is not None and len(list(bolt_tip_ras)) >= 3:
+                entry_ras = [float(v) for v in list(bolt_tip_ras)[:3]]
+                n_with_bolt_tip += 1
+            else:
+                start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+                entry_ras = lps_to_ras_point(list(start_lps))
             end_lps = traj.get("end") or [0.0, 0.0, 0.0]
-            entry_ras = lps_to_ras_point(list(start_lps))
             target_ras = lps_to_ras_point(list(end_lps))
             seeds.append(Seed(
                 name=str(name),
@@ -1315,6 +1332,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 end_ras=target_ras,
                 model_id=assigned_model,
             ))
+        if n_with_bolt_tip:
+            self.log(
+                f"[contacts:{log_context}] {n_with_bolt_tip}/{len(trajectories)} "
+                f"seeds use bolt_tip_ras (Rosa.BoltTipRas attribute) for full "
+                f"bolt-to-tip range; rest use line-node start"
+            )
 
         # Library subset: pitch-strategy combo controls library filter
         # (matches Auto Fit / Guided Fit semantics). When the combo says

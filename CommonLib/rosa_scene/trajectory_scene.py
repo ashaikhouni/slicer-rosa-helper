@@ -279,6 +279,23 @@ class TrajectorySceneService:
             confidence = float(conf_str) if conf_str else None
         except Exception:
             confidence = None
+        # ``Rosa.BoltTipRas`` is stamped by Auto Fit's publish step to
+        # preserve the original bolt-tip endpoint when the line node is
+        # cropped to (skull_entry, deep_tip) for display. Consumers that
+        # need the full bolt-to-tip range (e.g. CTV's staged placement
+        # path, whose anchor walker assumes seed_start is at the bolt)
+        # can recover it from this attribute even after re-loading the
+        # scene from disk.
+        bolt_tip_ras = None
+        bolt_tip_attr = (node.GetAttribute("Rosa.BoltTipRas") or "").strip()
+        if bolt_tip_attr:
+            try:
+                parts = [float(s) for s in bolt_tip_attr.split(",")]
+                if len(parts) >= 3:
+                    bolt_tip_ras = parts[:3]
+            except (TypeError, ValueError):
+                bolt_tip_ras = None
+
         return {
             "name": logical_name,
             "node_name": node.GetName() or logical_name,
@@ -290,6 +307,7 @@ class TrajectorySceneService:
             "end_lps": [float(v) for v in p1_lps],
             "start_ras": [float(v) for v in p0],
             "end_ras": [float(v) for v in p1],
+            "bolt_tip_ras": bolt_tip_ras,  # original bolt tip when stamped; else None
             "best_model_id": str(node.GetAttribute("Rosa.BestModelId") or ""),
             "best_model_score": (
                 None
