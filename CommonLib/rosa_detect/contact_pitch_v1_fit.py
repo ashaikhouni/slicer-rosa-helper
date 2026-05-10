@@ -163,20 +163,11 @@ from .candidate_seeds.constants import (  # noqa: F401
 # voxel pull-on, family variants the library doesn't yet enumerate)
 # rather than "make subject X pass."
 
-_BUNDLED_LIBRARY_BOUNDS_FALLBACK = {
-    # Snapshot of the in-tree library used when rosa_core is
-    # unavailable (stripped install, Slicer-less environments).
-    "min_contacts": 5,
-    "max_contacts": 18,
-    "min_contact_span_mm": 14.0,
-    "max_contact_span_mm": 78.5,
-    "max_within_electrode_pitch_mm": 13.0,
-    "regular_pitches_mm": (3.5, 3.9, 3.97, 4.43, 4.8, 6.1),
-}
-
-
-SEEG_VENDORS = ("Dixi", "PMT", "AdTech")
-
+# Static and library-fallback constants live in candidate_seeds.constants
+# and are imported at the top of this module. Bolt-anchor primitives
+# (LOG_BOLT_NORMALIZER, HU_BOLT_NORMALIZER, METAL_BOLT_THRESHOLD,
+# BOLT_MIN_VOXELS, BOLT_BASE_MAX_DIST_MM, etc.) live in
+# primitives.bolt_anchor and are imported at the top.
 
 # Library bounds + strategy-scoped walker constants live in
 # candidate_seeds.pitch_library. Re-exported here for back-compat.
@@ -190,30 +181,13 @@ from .candidate_seeds.pitch_library import (  # noqa: F401
     with_strategy_bounds as _with_strategy_bounds,
 )
 
-# Walker endpoint + chaining slacks. Each one answers "what physical
-# effect loosens this bound past the strict library value?" — never
-# "which subject passes after this number?".
-WALKER_SPAN_UNDER_SLACK_MM = 2.0   # walker can miss endpoint contacts
-                                    # under sub-voxel drift / partial
-                                    # volume bias (~0.5 mm × 2 endpoints
-                                    # × small pitch).
-WALKER_SPAN_OVER_SLACK_MM = 11.5   # walker can chain a few bolt voxels
-                                    # past the shallowest real contact
-                                    # when bolt LoG response sits in the
-                                    # contact-amplitude band; tighter
-                                    # values cut real shanks short.
-WALKER_GAP_SLACK_MM = 9.0          # 2 consecutive missed contacts at
-                                    # the smallest library pitch
-                                    # (3.5 mm) plus walker drift; real
-                                    # shanks rarely lose >2 in a row.
-
-# Geometric chain-formation floor — independent of library bounds.
-# Set below the smallest library model (DIXI-5AM, PMT-8) so a real
-# shank with 1-2 under-resolved contacts (low HU, partial-volume,
-# or motion) still forms a chain and reaches the matched-filter
-# picker. Library bounds still constrain the model picker downstream;
-# they shouldn't double as the chain gate.
-MIN_BLOBS_PER_LINE = 3
+# Library-derived strategy-scoped walker bounds. These DO live here
+# (not in constants.py) because StrategyBoundsScope mutates them on
+# this module's __dict__ for the duration of one detection call —
+# the walker / orchestrator / score read them back from cpfit at
+# call time. Cleanup target (Step 2 of the post-Phase-B work):
+# replace StrategyBoundsScope with an explicit WalkerBounds dataclass
+# passed through the orchestrator.
 MIN_LINE_SPAN_MM = (
     _LIBRARY_BOUNDS["min_contact_span_mm"] - WALKER_SPAN_UNDER_SLACK_MM
 )
@@ -223,94 +197,12 @@ MAX_LINE_SPAN_MM = (
 MAX_INLIER_GAP_MM = (
     _LIBRARY_BOUNDS["max_within_electrode_pitch_mm"] + WALKER_GAP_SLACK_MM
 )
-
-STAGE1_DEDUP_ANGLE_DEG = 3.0
-STAGE1_DEDUP_PERP_MM = 2.0
-STAGE1_DEDUP_OVERLAP_FRAC = 0.3
-
-DEEP_TIP_MIN_MM = 30.0          # strict floor for long lines (where
-                                # sinus / skull-base tube FPs hide).
-DEEP_TIP_MIN_SHORT_MM = 15.0    # short-line relaxation: superficial
-                                # top-of-skull depths (T21 L_8/L_9/L_13)
-                                # only reach ~15-20 mm intracranial.
-DEEP_TIP_SHORT_MAX_AVG_PITCH_MM = 7.0
-                                # Deep-tip prior discriminator: walker
-                                # lines whose pre-extend inter-contact
-                                # gap averages ≤ this get the relaxed
-                                # DEEP_TIP_MIN_SHORT_MM=15 floor; any
-                                # wider avg pitch means "not a real
-                                # SEEG chain" → strict DEEP_TIP_MIN_MM
-                                # floor. 7 mm covers Dixi (3.5),
-                                # PMT 16B/C (3.97 / 4.43), and
-                                # over-extension slack up to 2× nominal
-                                # pitch. Cross-shank bridges + sinus
-                                # FPs land well above 7 mm avg.
-# Post-anchor length bounds. Anchored length = bolt-tip → deep contact
-# = library contact span + bolt protrusion (and, for thin-wire PMT,
-# the deep wire-segment gap that the contact span doesn't include).
-# Both bounds are derived from the library at module load — adding a
-# longer or shorter electrode model reshapes them automatically.
-BOLT_PROTRUSION_MIN_MM = 16.0      # Short PMT bolts protrude ~12 mm
-                                    # past the skull plus ~4 mm of
-                                    # shallow electrode tail before the
-                                    # first contact.
-ANCHOR_TOTAL_OVERSHOOT_MM = 61.5    # Long-bolt + thin-wire-PMT slack
-                                    # past the deepest library contact
-                                    # span. Long DIXI bolts protrude
-                                    # ~50 mm; the thin-wire PMT family
-                                    # adds an unmodelled ~10 mm wire
-                                    # segment beyond the deepest
-                                    # contact (subject-137 L_3 measured
-                                    # 84 mm contact span + 48 mm bolt
-                                    # + wire = 132 mm anchored). This
-                                    # collapses to ~50 mm once a thin-
-                                    # wire PMT model ships in
-                                    # electrode_models.json.
-
 MIN_POST_ANCHOR_LEN_MM = (
     _LIBRARY_BOUNDS["min_contact_span_mm"] + BOLT_PROTRUSION_MIN_MM
 )
 MAX_POST_ANCHOR_LEN_MM = (
     _LIBRARY_BOUNDS["max_contact_span_mm"] + ANCHOR_TOTAL_OVERSHOOT_MM
 )
-
-# Post-anchor dedup: same-bolt + same-physical-line duplicates (multi-
-# pitch walker passes that found disjoint blob ranges along one
-# electrode). Two trajectories sharing a bolt CC are the same physical
-# shank when their axes are nearly parallel AND their midpoints sit
-# on the same line. Per-axis variation (1-3°) over a 50-80 mm reach
-# would shift start_ras / end_ras by 5-15 mm, but the midpoint-to-
-# axis perpendicular stays small. Distinct shanks merged into one
-# bolt CC (T1, T22) have either non-parallel axes or non-coincident
-# midpoints, so they survive.
-POST_ANCHOR_DEDUP_PERP_MM = 3.0
-POST_ANCHOR_DEDUP_ANG_DEG = 8.0  # 5° was too tight: auto-pitch
-                                  # half-aliased walker passes (every-
-                                  # other-contact at 6.7 mm vs 3.5)
-                                  # produce axes 5-6° from the full-
-                                  # pitch pass. 8° catches them; the
-                                  # midpoint-perp 3 mm gate still
-                                  # preserves distinct adjacent shanks
-                                  # whose axes happen to be parallel
-                                  # (T1, T22 mega-CC cases — those
-                                  # have midpoint perp >> 3 mm).
-
-# LOG_BOLT_NORMALIZER, HU_BOLT_NORMALIZER, METAL_BOLT_THRESHOLD moved to
-# rosa_detect.primitives.bolt_anchor and re-exported above.
-
-AXIS_SKULL_SYNTH_STEP_MM = 0.5      # Synth fallback (only path remaining
-AXIS_SKULL_SYNTH_MAX_OUTWARD_MM = 80.0
-AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM = 15.0
-                                    # when the unified bolt CC pass finds
-                                    # no anchor): walk outward along the
-                                    # walker axis until it crosses the
-                                    # hull, place a synthetic bolt-tip
-                                    # PROTRUDE_MM further out. Recovers
-                                    # T4-class subjects whose bolts sit
-                                    # outside the CT acquisition window.
-
-# BOLT_MIN_VOXELS through BOLT_BASE_MAX_DIST_MM moved to
-# rosa_detect.primitives.bolt_anchor and re-exported above.
 
 
 # ---- Pitch strategy + auto-detection ---------------------------------
