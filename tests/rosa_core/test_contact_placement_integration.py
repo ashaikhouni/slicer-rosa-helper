@@ -181,18 +181,20 @@ def _seeds_from_gt(gt: list[dict]) -> list:
 
 
 # ---------------------------------------------------------------------
-# AMC88 mode-4 (seeded, library-matched) — pin 8/8 LoG ≥ medium
+# AMC88 — mode 5 (seeded, library-match) AND mode 1 (full auto)
 # ---------------------------------------------------------------------
 
 
 @unittest.skipUnless(_amc_subject_available("AMC88"),
                      f"AMC88 not found at {AMC_ROOT}")
-class Amc88Mode4LogTests(unittest.TestCase):
-    """AMC88 mode-4 with LoG sampler — notebook says 8/8 in 'high' band.
+class Amc88LogTests(unittest.TestCase):
+    """AMC88 with LoG sampler — notebook says 8/8 in 'high' band.
 
-    We pin a slightly weaker invariant (8/8 ≥ medium AND ≥7/8 in high) to
-    insulate against the 1-shank noise margin while still catching the case
-    where the staged pipeline flat-out regresses below the notebook number.
+    Two angles:
+      * Mode 5 — seeded with GT axes, library matches each shank.
+      * Mode 1 — full auto (candidate-seed gen + two-pass placement).
+
+    Notebook number: 8/8 GT-matched in 'high', 0 LoG orphans in 'high'.
     """
 
     def setUp(self):
@@ -210,44 +212,96 @@ class Amc88Mode4LogTests(unittest.TestCase):
         )
         self.sample_fn = sample_neg_log_max
 
-    def test_amc88_8_of_8_at_least_medium(self):
+    def test_amc88_mode5_runs_per_seed_with_library_match(self):
+        """Mode 5 sanity: seeded with GT-derived axes, library matches each.
+
+        Note: GT-derived axes (PCA over contact .dat points) are NOT what the
+        notebook validates. The notebook's 8/8-in-high number is for mode 1
+        (v1-emitted seeds, which carry v1's confidence labels and are bolt-
+        anchored). This test just confirms mode 5 routes correctly and runs
+        per-seed without rejecting.
+        """
         from rosa_core.placement_modes import place_seeg
 
         seeds = _seeds_from_gt(self.gt)
-        # Mode 4 requires model_id; AMC GT doesn't have one, so this is
-        # actually mode 5. Strip model_id so we pass through the full
-        # library matched-filter pick — but since mode 5 isn't wired in
-        # Session 1, fall back to mode 4 with model_id=None on each seed
-        # by filtering through the strategy library when the dispatcher
-        # accepts the seeds. Set model_id to a sentinel so we land in
-        # mode 4 dispatch.
-
-        # Simpler: skip if AMC GT lacks model_id — Session 2 (mode 5) will
-        # cover this case properly. AMC88 .dat files DO lack model_id.
-        if not all(s.model_id for s in seeds):
-            self.skipTest(
-                "AMC88 .dat GT lacks per-shank model_id — needs mode 5 "
-                "(library-match), which is implemented in Session 2.",
-            )
+        for s in seeds:
+            self.assertIsNone(s.model_id, "AMC88 .dat GT shouldn't have model_id")
 
         batch = place_seeg(
             self.ct, seeds=seeds,
             features=self.features, bolts=self.bolts,
             library=self.library, sample_fn=self.sample_fn,
+            apply_subject_fft_norm=True,
         )
-        bands = [t.band for t in batch.trajectories]
-        n_high = bands.count("high")
-        n_medium = bands.count("medium")
-        n_at_least_medium = n_high + n_medium
+        self.assertEqual(batch.diagnostics["mode"], 5)
+        self.assertEqual(len(batch.trajectories), len(self.gt))
+        # All emissions should at least produce a placement (n_placed > 0)
+        # and have a model_id picked from the strategy library.
+        for t in batch.trajectories:
+            self.assertIsNotNone(t.model_id, f"mode 5 should pick a model: {t.name}")
+            self.assertGreater(len(t.contacts_ras), 0,
+                                f"mode 5 should place contacts: {t.name}")
 
-        self.assertEqual(
-            n_at_least_medium, 8,
-            f"all 8 GT shanks should land at least medium; got bands={bands}",
+    def test_amc88_mode1_no_orphans_in_high(self):
+        """Mode 1 full auto: generate seeds + place. Notebook: 0 LoG orphans
+        in 'high', 8/8 GT matched in 'high'.
+
+        Pin: at least 8 emissions reach 'high' (the GT shanks); orphan check
+        requires GT-axis matching which we mirror inline.
+        """
+        from rosa_core.placement_modes import place_seeg
+
+        batch = place_seeg(
+            self.ct,
+            features=self.features, bolts=self.bolts,
+            library=self.library, sample_fn=self.sample_fn,
+            band_floor="low",  # don't filter so we can see orphans
         )
-        self.assertGreaterEqual(
-            n_high, 7,
-            f"at least 7 of 8 should land in 'high'; got n_high={n_high}",
+        self.assertEqual(batch.diagnostics["mode"], 1)
+
+        # Greedy-match GT to the dispatcher's emissions on axis angle + mid
+        # offset. Same matching rules as the notebook.
+        gt_axis_pairs = []
+        for gi, g in enumerate(self.gt):
+            axis_g = (g["end_ras"] - g["start_ras"])
+            axis_g = axis_g / max(np.linalg.norm(axis_g), 1e-9)
+            mid_g = 0.5 * (g["start_ras"] + g["end_ras"])
+            for ei, t in enumerate(batch.trajectories):
+                axis_e = (t.end_ras - t.start_ras)
+                axis_e = axis_e / max(np.linalg.norm(axis_e), 1e-9)
+                mid_e = 0.5 * (t.start_ras + t.end_ras)
+                ang = float(np.degrees(np.arccos(min(1.0, abs(float(np.dot(axis_g, axis_e)))))))
+                v = mid_g - mid_e
+                perp = v - float(np.dot(v, axis_e)) * axis_e
+                d_perp = float(np.linalg.norm(perp))
+                if ang <= 12.0 and d_perp <= 8.0:
+                    gt_axis_pairs.append((ang + d_perp, gi, ei))
+        gt_axis_pairs.sort(key=lambda p: p[0])
+        used_g, used_e = set(), set()
+        gt_for_emission = {}
+        for _s, gi, ei in gt_axis_pairs:
+            if gi in used_g or ei in used_e:
+                continue
+            used_g.add(gi); used_e.add(ei)
+            gt_for_emission[ei] = self.gt[gi]["name"]
+
+        n_matched = len(gt_for_emission)
+        n_matched_high = sum(
+            1 for ei, _name in gt_for_emission.items()
+            if batch.trajectories[ei].band == "high"
         )
+        n_orphan_high = sum(
+            1 for ei, t in enumerate(batch.trajectories)
+            if ei not in gt_for_emission and t.band == "high"
+        )
+        # Pin notebook numbers (with 1-shank slack on the GT-high count).
+        self.assertEqual(n_matched, len(self.gt),
+                         f"all {len(self.gt)} GT should match an emission; got {n_matched}")
+        self.assertGreaterEqual(n_matched_high, len(self.gt) - 1,
+                                f"≥{len(self.gt) - 1} GT should land in 'high' "
+                                f"(notebook: {len(self.gt)}); got {n_matched_high}")
+        self.assertEqual(n_orphan_high, 0,
+                         f"notebook reports 0 LoG orphans in 'high'; got {n_orphan_high}")
 
 
 # ---------------------------------------------------------------------
@@ -257,15 +311,14 @@ class Amc88Mode4LogTests(unittest.TestCase):
 
 @unittest.skipUnless(_curated_gt_available("T18"),
                      f"T18 curated GT not found under {SEEG_ROOT}")
-class T18Mode4LogTests(unittest.TestCase):
-    """T18 mode-4 with LoG sampler — notebook says 13/13 model picks.
+class T18LogTests(unittest.TestCase):
+    """T18 with LoG sampler — notebook says 13/13 model picks (mode 5).
 
-    We pin ≥12/13 to allow one-shank noise; the 13/13 number depends on the
-    cross-shank ownership pass which may or may not be invoked depending on
-    how the test threads through ``place_seeg`` (mode 4 doesn't run two-pass).
+    Mode dispatch: T18 curated GT MAY include per-shank model_id. If it
+    does, this is mode 4 (model vouched). If not, mode 5 (library match).
+    Either way, pin ≥12/13 correct picks (notebook: 13/13).
 
-    Skips if ``eval_seeg_localization`` isn't installed (it's the T-series
-    manifest reader; only present in dev environments with the dataset).
+    Skips if ``eval_seeg_localization`` isn't installed.
     """
 
     def setUp(self):
@@ -286,30 +339,71 @@ class T18Mode4LogTests(unittest.TestCase):
         )
         self.sample_fn = sample_neg_log_max
 
-    def test_t18_model_picks_at_least_12_of_13(self):
+    def test_t18_mode1_model_picks_at_least_12_of_13(self):
+        """Mode 1 (full auto via candidate-seeds + two-pass): notebook 13/13.
+
+        This matches the notebook's actual flow — v1 emission seeds carry
+        bolt-anchored centerlines + confidence labels. We then GT-match by
+        axis to compare placer-picked model_id against curated GT model_id.
+
+        Why not mode 5: GT-derived axes (PCA over contacts) are NOT
+        equivalent to v1-emitted seeds — the placer's anchor walker
+        assumes start_ras is at the bolt, which v1 guarantees but GT-PCA
+        does not. Mode 5 with GT axes systematically underperforms.
+        """
         from rosa_core.placement_modes import place_seeg
 
-        seeds = _seeds_from_gt(self.gt)
-        if not all(s.model_id for s in seeds):
-            self.skipTest(
-                "T18 curated GT does not contain per-shank model_id — "
-                "test requires mode 5 (Session 2) for library matching.",
-            )
+        # Curated GT must have model labels for this test to mean anything.
+        gt_model_count = sum(1 for g in self.gt if g.get("model_id"))
+        if gt_model_count == 0:
+            self.skipTest("T18 curated GT lacks per-shank model_id labels")
 
         batch = place_seeg(
-            self.ct, seeds=seeds,
+            self.ct,
             features=self.features, bolts=self.bolts,
             library=self.library, sample_fn=self.sample_fn,
+            band_floor="low",  # see all emissions for GT match
         )
+        self.assertEqual(batch.diagnostics["mode"], 1)
 
-        n_correct = sum(
-            1 for t, gt_seed in zip(batch.trajectories, seeds)
-            if t.model_id == gt_seed.model_id
-        )
+        # Greedy axis-match each GT to a placer emission.
+        gt_to_emission = {}
+        used_e = set()
+        pairs = []
+        for gi, g in enumerate(self.gt):
+            ax_g = (g["end_ras"] - g["start_ras"])
+            ax_g = ax_g / max(np.linalg.norm(ax_g), 1e-9)
+            mid_g = 0.5 * (g["start_ras"] + g["end_ras"])
+            for ei, t in enumerate(batch.trajectories):
+                ax_e = (t.end_ras - t.start_ras)
+                ax_e = ax_e / max(np.linalg.norm(ax_e), 1e-9)
+                mid_e = 0.5 * (t.start_ras + t.end_ras)
+                ang = float(np.degrees(np.arccos(min(1.0, abs(float(np.dot(ax_g, ax_e)))))))
+                v = mid_g - mid_e
+                perp = v - float(np.dot(v, ax_e)) * ax_e
+                d_perp = float(np.linalg.norm(perp))
+                if ang <= 12.0 and d_perp <= 8.0:
+                    pairs.append((ang + d_perp, gi, ei))
+        pairs.sort(key=lambda p: p[0])
+        for _s, gi, ei in pairs:
+            if gi in gt_to_emission or ei in used_e:
+                continue
+            gt_to_emission[gi] = ei
+            used_e.add(ei)
+
+        # For matched GT shanks, compare picked model_id to GT model_id.
+        n_correct = 0
+        details = []
+        for gi, ei in gt_to_emission.items():
+            gt_model = self.gt[gi].get("model_id")
+            picked = batch.trajectories[ei].model_id
+            details.append((self.gt[gi]["name"], picked, gt_model))
+            if gt_model and picked == gt_model:
+                n_correct += 1
         self.assertGreaterEqual(
-            n_correct, 12,
-            f"≥12/13 model picks should match GT; got {n_correct}/13. "
-            f"picks: {[(t.name, t.model_id, gt_seed.model_id) for t, gt_seed in zip(batch.trajectories, seeds)]}",
+            n_correct, max(1, gt_model_count - 1),
+            f"≥{gt_model_count - 1}/{gt_model_count} model picks should match "
+            f"GT; got {n_correct}. picks: {details}",
         )
 
 

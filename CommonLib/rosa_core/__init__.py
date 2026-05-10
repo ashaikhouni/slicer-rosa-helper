@@ -77,11 +77,13 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "place_seed":                                         ("contact_placement", "place_seed"),
     "run_two_pass":                                       ("contact_placement", "run_two_pass"),
     "apply_subject_fft_normalization":                    ("contact_placement", "apply_subject_fft_normalization"),
-    # placement_modes — 5-mode user-facing API (mode 4 in Session 1).
+    # placement_modes — 5-mode user-facing API.
     "PlacedTrajectory":                                   ("placement_modes", "PlacedTrajectory"),
     "PlacementBatch":                                     ("placement_modes", "PlacementBatch"),
     "Seed":                                               ("placement_modes", "Seed"),
     "place_seeg":                                         ("placement_modes", "place_seeg"),
+    # volume_loader — CT path / SimpleITK.Image → features + bolt CCs.
+    "load_features_and_bolts":                            ("volume_loader", "load_features_and_bolts"),
     # contact_placement_v2 — DEPRECATED shim (lazy-loaded only for
     # unified_detect + the v2-specific test). Will be removed in Session 4.
     "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement_v2", "MIN_CORR_FOR_REAL_SHANK"),

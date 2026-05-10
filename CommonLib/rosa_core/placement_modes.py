@@ -34,6 +34,7 @@ from .contact_placement import (
     PlacementCtx,
     apply_subject_fft_normalization,
     place_seed,
+    run_two_pass,
 )
 
 
@@ -49,12 +50,20 @@ class Seed:
     ``model_id`` distinguishes mode 4 (caller vouches for the electrode
     model — placement only, no library search) from mode 5 (caller knows
     where the shank is but wants library matching).
+
+    ``seeder_*`` fields carry optional per-seed metadata that the placer's
+    compound score reads (s_seeder weight = 0.10). ``generate_candidate_seeds``
+    populates them from v1's stage1 confidence; user-supplied seeds (mode 4/5)
+    typically leave them at defaults (neutral 0.5 in s_seeder).
     """
 
     name: str
     start_ras: np.ndarray
     end_ras: np.ndarray
     model_id: str | None = None
+    seeder_label: str = ""               # "high" | "medium" | "low" | ""
+    seeder_confidence: float = 0.0
+    seeder_model: str | None = None
 
     def __post_init__(self):
         self.start_ras = np.asarray(self.start_ras, dtype=float)
@@ -169,8 +178,7 @@ def _place_mode_4(
     in ``PlacedTrajectory`` via ``_ctx_to_placed``.
 
     No two-pass cross-shank ownership — when the caller has vouched for
-    every seed, it's their responsibility to deconflict. (Two-pass is opt-in
-    via mode 1/2 batch flows in Session 2.)
+    every seed, it's their responsibility to deconflict.
     """
     out: list[tuple[str, PlacementCtx]] = []
     for s in seeds:
@@ -181,8 +189,129 @@ def _place_mode_4(
             library_models=models,
             bolts=bolts,
             sample_fn=sample_fn,
+            seeder_label=s.seeder_label,
+            seeder_confidence=s.seeder_confidence,
+            seeder_model=s.seeder_model,
         )
         out.append((s.name, ctx))
+    return out
+
+
+def _place_mode_5(
+    seeds: list[Seed], *,
+    features: dict,
+    library_models: list[dict],
+    bolts: list[dict] | None,
+    sample_fn: Callable[[PlacementCtx], PlacementCtx],
+) -> list[tuple[str, PlacementCtx]]:
+    """Mode 5 inner: seeded placement with library matching (no model_id).
+
+    Same as mode 4 but the matched filter has the full library to choose
+    from. With multiple seeds, runs cross-shank-aware two-pass placement
+    (notebook achieves 13/13 model picks on T18 only with two-pass; a
+    per-seed pass without ownership masking gets 9/13).
+
+    Used by callers who know where each shank is but want the placer to
+    identify the electrode model.
+    """
+    if len(seeds) > 1:
+        return _place_two_pass(
+            seeds, features=features, library_models=library_models,
+            bolts=bolts, sample_fn=sample_fn,
+        )
+    s = seeds[0]
+    ctx = place_seed(
+        s.start_ras, s.end_ras,
+        features=features,
+        library_models=library_models,
+        bolts=bolts,
+        sample_fn=sample_fn,
+        seeder_label=s.seeder_label,
+        seeder_confidence=s.seeder_confidence,
+        seeder_model=s.seeder_model,
+    )
+    return [(s.name, ctx)]
+
+
+def _place_two_pass(
+    seeds: list[Seed], *,
+    features: dict,
+    library_models: list[dict],
+    bolts: list[dict] | None,
+    sample_fn: Callable[[PlacementCtx], PlacementCtx],
+) -> list[tuple[str, PlacementCtx]]:
+    """Run cross-shank-aware two-pass placement on a seed batch.
+
+    Used by modes 1, 2, 3 — anywhere the seeds came from the same auto-detect
+    pass, since two-pass ownership masking helps with passing-shank artifacts
+    (memory: project_v3_staged_scoring_2026-05-09 cross-shank notes).
+    """
+    seed_dicts = [
+        {
+            "start_ras": s.start_ras,
+            "end_ras":   s.end_ras,
+            "confidence":       s.seeder_confidence,
+            "confidence_label": s.seeder_label,
+            "electrode_model":  s.seeder_model,
+        }
+        for s in seeds
+    ]
+    ctxs = run_two_pass(
+        seed_dicts,
+        features=features,
+        library_models=library_models,
+        bolts=bolts,
+        sample_fn=sample_fn,
+    )
+    return [(s.name, c) for s, c in zip(seeds, ctxs)]
+
+
+# ---------------------------------------------------------------------
+# Mode-3 (named, no seed) — assignment by best matched-filter pick
+# ---------------------------------------------------------------------
+
+
+def _assign_by_expected(
+    pairs: list[tuple[str, PlacementCtx]],
+    expected: list[tuple[str, str]],
+) -> list[tuple[str, PlacementCtx]]:
+    """Greedy assignment: each ``(name, model_id)`` in ``expected`` claims
+    the unused candidate with highest compound score whose pick matches.
+
+    Returns ``[(name, ctx)]`` with the requested names in their input order;
+    unmatched expected entries get a None-ctx placeholder dropped by the
+    caller. Unassigned candidates are dropped (mode 3 contract: "find each
+    of these specific shanks").
+    """
+    by_score = sorted(
+        enumerate(pairs),
+        key=lambda ip: -float(ip[1][1].score_components.get("compound_score", 0.0)),
+    )
+
+    assigned_indices: set[int] = set()
+    out: list[tuple[str, PlacementCtx]] = []
+    for name, want_model in expected:
+        chosen_idx = None
+        for idx, (_, ctx) in by_score:
+            if idx in assigned_indices:
+                continue
+            picked = ctx.score_components.get("model_id")
+            if picked == want_model:
+                chosen_idx = idx
+                break
+        if chosen_idx is None:
+            # No candidate picked this model — fall back to highest-score
+            # unassigned candidate (caller will see ``model_id`` mismatch
+            # in ``score_components``).
+            for idx, _ in by_score:
+                if idx not in assigned_indices:
+                    chosen_idx = idx
+                    break
+        if chosen_idx is None:
+            continue  # ran out of candidates
+        assigned_indices.add(chosen_idx)
+        _, ctx = pairs[chosen_idx]
+        out.append((name, ctx))
     return out
 
 
@@ -192,47 +321,153 @@ def _place_mode_4(
 
 
 def place_seeg(
-    ct,                                            # path | sitk.Image | (numpy_kji, ijk_to_ras)
+    ct,                                            # path | sitk.Image | None (when features= passed)
     *,
     seeds: list[Seed] | None = None,
     expected: list[tuple[str, str]] | None = None,
     n_expected: int | None = None,
     library: str | list[dict] | None = None,
+    pitch_strategy: str | None = None,
     output_dir: Path | str | None = None,
     sample_fn: Callable[[PlacementCtx], PlacementCtx] | None = None,
-    apply_subject_fft_norm: bool = False,
+    apply_subject_fft_norm: bool | None = None,
     features: dict | None = None,
     bolts: list[dict] | None = None,
+    band_floor: str | None = None,
+    progress_logger=None,
 ) -> PlacementBatch:
     """Single user-facing entry — see module docstring for the 5-mode table.
 
     Args:
-        ct: CT volume. Currently the implementation requires a precomputed
-            ``features`` dict; CT-from-path / CT-from-sitk loaders land in
-            Session 2 alongside the mode-1 candidate-seed generator.
+        ct: CT volume — path, ``SimpleITK.Image``, or ``None`` when
+            ``features`` is precomputed. The loader is invoked lazily; passing
+            both ``ct`` and ``features`` skips loading.
         seeds: per-trajectory inputs (modes 4 and 5).
-        expected, n_expected: mode 2/3 inputs (NotImplementedError until
-            Session 2).
-        library: pitch-strategy key ("dixi", "pmt_35", ...), explicit model
-            list, or None for full library.
+        expected: mode-3 input — list of ``(name, model_id)`` tuples to find.
+        n_expected: mode-2 input — expected total shank count.
+        library: pitch-strategy key (``"dixi"``, ``"pmt_35"``, ...), explicit
+            model list, or ``None`` for the full bundled library.
+        pitch_strategy: override for the candidate-seed generator's pitch
+            strategy (modes 1/2/3). Defaults to ``library`` when it's a
+            string, else ``None`` (auto).
         output_dir: when set, Session 3's ``qc_output.write_qc_directory``
-            will populate it. Currently stored on the result but no files
-            are written yet.
-        sample_fn: stage-C swap. Default uses ``sample_neg_log_max`` (LoG-
-            side dominates per the 2026-05-09 11-subject sweep).
+            will populate it. Currently stored on the result; no files are
+            written yet.
+        sample_fn: stage-C swap. Default ``sample_neg_log_max`` (LoG-side
+            dominates per the 2026-05-09 11-subject sweep).
         apply_subject_fft_norm: enable per-subject FFT p75 normalization.
-            Off by default for mode 4 (single-seed placement); on by default
-            for mode 1/2 batch flows in Session 2.
-        features, bolts: precomputed feature dict and bolt CC list. Mode-4
-            callers can pass them directly to skip CT loading. The loader-
-            built ``features`` dict comes from
-            ``rosa_detect.guided_fit_engine.compute_features``.
+            Defaults: ``False`` for modes 4/5 (per-seed); ``True`` for modes
+            1/2/3 (batch). Pass explicit ``True``/``False`` to override.
+        features, bolts: precomputed inputs from
+            ``rosa_core.volume_loader.load_features_and_bolts`` — pass them
+            to skip CT loading.
+        band_floor: optional ``"high"`` / ``"medium"`` / ``"low"`` filter
+            applied to the output (mode 1 default: ``"medium"``; modes 2/3
+            ignore — they have an explicit selection rule; modes 4/5 keep
+            everything by default).
+        progress_logger: callable forwarded to the candidate-seed generator
+            in modes 1/2/3.
 
     Raises:
-        NotImplementedError: modes 1, 2, 3, 5 (Session 2 work).
-        ValueError: incompatible mode dispatch (e.g. seeds + expected both set).
+        ValueError: incompatible mode dispatch (e.g. ``seeds=`` + ``expected=``).
+        TypeError: ``library`` of unsupported type.
+        FileNotFoundError: ``ct`` is a non-existent path.
     """
-    # Mode dispatch.
+    mode = _dispatch_mode(seeds, expected, n_expected)
+
+    library_models = _resolve_library(library)
+    if pitch_strategy is None and isinstance(library, str):
+        pitch_strategy = library
+    sample_fn = sample_fn or _default_sample_fn()
+    if apply_subject_fft_norm is None:
+        # Auto modes (1/2/3) batch many candidates → subject normalization
+        # is appropriate. Seeded modes (4/5) typically run a handful of
+        # user-vouched seeds; per-seed scoring without subject relativity.
+        apply_subject_fft_norm = mode in (1, 2, 3)
+
+    if features is None or bolts is None:
+        if ct is None:
+            raise ValueError(
+                "place_seeg needs either a CT (path | SimpleITK.Image) or both "
+                "`features` and `bolts` precomputed."
+            )
+        from .volume_loader import load_features_and_bolts
+        features, bolts = load_features_and_bolts(ct)
+
+    if mode == 1:
+        pairs = _run_auto(
+            features=features, bolts=bolts, library_models=library_models,
+            pitch_strategy=pitch_strategy, sample_fn=sample_fn,
+            progress_logger=progress_logger,
+        )
+        if apply_subject_fft_norm:
+            pairs = _apply_fft_norm(pairs)
+        if band_floor is None:
+            band_floor = "medium"
+        pairs = _filter_by_band(pairs, band_floor)
+    elif mode == 2:
+        pairs = _run_auto(
+            features=features, bolts=bolts, library_models=library_models,
+            pitch_strategy=pitch_strategy, sample_fn=sample_fn,
+            progress_logger=progress_logger,
+        )
+        if apply_subject_fft_norm:
+            pairs = _apply_fft_norm(pairs)
+        pairs = sorted(
+            pairs,
+            key=lambda p: -float(p[1].score_components.get("compound_score", 0.0)),
+        )[:int(n_expected)]
+    elif mode == 3:
+        pairs = _run_auto(
+            features=features, bolts=bolts, library_models=library_models,
+            pitch_strategy=pitch_strategy, sample_fn=sample_fn,
+            progress_logger=progress_logger,
+        )
+        if apply_subject_fft_norm:
+            pairs = _apply_fft_norm(pairs)
+        pairs = _assign_by_expected(pairs, list(expected))
+    elif mode == 4:
+        pairs = _place_mode_4(
+            list(seeds), features=features, library_models=library_models,
+            bolts=bolts, sample_fn=sample_fn,
+        )
+        if apply_subject_fft_norm:
+            pairs = _apply_fft_norm(pairs)
+    else:  # mode == 5
+        pairs = _place_mode_5(
+            list(seeds), features=features, library_models=library_models,
+            bolts=bolts, sample_fn=sample_fn,
+        )
+        if apply_subject_fft_norm:
+            pairs = _apply_fft_norm(pairs)
+
+    placed = [_ctx_to_placed(name, ctx) for name, ctx in pairs]
+
+    return PlacementBatch(
+        trajectories=placed,
+        qc_dir=Path(output_dir) if output_dir is not None else None,
+        diagnostics={
+            "mode": mode,
+            "n_input_seeds": len(seeds) if seeds else 0,
+            "n_emitted": len(placed),
+            "n_library_models": len(library_models),
+            "subject_fft_normalized": apply_subject_fft_norm,
+            "band_floor": band_floor,
+        },
+    )
+
+
+# ---------------------------------------------------------------------
+# Dispatch + flow helpers
+# ---------------------------------------------------------------------
+
+
+def _dispatch_mode(
+    seeds: list[Seed] | None,
+    expected: list[tuple[str, str]] | None,
+    n_expected: int | None,
+) -> int:
+    """Pick the mode from the optional-arg combination. Validates exclusivity."""
     has_seeds = seeds is not None and len(seeds) > 0
     has_expected = expected is not None
     has_n_expected = n_expected is not None
@@ -243,57 +478,63 @@ def place_seeg(
         raise ValueError("n_expected= cannot be combined with seeds=")
 
     if has_seeds:
-        seeds_have_models = all(s.model_id is not None for s in seeds)
-        if seeds_have_models:
-            mode = 4
-        else:
-            mode = 5
-    elif has_n_expected:
-        mode = 2
-    elif has_expected:
-        mode = 3
-    else:
-        mode = 1
+        return 4 if all(s.model_id is not None for s in seeds) else 5
+    if has_n_expected:
+        return 2
+    if has_expected:
+        return 3
+    return 1
 
-    if mode != 4:
-        raise NotImplementedError(
-            f"place_seeg mode {mode} is implemented in Session 2 (this is "
-            f"Session 1 — only mode 4 / seeded placement is wired)"
-        )
 
-    # Mode 4 implementation.
-    if features is None:
-        raise NotImplementedError(
-            "Session 1 mode-4 requires a precomputed `features` dict from "
-            "`rosa_detect.guided_fit_engine.compute_features`. CT loaders "
-            "land in Session 2."
-        )
+def _run_auto(
+    *,
+    features: dict,
+    bolts: list[dict] | None,
+    library_models: list[dict],
+    pitch_strategy: str | None,
+    sample_fn: Callable[[PlacementCtx], PlacementCtx],
+    progress_logger,
+) -> list[tuple[str, PlacementCtx]]:
+    """Modes 1/2/3 inner: candidate generation → two-pass placement.
 
-    library_models = _resolve_library(library)
-    sample_fn = sample_fn or _default_sample_fn()
-
-    pairs = _place_mode_4(
-        list(seeds), features=features, library_models=library_models,
+    The two-pass placement applies cross-shank ownership masking — relevant
+    for batch auto-detect runs where multiple emissions can share voxels.
+    """
+    from rosa_detect.candidate_seeds import generate_candidate_seeds
+    seeds = generate_candidate_seeds(
+        features, bolts=bolts, pitch_strategy=pitch_strategy,
+        progress_logger=progress_logger,
+    )
+    if not seeds:
+        return []
+    return _place_two_pass(
+        seeds, features=features, library_models=library_models,
         bolts=bolts, sample_fn=sample_fn,
     )
 
-    if apply_subject_fft_norm:
-        ctxs = [c for _, c in pairs]
-        ctxs = apply_subject_fft_normalization(ctxs)
-        pairs = [(name, c) for (name, _), c in zip(pairs, ctxs)]
 
-    placed = [_ctx_to_placed(name, ctx) for name, ctx in pairs]
+def _apply_fft_norm(
+    pairs: list[tuple[str, PlacementCtx]],
+) -> list[tuple[str, PlacementCtx]]:
+    """Re-normalize each ctx's FFT score against the subject's reliable p75."""
+    if not pairs:
+        return pairs
+    ctxs = [c for _, c in pairs]
+    ctxs = apply_subject_fft_normalization(ctxs)
+    return [(name, c) for (name, _), c in zip(pairs, ctxs)]
 
-    return PlacementBatch(
-        trajectories=placed,
-        qc_dir=Path(output_dir) if output_dir is not None else None,
-        diagnostics={
-            "mode": mode,
-            "n_seeds": len(seeds),
-            "n_library_models": len(library_models),
-            "subject_fft_normalized": apply_subject_fft_norm,
-        },
-    )
+
+def _filter_by_band(
+    pairs: list[tuple[str, PlacementCtx]],
+    band_floor: str,
+) -> list[tuple[str, PlacementCtx]]:
+    """Keep emissions whose band is at least ``band_floor``."""
+    rank = {"low": 0, "medium": 1, "high": 2}
+    threshold = rank.get(band_floor, 1)
+    return [
+        (n, c) for n, c in pairs
+        if rank.get(c.score_components.get("band", "low"), 0) >= threshold
+    ]
 
 
 # ---------------------------------------------------------------------
