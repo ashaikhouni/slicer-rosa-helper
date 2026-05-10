@@ -212,35 +212,48 @@ class Amc88LogTests(unittest.TestCase):
         )
         self.sample_fn = sample_neg_log_max
 
-    def test_amc88_mode5_runs_per_seed_with_library_match(self):
-        """Mode 5 sanity: seeded with GT-derived axes, library matches each.
+    def test_amc88_mode5_snaps_seeds_to_v1_candidates(self):
+        """Mode 5 (per user 2026-05-09 spec): seed should snap to closest
+        mode-1 emission; unmatched seeds drop; unmatched candidates drop.
 
-        Note: GT-derived axes (PCA over contact .dat points) are NOT what the
-        notebook validates. The notebook's 8/8-in-high number is for mode 1
-        (v1-emitted seeds, which carry v1's confidence labels and are bolt-
-        anchored). This test just confirms mode 5 routes correctly and runs
-        per-seed without rejecting.
+        AMC88 has 8 GT shanks → ≥8 v1 emissions → all 8 GT seeds should
+        snap. Inheriting v1's bolt-anchored geometry, the matched filter
+        gets the same model picks as mode 1.
         """
         from rosa_core.placement_modes import place_seeg
 
         seeds = _seeds_from_gt(self.gt)
-        for s in seeds:
-            self.assertIsNone(s.model_id, "AMC88 .dat GT shouldn't have model_id")
-
         batch = place_seeg(
             self.ct, seeds=seeds,
             features=self.features, bolts=self.bolts,
             library=self.library, sample_fn=self.sample_fn,
-            apply_subject_fft_norm=True,
         )
         self.assertEqual(batch.diagnostics["mode"], 5)
-        self.assertEqual(len(batch.trajectories), len(self.gt))
-        # All emissions should at least produce a placement (n_placed > 0)
-        # and have a model_id picked from the strategy library.
+        diag = batch.diagnostics["mode5"]
+        self.assertEqual(diag["n_input_seeds"], len(self.gt))
+        # All 8 GT seeds should snap to a v1 candidate.
+        self.assertEqual(
+            diag["n_seeds_matched"], len(self.gt),
+            f"all {len(self.gt)} GT seeds should snap to a v1 candidate; "
+            f"got {diag['n_seeds_matched']}. diag={diag}",
+        )
+        # Each emission should have a model_id and placed contacts —
+        # snapped from mode 1, so geometry is bolt-anchored.
         for t in batch.trajectories:
-            self.assertIsNotNone(t.model_id, f"mode 5 should pick a model: {t.name}")
-            self.assertGreater(len(t.contacts_ras), 0,
-                                f"mode 5 should place contacts: {t.name}")
+            self.assertIsNotNone(t.model_id, f"snap should produce model_id: {t.name}")
+            self.assertGreater(
+                len(t.contacts_ras), 0,
+                f"snapped emission should have contacts: {t.name}",
+            )
+        # Snapped emissions should largely match notebook's mode-1 number:
+        # 8/8 in 'high' (notebook) — allow 1 slack for shank-level noise.
+        bands = [t.band for t in batch.trajectories]
+        n_high = bands.count("high")
+        self.assertGreaterEqual(
+            n_high, len(self.gt) - 1,
+            f"snap-to-v1 mode 5 should match notebook ≥{len(self.gt)-1}/{len(self.gt)} in 'high'; "
+            f"got bands={bands}",
+        )
 
     def test_amc88_mode1_no_orphans_in_high(self):
         """Mode 1 full auto: generate seeds + place. Notebook: 0 LoG orphans
@@ -338,6 +351,52 @@ class T18LogTests(unittest.TestCase):
             load_electrode_library()["models"], strategy,
         )
         self.sample_fn = sample_neg_log_max
+
+    def test_t18_mode5_snap_matches_notebook_picks(self):
+        """Mode 5 (snap-to-v1): T18 GT seeds snap to v1 emissions, then
+        each snapped emission's matched-filter pick is compared against GT
+        model_id. With snap, mode 5 should match mode 1's notebook number
+        (13/13 picks correct on T18 LoG side).
+
+        Without snap (per-seed placement on raw GT axes), mode 5 gets
+        ~9/13 — see Session 2 commit message.
+        """
+        from rosa_core.placement_modes import place_seeg
+
+        gt_with_models = [g for g in self.gt if g.get("model_id")]
+        if not gt_with_models:
+            self.skipTest("T18 curated GT lacks per-shank model_id labels")
+
+        # Strip model_id so the dispatcher routes to mode 5 (library match
+        # via snap), not mode 4 (model vouched).
+        seeds = [
+            type(s)(name=s.name, start_ras=s.start_ras, end_ras=s.end_ras,
+                    model_id=None,
+                    seeder_label=s.seeder_label,
+                    seeder_confidence=s.seeder_confidence,
+                    seeder_model=s.seeder_model)
+            for s in _seeds_from_gt(self.gt)
+        ]
+        batch = place_seeg(
+            self.ct, seeds=seeds,
+            features=self.features, bolts=self.bolts,
+            library=self.library, sample_fn=self.sample_fn,
+        )
+        self.assertEqual(batch.diagnostics["mode"], 5)
+
+        # Map snapped seed name → GT model_id.
+        gt_model_by_name = {g["name"]: g.get("model_id") for g in self.gt}
+        n_correct = sum(
+            1 for t in batch.trajectories
+            if gt_model_by_name.get(t.name) and t.model_id == gt_model_by_name[t.name]
+        )
+        n_with_model = len(gt_with_models)
+        self.assertGreaterEqual(
+            n_correct, max(1, n_with_model - 1),
+            f"mode-5 snap should match notebook ≥{n_with_model - 1}/{n_with_model}; "
+            f"got {n_correct}. picks: "
+            f"{[(t.name, t.model_id, gt_model_by_name.get(t.name)) for t in batch.trajectories]}",
+        )
 
     def test_t18_mode1_model_picks_at_least_12_of_13(self):
         """Mode 1 (full auto via candidate-seeds + two-pass): notebook 13/13.

@@ -194,35 +194,58 @@ class Mode4SyntheticTests(unittest.TestCase):
 
 
 class Mode5SyntheticTests(unittest.TestCase):
-    """Mode 5: seeds without model_id; placer does library matching."""
+    """Mode 5: seeds without model_id; snaps to closest mode-1 emission.
+
+    Synthetic CT typically yields zero v1 candidates (too clean for stage1
+    to pick anything up). Mode 5 then drops all seeds (no candidate to snap
+    to). This is the documented behavior — caller sees ``n_seeds_unmatched``
+    in diagnostics. Real-CT mode-5 behavior is exercised by the AMC88
+    integration test.
+    """
 
     def setUp(self):
         self.features = _synthetic_features()
         self.bolts = []
         self.library = _synthetic_library()
-        # Seed without model_id → mode 5.
         self.seeds = [_synthetic_seed(model_id=None)]
 
-    def test_mode_5_returns_placement_batch(self):
+    def test_mode_5_routes_correctly(self):
         batch = place_seeg(None, seeds=self.seeds,
                            library=self.library, features=self.features,
                            bolts=self.bolts)
         self.assertEqual(batch.diagnostics["mode"], 5)
-        self.assertEqual(len(batch.trajectories), 1)
+        self.assertIn("mode5", batch.diagnostics)
 
-    def test_mode_5_uses_full_library(self):
-        # Multi-model library; the placer picks one.
-        lib = _synthetic_library() + [{
-            "id": "DIFFERENT", "vendor": "test", "n_contacts": 5, "pitch_mm": 5.0,
-            "contact_center_offsets_from_tip_mm": [0, 5, 10, 15, 20],
-            "active_length_mm": 25.0, "diameter_mm": 1.3,
-        }]
+    def test_mode_5_diag_reports_snap_outcome(self):
         batch = place_seeg(None, seeds=self.seeds,
-                           library=lib, features=self.features,
+                           library=self.library, features=self.features,
                            bolts=self.bolts)
-        # The picked model could be either; just confirm it's one of them.
-        picked = batch.trajectories[0].model_id
-        self.assertIn(picked, {"SYNTH-10", "DIFFERENT", None})
+        d = batch.diagnostics["mode5"]
+        for k in ("n_input_seeds", "n_candidates_generated",
+                  "n_seeds_matched", "n_seeds_unmatched",
+                  "n_candidates_dropped",
+                  "snap_angle_tol_deg", "snap_perp_tol_mm"):
+            self.assertIn(k, d)
+        self.assertEqual(d["n_input_seeds"], 1)
+        # Unmatched + matched = input total.
+        self.assertEqual(
+            d["n_seeds_matched"] + d["n_seeds_unmatched"],
+            d["n_input_seeds"],
+        )
+
+    def test_mode_5_snap_tolerances_recorded(self):
+        # The configured tolerances surface in diagnostics so QC can see them.
+        batch = place_seeg(None, seeds=self.seeds,
+                           library=self.library, features=self.features,
+                           bolts=self.bolts,
+                           snap_angle_tol_deg=2.5, snap_perp_tol_mm=0.5)
+        d = batch.diagnostics["mode5"]
+        self.assertEqual(d["snap_angle_tol_deg"], 2.5)
+        self.assertEqual(d["snap_perp_tol_mm"], 0.5)
+        # Sanity: matched + unmatched = input total.
+        self.assertEqual(
+            d["n_seeds_matched"] + d["n_seeds_unmatched"], d["n_input_seeds"],
+        )
 
 
 # ---------------------------------------------------------------------
@@ -296,34 +319,75 @@ class FilterByBandTests(unittest.TestCase):
 
 
 class AssignByExpectedTests(unittest.TestCase):
-    def test_assignment_picks_best_match_per_expected(self):
-        from rosa_core.placement_modes import _assign_by_expected
+    @staticmethod
+    def _ctx(model, score):
         from rosa_core.contact_placement import PlacementCtx
         from dataclasses import replace
+        ctx = PlacementCtx(
+            seed_start=np.zeros(3),
+            seed_end=np.array([10, 0, 0], dtype=float),
+            features={}, library_models=[],
+        )
+        return replace(ctx, score_components={
+            "model_id": model, "compound_score": score, "band": "high",
+        })
 
-        def _ctx(model, score):
-            ctx = PlacementCtx(
-                seed_start=np.zeros(3),
-                seed_end=np.array([10, 0, 0], dtype=float),
-                features={}, library_models=[],
-            )
-            return replace(ctx, score_components={
-                "model_id": model, "compound_score": score, "band": "high",
-            })
+    def test_assignment_picks_best_match_per_expected(self):
+        from rosa_core.placement_modes import _assign_by_expected
 
         pairs = [
-            ("CAND-001", _ctx("DIXI-15", 0.8)),
-            ("CAND-002", _ctx("DIXI-12", 0.7)),
-            ("CAND-003", _ctx("DIXI-15", 0.6)),  # also picks DIXI-15 but lower
+            ("CAND-001", self._ctx("DIXI-15", 0.8)),
+            ("CAND-002", self._ctx("DIXI-12", 0.7)),
+            ("CAND-003", self._ctx("DIXI-15", 0.6)),
         ]
-        out = _assign_by_expected(pairs, [
+        out, diag = _assign_by_expected(pairs, [
             ("L1", "DIXI-15"),
             ("L2", "DIXI-12"),
         ])
-        # L1 takes the best DIXI-15 (CAND-001), L2 takes CAND-002.
         self.assertEqual([n for n, _ in out], ["L1", "L2"])
         self.assertEqual(out[0][1].score_components["model_id"], "DIXI-15")
         self.assertEqual(out[1][1].score_components["model_id"], "DIXI-12")
+        self.assertEqual(diag["duplicate_models"], {})
+
+    def test_duplicate_model_ids_emit_warning_and_diag(self):
+        """Per user 2026-05-09: duplicate model_ids in expected can't be
+        disambiguated from CT alone. Greedy assignment among same-model
+        candidates is arbitrary; the dispatcher warns the caller."""
+        import warnings
+        from rosa_core.placement_modes import _assign_by_expected
+
+        pairs = [
+            ("CAND-001", self._ctx("DIXI-15", 0.9)),
+            ("CAND-002", self._ctx("DIXI-15", 0.7)),
+        ]
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out, diag = _assign_by_expected(pairs, [
+                ("L1", "DIXI-15"),
+                ("L2", "DIXI-15"),
+            ])
+
+        self.assertEqual(len(out), 2)
+        self.assertEqual(diag["duplicate_models"], {"DIXI-15": 2})
+        # Warning surfaced.
+        self.assertTrue(
+            any("duplicate model_ids" in str(w.message) for w in caught),
+            f"expected duplicate-model warning; got {[str(w.message) for w in caught]}",
+        )
+
+    def test_no_match_falls_back_to_highest_score_unassigned(self):
+        from rosa_core.placement_modes import _assign_by_expected
+
+        pairs = [
+            ("CAND-001", self._ctx("DIXI-12", 0.8)),
+            ("CAND-002", self._ctx("DIXI-12", 0.7)),
+        ]
+        out, diag = _assign_by_expected(pairs, [
+            ("L1", "DIXI-15"),  # no DIXI-15 candidate
+        ])
+        self.assertEqual(len(out), 1)
+        # Fallback used.
+        self.assertEqual(diag["per_name_outcome"][0]["outcome"], "fallback_no_model_match")
 
 
 if __name__ == "__main__":

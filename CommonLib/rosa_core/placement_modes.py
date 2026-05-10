@@ -200,37 +200,108 @@ def _place_mode_4(
 def _place_mode_5(
     seeds: list[Seed], *,
     features: dict,
-    library_models: list[dict],
     bolts: list[dict] | None,
+    library_models: list[dict],
+    pitch_strategy: str | None,
     sample_fn: Callable[[PlacementCtx], PlacementCtx],
-) -> list[tuple[str, PlacementCtx]]:
-    """Mode 5 inner: seeded placement with library matching (no model_id).
+    progress_logger,
+    angle_tol_deg: float,
+    perp_tol_mm: float,
+) -> tuple[list[tuple[str, PlacementCtx]], dict]:
+    """Mode 5 inner: snap user seeds to mode-1 candidate emissions.
 
-    Same as mode 4 but the matched filter has the full library to choose
-    from. With multiple seeds, runs cross-shank-aware two-pass placement
-    (notebook achieves 13/13 model picks on T18 only with two-pass; a
-    per-seed pass without ownership masking gets 9/13).
+    Per the user's 2026-05-09 spec: ``the seeded trajectory should be snapped
+    to the closest axis emitted by mode 1, and mode-1 trajectories without
+    a close seed get dropped``.
 
-    Used by callers who know where each shank is but want the placer to
-    identify the electrode model.
+    Why: GT-axis-style seeds (PCA over contact points) are NOT equivalent
+    to v1-emitted seeds — the placer's anchor walker assumes ``start_ras``
+    is at the bolt, which v1 guarantees but a hand-clicked / GT-derived
+    seed does not. Snapping to v1 emissions inherits the bolt-anchored
+    geometry. T18 model picks: per-seed mode 5 = 9/13; snap-to-v1 = 13/13
+    (notebook parity).
+
+    Returns ``([(name, ctx)], diag_dict)`` — diag_dict reports counts of
+    matched seeds, dropped seeds, dropped candidates so callers can see
+    when snap thresholds were too tight.
     """
-    if len(seeds) > 1:
-        return _place_two_pass(
-            seeds, features=features, library_models=library_models,
-            bolts=bolts, sample_fn=sample_fn,
-        )
-    s = seeds[0]
-    ctx = place_seed(
-        s.start_ras, s.end_ras,
-        features=features,
-        library_models=library_models,
-        bolts=bolts,
-        sample_fn=sample_fn,
-        seeder_label=s.seeder_label,
-        seeder_confidence=s.seeder_confidence,
-        seeder_model=s.seeder_model,
+    auto_pairs = _run_auto(
+        features=features, bolts=bolts, library_models=library_models,
+        pitch_strategy=pitch_strategy, sample_fn=sample_fn,
+        progress_logger=progress_logger,
     )
-    return [(s.name, ctx)]
+    n_candidates = len(auto_pairs)
+    matches = _greedy_axis_match(
+        seeds, auto_pairs,
+        angle_tol_deg=angle_tol_deg, perp_tol_mm=perp_tol_mm,
+    )
+    out: list[tuple[str, PlacementCtx]] = []
+    matched_seed_names: set[str] = set()
+    matched_cand_indices: set[int] = set()
+    for seed_idx, cand_idx in matches:
+        seed = seeds[seed_idx]
+        _cand_name, ctx = auto_pairs[cand_idx]
+        out.append((seed.name, ctx))
+        matched_seed_names.add(seed.name)
+        matched_cand_indices.add(cand_idx)
+
+    diag = {
+        "n_input_seeds": len(seeds),
+        "n_candidates_generated": n_candidates,
+        "n_seeds_matched": len(matches),
+        "n_seeds_unmatched": len(seeds) - len(matches),
+        "n_candidates_dropped": n_candidates - len(matched_cand_indices),
+        "snap_angle_tol_deg": angle_tol_deg,
+        "snap_perp_tol_mm": perp_tol_mm,
+    }
+    return out, diag
+
+
+def _greedy_axis_match(
+    seeds: list[Seed],
+    candidates: list[tuple[str, PlacementCtx]],
+    *,
+    angle_tol_deg: float,
+    perp_tol_mm: float,
+) -> list[tuple[int, int]]:
+    """Greedy match: each seed claims the closest candidate within tolerance.
+
+    Returns list of ``(seed_idx, candidate_idx)`` pairs in cost-ascending
+    order. Reciprocal: each seed and each candidate appear at most once.
+    Same algorithm the integration tests use for GT axis matching.
+    """
+    if not seeds or not candidates:
+        return []
+
+    pairs = []
+    for si, s in enumerate(seeds):
+        ax_s = _unit_axis(s.end_ras - s.start_ras)
+        mid_s = 0.5 * (s.start_ras + s.end_ras)
+        for ci, (_name, ctx) in enumerate(candidates):
+            ax_c = _unit_axis(ctx.seed_end - ctx.seed_start)
+            mid_c = 0.5 * (ctx.seed_start + ctx.seed_end)
+            ang = float(np.degrees(np.arccos(min(1.0, abs(float(np.dot(ax_s, ax_c)))))))
+            v = mid_s - mid_c
+            perp = v - float(np.dot(v, ax_c)) * ax_c
+            d_perp = float(np.linalg.norm(perp))
+            if ang <= angle_tol_deg and d_perp <= perp_tol_mm:
+                pairs.append((ang + d_perp, si, ci))
+
+    pairs.sort(key=lambda p: p[0])
+    used_s, used_c = set(), set()
+    out = []
+    for _cost, si, ci in pairs:
+        if si in used_s or ci in used_c:
+            continue
+        used_s.add(si); used_c.add(ci)
+        out.append((si, ci))
+    return out
+
+
+def _unit_axis(v: np.ndarray) -> np.ndarray:
+    """Unit vector with safe fallback for zero vectors."""
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
 
 
 def _place_two_pass(
@@ -274,24 +345,42 @@ def _place_two_pass(
 def _assign_by_expected(
     pairs: list[tuple[str, PlacementCtx]],
     expected: list[tuple[str, str]],
-) -> list[tuple[str, PlacementCtx]]:
+) -> tuple[list[tuple[str, PlacementCtx]], dict]:
     """Greedy assignment: each ``(name, model_id)`` in ``expected`` claims
     the unused candidate with highest compound score whose pick matches.
 
-    Returns ``[(name, ctx)]`` with the requested names in their input order;
-    unmatched expected entries get a None-ctx placeholder dropped by the
-    caller. Unassigned candidates are dropped (mode 3 contract: "find each
-    of these specific shanks").
+    Returns ``([(name, ctx)], diag)``:
+      * The list pairs each requested name with the chosen candidate (or is
+        omitted when no candidates remain).
+      * ``diag`` carries the duplicate-model warning and per-name match
+        outcome for QC inspection.
+
+    **Duplicate-model limitation** (per user 2026-05-09): if two entries in
+    ``expected`` share the same ``model_id`` (e.g. ``L1=DIXI-15CM`` and
+    ``L2=DIXI-15CM``), there's no signal in the CT alone that distinguishes
+    which physical shank goes to which name. The greedy pass assigns the
+    highest-scoring matching candidate to the first entry, second-highest
+    to the next, etc. — but the assignment among same-model entries is
+    arbitrary. Caller should disambiguate via mode 4 (seed + model) or
+    mode 5 (seed) when shank-to-name correspondence matters. The diagnostic
+    surfaces a warning when duplicates are present.
     """
+    from collections import Counter
+
     by_score = sorted(
         enumerate(pairs),
         key=lambda ip: -float(ip[1][1].score_components.get("compound_score", 0.0)),
     )
 
+    model_counts = Counter(m for _, m in expected)
+    duplicate_models = {m: c for m, c in model_counts.items() if c > 1}
+
     assigned_indices: set[int] = set()
     out: list[tuple[str, PlacementCtx]] = []
+    per_name_outcome: list[dict] = []
     for name, want_model in expected:
         chosen_idx = None
+        outcome = "matched_by_model"
         for idx, (_, ctx) in by_score:
             if idx in assigned_indices:
                 continue
@@ -301,18 +390,42 @@ def _assign_by_expected(
                 break
         if chosen_idx is None:
             # No candidate picked this model — fall back to highest-score
-            # unassigned candidate (caller will see ``model_id`` mismatch
-            # in ``score_components``).
+            # unassigned candidate (caller sees ``model_id`` mismatch in
+            # ``score_components``).
+            outcome = "fallback_no_model_match"
             for idx, _ in by_score:
                 if idx not in assigned_indices:
                     chosen_idx = idx
                     break
         if chosen_idx is None:
-            continue  # ran out of candidates
+            per_name_outcome.append(
+                {"name": name, "want_model": want_model, "outcome": "no_candidate_left"},
+            )
+            continue
         assigned_indices.add(chosen_idx)
         _, ctx = pairs[chosen_idx]
         out.append((name, ctx))
-    return out
+        per_name_outcome.append(
+            {"name": name, "want_model": want_model, "outcome": outcome},
+        )
+
+    diag = {
+        "n_expected": len(expected),
+        "n_emitted": len(out),
+        "duplicate_models": duplicate_models,
+        "per_name_outcome": per_name_outcome,
+    }
+    if duplicate_models:
+        import warnings as _warnings
+        _warnings.warn(
+            f"place_seeg mode 3: duplicate model_ids in expected — assignment "
+            f"among same-model entries is arbitrary (CT alone cannot "
+            f"distinguish identical-model shanks). Affected models: "
+            f"{duplicate_models}. Use mode 4/5 with seeds when shank-to-name "
+            f"correspondence matters.",
+            stacklevel=3,
+        )
+    return out, diag
 
 
 # ---------------------------------------------------------------------
@@ -334,6 +447,8 @@ def place_seeg(
     features: dict | None = None,
     bolts: list[dict] | None = None,
     band_floor: str | None = None,
+    snap_angle_tol_deg: float = 12.0,
+    snap_perp_tol_mm: float = 8.0,
     progress_logger=None,
 ) -> PlacementBatch:
     """Single user-facing entry — see module docstring for the 5-mode table.
@@ -425,7 +540,7 @@ def place_seeg(
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
-        pairs = _assign_by_expected(pairs, list(expected))
+        pairs, mode3_diag = _assign_by_expected(pairs, list(expected))
     elif mode == 4:
         pairs = _place_mode_4(
             list(seeds), features=features, library_models=library_models,
@@ -434,26 +549,39 @@ def place_seeg(
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
     else:  # mode == 5
-        pairs = _place_mode_5(
-            list(seeds), features=features, library_models=library_models,
-            bolts=bolts, sample_fn=sample_fn,
+        # Run candidates first (apply_subject_fft_norm applies internally),
+        # then snap user seeds to closest mode-1 emission. Drop on both sides
+        # of the snap (unmatched seeds + unmatched candidates).
+        pairs, mode5_diag = _place_mode_5(
+            list(seeds),
+            features=features, bolts=bolts,
+            library_models=library_models,
+            pitch_strategy=pitch_strategy,
+            sample_fn=sample_fn, progress_logger=progress_logger,
+            angle_tol_deg=snap_angle_tol_deg,
+            perp_tol_mm=snap_perp_tol_mm,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
 
     placed = [_ctx_to_placed(name, ctx) for name, ctx in pairs]
 
+    diagnostics = {
+        "mode": mode,
+        "n_input_seeds": len(seeds) if seeds else 0,
+        "n_emitted": len(placed),
+        "n_library_models": len(library_models),
+        "subject_fft_normalized": apply_subject_fft_norm,
+        "band_floor": band_floor,
+    }
+    if mode == 3:
+        diagnostics["mode3"] = mode3_diag
+    elif mode == 5:
+        diagnostics["mode5"] = mode5_diag
     return PlacementBatch(
         trajectories=placed,
         qc_dir=Path(output_dir) if output_dir is not None else None,
-        diagnostics={
-            "mode": mode,
-            "n_input_seeds": len(seeds) if seeds else 0,
-            "n_emitted": len(placed),
-            "n_library_models": len(library_models),
-            "subject_fft_normalized": apply_subject_fft_norm,
-            "band_floor": band_floor,
-        },
+        diagnostics=diagnostics,
     )
 
 
