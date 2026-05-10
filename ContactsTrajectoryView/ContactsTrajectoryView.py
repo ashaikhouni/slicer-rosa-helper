@@ -428,13 +428,25 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         form.addRow("Pitch strategy", self.contactsPitchStrategyCombo)
 
-        # Model-driven: synthesize contacts at the assigned electrode
-        # model's nominal offsets along the fitted line.
-        # Peak-driven: sample LoG sigma=1 along the axis, pick peaks,
-        # match to the library, emit contacts at the detected peak
-        # positions. Falls back to model-driven per-trajectory when
-        # the axis doesn't produce enough peaks to resolve a model.
+        # Detection mode (per the 2026-05-09 staged-pipeline lift):
+        #
+        # Staged (snap + matched filter): runs the full
+        #     ``rosa_core.placement_modes.place_seeg`` pipeline. Per-row
+        #     model picker drives mode 4 (vouched) vs mode 5 (library
+        #     match). Snaps each user seed to its closest v1 candidate so
+        #     placement inherits bolt-anchored geometry — same code path
+        #     as the CLI's ``rosa-agent place``.
+        #
+        # Model-driven (nominal): synthesizes contacts at the assigned
+        #     electrode model's nominal slot offsets along the fitted
+        #     line. Manual fallback when staged rejects (off-axis seed,
+        #     missing v1 candidate, etc.).
+        #
+        # Peak-driven (CT peaks): legacy LoG-peak detection along the
+        #     axis (rosa_core.detect_contacts_on_axis). Kept for
+        #     compatibility; "Staged" is the recommended default.
         self.detectionModeCombo = qt.QComboBox()
+        self.detectionModeCombo.addItem("Staged (snap + matched filter)", "staged")
         self.detectionModeCombo.addItem("Model-driven (nominal)", "model_driven")
         self.detectionModeCombo.addItem("Peak-driven (CT peaks)", "peak_driven")
         form.addRow("Detection mode", self.detectionModeCombo)
@@ -1175,6 +1187,158 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         vendor = default.split("-", 1)[0]
         return candidate_ids_for_vendors(self.modelsById, vendors=[vendor])
 
+    def _generate_contacts_staged(self, trajectories, assignments, log_context):
+        """Staged contact placement via ``rosa_core.placement_modes.place_seeg``.
+
+        Returns ``(contacts, updated_assignments, placed_by_traj)``.
+
+        Per-row model picker drives the dispatcher mode:
+          * Every selected row has an assigned model_id → mode 4
+            (placement-only with vouched model).
+          * At least one row has model_id="" → mode 5
+            (library matching via snap-to-v1).
+
+        Both modes snap the user-supplied seed to its closest v1 candidate
+        emission (inheriting bolt-anchored geometry) before running the
+        placer's stages A→F. Falls back to per-seed placement when no
+        v1 candidate is within tolerance.
+
+        Same code path as the CLI's ``rosa-agent place`` — keeps Slicer
+        and CLI bit-identical on the algorithm side.
+        """
+        from rosa_core.contact_placement import sample_neg_log_max
+        from rosa_core.placement_modes import Seed, place_seeg
+        from rosa_core.electrode_classifier import filter_models_for_strategy
+
+        ct_node = self._resolve_postop_ct_node()
+        if ct_node is None:
+            raise ValueError(
+                "PostopCT volume not available in the workflow — staged "
+                "placement needs the CT to sample. Assign it via the Focus "
+                "view selectors or run Auto Fit first.",
+            )
+
+        ct_path = ct_node.GetStorageNode().GetFileName() if ct_node.GetStorageNode() else None
+        if not ct_path:
+            # Fallback: dump the volume to a temp NIfTI so place_seeg can
+            # read it via SimpleITK. Slicer-loaded volumes without an
+            # on-disk file are rare in the production workflow but possible.
+            import tempfile
+            tmpdir = tempfile.mkdtemp(prefix="rosa_ctv_staged_")
+            ct_path = f"{tmpdir}/ct.nii.gz"
+            slicer.util.saveNode(ct_node, ct_path)
+            self.log(
+                f"[contacts:{log_context}] CT had no on-disk path; wrote to {ct_path}",
+            )
+
+        # Build Seed list from the selected rows + their assignments. Use
+        # entry/target order: trajectories carry start/end in LPS, the
+        # placer wants RAS.
+        assignment_by_name = {
+            row.get("trajectory", ""): row for row in assignments.get("assignments", [])
+        }
+        seeds: list[Seed] = []
+        for traj in trajectories:
+            name = traj.get("name", "")
+            row = assignment_by_name.get(name)
+            assigned_model = (row.get("model_id") if row else "") or None
+            start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+            end_lps = traj.get("end") or [0.0, 0.0, 0.0]
+            entry_ras = lps_to_ras_point(list(start_lps))
+            target_ras = lps_to_ras_point(list(end_lps))
+            seeds.append(Seed(
+                name=str(name),
+                start_ras=entry_ras,
+                end_ras=target_ras,
+                model_id=assigned_model,
+            ))
+
+        # Library subset: pitch-strategy combo controls library filter
+        # (matches Auto Fit / Guided Fit semantics). When the combo says
+        # "auto" / no strategy, pass None for full-library matching.
+        strategy = self._selected_pitch_strategy()
+        library = strategy if strategy and strategy.lower() != "auto" else None
+
+        self.log(
+            f"[contacts:{log_context}] running place_seeg on {len(seeds)} seeds "
+            f"(library={library or 'full'}); per-seed model picker drives mode 4 vs 5",
+        )
+
+        batch = place_seeg(
+            ct_path,
+            seeds=seeds,
+            library=library,
+            sample_fn=sample_neg_log_max,
+            progress_logger=self.log,
+        )
+        diag = batch.diagnostics or {}
+        self.log(
+            f"[contacts:{log_context}] place_seeg mode {diag.get('mode')}: "
+            f"emitted {len(batch.trajectories)}; bands="
+            f"{[t.band for t in batch.trajectories]}",
+        )
+
+        # Convert PlacedTrajectory → ContactRecord-shape list. Same shape
+        # as ras_contacts_to_contact_records produces for peak-driven mode.
+        contacts: list[dict] = []
+        placed_by_traj = {}
+        for traj_pt in batch.trajectories:
+            traj_dict = next(
+                (t for t in trajectories if t.get("name") == traj_pt.name),
+                None,
+            )
+            tip_at = "target"
+            if traj_dict is not None:
+                row = assignment_by_name.get(traj_pt.name)
+                if row:
+                    tip_at = (row.get("tip_at") or "target")
+            label_prefix = traj_pt.name
+            for idx, ras_pt in enumerate(traj_pt.contacts_ras or [], start=1):
+                lps = lps_to_ras_point(list(ras_pt))  # symmetric flip
+                rec = {
+                    "trajectory": label_prefix,
+                    "model_id": traj_pt.model_id or "",
+                    "index": idx,
+                    "label": f"{label_prefix}{idx}",
+                    "position_lps": lps,
+                    "tip_at": tip_at,
+                    "peak_detected": True,  # staged placer is never nominal
+                }
+                contacts.append(rec)
+            placed_by_traj[traj_pt.name] = traj_pt
+
+            # Reflect placer-picked model + band back into the assignment row
+            # so the UI shows what was actually picked (mode 5 with empty
+            # model_id otherwise wouldn't update the per-row combo).
+            if traj_pt.model_id:
+                row = assignment_by_name.setdefault(traj_pt.name, {
+                    "trajectory": traj_pt.name,
+                    "model_id": "",
+                    "tip_at": tip_at,
+                    "tip_shift_mm": 0.0,
+                    "xyz_offset_mm": [0.0, 0.0, 0.0],
+                })
+                row["model_id"] = traj_pt.model_id
+                row["band"] = traj_pt.band
+                row["compound_score"] = traj_pt.compound_score
+
+        # Rebuild the assignments dict so callers see updated model_ids.
+        updated_assignments = {
+            "schema_version": assignments.get("schema_version", "1.0"),
+            "assignments": list(assignment_by_name.values()),
+        }
+        return contacts, updated_assignments, placed_by_traj
+
+    def _selected_pitch_strategy(self) -> str:
+        """Read the pitch-strategy combo's current value as a string."""
+        try:
+            value = self.contactsPitchStrategyCombo.currentData
+            if value is None:
+                value = self.contactsPitchStrategyCombo.currentText
+        except AttributeError:
+            value = ""
+        return str(value or "")
+
     def _generate_contacts_peak_driven(self, trajectories, assignments, log_context):
         """Peak-driven contact detection path. Returns
         ``(contacts, peak_fit_by_traj, updated_assignments)``.
@@ -1425,7 +1589,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
 
         mode = self._selected_detection_mode()
-        if mode == "peak_driven":
+        if mode == "staged":
+            contacts, assignments, _placed_by_traj = self._generate_contacts_staged(
+                trajectories=selected_trajectories,
+                assignments=assignments,
+                log_context=log_context,
+            )
+            self._sync_model_combos_from_assignments(assignments)
+            self.lastAssignments = assignments
+            self.lastPeakDriftFlags = []
+        elif mode == "peak_driven":
             contacts, peak_fit_by_traj, assignments = self._generate_contacts_peak_driven(
                 trajectories=selected_trajectories,
                 assignments=assignments,
