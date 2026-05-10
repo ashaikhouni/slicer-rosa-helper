@@ -204,7 +204,7 @@ cells.append(md("""
 cells.append(code("""
 from shank_core.io import image_ijk_ras_matrices
 from rosa_detect import guided_fit_engine as gfe
-from rosa_detect import contact_pitch_v1_fit as f1
+from rosa_detect.candidate_seeds.metal_evidence import compute_metal_evidence_volume
 from rosa_detect.primitives.bolt_anchor import (
     extract_bolt_candidates, METAL_BOLT_THRESHOLD, BOLT_HULL_PROXIMITY_MM,
 )
@@ -217,7 +217,7 @@ features = gfe.compute_features(img, np.asarray(i2r_in), np.asarray(r2i_in))
 i2r = np.asarray(features["ijk_to_ras_mat"])
 r2i = np.asarray(features["ras_to_ijk_mat"])
 
-metal_evidence = f1.compute_metal_evidence_volume(features["log"], features["ct_arr_kji"])
+metal_evidence = compute_metal_evidence_volume(features["log"], features["ct_arr_kji"])
 bolts, _ = extract_bolt_candidates(
     features["log"], features["head_distance"], i2r, img.GetSpacing(),
     ras_to_ijk_mat=r2i, ct_arr=metal_evidence,

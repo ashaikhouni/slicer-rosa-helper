@@ -46,7 +46,7 @@ from typing import Any
 
 import numpy as np
 
-from . import contact_pitch_v1_fit as cpfit
+from .candidate_seeds.orchestrator import run_two_stage_detection
 from .contracts import (
     DetectionContext,
     DetectionResult,
@@ -296,7 +296,7 @@ def run_contact_pitch_v1_with_features(
         pitch_strategy = ctx.get("contact_pitch_v1_pitch_strategy")
 
         def _run_detect():
-            return cpfit.run_two_stage_detection(
+            return run_two_stage_detection(
                 img, ijk_to_ras, ras_to_ijk,
                 return_features=True,
                 progress_logger=logger,

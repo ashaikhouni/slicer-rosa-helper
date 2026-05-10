@@ -149,7 +149,9 @@ def _build_features(ct_path: str):
     import SimpleITK as sitk
     from shank_core.io import image_ijk_ras_matrices
     from rosa_detect import guided_fit_engine as gfe
-    from rosa_detect import contact_pitch_v1_fit as f1
+    from rosa_detect.candidate_seeds.metal_evidence import (
+        compute_metal_evidence_volume,
+    )
     from rosa_detect.primitives.bolt_anchor import (
         BOLT_HULL_PROXIMITY_MM, METAL_BOLT_THRESHOLD, extract_bolt_candidates,
     )
@@ -160,7 +162,7 @@ def _build_features(ct_path: str):
     i2r = np.asarray(features["ijk_to_ras_mat"])
     r2i = np.asarray(features["ras_to_ijk_mat"])
 
-    metal_evidence = f1.compute_metal_evidence_volume(
+    metal_evidence = compute_metal_evidence_volume(
         features["log"], features["ct_arr_kji"],
     )
     bolts, _ = extract_bolt_candidates(
