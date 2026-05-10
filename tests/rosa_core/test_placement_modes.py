@@ -214,13 +214,15 @@ class Mode4SyntheticTests(unittest.TestCase):
 
 
 class Mode5SyntheticTests(unittest.TestCase):
-    """Mode 5: seeds without model_id; snaps to closest mode-1 emission.
+    """Mode 5: seeds without model_id; snaps to closest mode-1 emission,
+    falls back to per-seed placement when the snap finds no candidate
+    within tolerance.
 
     Synthetic CT typically yields zero v1 candidates (too clean for stage1
-    to pick anything up). Mode 5 then drops all seeds (no candidate to snap
-    to). This is the documented behavior — caller sees ``n_seeds_unmatched``
-    in diagnostics. Real-CT mode-5 behavior is exercised by the AMC88
-    integration test.
+    to pick anything up). Mode 5 then takes the fallback path for every
+    seed — caller sees ``n_seeds_fallback == n_input_seeds`` in
+    diagnostics. Real-CT mode-5 behavior is exercised by the AMC88 / T18
+    integration tests.
     """
 
     def setUp(self):
@@ -242,19 +244,18 @@ class Mode5SyntheticTests(unittest.TestCase):
                            bolts=self.bolts)
         d = batch.diagnostics["mode5"]
         for k in ("n_input_seeds", "n_candidates_generated",
-                  "n_seeds_matched", "n_seeds_unmatched",
+                  "n_seeds_snapped", "n_seeds_fallback",
                   "n_candidates_dropped",
                   "snap_angle_tol_deg", "snap_perp_tol_mm"):
             self.assertIn(k, d)
         self.assertEqual(d["n_input_seeds"], 1)
-        # Unmatched + matched = input total.
+        # Snapped + fallback = input total (every seed accounted for).
         self.assertEqual(
-            d["n_seeds_matched"] + d["n_seeds_unmatched"],
+            d["n_seeds_snapped"] + d["n_seeds_fallback"],
             d["n_input_seeds"],
         )
 
     def test_mode_5_snap_tolerances_recorded(self):
-        # The configured tolerances surface in diagnostics so QC can see them.
         batch = place_seeg(None, seeds=self.seeds,
                            library=self.library, features=self.features,
                            bolts=self.bolts,
@@ -262,10 +263,18 @@ class Mode5SyntheticTests(unittest.TestCase):
         d = batch.diagnostics["mode5"]
         self.assertEqual(d["snap_angle_tol_deg"], 2.5)
         self.assertEqual(d["snap_perp_tol_mm"], 0.5)
-        # Sanity: matched + unmatched = input total.
+        # Snapped + fallback = input total.
         self.assertEqual(
-            d["n_seeds_matched"] + d["n_seeds_unmatched"], d["n_input_seeds"],
+            d["n_seeds_snapped"] + d["n_seeds_fallback"], d["n_input_seeds"],
         )
+
+    def test_mode_5_returns_one_traj_per_input_seed(self):
+        """Per user 2026-05-10: never silently drop a user-supplied seed.
+        Fallback path runs per-seed placement when v1 misses."""
+        batch = place_seeg(None, seeds=self.seeds,
+                           library=self.library, features=self.features,
+                           bolts=self.bolts)
+        self.assertEqual(len(batch.trajectories), len(self.seeds))
 
 
 # ---------------------------------------------------------------------

@@ -283,20 +283,22 @@ def _place_mode_5(
 ) -> tuple[list[tuple[str, PlacementCtx]], dict]:
     """Mode 5 inner: snap user seeds to mode-1 candidate emissions.
 
-    Per the user's 2026-05-09 spec: ``the seeded trajectory should be snapped
-    to the closest axis emitted by mode 1, and mode-1 trajectories without
-    a close seed get dropped``.
+    Algorithm (per user 2026-05-09 + 2026-05-10 follow-up):
+      1. Run candidate generation + two-pass placement.
+      2. Snap each user seed to its closest v1 candidate within tolerance.
+      3. Per snapped pair → use the candidate's already-placed ctx as-is.
+      4. Per unsnapped seed (no v1 candidate within tolerance) → fall
+         back to per-seed ``place_seed`` on the user's raw seed with the
+         full library. The user said "place contacts on these seeds";
+         if v1 missed (planned-vs-actual drift on imported ROSA, etc.),
+         we still try.
 
-    Why: GT-axis-style seeds (PCA over contact points) are NOT equivalent
-    to v1-emitted seeds — the placer's anchor walker assumes ``start_ras``
-    is at the bolt, which v1 guarantees but a hand-clicked / GT-derived
-    seed does not. Snapping to v1 emissions inherits the bolt-anchored
-    geometry. T18 model picks: per-seed mode 5 = 9/13; snap-to-v1 = 13/13
-    (notebook parity).
+    Inheriting v1's bolt-anchored geometry on the snap path matches
+    notebook parity (T18 13/13 picks). The fallback path matches mode 4's
+    behavior — never silently drop a user seed.
 
-    Returns ``([(name, ctx)], diag_dict)`` — diag_dict reports counts of
-    matched seeds, dropped seeds, dropped candidates so callers can see
-    when snap thresholds were too tight.
+    Returns ``([(name, ctx)], diag_dict)``. The diag reports the snap
+    counts + the fallback count so callers can see the breakdown.
     """
     auto_pairs = _run_auto(
         features=features, bolts=bolts, library_models=library_models,
@@ -308,24 +310,44 @@ def _place_mode_5(
         seeds, auto_pairs,
         angle_tol_deg=angle_tol_deg, perp_tol_mm=perp_tol_mm,
     )
+    seed_to_cand = dict(matches)  # seed_idx → candidate_idx
+    matched_cand_indices = {ci for _si, ci in matches}
+
     out: list[tuple[str, PlacementCtx]] = []
-    matched_seed_names: set[str] = set()
-    matched_cand_indices: set[int] = set()
-    for seed_idx, cand_idx in matches:
-        seed = seeds[seed_idx]
-        _cand_name, ctx = auto_pairs[cand_idx]
-        out.append((seed.name, ctx))
-        matched_seed_names.add(seed.name)
-        matched_cand_indices.add(cand_idx)
+    n_snapped = 0
+    n_fallback = 0
+    per_seed_outcome: list[dict] = []
+    for si, s in enumerate(seeds):
+        cand_idx = seed_to_cand.get(si)
+        if cand_idx is not None:
+            _cand_name, ctx = auto_pairs[cand_idx]
+            outcome = "snap"
+            n_snapped += 1
+        else:
+            ctx = place_seed(
+                s.start_ras, s.end_ras,
+                features=features,
+                library_models=library_models,
+                bolts=bolts,
+                sample_fn=sample_fn,
+                seeder_label=s.seeder_label,
+                seeder_confidence=s.seeder_confidence,
+                seeder_model=s.seeder_model,
+            )
+            outcome = "fallback_per_seed"
+            n_fallback += 1
+        out.append((s.name, ctx))
+        per_seed_outcome.append({"name": s.name, "outcome": outcome})
 
     diag = {
         "n_input_seeds": len(seeds),
         "n_candidates_generated": n_candidates,
-        "n_seeds_matched": len(matches),
-        "n_seeds_unmatched": len(seeds) - len(matches),
+        "n_seeds_snapped": n_snapped,
+        "n_seeds_fallback": n_fallback,
         "n_candidates_dropped": n_candidates - len(matched_cand_indices),
         "snap_angle_tol_deg": angle_tol_deg,
         "snap_perp_tol_mm": perp_tol_mm,
+        "per_seed_outcome": per_seed_outcome,
     }
     return out, diag
 

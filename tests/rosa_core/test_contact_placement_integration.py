@@ -268,11 +268,12 @@ class Amc88LogTests(unittest.TestCase):
         self.assertEqual(batch.diagnostics["mode"], 5)
         diag = batch.diagnostics["mode5"]
         self.assertEqual(diag["n_input_seeds"], len(self.gt))
-        # All 8 GT seeds should snap to a v1 candidate.
+        # All 8 GT seeds should snap to a v1 candidate (no fallback).
         self.assertEqual(
-            diag["n_seeds_matched"], len(self.gt),
+            diag["n_seeds_snapped"], len(self.gt),
             f"all {len(self.gt)} GT seeds should snap to a v1 candidate; "
-            f"got {diag['n_seeds_matched']}. diag={diag}",
+            f"got snapped={diag['n_seeds_snapped']} fallback="
+            f"{diag.get('n_seeds_fallback')}. diag={diag}",
         )
         # Each emission should have a model_id and placed contacts —
         # snapped from mode 1, so geometry is bolt-anchored.
