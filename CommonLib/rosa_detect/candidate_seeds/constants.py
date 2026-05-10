@@ -167,13 +167,24 @@ CROSSING_RETREAT_STEP_MM: float = 0.5
 
 SCORE_WEIGHTS: dict[str, float] = {
     "amp":               1.0,
-    "pitch":             1.0,
-    "frangi":            1.0,
-    "depth":             1.0,
-    "bolt":              1.0,
     "n_inliers":         1.0,
-    "intracranial":      1.0,
-    "metal_continuity":  2.0,
+    "frangi":            1.0,
+    "pitch":             1.0,
+    "span":              1.0,
+    "length":            1.0,
+    "depth":             1.0,         # was 0.5; SEEG is a depth-electrode
+                                       # technique by definition, so depth is
+                                       # a load-bearing signal, not a soft
+                                       # prior.
+    "intracranial":      0.5,
+    "bolt":              1.0,
+    "metal_continuity":  2.0,  # frac_strong-along-axis: real shanks have
+                                # discrete contact-saturating peaks all along
+                                # the line (matched p10=0.27, p50=0.65);
+                                # cross-shank chains and synth-extended FPs
+                                # have frac near 0 (orphan p50=0.01). Weight
+                                # 2.0 pushes zero-saturation orphans into LOW
+                                # band.
 }
 SCORE_METAL_CONTINUITY_SAT: float = 0.10
 SCORE_HIGH_THRESHOLD: float = 0.80
@@ -187,10 +198,15 @@ SCORE_N_INLIERS_OVER_SLACK: float = 12.0
 SCORE_DEPTH_SAT_MM: float = 30.0
 SCORE_INTRACRANIAL_SAT_MM: float = 10.0
 SCORE_BOLT_VALUES: dict[str, float] = {
-    "metal":         1.0,
-    "synthesized":   0.6,
-    "wire_class":    0.4,
-    "none":          0.0,
+    "metal":         1.0,   # unified bolt CC (replaces "log" + "hu_rescue")
+    "metal_cc":      0.7,   # wire-class: bolt CC extends into brain as
+                             # continuous metal; walker found no
+                             # contact-pitch line (saturated/merged
+                             # contacts), but the CC itself defines the
+                             # shank axis. Lower than "metal" because no
+                             # contact-pitch validation.
+    "synthesized":   0.4,   # axis-to-skull synth fallback
+    "none":          0.1,   # no anchor and synth couldn't reach hull
 }
 
 
