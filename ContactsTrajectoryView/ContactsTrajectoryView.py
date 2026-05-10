@@ -1272,6 +1272,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         from rosa_core.contact_placement import sample_neg_log_max
         from rosa_core.placement_modes import Seed, place_seeg
         from rosa_core.electrode_classifier import filter_models_for_strategy
+        from rosa_core.volume_loader import load_features_and_bolts
+        from rosa_scene.sitk_volume_adapter import image_from_volume_node
 
         ct_node = self._resolve_postop_ct_node()
         if ct_node is None:
@@ -1281,18 +1283,19 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "view selectors or run Auto Fit first.",
             )
 
-        ct_path = ct_node.GetStorageNode().GetFileName() if ct_node.GetStorageNode() else None
-        if not ct_path:
-            # Fallback: dump the volume to a temp NIfTI so place_seeg can
-            # read it via SimpleITK. Slicer-loaded volumes without an
-            # on-disk file are rare in the production workflow but possible.
-            import tempfile
-            tmpdir = tempfile.mkdtemp(prefix="rosa_ctv_staged_")
-            ct_path = f"{tmpdir}/ct.nii.gz"
-            slicer.util.saveNode(ct_node, ct_path)
-            self.log(
-                f"[contacts:{log_context}] CT had no on-disk path; wrote to {ct_path}",
-            )
+        # Build the SITK image directly from the Slicer node — preserves
+        # the node's IJK→RAS geometry without round-tripping through a
+        # temp NIfTI on disk. This way Slicer-only volumes (no storage
+        # node, e.g. registered volumes built in-memory) work the same
+        # way as on-disk ones, and the placement pipeline sees the
+        # exact same coordinate frame the rest of Slicer is operating on.
+        sitk_img, _i2r, _r2i = image_from_volume_node(ct_node)
+        self.log(
+            f"[contacts:{log_context}] adapted CT volume node "
+            f"(name={ct_node.GetName()}) → SITK directly; "
+            f"computing features + bolts…"
+        )
+        features, bolts = load_features_and_bolts(sitk_img)
 
         # Build Seed list from the selected rows + their assignments.
         #
@@ -1368,7 +1371,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         slicer.app.processEvents()
         try:
             batch = place_seeg(
-                ct_path,
+                None,
+                features=features,
+                bolts=bolts,
                 seeds=seeds,
                 library=library,
                 sample_fn=sample_neg_log_max,
