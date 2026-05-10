@@ -167,42 +167,47 @@ def render_placed_trajectory_figure(
     ax_slab.legend(loc="lower right", fontsize=7, ncol=2)
 
     # Centerline profile — disk-min −LoG sampled along the centerline
-    # polyline at 0.5 mm steps, with placed contact tick marks for visual
-    # alignment. The disk reducer mirrors what the contact-peak picker
-    # would see (axis_peak_refine.refine_signature_via_axis_peaks). Real
-    # contacts show up as positive bumps; the bolt + intervening wire
-    # show high baseline; gaps drop to ~0.
+    # polyline at 0.5 mm steps, plotted in the SAME x coordinate as the
+    # slab above (seed-direction projection ``u``) so the slab columns,
+    # centerline curve, profile bumps, contact ticks, and bolt_end line
+    # all share one vertical scanline. Without this projection, slab
+    # uses ``u`` while the profile would use polyline arc-length and
+    # the two views drift apart whenever the centerline isn't a perfect
+    # straight line from start_ras to end_ras.
     cl_arr = np.asarray(cl, dtype=float) if cl is not None else None
-    profile_arc = profile_neg_log = None
+    profile_u = profile_neg_log = None
     if log_arr is not None and cl_arr is not None and len(cl_arr) >= 2:
-        profile_arc, profile_neg_log = _sample_neg_log_along_polyline(
+        profile_pos, profile_neg_log = _sample_neg_log_along_polyline(
             cl_arr, log_arr, r2i,
         )
-        if profile_arc.size:
-            ax_prof.plot(profile_arc, profile_neg_log, color="black",
+        if profile_pos.shape[0]:
+            profile_u = (profile_pos - es) @ seed_dir
+            ax_prof.plot(profile_u, profile_neg_log, color="black",
                           lw=0.9, alpha=0.85, label="−LoG (disk min)")
-            # Light fill below the curve for legibility.
             ax_prof.fill_between(
-                profile_arc, 0, profile_neg_log,
+                profile_u, 0, profile_neg_log,
                 where=profile_neg_log > 0,
-                color="#1f77b4", alpha=0.15, step=None,
+                color="#1f77b4", alpha=0.15,
             )
-    if traj.contacts_ras and cl_arr is not None:
-        for p in traj.contacts_ras:
-            arc = _project_to_polyline_arc_local(cl_arr, np.asarray(p, dtype=float))
-            ax_prof.axvline(arc, color="#1f77b4", alpha=0.45, lw=0.8)
-    if cl_arr is not None:
-        ax_prof.set_xlim(0, max(span, _polyline_total_arc(cl_arr)))
-    else:
-        ax_prof.set_xlim(0, span)
-    ax_prof.set_xlabel("arc along centerline (mm)")
-    ax_prof.set_ylabel("−LoG (disk min)" if profile_arc is not None
+    # Placed contact ticks: same seed-dir projection as the slab's
+    # _proj so they appear directly under the red dots in the top panel.
+    if traj.contacts_ras:
+        contact_u, _ = _proj(traj.contacts_ras)
+        for u_val in contact_u:
+            ax_prof.axvline(u_val, color="#1f77b4", alpha=0.45, lw=0.8)
+    # Match slab extent so columns line up across panels.
+    ax_prof.set_xlim(u_grid[0], u_grid[-1])
+    ax_prof.set_xlabel("u (mm along seed_dir, same axis as slab)")
+    ax_prof.set_ylabel("−LoG (disk min)" if profile_u is not None
                         else "placed contacts (tick marks)")
     ax_prof.grid(True, alpha=0.2)
     if traj.bolt_source == "metal" and traj.bolt_end_arc_mm > 0:
+        # bolt_end_arc_mm is already in the seed-direction coordinate
+        # (see contact_placement.estimate_bolt_end_from_metal_mass —
+        # arc is measured from seed_start along (seed_end - seed_start)).
         ax_prof.axvline(traj.bolt_end_arc_mm, color="red", lw=1.0,
                          label=f"bolt_end={traj.bolt_end_arc_mm:.1f}mm")
-    if (profile_arc is not None and profile_arc.size) or (
+    if (profile_u is not None and profile_u.size) or (
         traj.bolt_source == "metal" and traj.bolt_end_arc_mm > 0
     ):
         ax_prof.legend(loc="upper right", fontsize=8)
@@ -302,8 +307,8 @@ def _sample_neg_log_along_polyline(
     n_angles: int = 8,
 ):
     """Walk the centerline polyline at ``step_mm`` arc-length steps and
-    return ``(arc_mm, neg_log_profile)`` where ``neg_log_profile`` is
-    the negated disk-min |LoG| at each step.
+    return ``(positions_3d, neg_log_profile)``: per-sample 3D RAS
+    centers + the negated disk-min |LoG| at each step.
 
     Disk-min reducer mirrors the peak-driven path
     (``axis_peak_refine.refine_signature_via_axis_peaks``); negation
@@ -312,25 +317,29 @@ def _sample_neg_log_along_polyline(
 
     Per-segment sampling: each centerline segment is sampled via
     ``contact_peak_fit.sample_axis_profile`` with the segment's
-    endpoints, then arc offsets accumulate. Duplicate join points
+    endpoints, then 3D positions are reconstructed (segment start +
+    arc * unit_axis) and concatenated. Duplicate join points
     (segment[i] end == segment[i+1] start) are dropped to avoid
     sample-density jaggies at joins.
+
+    Caller is responsible for projecting the positions onto whatever
+    axis it wants the x-axis to be (e.g. seed-dir for slab-aligned
+    plots).
     """
     from .contact_peak_fit import sample_axis_profile
 
     cl = np.asarray(centerline, dtype=float)
     if len(cl) < 2:
-        return np.array([], dtype=float), np.array([], dtype=float)
+        return np.zeros((0, 3), dtype=float), np.array([], dtype=float)
 
-    arcs: list[np.ndarray] = []
+    positions: list[np.ndarray] = []
     profs: list[np.ndarray] = []
-    arc_offset = 0.0
     for i in range(len(cl) - 1):
         seg_start = cl[i]
         seg_end = cl[i + 1]
-        seg_len = float(np.linalg.norm(seg_end - seg_start))
+        seg_vec = seg_end - seg_start
+        seg_len = float(np.linalg.norm(seg_vec))
         if seg_len < step_mm:
-            arc_offset += seg_len
             continue
         try:
             seg_arc, seg_prof = sample_axis_profile(
@@ -339,22 +348,24 @@ def _sample_neg_log_along_polyline(
                 n_radii=n_radii, n_angles=n_angles, reducer="min",
             )
         except Exception:
-            arc_offset += seg_len
             continue
-        if i > 0 and arcs:
-            seg_arc = seg_arc[1:]
+        seg_axis = seg_vec / seg_len
+        seg_pos = seg_start[None, :] + seg_arc[:, None] * seg_axis[None, :]
+        # Drop the segment's start sample (it duplicates the prior
+        # segment's end sample at the polyline join).
+        if positions:
+            seg_pos = seg_pos[1:]
             seg_prof = seg_prof[1:]
-        arcs.append(seg_arc + arc_offset)
+        positions.append(seg_pos)
         profs.append(seg_prof)
-        arc_offset += seg_len
-    if not arcs:
-        return np.array([], dtype=float), np.array([], dtype=float)
+    if not positions:
+        return np.zeros((0, 3), dtype=float), np.array([], dtype=float)
 
-    arc = np.concatenate(arcs)
+    pos = np.concatenate(positions, axis=0)
     prof = np.concatenate(profs)
     # Negate so contact LoG wells point upward in the plot. NaN entries
     # (out-of-bounds) propagate; matplotlib skips them on plot.
-    return arc, -prof
+    return pos, -prof
 
 
 def _project_to_polyline_arc_local(polyline: np.ndarray, pt: np.ndarray) -> float:
