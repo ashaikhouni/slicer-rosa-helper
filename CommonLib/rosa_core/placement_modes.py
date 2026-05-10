@@ -154,14 +154,23 @@ def _filter_library_to_model(library_models: list[dict], model_id: str | None) -
     model so the matched filter has nothing else to consider.
 
     When ``model_id`` is None (mode 5), pass the full library through.
+
+    Raises ValueError when ``model_id`` is not in ``library_models`` —
+    a vouched model that isn't available is a real input error, not a
+    silent fallback. Caller should catch this and surface it per-seed
+    rather than scoring against an unintended template.
     """
     if model_id is None:
         return library_models
     out = [m for m in library_models if str(m.get("id") or "") == str(model_id)]
     if not out:
-        # User asked for an unknown model — fall through to full library
-        # rather than raising. Caller sees the actual pick in score_components.
-        return library_models
+        available = sorted({str(m.get("id") or "") for m in library_models})
+        raise ValueError(
+            f"vouched model_id {model_id!r} is not in the active library "
+            f"({len(library_models)} models: {', '.join(available[:10])}"
+            f"{'…' if len(available) > 10 else ''}). "
+            f"Pass a different `library=` strategy or correct the seed."
+        )
     return out
 
 
@@ -698,8 +707,31 @@ def _dispatch_mode(
     expected: list[tuple[str, str]] | None,
     n_expected: int | None,
 ) -> int:
-    """Pick the mode from the optional-arg combination. Validates exclusivity."""
-    has_seeds = seeds is not None and len(seeds) > 0
+    """Pick the mode from the optional-arg combination. Validates exclusivity
+    AND emptiness — empty seed/expected lists or non-positive n_expected
+    are treated as input errors, not silently demoted to mode 1.
+
+    Without these checks, a caller that meant "place these specific seeds"
+    would silently fall through to full auto detection when their seed
+    file was empty / the expected list was filtered to nothing — masking
+    the upstream bug.
+    """
+    if seeds is not None and len(seeds) == 0:
+        raise ValueError(
+            "seeds= was passed but is empty. Pass at least one Seed for "
+            "mode 4/5, or pass seeds=None for auto detection."
+        )
+    if expected is not None and len(expected) == 0:
+        raise ValueError(
+            "expected= was passed but is empty. Pass at least one "
+            "(name, model_id) pair for mode 3, or pass expected=None."
+        )
+    if n_expected is not None and int(n_expected) <= 0:
+        raise ValueError(
+            f"n_expected= must be a positive integer, got {n_expected!r}."
+        )
+
+    has_seeds = seeds is not None
     has_expected = expected is not None
     has_n_expected = n_expected is not None
 

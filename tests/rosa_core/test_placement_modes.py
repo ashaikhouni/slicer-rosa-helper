@@ -145,6 +145,38 @@ class ModeDispatchValidationTests(unittest.TestCase):
             place_seeg(None, seeds=seeds, library=self.library)
         self.assertIn("CT", str(cm.exception))
 
+    def test_empty_seeds_rejected(self):
+        # An empty seed list almost always means "the upstream filter
+        # dropped everything" — falling through to mode 1 hides that.
+        with self.assertRaises(ValueError) as cm:
+            place_seeg(None, seeds=[], features=self.features, bolts=self.bolts)
+        self.assertIn("seeds", str(cm.exception).lower())
+
+    def test_empty_expected_rejected(self):
+        with self.assertRaises(ValueError) as cm:
+            place_seeg(None, expected=[], features=self.features, bolts=self.bolts)
+        self.assertIn("expected", str(cm.exception).lower())
+
+    def test_zero_n_expected_rejected(self):
+        with self.assertRaises(ValueError):
+            place_seeg(None, n_expected=0, features=self.features, bolts=self.bolts)
+
+    def test_negative_n_expected_rejected(self):
+        with self.assertRaises(ValueError):
+            place_seeg(None, n_expected=-3, features=self.features, bolts=self.bolts)
+
+    def test_mode4_unknown_model_id_rejected(self):
+        # Vouched-model semantics: mode 4 must NOT silently fall back to
+        # the full library when the user's model_id isn't there.
+        seeds = [_synthetic_seed(model_id="DOES-NOT-EXIST")]
+        with self.assertRaises(ValueError) as cm:
+            place_seeg(None, seeds=seeds,
+                       features=self.features, bolts=self.bolts,
+                       library=self.library)
+        msg = str(cm.exception)
+        self.assertIn("DOES-NOT-EXIST", msg)
+        self.assertIn("library", msg.lower())
+
 
 # ---------------------------------------------------------------------
 # Mode-4 (placement-only with model_id) — synthetic CT smoke
