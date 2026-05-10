@@ -796,13 +796,19 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         """Populate the per-row table.
 
         Per user feedback (2026-05-10): default the model combo to empty
-        on load. The previous auto-classify-on-populate behavior was
-        guessing every row from the entire library, which is wrong default
-        UX for clinical use (user should opt in to suggestions). The
-        precedence is now:
-          1. User override (sticky across re-populate)
-          2. Auto-Fit-stamped ``best_model_id`` (preserved when present)
-          3. Empty — user explicitly clicks "Suggest models" to fill these
+        regardless of trajectory source. Even ``best_model_id`` stamped by
+        PostopCT Auto Fit's classifier is ignored on load — the user must
+        explicitly opt in to populate models via the "Suggest models"
+        button (which re-runs the CT-aware classifier scoped to the
+        selected pitch-strategy library) or pick manually per row.
+
+        Why: Auto Fit's per-trajectory classification is informational on
+        the line-node attribute but should not silently drive CTV's model
+        selection. The user controls what gets placed.
+
+        Only the user's manual override (from a prior CTV interaction)
+        persists across re-populate — that's what
+        ``_record_user_model_override`` is for.
         """
         self._updatingContactTable = True
         self.contactTable.setRowCount(0)
@@ -814,15 +820,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            # Only fill from sources we trust without re-classifying:
-            #   * user override (sticky)
-            #   * Auto-Fit stamp (best_model_id present on the traj)
-            # Live classification is opt-in via "Suggest models" button.
-            suggested_model = self._userModelOverrides.get(traj["name"], "")
-            if not suggested_model:
-                suggested_model = str(traj.get("best_model_id") or "").strip()
-            if suggested_model:
-                idx = model_combo.findText(suggested_model)
+            # Default empty. Only the user's manual override (sticky across
+            # re-populate) pre-fills.
+            override = self._userModelOverrides.get(traj["name"], "")
+            if override:
+                idx = model_combo.findText(override)
                 if idx >= 0:
                     model_combo.setCurrentIndex(idx)
             self.contactTable.setCellWidget(row, 3, model_combo)
@@ -840,15 +842,18 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         if hasattr(self, "suggestModelsButton"):
             self.suggestModelsButton.setEnabled(enabled)
         if trajectories:
-            n_pre_assigned = sum(
+            n_user_pre_assigned = sum(
                 1 for traj in trajectories
                 if self._userModelOverrides.get(traj["name"], "")
-                or str(traj.get("best_model_id") or "").strip()
+            )
+            note = (
+                f"({n_user_pre_assigned} restored from prior session)"
+                if n_user_pre_assigned else
+                "(all empty — use 'Suggest models' to classify from CT, "
+                "or pick per row)"
             )
             self.log(
-                f"[contacts] ready for {len(trajectories)} trajectories "
-                f"({n_pre_assigned} pre-assigned model_id; rest empty — use "
-                f"'Suggest models' to fill from CT)"
+                f"[contacts] ready for {len(trajectories)} trajectories {note}"
             )
             self.contactTable.selectRow(0)
         else:
@@ -1082,22 +1087,33 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.onRefreshClicked()
 
     def onSuggestModelsClicked(self):
-        """Run the CT-aware electrode classifier on rows with empty model_id.
+        """Run the staged ``place_seeg`` pipeline to suggest models for
+        rows with empty model_id.
 
-        Library subset comes from the pitch-strategy combo (e.g. "dixi",
-        "pmt_35", "auto"). Rows with an existing model_id (user override
-        or Auto-Fit-stamped) are left alone — the user can clear and
-        re-suggest if needed.
+        Crucially this uses the SAME engine ``Generate Contacts`` will use
+        when the user clicks it next — so the suggested picks match what
+        the eventual placement will pick. Previously this called the older
+        ``classify_electrode_model`` cascade (PaCER + walker-signature +
+        length fallback) which can disagree with the staged matched-filter
+        picker (the divergence the user flagged on 2026-05-10).
 
-        Per user feedback (2026-05-10): replaces the on-load auto-classify
-        that ran every time the table populated.
+        The button only fills rows whose model_id is currently empty.
+        Rows with a user override are left alone — clear them manually to
+        re-suggest. Library subset comes from the pitch-strategy combo.
+
+        This is expensive (full v1 detection + per-seed snap + scoring,
+        same cost as Generate Contacts) — wrapped in a progress dialog.
         """
-        n_filled = 0
-        n_skipped = 0
-        n_failed = 0
+        # Collect rows to suggest for (currently-empty ones only).
+        empty_rows = []
         for row in range(self.contactTable.rowCount):
             traj_item = self.contactTable.item(row, 1)
             if traj_item is None:
+                continue
+            model_combo = self.contactTable.cellWidget(row, 3)
+            if model_combo is None:
+                continue
+            if widget_current_text(model_combo).strip():
                 continue
             traj_name = traj_item.text()
             traj = next(
@@ -1106,43 +1122,68 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
             if traj is None:
                 continue
-            model_combo = self.contactTable.cellWidget(row, 3)
-            if model_combo is None:
-                continue
-            current = widget_current_text(model_combo).strip()
-            if current:
-                n_skipped += 1
-                continue
-            try:
-                pick = self._classify_with_unified_picker(traj)
-            except Exception as exc:
-                self.log(f"[contacts:suggest] {traj_name}: classifier raised ({exc})")
-                pick = ""
+            empty_rows.append((row, traj_name, traj))
+
+        if not empty_rows:
+            self.log("[contacts:suggest] no empty rows to suggest for")
+            return
+
+        self.log(
+            f"[contacts:suggest] running place_seeg on {len(empty_rows)} "
+            f"empty rows (mode 5: snap + library matching)"
+        )
+
+        # Build a fake "assignments" dict so _generate_contacts_staged routes
+        # via mode 5 (no model_ids vouched). Then read back the placer's
+        # picked model_id per row.
+        trajectories = [traj for _row, _name, traj in empty_rows]
+        empty_assignments = {
+            "schema_version": "1.0",
+            "assignments": [
+                {
+                    "trajectory": name, "model_id": "",
+                    "tip_at": "target", "tip_shift_mm": 0.0,
+                    "xyz_offset_mm": [0.0, 0.0, 0.0],
+                }
+                for _row, name, _traj in empty_rows
+            ],
+        }
+        try:
+            _contacts, updated_assignments, _placed = self._generate_contacts_staged(
+                trajectories=trajectories,
+                assignments=empty_assignments,
+                log_context="suggest",
+            )
+        except Exception as exc:
+            self.log(f"[contacts:suggest] place_seeg failed: {exc}")
+            return
+
+        # Push picks back into the row combos.
+        picked_by_name = {
+            row.get("trajectory", ""): row.get("model_id", "")
+            for row in updated_assignments.get("assignments", [])
+        }
+        n_filled = 0
+        n_failed = 0
+        for row, name, _traj in empty_rows:
+            picked = picked_by_name.get(name, "")
+            if not picked:
                 n_failed += 1
                 continue
-            picked_id = str(pick or "").strip()
-            if not picked_id:
-                # Length-only fallback when the CT-aware picker returns
-                # nothing (no usable CT, axis too short, etc.).
-                picked_id = suggest_model_id_for_trajectory(
-                    trajectory=traj,
-                    models_by_id=self.modelsById,
-                    model_ids=self.modelIds,
-                    tolerance_mm=5.0,
-                ) or ""
-            if not picked_id:
+            combo = self.contactTable.cellWidget(row, 3)
+            if combo is None:
                 n_failed += 1
                 continue
-            idx = model_combo.findText(picked_id)
+            idx = combo.findText(picked)
             if idx < 0:
                 n_failed += 1
                 continue
-            model_combo.setCurrentIndex(idx)
+            combo.setCurrentIndex(idx)
             self._record_user_model_override(row)
             n_filled += 1
         self.log(
-            f"[contacts:suggest] filled {n_filled}, skipped {n_skipped} "
-            f"(already set), failed {n_failed}"
+            f"[contacts:suggest] filled {n_filled}/{len(empty_rows)} from "
+            f"staged-pipeline picks; failed {n_failed}"
         )
 
     def onApplyModelAllClicked(self):
