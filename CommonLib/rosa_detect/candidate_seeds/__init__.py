@@ -6,10 +6,9 @@ seeds, no scoring. All confidence comes from `place_seed` running per
 candidate."
 
 This package owns that responsibility. ``generate_candidate_seeds`` runs the
-existing v1 stage1 walker + bolt anchoring (still living in
-``contact_pitch_v1_fit.py`` for now; will be moved here tier-by-tier in
-Sessions 3-4) and returns a list of ``Seed`` objects ready to feed into
-``rosa_core.contact_placement.run_two_pass``.
+v1 stage1 walker + bolt anchoring (orchestrated by
+``orchestrator.run_two_stage_detection``) and returns a list of ``Seed``
+objects ready to feed into ``rosa_core.contact_placement.run_two_pass``.
 
 Importantly, the seeds carry forward v1's seeder_label — that's what the
 compound score's ``s_seeder`` term reads — so notebook parity is preserved.
@@ -62,15 +61,16 @@ def generate_candidate_seeds(
           inputs come from the caller (typically via
           ``rosa_core.volume_loader.load_features_and_bolts``).
     """
-    # Lazy import — avoids pulling cpfit (and its numpy/scipy deps) into
-    # callers that only need the package's docstring or constants.
-    from rosa_detect import contact_pitch_v1_fit as cpfit
+    # Lazy import — avoids pulling the orchestrator (and its numpy /
+    # scipy / SimpleITK deps) into callers that only need the
+    # package's docstring or constants.
+    from rosa_detect.candidate_seeds.orchestrator import run_two_stage_detection
 
     img = features["img"]
     i2r = np.asarray(features["ijk_to_ras_mat"])
     r2i = np.asarray(features["ras_to_ijk_mat"])
 
-    trajectories, _features = cpfit.run_two_stage_detection(
+    trajectories, _features = run_two_stage_detection(
         img, i2r, r2i,
         return_features=True,
         progress_logger=progress_logger,

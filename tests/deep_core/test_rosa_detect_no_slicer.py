@@ -48,10 +48,8 @@ class RosaDetectBoundaryTests(unittest.TestCase):
                 stamp_ijk_to_ras_on_sitk,
                 load_image_and_matrices,
             )
-            from rosa_detect import (
-                guided_fit_engine,                # also full module, just in case
-                contact_pitch_v1_fit,
-            )
+            from rosa_detect import guided_fit_engine
+            from rosa_detect.candidate_seeds import orchestrator
             tainted = sorted(
                 m for m in sys.modules
                 if m == "vtk" or m.startswith("vtk.")
@@ -98,7 +96,7 @@ class RosaDetectBoundaryTests(unittest.TestCase):
                    or m == "scipy" or m.startswith("scipy.")
                    or m == "SimpleITK" or m.startswith("SimpleITK.")
                    or m.startswith("rosa_detect.service")
-                   or m.startswith("rosa_detect.contact_pitch_v1_fit")
+                   or m.startswith("rosa_detect.candidate_seeds.orchestrator")
                    or m.startswith("rosa_detect.guided_fit_engine")
             )
             # Show count + first few so a leak is debuggable.
@@ -113,23 +111,23 @@ class RosaDetectBoundaryTests(unittest.TestCase):
     def test_lazy_submodule_access_still_works(self):
         """Accessing a heavy attribute via ``rosa_detect.<name>`` should
         trigger the lazy import on demand. Pin both the
-        ``rosa_detect.run_contact_pitch_v1`` callable form and
-        ``rosa_detect.contact_pitch_v1_fit`` whole-module form.
+        ``rosa_detect.run_contact_pitch_v1`` callable form and the
+        ``rosa_detect.guided_fit_engine`` whole-module form.
         """
         code = textwrap.dedent("""
             import sys
             import rosa_detect
 
-            # Whole-module form (some probes / tests do this).
-            mod = rosa_detect.contact_pitch_v1_fit
-            assert mod.__name__ == "rosa_detect.contact_pitch_v1_fit"
+            # Whole-module form (Slicer guided-fit path).
+            mod = rosa_detect.guided_fit_engine
+            assert mod.__name__ == "rosa_detect.guided_fit_engine"
 
             # Callable form (Slicer / CLI entry).
             fn = rosa_detect.run_contact_pitch_v1
             assert callable(fn)
 
             # After lazy access, the submodule is loaded.
-            assert "rosa_detect.contact_pitch_v1_fit" in sys.modules
+            assert "rosa_detect.guided_fit_engine" in sys.modules
             assert "rosa_detect.service" in sys.modules
             print("OK")
         """).strip()
