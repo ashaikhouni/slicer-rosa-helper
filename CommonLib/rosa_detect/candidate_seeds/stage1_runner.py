@@ -17,6 +17,10 @@ from .constants import (
     DEEP_TIP_MIN_MM,
     DEEP_TIP_MIN_SHORT_MM,
     DEEP_TIP_SHORT_MAX_AVG_PITCH_MM,
+    EXTEND_MAX_EXTRA,
+    EXTEND_MAX_GAP_MM,
+    EXTEND_MAX_OUTER_ITER,
+    EXTEND_PERP_TOL_MM,
     FRANGI_LINE_MIN_MEDIAN,
     LOG_BLOB_MAX_VOXELS,
     LOG_BLOB_THRESHOLD,
@@ -118,10 +122,10 @@ def second_pass_orphan_walker(existing_lines, pts_c, amps_c,
 
 def extend_deep_end(line, pts_c, amps_c, claimed_blobs,
                      dist_arr=None, ras_to_ijk_mat=None,
-                     max_gap_mm: float = 14.0,
-                     perp_tol_mm: float = 2.5,
-                     max_extra: int = 20,
-                     max_outer_iter: int = 4):
+                     max_gap_mm: float = EXTEND_MAX_GAP_MM,
+                     perp_tol_mm: float = EXTEND_PERP_TOL_MM,
+                     max_extra: int = EXTEND_MAX_EXTRA,
+                     max_outer_iter: int = EXTEND_MAX_OUTER_ITER):
     """Walk outward from the current deepest AND shallowest inliers,
     snapping to unclaimed blobs within ``max_gap_mm`` along the axis.
     Refits axis after each pass; iterates until convergence.

@@ -9,9 +9,11 @@ import numpy as np
 
 from rosa_core.volume_sampling import iter_axis_points, sample_nearest_at_ras
 
+from .constants import ALONG_AXIS_STEP_MM
+
 
 def frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
-                             step_mm: float = 0.5) -> tuple[float, float]:
+                             step_mm: float = ALONG_AXIS_STEP_MM) -> tuple[float, float]:
     """Sample Frangi σ=1 at ``step_mm`` intervals along ``[start, end]``
     and return ``(mean, median)``.
 

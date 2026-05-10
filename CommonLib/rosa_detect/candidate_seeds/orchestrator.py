@@ -60,6 +60,7 @@ from .constants import (
     LOG_BLOB_MAX_VOXELS,
     LOG_BLOB_THRESHOLD,
     MIN_BLOBS_PER_LINE,
+    MODEL_SUGGEST_MIN_INTRACRANIAL_MM,
     PITCH_MM,
     WIRE_CLASS_MIN_DEPTH_MM,
     WIRE_CLASS_MIN_ELONGATION,
@@ -638,7 +639,7 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         n_suggested = 0
         for rec in anchored:
             intra = float(rec.get("intracranial_length_mm") or 0.0)
-            if intra < 5.0:
+            if intra < MODEL_SUGGEST_MIN_INTRACRANIAL_MM:
                 continue
             # Unified picker (`classify_electrode_model`): preferred
             # path is PaCER template-correlation against the canonical-

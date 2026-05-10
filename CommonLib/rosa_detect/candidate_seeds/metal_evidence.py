@@ -15,6 +15,7 @@ from ..primitives.bolt_anchor import (
     LOG_BOLT_NORMALIZER,
     METAL_BOLT_THRESHOLD,
 )
+from .constants import ALONG_AXIS_STEP_MM
 
 
 def compute_metal_evidence_volume(log_arr, ct_arr):
@@ -33,7 +34,8 @@ def compute_metal_evidence_volume(log_arr, ct_arr):
 
 
 def frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
-                                  ras_to_ijk_mat, step_mm: float = 0.5) -> float:
+                                  ras_to_ijk_mat,
+                                  step_mm: float = ALONG_AXIS_STEP_MM) -> float:
     """Fraction of axis samples whose per-voxel metal evidence saturates
     (>= ``METAL_BOLT_THRESHOLD``).
 

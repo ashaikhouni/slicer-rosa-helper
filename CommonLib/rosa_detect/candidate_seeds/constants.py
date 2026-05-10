@@ -9,18 +9,21 @@ Section organization:
   1. Blob extraction (LoG)
   2. Walker / pitch tolerance
   3. Auto-pitch detection
-  4. Library bounds
-  5. Walker line scoring (span / gap / blob count)
+  4. Library fallback bounds
+  5. Walker line scoring (span / gap / blob count slack)
   6. Stage-1 dedup
   7. Deep-tip floor
   8. Bolt anchoring + post-anchor dedup
   9. Synth bolt fallback (axis-to-skull)
  10. Frangi gate (post-anchor)
- 11. Post-arbitration loosening
- 12. Axis-deep-end refinement
- 13. Crossing-tip retreat
- 14. Confidence score
- 15. Wire-class extension
+ 11. Axis-deep-end refinement
+ 12. Crossing-tip retreat
+ 13. Confidence score
+ 14. Wire-class extension
+ 15. Stage-1 deep-end extension walker
+ 16. Axis-profile peak signature refinement
+ 17. Along-axis sampling step (Frangi / metal-evidence / refine)
+ 18. Model-suggestion gates
 
 Constants that depend on the dynamically-loaded electrode library
 (`LIBRARY_PITCHES_MM`, `MIN_LINE_SPAN_MM`, etc.) live in
@@ -220,6 +223,91 @@ WIRE_CLASS_MIN_VOXELS: int = 50
 WIRE_CLASS_MIN_ELONGATION: float = 0.65
 
 
+# ---------------------------------------------------------------------
+# 15. Stage-1 deep-end extension walker (`extend_deep_end`)
+# ---------------------------------------------------------------------
+#
+# After the initial walker pass, walk outward from the deepest /
+# shallowest inliers to absorb un-claimed contact-sized blobs that the
+# pitch-strict walker missed. Bounded so we don't chain across to a
+# different shank.
+
+EXTEND_MAX_GAP_MM: float = 14.0     # axis gap beyond which the next
+                                     # blob is not the same shank. Up
+                                     # to two missed contacts at the
+                                     # widest library pitch (6.1 mm)
+                                     # plus a slack mm.
+EXTEND_PERP_TOL_MM: float = 2.5     # perp tolerance for absorption.
+                                     # Walker's PERP_TOL_MM is 1.5 —
+                                     # the +1 mm here lets the deep
+                                     # end pick up one contact whose
+                                     # walker-axis projection is
+                                     # imperfect (deep-tip drift).
+EXTEND_MAX_EXTRA: int = 20          # cap on absorbed blobs per pass.
+                                     # 20 is well past the largest
+                                     # library electrode (18 contacts).
+EXTEND_MAX_OUTER_ITER: int = 4      # outer-loop refit iterations.
+                                     # Converges in 1-2 passes on
+                                     # clean cases; 4 is a safety cap.
+
+
+# ---------------------------------------------------------------------
+# 16. Axis-profile peak signature refinement
+#     (`refine_signature_via_axis_peaks`)
+# ---------------------------------------------------------------------
+#
+# After bolt anchor, re-derive (n_inliers, median_pitch, contact_span)
+# from a 1-D LoG profile sampled along the FIT axis with sub-voxel
+# (0.25 mm) steps + trilinear interpolation. Recovers the true contact
+# pitch on anisotropic CTs where the walker's NN-spacing is biased
+# (S56 case: walker locked to 3.14 mm instead of 3.5 mm).
+
+AXIS_PEAK_STEP_MM: float = 0.25         # sub-voxel sampling step.
+AXIS_PEAK_DISK_RADIUS_MM: float = 2.0   # off-axis disk radius;
+                                         # contacts saturate to ~2 mm
+                                         # on most scanners.
+AXIS_PEAK_N_RADII: int = 4
+AXIS_PEAK_N_ANGLES: int = 8
+AXIS_PEAK_MIN_AMPLITUDE: float = 200.0  # |LoG| floor for a peak.
+                                         # Below the contact LoG floor
+                                         # (LOG_BLOB_THRESHOLD=500) so
+                                         # weak-but-real contacts on
+                                         # the tip count.
+AXIS_PEAK_MIN_SEPARATION_MM: float = 2.0
+AXIS_PEAK_MIN_PEAKS_REQUIRED: int = 4   # below this, the picker
+                                         # returns None and the
+                                         # caller keeps walker stats.
+AXIS_PEAK_SHALLOW_PAD_MM: float = 1.5   # extend sampling past skull
+                                         # entry / deep tip in case the
+                                         # bolt anchor or deep-end
+                                         # refine clipped a contact.
+AXIS_PEAK_DEEP_PAD_MM: float = 3.0
+
+
+# ---------------------------------------------------------------------
+# 17. Along-axis sampling step (Frangi / metal-evidence / refine)
+# ---------------------------------------------------------------------
+#
+# Common 0.5 mm step shared by `frangi_along_line_stats`,
+# `frac_strong_metal_along_line`, and `refine_deep_end_via_axis_log`.
+# 0.5 mm is half the canonical 1 mm voxel (Nyquist for the contact-
+# sized features) and matches the AXIS_REFINE_STEP_MM used by the
+# deep-end refiner.
+
+ALONG_AXIS_STEP_MM: float = 0.5
+
+
+# ---------------------------------------------------------------------
+# 18. Model-suggestion gates (electrode classifier dispatch)
+# ---------------------------------------------------------------------
+
+# Minimum intracranial trajectory length below which the orchestrator
+# skips the electrode-model picker. 5 mm is shorter than the smallest
+# library electrode's contact span — anything shorter is almost
+# certainly not a real shank.
+MODEL_SUGGEST_MIN_INTRACRANIAL_MM: float = 5.0
+
+
 __all__ = [
     "LOG_BLOB_THRESHOLD", "LOG_BLOB_MAX_VOXELS", "LOG_BLOB_SUBVOXEL_DEFAULT",
     "PITCH_MM", "PITCH_TOL_MM", "PERP_TOL_MM", "AX_TOL_MM", "MAX_K_STEPS",
@@ -245,4 +333,13 @@ __all__ = [
     "SCORE_DEPTH_SAT_MM", "SCORE_INTRACRANIAL_SAT_MM", "SCORE_BOLT_VALUES",
     "WIRE_CLASS_MIN_DEPTH_MM", "WIRE_CLASS_MIN_SPAN_MM",
     "WIRE_CLASS_MIN_VOXELS", "WIRE_CLASS_MIN_ELONGATION",
+    "EXTEND_MAX_GAP_MM", "EXTEND_PERP_TOL_MM", "EXTEND_MAX_EXTRA",
+    "EXTEND_MAX_OUTER_ITER",
+    "AXIS_PEAK_STEP_MM", "AXIS_PEAK_DISK_RADIUS_MM",
+    "AXIS_PEAK_N_RADII", "AXIS_PEAK_N_ANGLES",
+    "AXIS_PEAK_MIN_AMPLITUDE", "AXIS_PEAK_MIN_SEPARATION_MM",
+    "AXIS_PEAK_MIN_PEAKS_REQUIRED",
+    "AXIS_PEAK_SHALLOW_PAD_MM", "AXIS_PEAK_DEEP_PAD_MM",
+    "ALONG_AXIS_STEP_MM",
+    "MODEL_SUGGEST_MIN_INTRACRANIAL_MM",
 ]

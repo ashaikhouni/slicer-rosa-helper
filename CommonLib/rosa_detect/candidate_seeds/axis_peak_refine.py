@@ -15,17 +15,29 @@ from __future__ import annotations
 
 import numpy as np
 
+from .constants import (
+    AXIS_PEAK_DEEP_PAD_MM,
+    AXIS_PEAK_DISK_RADIUS_MM,
+    AXIS_PEAK_MIN_AMPLITUDE,
+    AXIS_PEAK_MIN_PEAKS_REQUIRED,
+    AXIS_PEAK_MIN_SEPARATION_MM,
+    AXIS_PEAK_N_ANGLES,
+    AXIS_PEAK_N_RADII,
+    AXIS_PEAK_SHALLOW_PAD_MM,
+    AXIS_PEAK_STEP_MM,
+)
+
 
 def refine_signature_via_axis_peaks(rec, log_arr, ras_to_ijk_mat,
-                                    step_mm=0.25,
-                                    disk_radius_mm=2.0,
-                                    n_radii=4,
-                                    n_angles=8,
-                                    min_amplitude=200.0,
-                                    min_separation_mm=2.0,
-                                    min_peaks_required=4,
-                                    shallow_pad_mm=1.5,
-                                    deep_pad_mm=3.0):
+                                    step_mm: float = AXIS_PEAK_STEP_MM,
+                                    disk_radius_mm: float = AXIS_PEAK_DISK_RADIUS_MM,
+                                    n_radii: int = AXIS_PEAK_N_RADII,
+                                    n_angles: int = AXIS_PEAK_N_ANGLES,
+                                    min_amplitude: float = AXIS_PEAK_MIN_AMPLITUDE,
+                                    min_separation_mm: float = AXIS_PEAK_MIN_SEPARATION_MM,
+                                    min_peaks_required: int = AXIS_PEAK_MIN_PEAKS_REQUIRED,
+                                    shallow_pad_mm: float = AXIS_PEAK_SHALLOW_PAD_MM,
+                                    deep_pad_mm: float = AXIS_PEAK_DEEP_PAD_MM):
     """Re-derive ``(n_inliers, median_pitch, contact_span)`` for one
     trajectory by 1-D peak picking on the LoG profile sampled along
     its intracranial axis. Returns ``None`` if the axis yields fewer
