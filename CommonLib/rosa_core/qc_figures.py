@@ -166,20 +166,45 @@ def render_placed_trajectory_figure(
     ax_slab.set_ylabel("perp (mm)")
     ax_slab.legend(loc="lower right", fontsize=7, ncol=2)
 
-    # Walker profile — placed contact tick marks (no walker signal stored
-    # on PlacedTrajectory; only the placed positions are surfaced).
-    if traj.contacts_ras and cl is not None:
-        cl_arr = np.asarray(cl, dtype=float)
+    # Centerline profile — disk-min −LoG sampled along the centerline
+    # polyline at 0.5 mm steps, with placed contact tick marks for visual
+    # alignment. The disk reducer mirrors what the contact-peak picker
+    # would see (axis_peak_refine.refine_signature_via_axis_peaks). Real
+    # contacts show up as positive bumps; the bolt + intervening wire
+    # show high baseline; gaps drop to ~0.
+    cl_arr = np.asarray(cl, dtype=float) if cl is not None else None
+    profile_arc = profile_neg_log = None
+    if log_arr is not None and cl_arr is not None and len(cl_arr) >= 2:
+        profile_arc, profile_neg_log = _sample_neg_log_along_polyline(
+            cl_arr, log_arr, r2i,
+        )
+        if profile_arc.size:
+            ax_prof.plot(profile_arc, profile_neg_log, color="black",
+                          lw=0.9, alpha=0.85, label="−LoG (disk min)")
+            # Light fill below the curve for legibility.
+            ax_prof.fill_between(
+                profile_arc, 0, profile_neg_log,
+                where=profile_neg_log > 0,
+                color="#1f77b4", alpha=0.15, step=None,
+            )
+    if traj.contacts_ras and cl_arr is not None:
         for p in traj.contacts_ras:
             arc = _project_to_polyline_arc_local(cl_arr, np.asarray(p, dtype=float))
-            ax_prof.axvline(arc, color="#1f77b4", alpha=0.6, lw=0.8)
-    ax_prof.set_xlim(0, span if cl is None else max(span, _polyline_total_arc(cl)))
+            ax_prof.axvline(arc, color="#1f77b4", alpha=0.45, lw=0.8)
+    if cl_arr is not None:
+        ax_prof.set_xlim(0, max(span, _polyline_total_arc(cl_arr)))
+    else:
+        ax_prof.set_xlim(0, span)
     ax_prof.set_xlabel("arc along centerline (mm)")
-    ax_prof.set_ylabel("placed contacts (tick marks)")
+    ax_prof.set_ylabel("−LoG (disk min)" if profile_arc is not None
+                        else "placed contacts (tick marks)")
     ax_prof.grid(True, alpha=0.2)
     if traj.bolt_source == "metal" and traj.bolt_end_arc_mm > 0:
         ax_prof.axvline(traj.bolt_end_arc_mm, color="red", lw=1.0,
                          label=f"bolt_end={traj.bolt_end_arc_mm:.1f}mm")
+    if (profile_arc is not None and profile_arc.size) or (
+        traj.bolt_source == "metal" and traj.bolt_end_arc_mm > 0
+    ):
         ax_prof.legend(loc="upper right", fontsize=8)
 
     # Per-model corr bar — read from score_components.per_model_corr stash.
@@ -267,6 +292,69 @@ def _bar(ax, per_model, picked: str | None, title: str) -> None:
     ax.axhline(0, color="black", lw=0.4)
     ax.grid(True, axis="y", alpha=0.2)
     ax.set_title(title, fontsize=9)
+
+
+def _sample_neg_log_along_polyline(
+    centerline: np.ndarray, log_arr, r2i, *,
+    step_mm: float = 0.5,
+    disk_radius_mm: float = 2.0,
+    n_radii: int = 4,
+    n_angles: int = 8,
+):
+    """Walk the centerline polyline at ``step_mm`` arc-length steps and
+    return ``(arc_mm, neg_log_profile)`` where ``neg_log_profile`` is
+    the negated disk-min |LoG| at each step.
+
+    Disk-min reducer mirrors the peak-driven path
+    (``axis_peak_refine.refine_signature_via_axis_peaks``); negation
+    flips the contact LoG wells (which are negative) into upward peaks
+    that read intuitively in the QC plot.
+
+    Per-segment sampling: each centerline segment is sampled via
+    ``contact_peak_fit.sample_axis_profile`` with the segment's
+    endpoints, then arc offsets accumulate. Duplicate join points
+    (segment[i] end == segment[i+1] start) are dropped to avoid
+    sample-density jaggies at joins.
+    """
+    from .contact_peak_fit import sample_axis_profile
+
+    cl = np.asarray(centerline, dtype=float)
+    if len(cl) < 2:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    arcs: list[np.ndarray] = []
+    profs: list[np.ndarray] = []
+    arc_offset = 0.0
+    for i in range(len(cl) - 1):
+        seg_start = cl[i]
+        seg_end = cl[i + 1]
+        seg_len = float(np.linalg.norm(seg_end - seg_start))
+        if seg_len < step_mm:
+            arc_offset += seg_len
+            continue
+        try:
+            seg_arc, seg_prof = sample_axis_profile(
+                log_arr, r2i, seg_start, seg_end,
+                step_mm=step_mm, disk_radius_mm=disk_radius_mm,
+                n_radii=n_radii, n_angles=n_angles, reducer="min",
+            )
+        except Exception:
+            arc_offset += seg_len
+            continue
+        if i > 0 and arcs:
+            seg_arc = seg_arc[1:]
+            seg_prof = seg_prof[1:]
+        arcs.append(seg_arc + arc_offset)
+        profs.append(seg_prof)
+        arc_offset += seg_len
+    if not arcs:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    arc = np.concatenate(arcs)
+    prof = np.concatenate(profs)
+    # Negate so contact LoG wells point upward in the plot. NaN entries
+    # (out-of-bounds) propagate; matplotlib skips them on plot.
+    return arc, -prof
 
 
 def _project_to_polyline_arc_local(polyline: np.ndarray, pt: np.ndarray) -> float:
