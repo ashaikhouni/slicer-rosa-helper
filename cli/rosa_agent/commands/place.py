@@ -136,18 +136,29 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     log(f"[place] running place_seeg on {ct_path}")
-    batch = place_seeg(
-        str(ct_path),
-        seeds=seeds,
-        expected=expected,
-        n_expected=args.n_expected,
-        library=args.library,
-        sample_fn=sample_fn,
-        band_floor=args.band_floor,
-        snap_angle_tol_deg=args.snap_angle_deg,
-        snap_perp_tol_mm=args.snap_perp_mm,
-        progress_logger=log,
-    )
+    try:
+        batch = place_seeg(
+            str(ct_path),
+            seeds=seeds,
+            expected=expected,
+            n_expected=args.n_expected,
+            library=args.library,
+            sample_fn=sample_fn,
+            band_floor=args.band_floor,
+            snap_angle_tol_deg=args.snap_angle_deg,
+            snap_perp_tol_mm=args.snap_perp_mm,
+            progress_logger=log,
+        )
+    except ValueError as exc:
+        # place_seeg raises ValueError on input-validation failures:
+        # empty seeds=[] / expected=[] (often an upstream filter dropped
+        # everything), n_expected <= 0, mode-arg combinations that
+        # contradict each other, mode-4 vouched model not in the active
+        # library, etc. Surface a clean one-liner instead of letting
+        # the traceback escape — same exit code (2) the argparse layer
+        # uses for its own usage errors.
+        _stderr(f"error: place_seeg rejected the inputs: {exc}")
+        return 2
     runtime_sec = time.perf_counter() - t0
     log(f"[place] mode {batch.diagnostics['mode']}: emitted "
         f"{len(batch.trajectories)} trajectories in {runtime_sec:.1f}s")

@@ -122,6 +122,94 @@ class PlaceCommandShapeTests(unittest.TestCase):
             ])
             self.assertEqual(rc, 2)  # error exit
 
+    def _capture_stderr(self, fn, *args, **kwargs):
+        """Run ``fn`` while redirecting stderr; return (rc, stderr_text)."""
+        import contextlib, io
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            rc = fn(*args, **kwargs)
+        return rc, buf.getvalue()
+
+    def test_empty_seeds_file_polite_failure(self):
+        """Header-only seeds.tsv ⇒ caller meant mode 4/5 but supplied
+        nothing; CLI exits 2 with a clear stderr line, not a traceback."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds = Path(tmp) / "seeds_empty.tsv"
+            seeds.write_text(
+                "name\tstart_x\tstart_y\tstart_z\tend_x\tend_y\tend_z\n",
+            )
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--seeds", str(seeds),
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("seeds", err.lower())
+
+    def test_empty_expected_file_polite_failure(self):
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = Path(tmp) / "expected_empty.tsv"
+            expected.write_text("name\tmodel_id\n")
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--expected", str(expected),
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("expected", err.lower())
+
+    def test_zero_n_expected_polite_failure(self):
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--n-expected", "0",
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("n_expected", err.lower())
+
+    def test_negative_n_expected_polite_failure(self):
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--n-expected", "-3",
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+
+    def test_unknown_model_id_polite_failure(self):
+        """Mode 4 vouched-model lookup misses ⇒ CLI exits 2 with a
+        clear stderr message naming the missing model id."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds = Path(tmp) / "seeds_bad_model.tsv"
+            seeds.write_text(
+                "name\tstart_x\tstart_y\tstart_z\tend_x\tend_y\tend_z\telectrode_model\n"
+                "L1\t0\t0\t0\t10\t0\t0\tNOT-A-REAL-MODEL\n",
+            )
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--seeds", str(seeds),
+                "--library", "dixi",
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("NOT-A-REAL-MODEL", err)
+
 
 @unittest.skipUnless(_try_imports() and (AMC_ROOT / "AMC88").is_dir(),
                      f"AMC88 not found at {AMC_ROOT}")
