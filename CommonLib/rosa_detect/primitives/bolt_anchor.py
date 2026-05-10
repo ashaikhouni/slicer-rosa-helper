@@ -13,8 +13,9 @@ Two pieces of the contact_pitch_v1 pipeline:
 
 Plus the metal-evidence + bolt-CC tuning constants both functions
 share. Imported by the orchestrator (``run_two_stage_detection`` in
-``contact_pitch_v1_fit``) and by ``guided_fit_engine`` (which uses
-the unified metal-evidence path for its own bolt extraction).
+``rosa_detect.candidate_seeds.orchestrator``) and by
+``rosa_detect.guided_fit_engine`` (which uses the unified
+metal-evidence path for its own bolt extraction).
 
 No Slicer / VTK / Qt dependencies.
 """

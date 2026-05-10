@@ -157,7 +157,8 @@ def sample_trilinear_batch(arr_kji, ras_to_ijk_mat, ras_points):
 def iter_axis_points(start_ras, end_ras, step_mm):
     """Yield ``(t_mm, point_ras)`` evenly along [start_ras, end_ras].
 
-    Sampling matches the prior inline loops in ``contact_pitch_v1_fit``:
+    Sampling matches the prior inline loops in the v1 detector
+    (now in ``rosa_detect.candidate_seeds``):
 
     - ``n = max(2, int(L / step_mm) + 1)`` points.
     - ``t = idx * step_mm`` for ``idx < n - 1``, then ``t = L`` for the

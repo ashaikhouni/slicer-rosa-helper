@@ -1,6 +1,6 @@
 # contact_pitch_v1 handoff
 
-Last updated: 2026-05-02 — pipeline 1.0.29
+Last updated: 2026-05-10 — post-Phase-B refactor complete.
 
 This is the single sticky reference. Session-by-session detail lives
 in the memory files (auto-loaded into Claude Code context). For full
@@ -10,13 +10,13 @@ historical narrative, read those rather than expanding this doc.
 
 | metric | value |
 |---|---|
-| pipeline version | 1.0.29 |
+| pipeline version | 1.0.29 (algorithm unchanged since pre-refactor) |
 | dataset recall | 295 / 295 (22 subjects, T17 / T19 / T21 excluded) |
 | dataset orphans | see `test_dataset_full` for the asserted budget |
 | AMC099 | 16 / 16 (wire-class extension recovered L_4) |
 | S56 | 16 / 16 (anisotropic σ recovered L_2 / L_3 horizontal shanks) |
 | ct88 | 8 / 8 |
-| code monolith | `contact_pitch_v1_fit.py` is currently 3411 lines — pending split, see `project_contact_pitch_v1_risks_2026-04-29.md` |
+| code shape | monolith deleted 2026-05-10; algorithm now lives in `rosa_detect.candidate_seeds.*` (one file per stage) and `rosa_detect.primitives.*` (preprocessing / bolt-anchor / geometry shared with the placer). Tunable knobs in one file: `candidate_seeds.constants`. |
 
 ## Pipeline shape
 
@@ -25,21 +25,33 @@ shank detection from the postop CT only — no bolt-first stage. Stage 2
 (Frangi shaft fallback) was retired 2026-04-27; only the unified
 metal-evidence cascade remains.
 
-End-to-end orchestration lives in `CommonLib/rosa_detect/`. The
-public seam is
-[`run_contact_pitch_v1`](../CommonLib/rosa_detect/service.py); the
-algorithm body lives in
-[`contact_pitch_v1_fit.py`](../CommonLib/rosa_detect/contact_pitch_v1_fit.py)
-and Guided Fit shares the same feature volumes via
-[`guided_fit_engine.py`](../CommonLib/rosa_detect/guided_fit_engine.py).
-(The legacy `shank_engine/pipelines/...` registry was retired
-2026-04-30 when `rosa_detect/` became the single algorithm package.)
+End-to-end orchestration lives in `CommonLib/rosa_detect/`:
+
+- **Public detection entry**:
+  [`rosa_detect.service.run_contact_pitch_v1`](../CommonLib/rosa_detect/service.py)
+  (used by Slicer Auto Fit + the `rosa-agent` CLI).
+- **Public placement entry**:
+  [`rosa_core.placement_modes.place_seeg`](../CommonLib/rosa_core/placement_modes.py)
+  (used by ContactsTrajectoryView + `rosa-agent place` for all five modes).
+- **v1 detector**:
+  [`rosa_detect.candidate_seeds.orchestrator.run_two_stage_detection`](../CommonLib/rosa_detect/candidate_seeds/orchestrator.py)
+  composes the per-stage modules (`blob_extraction`, `walker`,
+  `stage1_runner`, `pitch_library`, `dedup`, `crossing_tips`,
+  `deep_end_refine`, `synth_anchor`, `confidence_score`,
+  `axis_peak_refine`).
+- **Staged contact placement internals**: `rosa_core.contact_placement`.
+- **Slicer→headless adapter**:
+  [`rosa_scene.sitk_volume_adapter`](../CommonLib/rosa_scene/sitk_volume_adapter.py)
+  (bridges `vtkMRMLScalarVolumeNode` to the SITK image inputs the
+  algorithm consumes; only place vtk + slicer get imported on the
+  algorithm-call path).
 
 For the algorithm walkthrough (preprocessing, walker, bolt anchor,
 scoring, dedup, refine), the authoritative source is the inline
-docstrings + comments in `contact_pitch_v1_fit.py` itself. Past doc
-copies of the algorithm description rotted within weeks of being
-written; they are no longer maintained here.
+docstrings + comments in the per-stage modules under
+`rosa_detect/candidate_seeds/`. Past doc copies of the algorithm
+description rotted within weeks of being written; they are no longer
+maintained here.
 
 ## Key adjacent pieces
 
@@ -116,10 +128,6 @@ identified risks with location, fix, and tradeoff.
 | 4 | full-dataset regression + handoff consolidation | **landed** `360c95c` |
 | 3 | coordinate naming silent LPS/RAS sign-flip | **landed** `f140d07` |
 | 1 | Auto Fit ↔ Guided Fit preprocessing drift (extract `prepare_volume`) | **landed** `0cecf9a` |
-| 2 | `contact_pitch_v1_fit.py` monolith split | deferred |
+| 2 | `contact_pitch_v1_fit.py` monolith split | **landed** 2026-05-10 (module deleted; algorithm in `candidate_seeds.*` + `primitives.*`) |
 
-Item 2 (monolith split into `preprocess` / `pitch_walker` /
-`bolt_anchor` / `scoring` / `model_suggestion` modules) is the only
-open structural item. The `prepare_volume` extract from item 1 is
-the natural first slice of that split — when the monolith work
-starts, it has a working precedent.
+All five identified risks are now closed.

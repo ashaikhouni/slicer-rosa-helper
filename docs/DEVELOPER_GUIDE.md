@@ -38,12 +38,20 @@ Primary packages in `CommonLib`:
 - **`rosa_detect`** — pure-Python detection algorithm with a sealed
   public seam:
   - `from rosa_detect.service import run_contact_pitch_v1` is the
-    ONLY entry point external code uses.
+    public detection entry point (used by Slicer Auto Fit + the
+    `rosa-agent` CLI).
   - `contracts.DetectedTrajectory` (TypedDict) is the public output
     shape; algorithm-private fields are documented as opaque.
+  - The algorithm body lives in `rosa_detect.candidate_seeds` (one
+    module per pipeline stage: `blob_extraction`, `walker`,
+    `stage1_runner`, `pitch_library`, `confidence_score`, …; the
+    end-to-end orchestrator is `candidate_seeds.orchestrator`)
+    and `rosa_detect.primitives` (`preprocessing`, `bolt_anchor`,
+    `geometry` — shared with the placer). Tunable knobs live in
+    one file: `rosa_detect.candidate_seeds.constants`.
   - Lazy `__init__.py` keeps `import rosa_detect` cheap (only
-    pure-stdlib types load eagerly; `service` /
-    `contact_pitch_v1_fit` / `guided_fit_engine` import on first
+    pure-stdlib types load eagerly; `service` / `guided_fit_engine`
+    / the heavy `candidate_seeds.*` imports happen on first
     attribute access).
   - **No Slicer / VTK / Qt deps anywhere in this package** — pinned
     by `tests/deep_core/test_rosa_detect_no_slicer.py`.

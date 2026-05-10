@@ -1,9 +1,5 @@
-"""Pure geometry helpers for the candidate-seed pipeline.
-
-Lifted verbatim from ``contact_pitch_v1_fit.py`` (Session 4 Phase B
-stage extraction). Public-named (no leading underscore); cpfit
-re-exports under the legacy ``_*`` names for back-compat with probes
-and tests.
+"""Pure geometry helpers shared across the v1 candidate-seed pipeline
+and the placer.
 """
 from __future__ import annotations
 

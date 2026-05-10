@@ -176,9 +176,9 @@ class ContactPitchV1WidgetMixin:
         form.addRow("Status:", self.contactPitchStatusLabel)
 
     # Vendor sets implied by each strategy. Mirrors
-    # ``PITCH_STRATEGY_VENDORS`` in ``contact_pitch_v1_fit`` — duplicated
-    # here so the widget can log sensible messages without importing
-    # the fit module.
+    # ``PITCH_STRATEGY_VENDORS`` in ``rosa_core.electrode_classifier`` —
+    # duplicated here so the widget can log sensible messages without
+    # importing the classifier module just for a string lookup.
     _CONTACT_PITCH_STRATEGY_VENDORS = {
         "dixi":     ("Dixi",),
         "dixi_mm":  ("Dixi",),

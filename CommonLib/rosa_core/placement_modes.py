@@ -14,13 +14,15 @@ list w/ model_id None           None               4 — placement only (user vo
 list w/o model_id None          None               5 — seeds + library match
 ==============  =============  =================  ================================================
 
-**Session 1 implements only mode 4.** Modes 1, 2, 3, 5 require candidate-seed
-extraction from ``rosa_detect.contact_pitch_v1_fit`` (Session 2) and raise
-``NotImplementedError`` for now.
+All five modes are live. Modes 1/2/3/5 trigger candidate-seed
+extraction via ``rosa_detect.candidate_seeds.orchestrator``;
+mode 4 takes the user's seeds + vouched ``model_id`` and snaps them
+to whatever the auto-detect emitted (then re-runs placement against
+the vouched template).
 
 The result is always a ``PlacementBatch`` carrying ``PlacedTrajectory``
-records (band-classified, score-componented) plus optional QC directory
-output (Session 3).
+records (band-classified, score-componented) plus optional QC
+directory output (``rosa_core.qc_output.write_qc_directory``).
 """
 from __future__ import annotations
 

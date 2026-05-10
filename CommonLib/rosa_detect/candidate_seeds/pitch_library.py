@@ -6,12 +6,9 @@ filtered per pitch-strategy. This module owns the library load and the
 ``WalkerBounds`` immutable record threaded through the orchestrator
 into walker / score / crossing-tip retreat.
 
-Earlier the same job was done by mutating ``contact_pitch_v1_fit``'s
-module dict for the duration of one call (via ``StrategyBoundsScope``
-+ the ``with_strategy_bounds`` decorator). That pattern made the
-walker depend on cpfit at runtime. The dataclass below replaces it:
-the orchestrator computes a single ``WalkerBounds`` on entry and
-passes it explicitly to every stage that needs it.
+The orchestrator computes a single ``WalkerBounds`` on entry from the
+caller's pitch_strategy and passes it explicitly to every stage that
+needs it; no module-global mutation, no decorator magic.
 """
 from __future__ import annotations
 

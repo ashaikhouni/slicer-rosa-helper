@@ -1,9 +1,8 @@
 """Tunable knobs for the v1 SEEG shank detector.
 
-Lifted from ``contact_pitch_v1_fit.py`` as part of the 2026-05-10 stage
-extraction (``handoff_v3_production_lift_2026-05-09`` Session 4 Phase B).
-Each constant has its calibration rationale inline; longer prose lives
-in the per-stage memory entries.
+Single source of truth for every tunable in the v1 pipeline. Each
+constant has its calibration rationale inline; longer prose lives in
+the per-stage memory entries.
 
 Section organization:
   1. Blob extraction (LoG)
@@ -40,8 +39,8 @@ from __future__ import annotations
 # |LoG| floor for accepting a contact-sized local minimum. Calibrated
 # for the Box r=1 (3x3x3) blob extractor + sub-voxel quadratic
 # refinement. ~50% of typical per-contact LoG (1062), ~2x cross-scanner
-# safety margin. See `contact_pitch_v1_fit` original docstring for the
-# full calibration rationale.
+# safety margin. Calibration rationale lives in
+# `project_contact_pitch_v1_kernel_recalibration_2026-04-27.md`.
 LOG_BLOB_THRESHOLD: float = 500.0
 LOG_BLOB_MAX_VOXELS: int = 500
 LOG_BLOB_SUBVOXEL_DEFAULT: bool = True

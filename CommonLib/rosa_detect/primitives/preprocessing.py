@@ -1,16 +1,13 @@
 """CT volume preprocessing for the contact_pitch_v1 detection pipeline.
 
-Both Auto Fit's ``run_two_stage_detection`` and Guided Fit's
-``compute_features`` (in ``guided_fit_engine``) call ``prepare_volume``
-first so they see the same canonical volume. Any drift between the two
-paths is a P0 parity bug per ``feedback_cli_slicer_parity.md``.
+Both Auto Fit's ``run_two_stage_detection``
+(``rosa_detect.candidate_seeds.orchestrator``) and Guided Fit's
+``compute_features`` (``rosa_detect.guided_fit_engine``) call
+``prepare_volume`` first so they see the same canonical volume. Any
+drift between the two paths is a P0 parity bug per
+``feedback_cli_slicer_parity.md``.
 
-The four entry points exported here are also imported by external
-research probes via the module-level alias
-``rosa_detect.contact_pitch_v1_fit`` — that file keeps re-exporting
-the symbols for backwards compatibility. Once the rest of the
-contact_pitch_v1_fit monolith is split this preprocessing module
-becomes the canonical home; re-exports can then be removed.
+This module is the canonical home for these symbols.
 """
 
 from __future__ import annotations
