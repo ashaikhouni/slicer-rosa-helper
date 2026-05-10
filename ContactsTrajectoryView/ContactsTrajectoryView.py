@@ -1858,6 +1858,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _align_focus_views_for_selected(self, align_trajectory_views=True):
         trajectory = self._selected_trajectory()
         scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        # When contacts have been placed for this trajectory, hand them
+        # to focus_selected so the slice axis is refit through the actual
+        # contacts (mitigates centerline drift / slight electrode bend).
+        # Falls back to seed line silently when no contacts are available.
+        placed_ras = self._placed_contacts_for_selected(trajectory)
         try:
             return bool(
                 self.logic.focus_controller.focus_selected(
@@ -1866,11 +1871,36 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     jump_cardinal=True,
                     align_focus_views=bool(align_trajectory_views),
                     focus="entry",
+                    placed_contacts_ras=placed_ras,
                 )
             )
         except Exception as exc:
             self.log(f"[focus] alignment fallback: {exc}")
             return False
+
+    def _placed_contacts_for_selected(self, trajectory):
+        """Return RAS positions of the placed contacts for ``trajectory``,
+        or None when none have been generated yet for this row.
+
+        ``lastGeneratedContacts`` items carry ``position_lps`` (placed by
+        ``_run_contact_generation``); we flip to RAS for the slice axis
+        refit.
+        """
+        if trajectory is None or not self.lastGeneratedContacts:
+            return None
+        traj_name = trajectory.get("name", "")
+        if not traj_name:
+            return None
+        out = []
+        for rec in self.lastGeneratedContacts:
+            if rec.get("trajectory") != traj_name:
+                continue
+            lps = rec.get("position_lps")
+            if not lps or len(lps) != 3:
+                continue
+            # symmetric flip LPS↔RAS (lps_to_ras_point is its own inverse)
+            out.append(lps_to_ras_point(list(lps)))
+        return out or None
 
     def _follow_selected_trajectory_if_enabled(self):
         if self._syncingFocusControls:
