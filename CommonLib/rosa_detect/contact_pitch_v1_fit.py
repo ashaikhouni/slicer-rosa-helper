@@ -72,58 +72,29 @@ from .primitives.bolt_anchor import (  # noqa: F401
     anchor_trajectory_to_bolt,
     extract_bolt_candidates,
 )
-# |LoG| floor for accepting a contact-sized local minimum.
-#
-# Calibrated for the Box r=1 (3x3x3) blob extractor. Per-inlier
-# amplitude distribution across 295 GT-matched shanks (4760 inliers,
-# probe_inlier_amp_distribution.py): p1 = 406, p5 = 626, p50 = 1062,
-# weakest individual inlier = 302.6. Real-shank chains have 12-24
-# inliers each, so dropping the bottom few percent of weak peaks
-# doesn't break any chain.
-#
-# The earlier value (300) was set when the blob extractor used SITK
-# Ball r=2 (81 voxels). Box r=1 (27 voxels, no kernel-snap aliasing
-# at 3.5 mm pitch) keeps more weak peaks alive at threshold 300, and
-# those weak peaks form spurious chains that surface as medium-band
-# orphans (probe_log_threshold_sweep.py: 101 orphans @ 300 vs 12 @
-# 500 vs 1 @ 600 — recall held at 295/295 across the entire sweep).
-#
-# 500 is ~50 % of the typical per-contact LoG (1062), giving roughly
-# 2x cross-scanner safety margin. 600 was empirically clean too but
-# tightens that margin further.
-LOG_BLOB_THRESHOLD = 500.0
-LOG_BLOB_MAX_VOXELS = 500
-
-# HU_CLIP_MAX, CANONICAL_SPACING_MM moved to rosa_detect.primitives.preprocessing
-# and re-exported above. See that module for the calibration rationale.
-
-PITCH_MM = 3.5
-# Inter-contact pitch tolerance for the walker. Calibrated for the
-# Box r=1 (3x3x3) blob extractor + sub-voxel quadratic refinement.
-#
-# Per-peak position error budget (1 sigma):
-#   sub-voxel residual   ~0.10 mm
-#   manufacturing        ~0.05 mm
-#   registration         ~0.10 mm
-#   combined per-peak    ~0.15 mm
-# Inter-contact distance error: sigma_d = sqrt(2) * 0.15 ~0.21 mm.
-# 2 sigma (95%) tolerance = 0.42 mm; 2.5 sigma (99%) = 0.53 mm.
-#
-# The earlier value 0.5 mm was empirical for the Ball r=2 era, where
-# kernel snap on the (+-1,+-1,+-2) family added ~0.5-1 mm of position
-# error and forced a wider tolerance. Box r=1 doesn't kernel-snap at
-# 3.5 mm pitch (corner reach sqrt(3) ~1.73 mm < pitch), so the wider
-# slack is no longer needed.
-#
-# 0.4 (~2 sigma) is the math-grounded choice: kills walker-chain
-# false positives whose blobs aren't on a regular pitch while
-# preserving the 95 % confidence interval for real shanks. Probe
-# probe_pitch_tol_sweep.py confirmed dataset recall holds at 295/295
-# down to 0.2 mm; 0.4 keeps cross-scanner safety margin.
-PITCH_TOL_MM = 0.4
-PERP_TOL_MM = 1.5
-AX_TOL_MM = 0.7
-MAX_K_STEPS = 20
+# Generic geometry helpers — shared across v1 (candidate seeds) and the
+# placer (rosa_core.contact_placement). cpfit re-exports under the
+# legacy ``_*`` names for back-compat with probes and tests.
+from .primitives.geometry import (  # noqa: F401
+    unit as _unit,
+    sample_dist_at_ras as _sample_dist_at_ras,
+    orient_shallow_to_deep as _orient_shallow_to_deep,
+    min_perp_to_other_segments as _min_perp_to_other_segments,
+    kji_to_ras_fn_from_matrix as _kji_to_ras_fn_from_matrix,
+)
+# All tunable knobs for v1 detection live in
+# ``rosa_detect.candidate_seeds.constants``. Re-exported here so legacy
+# callers (probes, tests) that read symbols via ``cpfit.<NAME>`` still
+# work. Calibration rationale moved to constants.py docstrings.
+from .candidate_seeds.constants import (  # noqa: F401
+    LOG_BLOB_THRESHOLD,
+    LOG_BLOB_MAX_VOXELS,
+    PITCH_MM,
+    PITCH_TOL_MM,
+    PERP_TOL_MM,
+    AX_TOL_MM,
+    MAX_K_STEPS,
+)
 
 # ---- Library-derived bounds ------------------------------------------
 #
@@ -602,30 +573,6 @@ def resolve_pitches_for_strategy(strategy, pts_c=None,
 
 
 # ---- Stage 1: blob-pitch ---------------------------------------------
-
-def _unit(v):
-    v = np.asarray(v, dtype=float).reshape(3)
-    n = float(np.linalg.norm(v))
-    return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
-
-
-def _sample_dist_at_ras(dist_arr, ras_to_ijk_mat, ras_xyz):
-    """Look up head_distance at a RAS point (nearest voxel)."""
-    return sample_nearest_at_ras(dist_arr, ras_to_ijk_mat, ras_xyz)
-
-
-def _orient_shallow_to_deep(start_ras, end_ras, dist_arr, ras_to_ijk_mat):
-    """Return (shallow_ras, deep_ras) so the shallower end (smaller
-    head_distance = closer to hull surface) comes first. Disambiguates
-    PCA axis direction so downstream visualization can color shallow vs
-    deep consistently.
-    """
-    d_start = _sample_dist_at_ras(dist_arr, ras_to_ijk_mat, start_ras)
-    d_end = _sample_dist_at_ras(dist_arr, ras_to_ijk_mat, end_ras)
-    if d_start <= d_end:
-        return np.asarray(start_ras, dtype=float), np.asarray(end_ras, dtype=float)
-    return np.asarray(end_ras, dtype=float), np.asarray(start_ras, dtype=float)
-
 
 # Sub-voxel centroid refinement on LoG blob minima. Without it, blob
 # positions snap to voxel-integer grid and consecutive-contact distances
@@ -1508,26 +1455,6 @@ CROSSING_TIP_CLEARANCE_MM = 2.0
 CROSSING_RETREAT_STEP_MM = 0.5
 
 
-def _min_perp_to_other_segments(p, segs, skip_idx):
-    """Minimum perpendicular distance from point ``p`` to any other
-    segment in ``segs`` (skipping the one at ``skip_idx``). Uses
-    segment-to-point distance (clamped along-projection), not infinite
-    line, so crossing shanks compare only where they actually live.
-    """
-    best = float("inf")
-    for i, seg in enumerate(segs):
-        if i == skip_idx:
-            continue
-        v = p - seg["s"]
-        along = float(v @ seg["a"])
-        along_c = max(0.0, min(seg["L"], along))
-        proj = seg["s"] + along_c * seg["a"]
-        d = float(np.linalg.norm(p - proj))
-        if d < best:
-            best = d
-    return best
-
-
 def _retreat_crossing_tips(anchored,
                              log_arr=None,
                              ras_to_ijk_mat=None,
@@ -2145,19 +2072,6 @@ def _compute_trajectory_score(rec):
 
 
 # ---- Orchestration ----------------------------------------------------
-
-def _kji_to_ras_fn_from_matrix(ijk_to_ras_mat):
-    m = np.asarray(ijk_to_ras_mat, dtype=float)
-
-    def _fn(kji):
-        if kji.ndim == 1:
-            i, j, k = float(kji[2]), float(kji[1]), float(kji[0])
-            return (m @ np.array([i, j, k, 1.0]))[:3]
-        ijk = np.stack([kji[:, 2], kji[:, 1], kji[:, 0]], axis=1)
-        h = np.concatenate([ijk, np.ones((ijk.shape[0], 1))], axis=1)
-        return (m @ h.T).T[:, :3]
-    return _fn
-
 
 @_with_strategy_bounds
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
