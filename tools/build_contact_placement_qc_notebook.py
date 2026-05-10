@@ -267,10 +267,12 @@ from typing import Any, Callable
 
 from rosa_core.contact_placement import sample_disk_along_polyline, estimate_bolt_end_from_metal_mass
 from rosa_core.matched_filter import matched_filter_pick, MatchedFilterResult
-from rosa_core.contact_placement_v2 import (
+from rosa_core.contact_placement import (
     WALK_STEP_MM, WALK_DISK_RADIUS_MM, WALK_N_RADII, WALK_N_ANGLES, WALK_TIP_PAD_MM, WALK_HU_MIN,
     DEGENERATE_CONTACT_ZONE_MM,
-    _snap_centerline_to_centroid, _extend_centerline_tail, _project_to_polyline_arc,
+    snap_centerline_to_centroid as _snap_centerline_to_centroid,
+    extend_centerline_tail as _extend_centerline_tail,
+    project_to_polyline_arc as _project_to_polyline_arc,
 )
 
 

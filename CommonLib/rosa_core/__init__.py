@@ -92,32 +92,18 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "write_contacts_tsv":                                 ("qc_output", "write_contacts_tsv"),
     "write_manifest_json":                                ("qc_output", "write_manifest_json"),
     "trajectory_to_qc_row":                               ("qc_output", "trajectory_to_qc_row"),
-    # qc_figures — headless matplotlib renderer for the new staged-pipeline
-    # PlacedTrajectory output. (emission_qc.render_emission_figure renders
-    # the legacy unified-detect EmissionQC; different signature.)
+    # qc_figures — headless matplotlib renderer for staged-pipeline
+    # PlacedTrajectory output (the only emission-figure renderer now;
+    # emission_qc and its alternate render_emission_figure were retired
+    # in Session 4 alongside unified_detect).
     "render_placed_trajectory_figure":                    ("qc_figures", "render_placed_trajectory_figure"),
     "render_all_figures":                                 ("qc_figures", "render_all_figures"),
-    # contact_placement_v2 — DEPRECATED shim (lazy-loaded only for
-    # unified_detect + the v2-specific test). Will be removed in Session 4.
-    "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement_v2", "MIN_CORR_FOR_REAL_SHANK"),
-    "MAX_SLOT_CC_VOLUME_P90_MM3":                         ("contact_placement_v2", "MAX_SLOT_CC_VOLUME_P90_MM3"),
-    "MIN_SLOT_HU_MEAN":                                   ("contact_placement_v2", "MIN_SLOT_HU_MEAN"),
-    "PlacementV2Result":                                  ("contact_placement_v2", "PlacementV2Result"),
-    "place_contacts_for_seed_v2":                         ("contact_placement_v2", "place_contacts_for_seed_v2"),
-    # unified_detect — composes v1 stage1 + v2 placement (M9 architecture).
-    # See project_unified_pipeline_m9_2026-05-08.md.
-    "MIN_BLOBS_PER_LINE_UNIFIED":                         ("unified_detect", "MIN_BLOBS_PER_LINE_UNIFIED"),
-    "UnifiedTrajectory":                                  ("unified_detect", "UnifiedTrajectory"),
-    "detect_and_place_unified":                           ("unified_detect", "detect_and_place_unified"),
-    # emission_qc — per-emission QC for the unified-pipeline output.
-    # Used by QC notebooks and the CLI ``rosa-agent qc`` subcommand.
-    # Distinct from rosa_core.qc (planned-vs-final-trajectory QC).
-    "EmissionQC":                                         ("emission_qc", "EmissionQC"),
-    "PerModelCorr":                                       ("emission_qc", "PerModelCorr"),
-    "build_emission_qc":                                  ("emission_qc", "build_emission_qc"),
-    "build_subject_qc":                                   ("emission_qc", "build_subject_qc"),
-    "emission_qc_to_dict":                                ("emission_qc", "emission_qc_to_dict"),
-    "render_emission_figure":                             ("emission_qc", "render_emission_figure"),
+    # The validator constants that used to live on contact_placement_v2
+    # are now public on rosa_core.contact_placement (see
+    # rosa_core.contact_placement.constants).
+    "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement", "MIN_CORR_FOR_REAL_SHANK"),
+    "MAX_SLOT_CC_VOLUME_P90_MM3":                         ("contact_placement", "MAX_SLOT_CC_VOLUME_P90_MM3"),
+    "MIN_SLOT_HU_MEAN":                                   ("contact_placement", "MIN_SLOT_HU_MEAN"),
     # contact_peak_fit — numpy + SimpleITK (LoG helper).
     "PeakFitResult":                                      ("contact_peak_fit", "PeakFitResult"),
     "candidate_ids_for_vendors":                          ("contact_peak_fit", "candidate_ids_for_vendors"),

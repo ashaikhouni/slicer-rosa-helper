@@ -1,8 +1,18 @@
-"""rosa-agent contacts — place contacts on each trajectory using LoG-driven peaks.
+"""rosa-agent contacts — place contacts along supplied trajectories.
 
-Reads the trajectory TSV emitted by ``rosa-agent detect``, computes
-LoG σ=1 once for the CT, then runs ``contact_peak_fit.detect_contacts_on_axis``
-per trajectory. Output: contacts TSV with stable columns.
+Thin wrapper around ``rosa_core.placement_modes.place_seeg``: reads a
+trajectory TSV (one row per shank, RAS endpoints + optional model_id),
+runs the staged pipeline, writes contacts to TSV.
+
+Mode dispatch (mirrors ``rosa-agent place``):
+
+  * Every row has ``electrode_model`` set → mode 4 (vouched + force model).
+  * Any row missing ``electrode_model`` → mode 5 (snap-to-v1 + library match).
+
+This subcommand is kept for back-compat with ``rosa-agent pipeline`` and
+external scripts that produce a ``rosa-agent detect`` TSV. New users should
+prefer ``rosa-agent place --seeds traj.tsv --output qc/`` which writes a
+full QC directory instead of just the contacts TSV.
 """
 
 from __future__ import annotations
@@ -22,71 +32,76 @@ def _stderr(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
-def _compute_log_volume(ct_path: str | Path):
-    """Return (log_kji_float32, ras_to_ijk_4x4)."""
-    import SimpleITK as sitk
-    from rosa_core.contact_peak_fit import compute_log_sigma1_volume
-    from shank_core.io import image_ijk_ras_matrices
-
-    img = sitk.ReadImage(str(ct_path))
-    log_arr = compute_log_sigma1_volume(img)
-    _, ras_to_ijk = image_ijk_ras_matrices(img)
-    return log_arr, ras_to_ijk
-
-
 def place_contacts(
     ct_path: str | Path,
     trajectories: list[dict[str, Any]],
     *,
     pitch_strategy: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Run peak-driven contact placement for each trajectory.
+    """Run the staged placement pipeline for each trajectory.
 
     Returns a list of contact-group dicts in the format expected by
-    ``write_contacts_tsv``:
+    ``write_contacts_tsv``::
 
-        {
-            "trajectory": <name>,
-            "electrode_model": <id>,
-            "positions_ras": [...],
-            "peak_detected": [...],
-        }
+        {"trajectory": <name>, "electrode_model": <id>,
+         "positions_ras": [...], "peak_detected": [...]}
+
+    Mode dispatch:
+      * Trajectories with ``electrode_model`` → mode 4 (force the vouched
+        model on each).
+      * Trajectories missing ``electrode_model`` → mode 5 (snap-to-v1
+        candidate, library match).
+
+    Mixed inputs route through mode 5 (the dispatcher's strictness rule
+    requires every seed to have a model_id for mode 4); rows that come
+    in with a model_id still get model-filtered placement via the snap
+    path on the way out.
+
+    Args:
+        ct_path: CT volume — file path consumed by SimpleITK.
+        trajectories: list of dicts with ``name``, ``start_ras``,
+            ``end_ras`` (3-tuples or 3-lists), optional ``electrode_model``.
+        pitch_strategy: library subset key (e.g. ``"dixi"``, ``"pmt_35"``).
+            ``None`` (default) uses the full bundled library.
     """
-    from rosa_core.contact_peak_fit import detect_contacts_on_axis
-    from rosa_core.electrode_models import load_electrode_library, model_map
+    from rosa_core.placement_modes import Seed, place_seeg
+    from rosa_core.contact_placement import sample_neg_log_max
 
-    library = load_electrode_library()
-    models_by_id = model_map(library)
-
-    log_arr, ras_to_ijk = _compute_log_volume(ct_path)
-
-    out: list[dict[str, Any]] = []
+    seeds = []
     for traj in trajectories:
         name = str(traj.get("name") or "")
-        start = traj["start_ras"]
-        end = traj["end_ras"]
-        restrict = str(traj.get("electrode_model") or "") or None
-        result = detect_contacts_on_axis(
-            start, end,
-            log_volume_kji=log_arr,
-            ras_to_ijk_mat=ras_to_ijk,
-            models_by_id=models_by_id,
-            restrict_to_model_id=restrict,
-        )
-        if result.rejected_reason:
-            _stderr(f"[contacts] {name}: rejected ({result.rejected_reason})")
-            out.append({
-                "trajectory": name,
-                "electrode_model": restrict or "",
-                "positions_ras": [],
-                "peak_detected": [],
-            })
-            continue
+        model = (traj.get("electrode_model") or None)
+        seeds.append(Seed(
+            name=name,
+            start_ras=traj["start_ras"],
+            end_ras=traj["end_ras"],
+            model_id=str(model) if model else None,
+        ))
+
+    if not seeds:
+        return []
+
+    batch = place_seeg(
+        str(ct_path),
+        seeds=seeds,
+        library=pitch_strategy,
+        sample_fn=sample_neg_log_max,
+        progress_logger=_stderr,
+    )
+
+    out: list[dict[str, Any]] = []
+    for placed in batch.trajectories:
+        contacts_ras = [list(c) for c in placed.contacts_ras]
+        if not contacts_ras:
+            _stderr(f"[contacts] {placed.name}: no contacts placed (band={placed.band})")
         out.append({
-            "trajectory": name,
-            "electrode_model": result.model_id,
-            "positions_ras": [list(p) for p in result.positions_ras],
-            "peak_detected": list(result.peak_detected),
+            "trajectory": placed.name,
+            "electrode_model": placed.model_id or "",
+            "positions_ras": contacts_ras,
+            # The staged placer always emits library-template-anchored
+            # contacts (no nominal-vs-detected distinction); mark all as
+            # peak_detected for back-compat with the TSV schema.
+            "peak_detected": [True] * len(contacts_ras),
         })
     return out
 
@@ -94,16 +109,25 @@ def place_contacts(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="rosa-agent contacts",
-        description="Place contacts along each trajectory using peak-driven LoG sampling.",
+        description=(
+            "Place contacts along each trajectory using the staged pipeline. "
+            "Prefer 'rosa-agent place --seeds traj.tsv --output DIR' for new "
+            "workflows (writes a full QC directory)."
+        ),
     )
     parser.add_argument("trajectories_tsv", help="Trajectory TSV (rosa-agent detect output)")
     parser.add_argument("ct_path", help="CT NIfTI/NRRD")
     parser.add_argument("--out", "-o", required=True, help="Output contacts TSV")
+    parser.add_argument(
+        "--library", default=None,
+        help="Pitch-strategy / library subset key (e.g. 'dixi', 'pmt_35'). "
+             "Default: full library.",
+    )
     args = parser.parse_args(argv)
 
     trajs = read_seeds_tsv(args.trajectories_tsv)
     _stderr(f"[contacts] {len(trajs)} trajectories from {args.trajectories_tsv}")
-    groups = place_contacts(args.ct_path, trajs)
+    groups = place_contacts(args.ct_path, trajs, pitch_strategy=args.library)
     n = write_contacts_tsv(args.out, groups)
     _stderr(f"[contacts] wrote {args.out} ({n} contacts)")
     return 0
