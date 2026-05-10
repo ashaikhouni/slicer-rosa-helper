@@ -87,13 +87,64 @@ from .primitives.geometry import (  # noqa: F401
 # callers (probes, tests) that read symbols via ``cpfit.<NAME>`` still
 # work. Calibration rationale moved to constants.py docstrings.
 from .candidate_seeds.constants import (  # noqa: F401
-    LOG_BLOB_THRESHOLD,
-    LOG_BLOB_MAX_VOXELS,
-    PITCH_MM,
-    PITCH_TOL_MM,
-    PERP_TOL_MM,
+    ANCHOR_TOTAL_OVERSHOOT_MM,
     AX_TOL_MM,
+    AXIS_REFINE_MAX_MM,
+    AXIS_REFINE_MIN_ABS,
+    AXIS_REFINE_MISS_MM,
+    AXIS_REFINE_STEP_MM,
+    AXIS_SKULL_SYNTH_BOLT_PROTRUDE_MM,
+    AXIS_SKULL_SYNTH_MAX_OUTWARD_MM,
+    AXIS_SKULL_SYNTH_STEP_MM,
+    BOLT_PROTRUSION_MIN_MM,
+    CROSSING_RETREAT_STEP_MM,
+    CROSSING_TIP_CLEARANCE_MM,
+    DEEP_END_MARGIN_PAST_LAST_CONTACT_MM,
+    DEEP_TIP_MIN_MM,
+    DEEP_TIP_MIN_SHORT_MM,
+    DEEP_TIP_SHORT_MAX_AVG_PITCH_MM,
+    FRANGI_LINE_MIN_MEDIAN,
+    LOG_BLOB_MAX_VOXELS,
+    LOG_BLOB_THRESHOLD,
     MAX_K_STEPS,
+    MIN_BLOBS_PER_LINE,
+    MIN_BLOBS_POST_ARBITRATION,
+    PERP_TOL_MM,
+    PITCH_AUTO_MAX_MM,
+    PITCH_AUTO_MAX_PEAKS,
+    PITCH_AUTO_MIN_MM,
+    PITCH_AUTO_PEAK_EXCLUSION_MM,
+    PITCH_AUTO_SECONDARY_FRAC,
+    PITCH_MM,
+    PITCH_SNAP_MM,
+    PITCH_TOL_MM,
+    POST_ANCHOR_DEDUP_ANG_DEG,
+    POST_ANCHOR_DEDUP_PERP_MM,
+    SCORE_AMP_SAT,
+    SCORE_BOLT_VALUES,
+    SCORE_DEPTH_SAT_MM,
+    SCORE_HIGH_THRESHOLD,
+    SCORE_INTRACRANIAL_SAT_MM,
+    SCORE_LENGTH_SHOULDER_MM,
+    SCORE_MEDIUM_THRESHOLD,
+    SCORE_METAL_CONTINUITY_SAT,
+    SCORE_N_INLIERS_OVER_SLACK,
+    SCORE_N_INLIERS_SLOPE,
+    SCORE_PITCH_TOL_MM,
+    SCORE_SPAN_SHOULDER_MM,
+    SCORE_WEIGHTS,
+    SEEG_VENDORS,
+    STAGE1_DEDUP_ANGLE_DEG,
+    STAGE1_DEDUP_OVERLAP_FRAC,
+    STAGE1_DEDUP_PERP_MM,
+    WALKER_GAP_SLACK_MM,
+    WALKER_SPAN_OVER_SLACK_MM,
+    WALKER_SPAN_UNDER_SLACK_MM,
+    WIRE_CLASS_MIN_DEPTH_MM,
+    WIRE_CLASS_MIN_ELONGATION,
+    WIRE_CLASS_MIN_SPAN_MM,
+    WIRE_CLASS_MIN_VOXELS,
+    _BUNDLED_LIBRARY_BOUNDS_FALLBACK,
 )
 
 # ---- Library-derived bounds ------------------------------------------
@@ -574,108 +625,14 @@ def resolve_pitches_for_strategy(strategy, pts_c=None,
 
 # ---- Stage 1: blob-pitch ---------------------------------------------
 
-# Sub-voxel centroid refinement on LoG blob minima. Without it, blob
-# positions snap to voxel-integer grid and consecutive-contact distances
-# collapse onto √(integer) values (√14 = 3.74, √38 = 6.16 …). For
-# specific axis orientations those values fall outside the walker's
-# seed-pair pitch band ([3.0, 4.0] ∪ [6.5, 7.5] ∪ [10.0, 11.0]) and the
-# shank is lost. Refined positions land within ~0.1 mm of true centres
-# and collapse observed distances back toward 3.5 / 7.0 / 10.5 mm. Probes
-# can flip this off to compare.
-LOG_BLOB_SUBVOXEL_DEFAULT = True
-
-
-def extract_blobs(log_arr, threshold=LOG_BLOB_THRESHOLD, sub_voxel=None):
-    """Regional-minima blob extraction. Each contact (local LoG minimum)
-    becomes one blob. Uses SITK grayscale erode with a 3×3×3 Box kernel
-    (26-connectivity, max reach √3 ≈ 1.73 voxels), then thresholds by
-    absolute LoG value.
-
-    Why this kernel:
-      The local-min suppression neighbourhood must be wider than the
-      LoG within-peak shoulders (≈1.5-2 mm FWHM at σ=1 mm) so each
-      contact gives one detection, but strictly narrower than the
-      smallest library contact pitch (3.5 mm) so adjacent contacts on
-      the same shank both survive as distinct local minima. The
-      previous SITK Ball at radius 2 had diagonal reach √6 ≈ 2.45
-      voxels — fine on most subjects at 1 mm voxels but failed on the
-      `(±1, ±1, ±2)` voxel-offset family where adjacent contacts on a
-      shank happen to grid-snap (T7 LSFG: 5/8 contacts detected, 2 of
-      those 5 then failed the walker's 0.5 mm pitch tolerance, line
-      rejected).
-
-      A 3×3×3 Box (corner reach √3 ≈ 1.73 mm at 1 mm voxels) sits
-      cleanly between the within-peak FWHM and the contact pitch and
-      is voxel-size-invariant up to spacing ≈ pitch/√3 ≈ 2 mm. On the
-      dataset this recovers all LSFG-class shanks and preserves
-      T25 LITG which other tighter kernels happen to lose.
-
-    ``sub_voxel``: when True, refine each minimum's position to sub-voxel
-    accuracy via a 1-D quadratic fit along each axis in the 3×3×3
-    neighbourhood. This counteracts voxel-grid aliasing in blob-pair
-    distances — without it, consecutive-contact distances snap to
-    sqrt-integer values (√14 = 3.74 for well-aligned axes, √24 = 4.90
-    for others), putting some shanks outside the walker's seed-pair
-    pitch band despite being standard Dixi 3.5 mm pitch.
-    """
-    import SimpleITK as sitk
-    if sub_voxel is None:
-        sub_voxel = LOG_BLOB_SUBVOXEL_DEFAULT
-    erode = sitk.GrayscaleErode(
-        sitk.GetImageFromArray(log_arr),
-        kernelRadius=[1, 1, 1],
-        kernelType=sitk.sitkBox,
-    )
-    eroded = sitk.GetArrayFromImage(erode).astype(np.float32)
-    is_local_min = (log_arr <= eroded + 1e-4)
-    strong = is_local_min & (log_arr <= -abs(threshold))
-    kk, jj, ii = np.where(strong)
-    blobs = []
-    K, J, I = log_arr.shape
-    for k, j, i in zip(kk, jj, ii):
-        val = float(log_arr[k, j, i])
-        if sub_voxel and 0 < k < K - 1 and 0 < j < J - 1 and 0 < i < I - 1:
-            # Quadratic vertex along each axis: offset = 0.5·(f⁻ − f⁺) / (f⁻ − 2·f⁰ + f⁺)
-            # Clip to [-0.5, 0.5] so the refined position stays inside the voxel.
-            fi_m = float(log_arr[k, j, i - 1]); fi_p = float(log_arr[k, j, i + 1])
-            fj_m = float(log_arr[k, j - 1, i]); fj_p = float(log_arr[k, j + 1, i])
-            fk_m = float(log_arr[k - 1, j, i]); fk_p = float(log_arr[k + 1, j, i])
-            def _vtx(fm, f0, fp):
-                denom = fm - 2.0 * f0 + fp
-                if abs(denom) < 1e-6:
-                    return 0.0
-                off = 0.5 * (fm - fp) / denom
-                return max(-0.5, min(0.5, off))
-            di = _vtx(fi_m, val, fi_p)
-            dj = _vtx(fj_m, val, fj_p)
-            dk = _vtx(fk_m, val, fk_p)
-            blobs.append(dict(
-                kji=np.array([float(k) + dk, float(j) + dj, float(i) + di]),
-                amp=-val, n_vox=1,
-            ))
-        else:
-            blobs.append(dict(
-                kji=np.array([float(k), float(j), float(i)]),
-                amp=-val, n_vox=1,
-            ))
-    return blobs
-
-
-def extract_blob_cloud_ras(log_arr, ijk_to_ras_mat, threshold=LOG_BLOB_THRESHOLD):
-    """Return the RAS centroids and amplitudes of every LoG regional
-    minimum strong enough to be a contact candidate. Public wrapper
-    around ``extract_blobs`` so Auto Fit, Guided Fit, and Contacts &
-    Trajectory View can share one entry point for "blobs as RAS points".
-    """
-    blobs = extract_blobs(log_arr, threshold=threshold)
-    if not blobs:
-        return np.empty((0, 3), dtype=float), np.empty((0,), dtype=float)
-    kji = np.array([b["kji"] for b in blobs], dtype=float)
-    amps = np.array([b["amp"] for b in blobs], dtype=float)
-    ij_k = np.stack([kji[:, 2], kji[:, 1], kji[:, 0]], axis=1)
-    h = np.concatenate([ij_k, np.ones((ij_k.shape[0], 1))], axis=1)
-    ras = (np.asarray(ijk_to_ras_mat, dtype=float) @ h.T).T[:, :3]
-    return ras, amps
+# Blob extraction (LoG regional minima) lives in candidate_seeds.blob_extraction.
+# Re-exported below so legacy callers (probes, tests, guided_fit_engine)
+# that read symbols via ``cpfit.<name>`` keep working.
+from .candidate_seeds.blob_extraction import (  # noqa: F401
+    extract_blobs,
+    extract_blob_cloud_ras,
+)
+from .candidate_seeds.constants import LOG_BLOB_SUBVOXEL_DEFAULT  # noqa: F401
 
 
 def _walk_with_pitch_precomputed(proj, within_perp, amps, pitch, ax_tol, max_k):
@@ -805,113 +762,17 @@ def _walk_line(seed_idx, neighbor_idx, pts, amps, pitch_mm=PITCH_MM):
     )
 
 
-FRANGI_LINE_MIN_MEDIAN = 30.0  # post-anchor Frangi gate; only fires
-                                 # when the bolt anchor failed (synthesized
-                                 # / none). When the anchor latched onto a
-                                 # real metal CC, the bolt itself is the
-                                 # proof of realness — a weak Frangi
-                                 # median from a wire-only gap between
-                                 # bolt and contacts (thin-wire SEEG)
-                                 # shouldn't override that. The score's
-                                 # ``frangi`` component already penalizes
-                                 # weak Frangi proportionally.
-# Minimum median Frangi σ=1 response sampled along the walker line's
-# axis. Real SEEG shanks are thin straight metal cylinders — the exact
-# shape the Frangi tubular-objectness filter was designed for — and
-# saturate the response (real shanks: p10 median=75, p50=240). FP walker
-# lines sit near zero (FP lines: p10=0, p50=3.6). A 30 threshold kills
-# 84% of walker FPs with 100% TP retention on the dataset. Orthogonal
-# to the amp_sum gate (one is amplitude-based, the other is geometry-
-# based), so the two compound.
-
-
-def _frangi_along_line_stats(start_ras, end_ras, frangi_arr, ras_to_ijk_mat,
-                                step_mm=0.5):
-    """Sample Frangi σ=1 at ``step_mm`` intervals along [start, end] and
-    return (mean, median). Samples the nearest-voxel value; no
-    interpolation. Returns (0.0, 0.0) when the segment is too short or
-    both endpoints fall outside the volume.
-    """
-    L = float(np.linalg.norm(np.asarray(end_ras) - np.asarray(start_ras)))
-    if L < step_mm:
-        return 0.0, 0.0
-    vals = np.array(
-        [
-            sample_nearest_at_ras(frangi_arr, ras_to_ijk_mat, p)
-            for _t, p in iter_axis_points(start_ras, end_ras, step_mm)
-        ],
-        dtype=np.float32,
-    )
-    return float(vals.mean()), float(np.median(vals))
-
-
-def compute_metal_evidence_volume(log_arr, ct_arr):
-    """Per-voxel metal-evidence volume:
-
-        evidence(v) = max(|LoG(v)|/LOG_BOLT_NORMALIZER,
-                          max(0, HU(v))/HU_BOLT_NORMALIZER)
-
-    Returned as float32. ``ct_arr`` may be None (LoG-only fallback).
-    """
-    log_norm = np.abs(log_arr) / float(LOG_BOLT_NORMALIZER)
-    if ct_arr is None:
-        return log_norm.astype(np.float32, copy=False)
-    hu_norm = np.maximum(0.0, ct_arr) / float(HU_BOLT_NORMALIZER)
-    return np.maximum(log_norm, hu_norm).astype(np.float32, copy=False)
-
-
-def _frac_strong_metal_along_line(start_ras, end_ras, log_arr, ct_arr,
-                                    ras_to_ijk_mat, step_mm=0.5):
-    """Fraction of axis samples whose per-voxel metal evidence saturates
-    (>= METAL_BOLT_THRESHOLD). Real SEEG shanks have many
-    contact-saturating voxels along their axis (matched p10 ≈ 0.27,
-    p50 ≈ 0.65). Hull-skimming bone-assembled chains and synth-extended
-    FPs have near-zero saturation (orphan p50 ≈ 0.01).
-    """
-    L = float(np.linalg.norm(np.asarray(end_ras) - np.asarray(start_ras)))
-    if L < step_mm:
-        return 0.0
-    n_strong = 0
-    n = 0
-    for _t, p in iter_axis_points(start_ras, end_ras, step_mm):
-        i, j, k = ras_to_ijk_pt(ras_to_ijk_mat, p)
-        kc, jc, ic = clip_to_voxel(log_arr.shape, i, j, k)
-        log_norm = abs(float(log_arr[kc, jc, ic])) / LOG_BOLT_NORMALIZER
-        hu_norm = max(0.0, float(ct_arr[kc, jc, ic])) / HU_BOLT_NORMALIZER
-        if max(log_norm, hu_norm) >= METAL_BOLT_THRESHOLD:
-            n_strong += 1
-        n += 1
-    return float(n_strong) / float(n)
-
-
-def _median_inlier_pitch(pts, axis):
-    """Median consecutive spacing of ``pts`` projected onto ``axis``.
-
-    Robust to a single far-away outlier that would skew mean-based
-    avg_pitch (original_span_mm / (n-1)). When the walker absorbs a
-    spurious blob at one end, the mean pitch inflates past the
-    ``looks_like_seeg`` threshold even though most of the inliers sit
-    on a regular 3.5 mm chain; median collapses back to the true
-    pitch.
-    """
-    pts = np.asarray(pts, dtype=float)
-    axis = np.asarray(axis, dtype=float)
-    if pts.shape[0] < 2:
-        return float("inf")
-    c = pts.mean(axis=0)
-    proj = np.sort((pts - c) @ axis)
-    diffs = np.diff(proj)
-    if diffs.size == 0:
-        return float("inf")
-    return float(np.median(diffs))
-
-
-MIN_BLOBS_POST_ARBITRATION = 4  # looser floor after arbitration, which
-                                # can legitimately shave 1–2 blobs from a
-                                # real electrode sharing boundary contacts.
-                                # One below MIN_BLOBS_PER_LINE so a
-                                # 5-contact shank can survive a single
-                                # arbitrated contact without being killed.
+# Frangi sampling, metal evidence, and median inlier pitch live in
+# candidate_seeds.frangi_sampling and candidate_seeds.metal_evidence.
+# Re-exported below for back-compat.
+from .candidate_seeds.frangi_sampling import (  # noqa: F401
+    frangi_along_line_stats as _frangi_along_line_stats,
+    median_inlier_pitch as _median_inlier_pitch,
+)
+from .candidate_seeds.metal_evidence import (  # noqa: F401
+    compute_metal_evidence_volume,
+    frac_strong_metal_along_line as _frac_strong_metal_along_line,
+)
 
 
 def _refit_line_from_inliers(line, pts_c, amps_c, min_blobs=None):
