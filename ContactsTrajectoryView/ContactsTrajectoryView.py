@@ -1222,7 +1222,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 return ""
             import SimpleITK as sitk
             from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.contact_pitch_v1_fit import prepare_volume
+            from rosa_detect.primitives.preprocessing import prepare_volume
             arr = slicer.util.arrayFromVolume(ct_node)
             img = sitk.GetImageFromArray(arr)
             i2r, r2i = image_ijk_ras_matrices(ct_node)

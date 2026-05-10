@@ -20,8 +20,8 @@ from __main__ import qt, slicer
 
 from rosa_core import lps_to_ras_point, trajectory_length_mm
 
-from rosa_detect import contact_pitch_v1_fit as cpfit
 from rosa_detect import guided_fit_engine as gfe
+from rosa_detect.candidate_seeds.crossing_tips import retreat_crossing_tips
 
 
 # Seed sources the Guided Fit tab offers. Excludes "working" and
@@ -849,7 +849,7 @@ class GuidedFitWidgetMixin:
         # inside each other's contact tubes.
         if fit_records:
             try:
-                cpfit._retreat_crossing_tips(
+                retreat_crossing_tips(
                     fit_records,
                     log_arr=features["log"],
                     ras_to_ijk_mat=ras_to_ijk,
