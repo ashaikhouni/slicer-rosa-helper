@@ -282,14 +282,14 @@ class Amc88LogTests(unittest.TestCase):
                 len(t.contacts_ras), 0,
                 f"snapped emission should have contacts: {t.name}",
             )
-        # Snapped emissions should largely match notebook's mode-1 number:
-        # 8/8 in 'high' (notebook) — allow 1 slack for shank-level noise.
+        # Snap-to-v1 inherits mode-1's geometry, so band counts match
+        # mode 1 exactly: 8/8 in 'high' on AMC88.
         bands = [t.band for t in batch.trajectories]
         n_high = bands.count("high")
-        self.assertGreaterEqual(
-            n_high, len(self.gt) - 1,
-            f"snap-to-v1 mode 5 should match notebook ≥{len(self.gt)-1}/{len(self.gt)} in 'high'; "
-            f"got bands={bands}",
+        self.assertEqual(
+            n_high, len(self.gt),
+            f"snap-to-v1 mode 5 should match mode-1 number {len(self.gt)}/"
+            f"{len(self.gt)} in 'high'; got bands={bands}",
         )
 
     def test_amc88_mode1_no_orphans_in_high(self):
@@ -344,18 +344,20 @@ class Amc88LogTests(unittest.TestCase):
             1 for ei, t in enumerate(batch.trajectories)
             if ei not in gt_for_emission and t.band == "high"
         )
-        # Pin notebook numbers (with 1-shank slack on the GT-high count).
+        # Strict notebook parity: 8/8 in 'high', 0 LoG orphans in 'high'.
         self.assertEqual(n_matched, len(self.gt),
                          f"all {len(self.gt)} GT should match an emission; got {n_matched}")
-        self.assertGreaterEqual(n_matched_high, len(self.gt) - 1,
-                                f"≥{len(self.gt) - 1} GT should land in 'high' "
-                                f"(notebook: {len(self.gt)}); got {n_matched_high}")
+        self.assertEqual(n_matched_high, len(self.gt),
+                         f"all {len(self.gt)} GT should land in 'high' "
+                         f"(notebook number); got {n_matched_high}")
         self.assertEqual(n_orphan_high, 0,
                          f"notebook reports 0 LoG orphans in 'high'; got {n_orphan_high}")
 
     def test_amc88_mode2_top_n_covers_gt_shanks(self):
         """Mode 2 (count constraint): n_expected = 8 GT shanks → top 8
         emissions by compound score should include all 8 GT-matched ones.
+        Real-data check: AMC88's GT shanks dominate the high-band, so
+        top-8 covers all of them.
         """
         from rosa_core.placement_modes import place_seeg
         n_gt = len(self.gt)
@@ -367,11 +369,10 @@ class Amc88LogTests(unittest.TestCase):
         self.assertEqual(batch.diagnostics["mode"], 2)
         self.assertLessEqual(len(batch.trajectories), n_gt,
                              f"mode 2 should return at most n_expected={n_gt}")
-        # Match returned trajectories to GT.
         e_to_g = _greedy_gt_match(self.gt, batch.trajectories)
-        self.assertGreaterEqual(
-            len(e_to_g), n_gt - 1,
-            f"top-{n_gt} should cover ≥{n_gt - 1}/{n_gt} GT shanks; "
+        self.assertEqual(
+            len(e_to_g), n_gt,
+            f"top-{n_gt} should cover all {n_gt} GT shanks; "
             f"got {len(e_to_g)}/{n_gt} matched.",
         )
 
@@ -450,9 +451,11 @@ class T18LogTests(unittest.TestCase):
             if gt_model_by_name.get(t.name) and t.model_id == gt_model_by_name[t.name]
         )
         n_with_model = len(gt_with_models)
-        self.assertGreaterEqual(
-            n_correct, max(1, n_with_model - 1),
-            f"mode-5 snap should match notebook ≥{n_with_model - 1}/{n_with_model}; "
+        # Snap-to-v1 inherits mode-1's geometry → same picks as mode 1.
+        # Strict notebook parity: 13/13.
+        self.assertEqual(
+            n_correct, n_with_model,
+            f"mode-5 snap should match notebook {n_with_model}/{n_with_model}; "
             f"got {n_correct}. picks: "
             f"{[(t.name, t.model_id, gt_model_by_name.get(t.name)) for t in batch.trajectories]}",
         )
@@ -518,15 +521,17 @@ class T18LogTests(unittest.TestCase):
             details.append((self.gt[gi]["name"], picked, gt_model))
             if gt_model and picked == gt_model:
                 n_correct += 1
-        self.assertGreaterEqual(
-            n_correct, max(1, gt_model_count - 1),
-            f"≥{gt_model_count - 1}/{gt_model_count} model picks should match "
-            f"GT; got {n_correct}. picks: {details}",
+        # Strict: all GT model picks should be correct (notebook 13/13 on T18).
+        self.assertEqual(
+            n_correct, gt_model_count,
+            f"all {gt_model_count}/{gt_model_count} model picks should match "
+            f"GT (notebook number); got {n_correct}. picks: {details}",
         )
 
     def test_t18_mode2_top_n_covers_gt_shanks(self):
         """Mode 2: pass n_expected = 13 GT shanks → top-13 emissions by
-        compound score should include all/most GT-matched ones."""
+        compound score should include all 13 GT-matched ones (real-data
+        check: T18 GT shanks dominate compound rankings)."""
         from rosa_core.placement_modes import place_seeg
         n_gt = len(self.gt)
         batch = place_seeg(
@@ -537,19 +542,27 @@ class T18LogTests(unittest.TestCase):
         self.assertEqual(batch.diagnostics["mode"], 2)
         self.assertLessEqual(len(batch.trajectories), n_gt)
         e_to_g = _greedy_gt_match(self.gt, batch.trajectories)
-        self.assertGreaterEqual(
-            len(e_to_g), n_gt - 1,
-            f"top-{n_gt} should cover ≥{n_gt - 1}/{n_gt} GT shanks; "
+        self.assertEqual(
+            len(e_to_g), n_gt,
+            f"top-{n_gt} should cover all {n_gt} GT shanks; "
             f"got {len(e_to_g)}/{n_gt} matched.",
         )
 
     def test_t18_mode3_named_assignment_matches_gt_models(self):
         """Mode 3: ``expected = [(name, model_id)]`` from curated GT →
-        the dispatcher assigns the best matching candidate per name. With
-        model_id labels for guidance, ≥12/13 returned trajectories should
-        have ``model_id`` matching the requested one.
+        the dispatcher assigns the best matching candidate per name.
 
-        Skips if the curated GT lacks per-shank model_id (mode 3 needs them).
+        Slack of 1 here is REAL: T18 has 4 duplicate models in expected
+        (DIXI-15AM × 6, DIXI-18AM × 3, DIXI-18CM × 2, DIXI-8AM × 2). When
+        multiple expected entries share a model, the greedy assignment
+        picks the highest-scoring matching candidate first, then the next,
+        etc. — but the per-name correspondence among same-model entries
+        is arbitrary, so the "correct picks" count can flip ±1 across
+        candidate orderings without changing the underlying algorithm.
+
+        On the current run we get 13/13; we pin ≥12/13 to insulate from
+        ordering noise (the duplicate-model warning surfaces this caveat
+        in batch.diagnostics["mode3"]["duplicate_models"]).
         """
         from rosa_core.placement_modes import place_seeg
         gt_with_models = [g for g in self.gt if g.get("model_id")]
@@ -567,9 +580,6 @@ class T18LogTests(unittest.TestCase):
             len(batch.trajectories), len(expected),
             "mode 3 returns at most one trajectory per expected entry",
         )
-        # For each emitted (name, ctx), check its picked model_id against
-        # the requested one. The greedy assignment biases toward correct
-        # matches, so most should land on the right model.
         want_by_name = dict(expected)
         n_correct = sum(
             1 for t in batch.trajectories
@@ -616,10 +626,16 @@ class T18LogTests(unittest.TestCase):
             1 for t, s in zip(batch.trajectories, seeds)
             if t.model_id == s.model_id and len(t.contacts_ras) > 0
         )
-        # Allow up to 2 GT-axis-induced rejections.
+        # Real slack: GT-PCA-derived axes are NOT bolt-anchored, so the
+        # matched filter may reject when the library is filtered to one
+        # model and the axis isn't quite right. Current: 12/13 (X09 is
+        # the GT-axis-induced rejection — DIXI-15AM library template
+        # doesn't lock onto its PCA axis). Real Slicer Manual Fit users
+        # provide bolt-anchored seeds, so this slack only exists for
+        # GT-axis tests. Allow up to 1 such rejection.
         self.assertGreaterEqual(
-            n_placed, max(1, n_seeds - 2),
-            f"mode 4 should place ≥{n_seeds - 2}/{n_seeds} GT-seeded vouched "
+            n_placed, n_seeds - 1,
+            f"mode 4 should place ≥{n_seeds - 1}/{n_seeds} GT-seeded vouched "
             f"models; got {n_placed}. picks: "
             f"{[(t.name, t.model_id, s.model_id, len(t.contacts_ras)) for t, s in zip(batch.trajectories, seeds)]}",
         )
