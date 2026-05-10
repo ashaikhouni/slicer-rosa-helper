@@ -84,6 +84,19 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "place_seeg":                                         ("placement_modes", "place_seeg"),
     # volume_loader — CT path / SimpleITK.Image → features + bolt CCs.
     "load_features_and_bolts":                            ("volume_loader", "load_features_and_bolts"),
+    # qc_output — write a standardized QC directory for a PlacementBatch.
+    "QC_TRAJECTORY_COLUMNS":                              ("qc_output", "QC_TRAJECTORY_COLUMNS"),
+    "PIPELINE_VERSION":                                   ("qc_output", "PIPELINE_VERSION"),
+    "write_qc_directory":                                 ("qc_output", "write_qc_directory"),
+    "write_trajectories_tsv":                             ("qc_output", "write_trajectories_tsv"),
+    "write_contacts_tsv":                                 ("qc_output", "write_contacts_tsv"),
+    "write_manifest_json":                                ("qc_output", "write_manifest_json"),
+    "trajectory_to_qc_row":                               ("qc_output", "trajectory_to_qc_row"),
+    # qc_figures — headless matplotlib renderer for the new staged-pipeline
+    # PlacedTrajectory output. (emission_qc.render_emission_figure renders
+    # the legacy unified-detect EmissionQC; different signature.)
+    "render_placed_trajectory_figure":                    ("qc_figures", "render_placed_trajectory_figure"),
+    "render_all_figures":                                 ("qc_figures", "render_all_figures"),
     # contact_placement_v2 — DEPRECATED shim (lazy-loaded only for
     # unified_detect + the v2-specific test). Will be removed in Session 4.
     "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement_v2", "MIN_CORR_FOR_REAL_SHANK"),

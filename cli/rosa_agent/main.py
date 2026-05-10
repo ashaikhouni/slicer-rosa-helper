@@ -61,6 +61,7 @@ SUBCOMMANDS = {
     "label":    "rosa_agent.commands.label",
     "pipeline": "rosa_agent.commands.pipeline",
     "qc":       "rosa_agent.commands.qc",
+    "place":    "rosa_agent.commands.place",
 }
 
 
