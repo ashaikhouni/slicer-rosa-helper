@@ -168,33 +168,106 @@ def _filter_library_to_model(library_models: list[dict], model_id: str | None) -
 def _place_mode_4(
     seeds: list[Seed], *,
     features: dict,
-    library_models: list[dict],
     bolts: list[dict] | None,
+    library_models: list[dict],
+    pitch_strategy: str | None,
     sample_fn: Callable[[PlacementCtx], PlacementCtx],
-) -> list[tuple[str, PlacementCtx]]:
-    """Mode 4 inner: per-seed staged placement with the user-vouched model.
+    progress_logger,
+    angle_tol_deg: float,
+    perp_tol_mm: float,
+) -> tuple[list[tuple[str, PlacementCtx]], dict]:
+    """Mode 4 inner: snap to v1 emissions then force the user's model.
 
-    Returns list of ``(name, ctx)`` pairs in input seed order. Caller wraps
-    in ``PlacedTrajectory`` via ``_ctx_to_placed``.
+    Per user feedback (2026-05-09): a user-clicked seed in mode 4 might
+    be reversed, off-axis, or shorter than the bolt-to-tip span — but
+    the user has additionally vouched for the electrode model. The snap
+    inherits v1's bolt-anchored geometry (canonical direction, full
+    contact zone), then we re-place with the library filtered to the
+    vouched model.
 
-    No two-pass cross-shank ownership — when the caller has vouched for
-    every seed, it's their responsibility to deconflict.
+    Algorithm:
+      1. Run candidate generation + two-pass placement (same as mode 5).
+      2. Snap each user seed to its closest v1 candidate (axis tolerance).
+      3. For each snapped pair: if the candidate's matched-filter pick
+         already equals the vouched model_id, return that ctx as-is
+         (already correctly scored). Otherwise re-run ``place_seed`` on
+         the candidate's bolt-anchored geometry (``ctx.seed_start``,
+         ``ctx.seed_end``) with library filtered to ``seed.model_id`` —
+         constraints the matched filter to the vouched template.
+      4. For seeds with no snap (v1 missed): fall back to per-seed
+         ``place_seed`` on the user's raw seed with library filtered.
+         The seed may still place even if v1 missed — caller said "this
+         is where the shank is".
+
+    Diagnostics surface match counts + per-seed mode (snap vs fallback)
+    so callers see when the snap path triggered.
     """
+    auto_pairs = _run_auto(
+        features=features, bolts=bolts, library_models=library_models,
+        pitch_strategy=pitch_strategy, sample_fn=sample_fn,
+        progress_logger=progress_logger,
+    )
+    matches = _greedy_axis_match(
+        seeds, auto_pairs,
+        angle_tol_deg=angle_tol_deg, perp_tol_mm=perp_tol_mm,
+    )
+    seed_to_cand = dict(matches)  # seed_idx → candidate_idx
+
     out: list[tuple[str, PlacementCtx]] = []
-    for s in seeds:
-        models = _filter_library_to_model(library_models, s.model_id)
-        ctx = place_seed(
-            s.start_ras, s.end_ras,
-            features=features,
-            library_models=models,
-            bolts=bolts,
-            sample_fn=sample_fn,
-            seeder_label=s.seeder_label,
-            seeder_confidence=s.seeder_confidence,
-            seeder_model=s.seeder_model,
-        )
+    per_seed_outcome: list[dict] = []
+    n_snapped_passthrough = 0
+    n_snapped_re_placed = 0
+    n_fallback = 0
+    for si, s in enumerate(seeds):
+        cand_idx = seed_to_cand.get(si)
+        if cand_idx is not None:
+            _name, cand_ctx = auto_pairs[cand_idx]
+            picked = cand_ctx.score_components.get("model_id")
+            if picked == s.model_id:
+                ctx = cand_ctx
+                outcome = "snap_passthrough"
+                n_snapped_passthrough += 1
+            else:
+                # Re-run with library filtered to vouched model.
+                ctx = place_seed(
+                    cand_ctx.seed_start, cand_ctx.seed_end,
+                    features=features,
+                    library_models=_filter_library_to_model(library_models, s.model_id),
+                    bolts=bolts,
+                    sample_fn=sample_fn,
+                    seeder_label=s.seeder_label,
+                    seeder_confidence=s.seeder_confidence,
+                    seeder_model=s.seeder_model,
+                )
+                outcome = "snap_re_placed"
+                n_snapped_re_placed += 1
+        else:
+            ctx = place_seed(
+                s.start_ras, s.end_ras,
+                features=features,
+                library_models=_filter_library_to_model(library_models, s.model_id),
+                bolts=bolts,
+                sample_fn=sample_fn,
+                seeder_label=s.seeder_label,
+                seeder_confidence=s.seeder_confidence,
+                seeder_model=s.seeder_model,
+            )
+            outcome = "fallback_per_seed"
+            n_fallback += 1
         out.append((s.name, ctx))
-    return out
+        per_seed_outcome.append({"name": s.name, "outcome": outcome})
+
+    diag = {
+        "n_input_seeds": len(seeds),
+        "n_candidates_generated": len(auto_pairs),
+        "n_snapped_passthrough": n_snapped_passthrough,
+        "n_snapped_re_placed": n_snapped_re_placed,
+        "n_fallback_per_seed": n_fallback,
+        "snap_angle_tol_deg": angle_tol_deg,
+        "snap_perp_tol_mm": perp_tol_mm,
+        "per_seed_outcome": per_seed_outcome,
+    }
+    return out, diag
 
 
 def _place_mode_5(
@@ -495,10 +568,11 @@ def place_seeg(
         pitch_strategy = library
     sample_fn = sample_fn or _default_sample_fn()
     if apply_subject_fft_norm is None:
-        # Auto modes (1/2/3) batch many candidates → subject normalization
-        # is appropriate. Seeded modes (4/5) typically run a handful of
-        # user-vouched seeds; per-seed scoring without subject relativity.
-        apply_subject_fft_norm = mode in (1, 2, 3)
+        # Modes 1/2/3/5 generate candidates internally → subject FFT
+        # normalization is appropriate (the candidate batch IS the subject's
+        # full shank set). Mode 4 also runs candidate generation under the
+        # hood (snap-then-force-model), so it benefits too.
+        apply_subject_fft_norm = mode in (1, 2, 3, 4, 5)
 
     if features is None or bolts is None:
         if ct is None:
@@ -542,9 +616,14 @@ def place_seeg(
             pairs = _apply_fft_norm(pairs)
         pairs, mode3_diag = _assign_by_expected(pairs, list(expected))
     elif mode == 4:
-        pairs = _place_mode_4(
-            list(seeds), features=features, library_models=library_models,
-            bolts=bolts, sample_fn=sample_fn,
+        pairs, mode4_diag = _place_mode_4(
+            list(seeds),
+            features=features, bolts=bolts,
+            library_models=library_models,
+            pitch_strategy=pitch_strategy,
+            sample_fn=sample_fn, progress_logger=progress_logger,
+            angle_tol_deg=snap_angle_tol_deg,
+            perp_tol_mm=snap_perp_tol_mm,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -576,6 +655,8 @@ def place_seeg(
     }
     if mode == 3:
         diagnostics["mode3"] = mode3_diag
+    elif mode == 4:
+        diagnostics["mode4"] = mode4_diag
     elif mode == 5:
         diagnostics["mode5"] = mode5_diag
     return PlacementBatch(

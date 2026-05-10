@@ -152,7 +152,14 @@ class ModeDispatchValidationTests(unittest.TestCase):
 
 
 class Mode4SyntheticTests(unittest.TestCase):
-    """Mode 4: caller supplies seeds with model_id; no library search."""
+    """Mode 4: caller supplies seeds with model_id.
+
+    Mode 4 (post-2026-05-09) snaps user seeds to v1 candidate emissions
+    (inheriting bolt-anchored geometry), then forces the matched filter
+    to the vouched model. Falls back to per-seed placement when the snap
+    finds no candidate within tolerance. Synthetic CT typically yields
+    zero v1 candidates → all seeds take the fallback path.
+    """
 
     def setUp(self):
         self.features = _synthetic_features()
@@ -179,6 +186,19 @@ class Mode4SyntheticTests(unittest.TestCase):
         self.assertEqual(batch.diagnostics["mode"], 4)
         self.assertEqual(batch.diagnostics["n_input_seeds"], 1)
         self.assertEqual(batch.diagnostics["n_emitted"], 1)
+        self.assertIn("mode4", batch.diagnostics)
+        d = batch.diagnostics["mode4"]
+        for k in ("n_input_seeds", "n_candidates_generated",
+                  "n_snapped_passthrough", "n_snapped_re_placed",
+                  "n_fallback_per_seed", "snap_angle_tol_deg",
+                  "snap_perp_tol_mm"):
+            self.assertIn(k, d)
+        # Sum of paths = total seeds.
+        self.assertEqual(
+            d["n_snapped_passthrough"] + d["n_snapped_re_placed"]
+            + d["n_fallback_per_seed"],
+            d["n_input_seeds"],
+        )
 
     def test_output_dir_carried_through(self):
         from pathlib import Path

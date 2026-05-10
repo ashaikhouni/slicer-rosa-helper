@@ -593,17 +593,15 @@ class T18LogTests(unittest.TestCase):
         )
 
     def test_t18_mode4_seeded_with_model_id(self):
-        """Mode 4: GT seeds with ``model_id`` set → per-seed placement with
-        the library filtered to the vouched model.
+        """Mode 4 (snap-to-v1 + force vouched model): GT seeds with
+        ``model_id`` set → snap to closest v1 candidate (inheriting bolt-
+        anchored geometry), then force the matched filter to the user-
+        vouched model template.
 
-        Most seeds should produce a placement (matched filter accepts +
-        contacts placed). A handful may reject when the GT-PCA-derived
-        axis isn't bolt-anchored enough for the matched filter to lock
-        on to the vouched model template — this is a known GT-PCA-as-seed
-        limitation, not a mode-4 bug. The test pins ≥(N-2)/N successes
-        so a small number of GT-axis-induced rejections don't break it.
-        Real mode-4 callers (Slicer Manual Fit) provide clicked seeds
-        that ARE bolt-anchored.
+        Strict notebook parity: 13/13 placed. The previous per-seed mode 4
+        rejected X09 (GT-PCA axis was reversed + too short for the matched
+        filter to fit DIXI-15AM in the leftover contact zone). The snap
+        path uses v1's canonical bolt → tip axis instead.
         """
         from rosa_core.placement_modes import place_seeg
         gt_with_models = [g for g in self.gt if g.get("model_id")]
@@ -626,17 +624,11 @@ class T18LogTests(unittest.TestCase):
             1 for t, s in zip(batch.trajectories, seeds)
             if t.model_id == s.model_id and len(t.contacts_ras) > 0
         )
-        # Real slack: GT-PCA-derived axes are NOT bolt-anchored, so the
-        # matched filter may reject when the library is filtered to one
-        # model and the axis isn't quite right. Current: 12/13 (X09 is
-        # the GT-axis-induced rejection — DIXI-15AM library template
-        # doesn't lock onto its PCA axis). Real Slicer Manual Fit users
-        # provide bolt-anchored seeds, so this slack only exists for
-        # GT-axis tests. Allow up to 1 such rejection.
-        self.assertGreaterEqual(
-            n_placed, n_seeds - 1,
-            f"mode 4 should place ≥{n_seeds - 1}/{n_seeds} GT-seeded vouched "
-            f"models; got {n_placed}. picks: "
+        self.assertEqual(
+            n_placed, n_seeds,
+            f"mode 4 (snap-to-v1) should place all {n_seeds}/{n_seeds} "
+            f"GT-seeded vouched models; got {n_placed}. mode4_diag="
+            f"{batch.diagnostics.get('mode4', {})}. picks: "
             f"{[(t.name, t.model_id, s.model_id, len(t.contacts_ras)) for t, s in zip(batch.trajectories, seeds)]}",
         )
 
