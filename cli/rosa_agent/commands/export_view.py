@@ -557,6 +557,16 @@ _HTML_TEMPLATE = """<!doctype html>
     <div id="toolbar">
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
+      <label class="plane-ctl" data-control="brain-alpha">
+        <span class="axis">Brain α</span>
+        <input type="range" min="0" max="1" step="0.05" value="0.35" />
+        <span class="coord">0.35</span>
+      </label>
+      <label class="plane-ctl" data-control="plane-alpha">
+        <span class="axis">Slice α</span>
+        <input type="range" min="0" max="1" step="0.05" value="0.95" />
+        <span class="coord">0.95</span>
+      </label>
       <label class="plane-ctl" data-axis="axial">
         <input type="checkbox" /><span class="axis">Axial</span>
         <input type="range" min="0" max="1" step="0.5" disabled />
@@ -900,15 +910,24 @@ function renderSlice(axis) {{
     else if (axis === "coronal") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[2]; }}
     else {{ cu = mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}
     if (cu >= 0 && cu < W && cv >= 0 && cv < H) {{
-      ctx.strokeStyle = "rgba(255,32,48,0.85)";
-      ctx.lineWidth = 1;
+      // Lines are drawn in canvas-buffer pixels but the canvas is
+      // displayed at ~half size via CSS, so a 1px stroke ends up
+      // sub-CSS-pixel and gets anti-aliased to nothing. Use 3px +
+      // bright red so the crosshair is unmissable.
+      ctx.strokeStyle = "#ff0040";
+      ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(0, cv + 0.5); ctx.lineTo(W, cv + 0.5);
       ctx.moveTo(cu + 0.5, 0); ctx.lineTo(cu + 0.5, H);
       ctx.stroke();
-      ctx.fillStyle = "rgba(255,32,48,1)";
+      ctx.fillStyle = "#ff0040";
       ctx.beginPath();
-      ctx.arc(cu + 0.5, cv + 0.5, 2.5, 0, Math.PI * 2);
+      ctx.arc(cu + 0.5, cv + 0.5, 6, 0, Math.PI * 2);
+      ctx.fill();
+      // White inner pip so the dot reads even on bright cortex.
+      ctx.fillStyle = "#fff";
+      ctx.beginPath();
+      ctx.arc(cu + 0.5, cv + 0.5, 1.5, 0, Math.PI * 2);
       ctx.fill();
     }}
     const ras = mriRasCursor || [0, 0, 0];
@@ -957,6 +976,14 @@ async function loadMri(t1Meta) {{
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
     // Kick the 3D cut planes — they reuse the same parsed volume.
     initCutPlanes(mriVolume);
+    // If the user clicked a contact while the 16MB T1 was still
+    // downloading, snapSlicesToRas silently no-oped (mriVolume was
+    // null). Retroactively snap now that the volume is ready.
+    if (selectedContact) {{
+      const pos = selectedContact.getWorldPosition(new THREE.Vector3());
+      snapSlicesToRas([pos.x, pos.y, pos.z]);
+      snapCutPlanesToRas([pos.x, pos.y, pos.z]);
+    }}
   }} catch (err) {{
     console.error("MRI load failed", err);
     for (const axis of ["axial","coronal","sagittal"]) {{
@@ -1269,12 +1296,22 @@ function selectContact(label, shank) {{
   if (node) {{
     selectedContact = node;
     _setContactMaterial(node, RED);
-    // Snap the controls target onto the contact center and pull camera in close.
+    // Snap the controls target onto the contact center. Camera
+    // distance is sized off the trajectory's own length (or fallback
+    // to scene diag) so a typical shank fills the view comfortably,
+    // not "inside the contact" the way a hard-coded 35mm would.
     const pos = node.getWorldPosition(new THREE.Vector3());
     controls.target.copy(pos);
     const dir = camera.position.clone().sub(pos).normalize();
     if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
-    camera.position.copy(pos).addScaledVector(dir, 35);
+    let targetDist = 90;
+    const sNodes = shankNodes.get(shank) || [];
+    if (sNodes.length) {{
+      const box = new THREE.Box3();
+      for (const n of sNodes) box.expandByObject(n);
+      if (!box.isEmpty()) targetDist = Math.max(70, box.getSize(new THREE.Vector3()).length() * 1.3);
+    }}
+    camera.position.copy(pos).addScaledVector(dir, targetDist);
     controls.update();
     // Snap the MRI slice viewer to the contact's RAS coordinate so the
     // axial/coronal/sagittal planes pass through it.
@@ -1303,6 +1340,47 @@ function showAll() {{
 
 document.getElementById("btn-reset").addEventListener("click", showAll);
 document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
+
+// Brain α slider — opacity for every FS surface mesh. Surfaces are
+// indexed during GLB load, so this works regardless of how many
+// hemispheres / surface kinds got loaded.
+(function _wireBrainAlpha() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="brain-alpha"]');
+  if (!ctl) return;
+  const slider = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  slider.addEventListener("input", () => {{
+    const v = parseFloat(slider.value);
+    coord.textContent = v.toFixed(2);
+    for (const node of surfaceNodes) {{
+      const mesh = node.userData && node.userData._mesh;
+      if (!mesh || !mesh.material) continue;
+      mesh.material.opacity = v;
+      mesh.material.transparent = v < 0.999;
+      mesh.material.depthWrite = false;
+      mesh.material.needsUpdate = true;
+    }}
+  }});
+}})();
+
+// Slice plane α slider — sets the uOpacity uniform on the three cut
+// planes. Sliders that fire before initCutPlanes runs are harmless.
+(function _wirePlaneAlpha() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="plane-alpha"]');
+  if (!ctl) return;
+  const slider = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  slider.addEventListener("input", () => {{
+    const v = parseFloat(slider.value);
+    coord.textContent = v.toFixed(2);
+    for (const axis of Object.keys(cutPlanes)) {{
+      const plane = cutPlanes[axis];
+      if (plane && plane.material && plane.material.uniforms && plane.material.uniforms.uOpacity) {{
+        plane.material.uniforms.uOpacity.value = v;
+      }}
+    }}
+  }});
+}})();
 
 _initSlicePanels();
 fetch("scene_meta.json").then(r => r.json()).then(meta => {{
