@@ -148,8 +148,14 @@ def _load_image_as_sitk(path: Path):
     return sitk_img
 
 
-def _register_fs_to_ct(t1_path: Path, ct_path: Path) -> np.ndarray:
-    """Rigid Mattes-MI register FS T1 to CT; return the FS-RAS -> CT-RAS 4×4."""
+def _register_fs_to_ct(t1_path: Path, ct_path: Path):
+    """Rigid Mattes-MI register FS T1 to CT.
+
+    Returns a tuple ``(fs_to_ct_4x4, fixed_ct, moving_t1, sitk_transform)``
+    so the caller can both push surface vertices through the 4×4 AND
+    resample the T1 onto the CT grid via the same SITK transform —
+    without paying for a second registration pass.
+    """
     import SimpleITK as sitk
     from rosa_core.registration import register_rigid_mi
 
@@ -168,7 +174,65 @@ def _register_fs_to_ct(t1_path: Path, ct_path: Path) -> np.ndarray:
         f"iters={result.n_iterations} ({result.converged_reason})"
     )
     # We want FS-RAS -> CT-RAS = moving -> fixed in the rigid convention.
-    return result.moving_to_fixed_ras_4x4
+    return result.moving_to_fixed_ras_4x4, fixed, moving, result.transform
+
+
+def _write_t1_resampled_to_ct(
+    fixed_ct, moving_t1, sitk_transform, out_path: Path,
+) -> dict[str, Any]:
+    """Resample the FS T1 onto the CT grid and write as NIfTI.
+
+    The resampled volume lives in the CT RAS frame, which is also the
+    frame the contacts + trajectories live in. The browser-side slice
+    viewer parses this NIfTI and snaps the three orthogonal planes to
+    a contact's RAS coordinate.
+
+    Returns a dict describing what was written so the viewer's
+    ``scene_meta.json`` can be populated.
+    """
+    import SimpleITK as sitk
+    from rosa_core.registration import resample_volume
+
+    resampled = resample_volume(
+        moving_t1, sitk_transform,
+        reference=fixed_ct, interp="linear",
+    )
+    # The FS T1 is intensity-normalized to [0, 255] by recon-all (uint8
+    # on disk). _load_image_as_sitk widens to float32 so SITK Resample
+    # behaves predictably, but for *storage* — and especially over HTTP
+    # to the in-browser slice viewer — uint8 is the right end shape.
+    # Clamp + cast: lossless for the FS T1 source, 4× smaller file.
+    if resampled.GetPixelID() != sitk.sitkUInt8:
+        resampled = sitk.Cast(
+            sitk.Clamp(resampled, lowerBound=0.0, upperBound=255.0),
+            sitk.sitkUInt8,
+        )
+    sitk.WriteImage(resampled, str(out_path))
+
+    size = list(resampled.GetSize())
+    spacing = list(resampled.GetSpacing())
+    origin_lps = list(resampled.GetOrigin())
+    direction_lps = list(resampled.GetDirection())
+    # The viewer needs the vox->RAS affine. SITK stores origin/direction
+    # in LPS; convert to RAS for the JS side.
+    origin_ras = [-origin_lps[0], -origin_lps[1], origin_lps[2]]
+    d = np.asarray(direction_lps, dtype=float).reshape(3, 3)
+    # Flip the first two rows of the direction matrix to convert LPS to RAS.
+    d_ras = d.copy()
+    d_ras[0, :] *= -1.0
+    d_ras[1, :] *= -1.0
+    vox_to_ras = np.eye(4)
+    for k in range(3):
+        vox_to_ras[:3, k] = d_ras[:, k] * spacing[k]
+    vox_to_ras[:3, 3] = origin_ras
+
+    return {
+        "path": out_path.name,
+        "size": [int(s) for s in size],
+        "spacing": [float(s) for s in spacing],
+        "vox_to_ras": [[float(v) for v in row] for row in vox_to_ras.tolist()],
+        "dtype": str(sitk.GetArrayViewFromImage(resampled).dtype),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -435,12 +499,18 @@ _HTML_TEMPLATE = """<!doctype html>
 <title>{title}</title>
 <style>
   html, body {{ margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111; color: #eee; overflow: hidden; }}
-  #app {{ display: grid; grid-template-columns: 1fr 360px; height: 100%; }}
+  #app {{ display: grid; grid-template-columns: 1fr 320px 320px; height: 100%; }}
   #canvas-host {{ position: relative; }}
   #canvas-host canvas {{ display: block; }}
   #toolbar {{ position: absolute; top: 10px; left: 10px; z-index: 5; display: flex; gap: 6px; }}
   #toolbar button {{ background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
   #toolbar button:hover {{ background: rgba(70,70,70,0.95); }}
+  #slices {{ background: #0d0d0d; border-left: 1px solid #2a2a2a; padding: 8px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }}
+  .slice-panel {{ position: relative; background: #000; border: 1px solid #1d1d1d; }}
+  .slice-panel canvas {{ display: block; width: 100%; height: auto; image-rendering: crisp-edges; }}
+  .slice-label {{ position: absolute; top: 4px; left: 6px; font-size: 10px; color: #bbb; letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; }}
+  .slice-coord {{ position: absolute; bottom: 4px; right: 6px; font-size: 10px; color: #888; pointer-events: none; font-family: ui-monospace, monospace; }}
+  .slice-axes {{ position: absolute; bottom: 4px; left: 6px; font-size: 9px; color: #555; pointer-events: none; font-family: ui-monospace, monospace; }}
   #side {{ overflow-y: auto; padding: 12px 14px; border-left: 1px solid #2a2a2a; font-size: 13px; background: #161616; }}
   #side h2 {{ font-size: 12px; margin: 14px 0 6px; color: #999; letter-spacing: 0.08em; text-transform: uppercase; }}
   #subject {{ font-size: 14px; color: #ddd; font-weight: 500; }}
@@ -464,6 +534,10 @@ _HTML_TEMPLATE = """<!doctype html>
   .contact-row .region {{ color: #aaa; }}
   .contact-row.selected .region {{ color: #ffdcdc; }}
 </style>
+<!-- es-module-shims polyfills <script type="importmap"> on browsers that
+     don't support it natively (older Safari/Firefox). Modern Chrome/Safari/
+     Firefox ignore it. -->
+<script async src="https://unpkg.com/es-module-shims@1.10.0/dist/es-module-shims.js"></script>
 <script type="importmap">
 {{
   "imports": {{
@@ -481,6 +555,26 @@ _HTML_TEMPLATE = """<!doctype html>
       <button id="btn-fit">Fit view</button>
     </div>
   </div>
+  <div id="slices">
+    <div class="slice-panel" data-axis="axial">
+      <canvas></canvas>
+      <div class="slice-label">Axial</div>
+      <div class="slice-axes">R&rarr;  A&uarr;</div>
+      <div class="slice-coord"></div>
+    </div>
+    <div class="slice-panel" data-axis="coronal">
+      <canvas></canvas>
+      <div class="slice-label">Coronal</div>
+      <div class="slice-axes">R&rarr;  S&uarr;</div>
+      <div class="slice-coord"></div>
+    </div>
+    <div class="slice-panel" data-axis="sagittal">
+      <canvas></canvas>
+      <div class="slice-label">Sagittal</div>
+      <div class="slice-axes">A&rarr;  S&uarr;</div>
+      <div class="slice-coord"></div>
+    </div>
+  </div>
   <div id="side">
     <div id="subject"></div>
     <div class="small" id="summary"></div>
@@ -493,7 +587,9 @@ import * as THREE from "three";
 import {{ OrbitControls }} from "three/addons/controls/OrbitControls.js";
 import {{ GLTFLoader }} from "three/addons/loaders/GLTFLoader.js";
 
-const sideWidth = 360;
+// Width reserved for everything to the right of the 3D canvas:
+// slices column (320px) + sidebar column (320px).
+const rightStripWidth = 320 + 320;
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -532,7 +628,7 @@ function fitToObject(obj) {{
 }}
 
 function resize() {{
-  const w = window.innerWidth - sideWidth;
+  const w = Math.max(200, window.innerWidth - rightStripWidth);
   const h = window.innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
@@ -585,6 +681,243 @@ loader.load("scene.glb", gltf => {{
   console.error("GLB load failed", err);
   document.getElementById("subject").textContent = "Failed to load scene.glb: " + err;
 }});
+
+// ---------- MRI slice viewer --------------------------------------
+//
+// Minimal NIfTI-1 parser + slice renderer. The exporter resamples the
+// FreeSurfer T1 onto the CT grid so it lives in the same RAS frame as
+// the contacts; we draw three orthogonal canvases and snap to a
+// contact's voxel coordinates when the user clicks one.
+//
+// Convention: the input volume is recon-all's intensity-normalized T1
+// (uint8, 256³). We don't do any windowing.
+
+function _invert4x4(m) {{
+  // Affine inverse; fine for rigid + spacing matrices used here.
+  const a = m[0][0], b = m[0][1], c = m[0][2];
+  const d = m[1][0], e = m[1][1], f = m[1][2];
+  const g = m[2][0], h = m[2][1], i = m[2][2];
+  const det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+  if (Math.abs(det) < 1e-12) return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
+  const inv = [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,1]];
+  inv[0][0] = (e*i - f*h) / det;
+  inv[0][1] = (c*h - b*i) / det;
+  inv[0][2] = (b*f - c*e) / det;
+  inv[1][0] = (f*g - d*i) / det;
+  inv[1][1] = (a*i - c*g) / det;
+  inv[1][2] = (c*d - a*f) / det;
+  inv[2][0] = (d*h - e*g) / det;
+  inv[2][1] = (b*g - a*h) / det;
+  inv[2][2] = (a*e - b*d) / det;
+  inv[0][3] = -(inv[0][0]*m[0][3] + inv[0][1]*m[1][3] + inv[0][2]*m[2][3]);
+  inv[1][3] = -(inv[1][0]*m[0][3] + inv[1][1]*m[1][3] + inv[1][2]*m[2][3]);
+  inv[2][3] = -(inv[2][0]*m[0][3] + inv[2][1]*m[1][3] + inv[2][2]*m[2][3]);
+  return inv;
+}}
+
+function _apply4x4(m, v) {{
+  return [
+    m[0][0]*v[0] + m[0][1]*v[1] + m[0][2]*v[2] + m[0][3],
+    m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2] + m[1][3],
+    m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2] + m[2][3],
+  ];
+}}
+
+async function _maybeInflate(buffer) {{
+  // .nii.gz support via the native DecompressionStream API
+  // (Chrome 80+, Safari 16.4+, Firefox 113+). Returns the buffer
+  // unchanged if it's not gzipped (magic != 0x1f 0x8b).
+  const view = new Uint8Array(buffer);
+  if (view.length < 2 || view[0] !== 0x1f || view[1] !== 0x8b) return buffer;
+  if (typeof DecompressionStream === "undefined") {{
+    throw new Error("Browser lacks DecompressionStream for .gz; can't load t1_in_ct.nii.gz");
+  }}
+  const ds = new DecompressionStream("gzip");
+  const writer = ds.writable.getWriter();
+  writer.write(view); writer.close();
+  return await new Response(ds.readable).arrayBuffer();
+}}
+
+class NiftiVolume {{
+  constructor(buffer) {{
+    const v = new DataView(buffer);
+    this.dim = [v.getInt16(42, true), v.getInt16(44, true), v.getInt16(46, true)];
+    this.pixdim = [v.getFloat32(80, true), v.getFloat32(84, true), v.getFloat32(88, true)];
+    this.datatype = v.getInt16(70, true);
+    const voxOffset = v.getFloat32(108, true);
+    // sform affine (preferred) — NIFTI stores vox->scanner RAS as 3 rows.
+    this.affine = [
+      [v.getFloat32(280, true), v.getFloat32(284, true), v.getFloat32(288, true), v.getFloat32(292, true)],
+      [v.getFloat32(296, true), v.getFloat32(300, true), v.getFloat32(304, true), v.getFloat32(308, true)],
+      [v.getFloat32(312, true), v.getFloat32(316, true), v.getFloat32(320, true), v.getFloat32(324, true)],
+      [0, 0, 0, 1],
+    ];
+    this.affineInv = _invert4x4(this.affine);
+    const off = Math.max(352, Math.floor(voxOffset));
+    if (this.datatype === 2) {{
+      this.data = new Uint8Array(buffer, off);
+    }} else if (this.datatype === 4) {{
+      this.data = new Int16Array(buffer, off);
+    }} else if (this.datatype === 16) {{
+      this.data = new Float32Array(buffer, off);
+    }} else {{
+      throw new Error("Unsupported NIfTI datatype " + this.datatype);
+    }}
+    // Auto-window from sampled percentile-ish range. For uint8 T1.mgz
+    // (recon-all output) this collapses to [0, 255] which is exactly
+    // the right rendering range; for float32 inputs we sample 1/256
+    // of the voxels for a coarse min/max.
+    let lo = Infinity, hi = -Infinity;
+    const step = Math.max(1, Math.floor(this.data.length / 65536));
+    for (let i = 0; i < this.data.length; i += step) {{
+      const x = this.data[i];
+      if (x < lo) lo = x; if (x > hi) hi = x;
+    }}
+    this.displayMin = lo;
+    this.displayMax = Math.max(hi, lo + 1);
+  }}
+  rasToVox(ras) {{ return _apply4x4(this.affineInv, ras); }}
+  voxel(i, j, k) {{
+    if (i < 0 || j < 0 || k < 0) return 0;
+    const [Nx, Ny, Nz] = this.dim;
+    if (i >= Nx || j >= Ny || k >= Nz) return 0;
+    return this.data[i + Nx * (j + Ny * k)];
+  }}
+}}
+
+const slicePanels = {{}};   // axis -> {{ canvas, ctx, coordEl }}
+let mriVolume = null;
+let mriRasCursor = null;   // last selected RAS point [x,y,z]
+let mriVoxCursor = [0, 0, 0]; // last selected vox indices
+
+function _initSlicePanels() {{
+  for (const panel of document.querySelectorAll(".slice-panel")) {{
+    const axis = panel.dataset.axis;
+    const canvas = panel.querySelector("canvas");
+    // Fixed device-pixel size; CSS scales to width 100%.
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    slicePanels[axis] = {{ canvas, ctx, coordEl: panel.querySelector(".slice-coord") }};
+  }}
+}}
+
+function renderSlice(axis) {{
+  if (!mriVolume) return;
+  const panel = slicePanels[axis];
+  if (!panel) return;
+  const [Nx, Ny, Nz] = mriVolume.dim;
+  // Pick the in-plane axes (U/V) plus the through-plane axis index.
+  // Naming convention for RAS-oriented data: the volume's i-axis ~ X (R),
+  // j-axis ~ Y (A), k-axis ~ Z (S). For non-axis-aligned affines this
+  // is approximate but still gives a sensible orthogonal slice.
+  let W, H, throughIdx, throughLabel;
+  if (axis === "axial") {{
+    W = Nx; H = Ny; throughIdx = mriVoxCursor[2]; throughLabel = "k";
+  }} else if (axis === "coronal") {{
+    W = Nx; H = Nz; throughIdx = mriVoxCursor[1]; throughLabel = "j";
+  }} else {{ // sagittal
+    W = Ny; H = Nz; throughIdx = mriVoxCursor[0]; throughLabel = "i";
+  }}
+  const canvas = panel.canvas;
+  if (canvas.width !== W || canvas.height !== H) {{
+    canvas.width = W; canvas.height = H;
+  }}
+  const ctx = panel.ctx;
+  const img = ctx.createImageData(W, H);
+  const range = Math.max(1e-6, mriVolume.displayMax - mriVolume.displayMin);
+  const lo = mriVolume.displayMin;
+  for (let v = 0; v < H; v++) {{
+    // Flip the vertical axis so anatomically "up" (anterior/superior)
+    // appears at the top of the canvas.
+    const vSrc = H - 1 - v;
+    for (let u = 0; u < W; u++) {{
+      let i, j, k;
+      if (axis === "axial") {{ i = u; j = vSrc; k = throughIdx; }}
+      else if (axis === "coronal") {{ i = u; j = throughIdx; k = vSrc; }}
+      else {{ i = throughIdx; j = u; k = vSrc; }}
+      const raw = mriVolume.voxel(i, j, k);
+      const g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
+      const px = (v * W + u) * 4;
+      img.data[px] = g; img.data[px+1] = g; img.data[px+2] = g; img.data[px+3] = 255;
+    }}
+  }}
+  ctx.putImageData(img, 0, 0);
+
+  // Crosshair
+  if (mriVoxCursor) {{
+    let cu, cv;
+    if (axis === "axial") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[1]; }}
+    else if (axis === "coronal") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[2]; }}
+    else {{ cu = mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}
+    if (cu >= 0 && cu < W && cv >= 0 && cv < H) {{
+      ctx.strokeStyle = "rgba(255,32,48,0.85)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, cv + 0.5); ctx.lineTo(W, cv + 0.5);
+      ctx.moveTo(cu + 0.5, 0); ctx.lineTo(cu + 0.5, H);
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,32,48,1)";
+      ctx.beginPath();
+      ctx.arc(cu + 0.5, cv + 0.5, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }}
+    const ras = mriRasCursor || [0, 0, 0];
+    panel.coordEl.textContent =
+      `${{throughLabel}}=${{throughIdx|0}} | RAS ${{ras[0].toFixed(1)}}, ${{ras[1].toFixed(1)}}, ${{ras[2].toFixed(1)}}`;
+  }}
+}}
+
+function snapSlicesToRas(ras) {{
+  if (!mriVolume) return;
+  const vox = mriVolume.rasToVox(ras);
+  mriVoxCursor = [Math.round(vox[0]), Math.round(vox[1]), Math.round(vox[2])];
+  mriRasCursor = ras;
+  renderSlice("axial");
+  renderSlice("coronal");
+  renderSlice("sagittal");
+}}
+
+async function loadMri(t1Meta) {{
+  if (!t1Meta || !t1Meta.path) {{
+    // No T1 was exported (no FS surfaces); leave the slice panels blank.
+    for (const axis of ["axial","coronal","sagittal"]) {{
+      const p = slicePanels[axis]; if (!p) continue;
+      const ctx = p.ctx;
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
+      ctx.fillStyle = "#666";
+      ctx.font = "11px ui-sans-serif";
+      ctx.fillText("No MRI available", 10, 20);
+    }}
+    return;
+  }}
+  try {{
+    const resp = await fetch(t1Meta.path);
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const raw = await resp.arrayBuffer();
+    const inflated = await _maybeInflate(raw);
+    mriVolume = new NiftiVolume(inflated);
+    // Default cursor: volume center.
+    mriVoxCursor = [
+      Math.floor(mriVolume.dim[0] / 2),
+      Math.floor(mriVolume.dim[1] / 2),
+      Math.floor(mriVolume.dim[2] / 2),
+    ];
+    mriRasCursor = _apply4x4(mriVolume.affine, mriVoxCursor);
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }} catch (err) {{
+    console.error("MRI load failed", err);
+    for (const axis of ["axial","coronal","sagittal"]) {{
+      const p = slicePanels[axis]; if (!p) continue;
+      const ctx = p.ctx;
+      ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
+      ctx.fillStyle = "#c66"; ctx.font = "11px ui-sans-serif";
+      ctx.fillText("MRI load failed: " + err.message, 6, 18);
+    }}
+  }}
+}}
 
 // ---------- sidebar -----------------------------------------------
 
@@ -693,6 +1026,9 @@ function selectContact(label, shank) {{
     if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
     camera.position.copy(pos).addScaledVector(dir, 35);
     controls.update();
+    // Snap the MRI slice viewer to the contact's RAS coordinate so the
+    // axial/coronal/sagittal planes pass through it.
+    snapSlicesToRas([pos.x, pos.y, pos.z]);
   }}
   // Toggle selection in sidebar UI
   document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
@@ -717,7 +1053,12 @@ function showAll() {{
 document.getElementById("btn-reset").addEventListener("click", showAll);
 document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
 
-fetch("scene_meta.json").then(r => r.json()).then(renderSidebar).catch(err => {{
+_initSlicePanels();
+fetch("scene_meta.json").then(r => r.json()).then(meta => {{
+  renderSidebar(meta);
+  // Kick off MRI load in the background; doesn't block sidebar / 3D.
+  loadMri(meta.t1_volume);
+}}).catch(err => {{
   console.error(err);
   document.getElementById("subject").textContent = "Failed to load metadata: " + err.message;
 }});
@@ -803,9 +1144,16 @@ def run_export_view(
     lut_index = parse_freesurfer_lut(lut) if lut else {}
 
     # 2. Register FS T1 -> CT. Run only when we have surfaces to push.
+    # The same registration is reused twice: to push surface vertices
+    # into CT RAS, and to resample the T1 onto the CT grid so the
+    # in-browser slice viewer can render axial/coronal/sagittal MRI
+    # planes that line up with the contacts.
     surfaces = []
+    t1_slice_meta: dict[str, Any] | None = None
     if fs.available_surfaces:
-        fs_to_ct_4x4 = _register_fs_to_ct(fs.t1_path, ct_path)
+        fs_to_ct_4x4, fixed_ct_img, moving_t1_img, sitk_transform = _register_fs_to_ct(
+            fs.t1_path, ct_path,
+        )
         # 3. Load surfaces (in FS scanner-RAS) and push through FS->CT.
         surfaces = load_fs_surfaces(
             fs,
@@ -819,6 +1167,15 @@ def run_export_view(
                 f"{s.faces.shape[0]} faces"
                 + (f" + {s.annotation_name}" if s.annotation_name else "")
             )
+        # Resample T1 -> CT grid for the in-browser MRI slice viewer.
+        t1_out = out / "t1_in_ct.nii.gz"
+        t1_slice_meta = _write_t1_resampled_to_ct(
+            fixed_ct_img, moving_t1_img, sitk_transform, t1_out,
+        )
+        _stderr(
+            f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
+            f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
+        )
     else:
         _stderr("[view] no FreeSurfer surfaces under surf/; skipping brain mesh")
 
@@ -847,6 +1204,7 @@ def run_export_view(
         "annotation": annotation,
         "trajectories": trajectories,
         "contacts": contact_meta,
+        "t1_volume": t1_slice_meta,
     }
     (out / "scene_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     html_path = _write_html(out, title=f"rosa-agent export-view — {Path(target).name}")
