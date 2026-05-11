@@ -31,7 +31,6 @@ from rosa_core import (
     load_electrode_library,
     lps_to_ras_point,
     model_map,
-    suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
 from rosa_scene import (

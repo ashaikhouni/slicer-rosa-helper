@@ -80,7 +80,8 @@ def matched_filter_pick(
     tip_grid_step_mm: float = 0.25,
     sigma_contact_mm: float = SIGMA_CONTACT_MM_DEFAULT,
     max_bolt_frac: float = 0.5,
-    max_tip_short_mm: float | None = 5.0,
+    max_tip_short_mm: float | None = 1.0,
+    metal_extent_threshold_frac: float = 0.5,
     max_tip_override: float | None = None,
     tie_eps: float = 1e-6,
     add_valley_anti_template: bool = False,
@@ -113,11 +114,17 @@ def matched_filter_pick(
             survives across user conventions (start_ras can be the bolt
             outer, the intracranial entry, or the contact-array start
             depending on the planner; end_ras consistently marks the
-            implant target). Without this gate, a small electrode
-            template can win on correlation while leaving the deep half
-            of the trajectory uncovered (failure mode: contacts placed in
-            a uniformly-bright bolt zone). ``None`` disables the gate
+            implant target). Default 1.0 mm. ``None`` disables the gate
             (equivalent to the pre-2026-05 behaviour).
+        metal_extent_threshold_frac: fraction of the signal's 90th-
+            percentile used to define the "metal extent" along the
+            centerline — the most-shallow arc where the centerline-
+            sampled signal first crosses above this threshold. Slots
+            that would fall proximal to the metal extent are rejected
+            (would place electrode contacts into air past the back of
+            the bolt). 0.5 is conservative; raise toward 1.0 to insist
+            on saturated metal at every slot. Auto-disabled when
+            ``max_tip_short_mm`` is None.
         max_tip_override: hard cap on the model's deepest slot arc (used
             in bolt-less mode to clamp to the actual metal extent).
         tie_eps: correlation tolerance for the hierarchical tie-break.
@@ -164,6 +171,30 @@ def matched_filter_pick(
         return _EMPTY
     inv_2sig2 = 1.0 / (2.0 * float(sigma_contact_mm) * float(sigma_contact_mm))
 
+    # Metal extent along the centerline: the most-shallow arc where the
+    # signal first crosses above (metal_extent_threshold_frac × p90).
+    # Used to bound the proximal-most slot of any candidate template —
+    # contacts can extend back into the bolt zone, but only as far as
+    # the visible metal CC actually goes (no contacts in air past the
+    # back of the bolt). Auto-disabled when the tip-coverage gate is
+    # disabled — the two checks together define the "valid metal arc"
+    # that contacts must inhabit.
+    if max_tip_short_mm is not None and max_tip_override is None:
+        finite_full = signal[np.isfinite(signal)]
+        if finite_full.size:
+            metal_threshold = (
+                float(metal_extent_threshold_frac) * float(np.percentile(finite_full, 90))
+            )
+            is_metal = signal >= metal_threshold
+            if is_metal.any():
+                metal_start_arc = float(arcs[int(np.argmax(is_metal))])
+            else:
+                metal_start_arc = float("-inf")
+        else:
+            metal_start_arc = float("-inf")
+    else:
+        metal_start_arc = float("-inf")
+
     # Hierarchical tie-break: corr (primary) → n_covered (secondary,
     # prefer the model that explains MORE contacts when corrs tie) →
     # n_slots (tertiary, smallest electrode of equally-covering ones to
@@ -206,13 +237,23 @@ def matched_filter_pick(
             # the trajectory unexplained are rejected here even if
             # they correlate well over the bolt-zone signal.
             #
-            # Skip the gate when the caller has supplied
+            # Metal-extent gate: the proximal-most slot must not fall
+            # before ``metal_start_arc`` — placing contacts in air past
+            # the back of the bolt is physically impossible. This is
+            # what stops the matcher from picking a too-long electrode
+            # (e.g. DIXI-18CM on a short shank) just because its deepest
+            # slot reaches the tip — its proximal slots would have to
+            # sit in air.
+            #
+            # Skip both gates when the caller has supplied
             # ``max_tip_override`` — that's an explicit "clamp deepest
             # slot to X" instruction, conflicting with "deepest slot
             # must reach the unclamped profile_end".
             if max_tip_short_mm is not None and max_tip_override is None:
                 tip_short = float(profile_end_arc) - float(slot_arcs.max())
                 if tip_short > float(max_tip_short_mm):
+                    continue
+                if float(slot_arcs.min()) < metal_start_arc:
                     continue
             slots_cz = slot_arcs[in_contact]
             d = arcs_in[:, None] - slots_cz[None, :]
