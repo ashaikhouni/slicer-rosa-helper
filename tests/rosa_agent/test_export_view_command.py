@@ -191,11 +191,13 @@ class ExportViewSmokeTests(unittest.TestCase):
 
         gltf = _validate_glb(self.out_dir / "scene.glb")
         self.assertEqual(gltf["asset"]["version"], "2.0")
-        # Surfaces should be present (lh.pial + rh.pial nodes).
+        # Surfaces should be present. Names use ``_`` separators so they
+        # survive three.js's GLTFLoader.PropertyBinding.sanitizeNodeName
+        # (which would strip ``/`` and ``.``).
         node_names = {n["name"] for n in gltf["nodes"]}
-        self.assertTrue(any("lh.pial" in n for n in node_names),
-                        f"expected lh.pial in scene nodes; got {node_names}")
-        self.assertTrue(any("rh.pial" in n for n in node_names))
+        self.assertTrue(any("lh_pial" in n for n in node_names),
+                        f"expected lh_pial in scene nodes; got {node_names}")
+        self.assertTrue(any("rh_pial" in n for n in node_names))
 
         # Scene metadata sidecar must list trajectories + contacts arrays
         # (lengths can be zero on the phantom, but the keys must exist).

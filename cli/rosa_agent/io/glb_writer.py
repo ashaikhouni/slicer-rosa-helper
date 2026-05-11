@@ -59,6 +59,7 @@ class _MeshPrimitive:
     indices: np.ndarray               # (M*3,) uint32
     colors_rgba: np.ndarray | None    # (N, 4) uint8 or None
     material_index: int
+    normals: np.ndarray | None = None  # (N, 3) float32; optional smooth normals
 
 
 @dataclass
@@ -78,6 +79,7 @@ class _Material:
     metallic: float = 0.1
     roughness: float = 0.7
     double_sided: bool = True
+    alpha_mode: str = "OPAQUE"  # "OPAQUE" | "MASK" | "BLEND"
 
 
 @dataclass
@@ -101,11 +103,13 @@ class GLBScene:
         metallic: float = 0.1,
         roughness: float = 0.7,
         double_sided: bool = True,
+        alpha_mode: str = "OPAQUE",
     ) -> int:
         self.materials.append(_Material(
             name=name,
             base_color=(float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3])),
             metallic=metallic, roughness=roughness, double_sided=double_sided,
+            alpha_mode=alpha_mode,
         ))
         return len(self.materials) - 1
 
@@ -117,6 +121,7 @@ class GLBScene:
         indices: np.ndarray,
         material_index: int,
         colors_rgba: np.ndarray | None = None,
+        normals: np.ndarray | None = None,
     ) -> int:
         positions = np.ascontiguousarray(positions, dtype=np.float32)
         if positions.ndim != 2 or positions.shape[1] != 3:
@@ -131,9 +136,17 @@ class GLBScene:
                     f"colors_rgba shape {colors_rgba.shape} doesn't match "
                     f"positions ({positions.shape[0]} verts)"
                 )
+        if normals is not None:
+            normals = np.ascontiguousarray(normals, dtype=np.float32)
+            if normals.shape != positions.shape:
+                raise ValueError(
+                    f"normals shape {normals.shape} doesn't match "
+                    f"positions {positions.shape}"
+                )
         self.primitives.append(_MeshPrimitive(
             positions=positions, indices=indices,
             colors_rgba=colors_rgba, material_index=material_index,
+            normals=normals,
         ))
         return len(self.primitives) - 1
 
@@ -147,11 +160,12 @@ class GLBScene:
         material_index: int,
         *,
         vertex_colors_rgba: np.ndarray | None = None,
+        normals: np.ndarray | None = None,
         extras: dict[str, Any] | None = None,
     ) -> int:
         """One indexed triangle mesh -> one mesh -> one node."""
         prim = self._add_primitive(positions, faces.reshape(-1), material_index,
-                                   colors_rgba=vertex_colors_rgba)
+                                   colors_rgba=vertex_colors_rgba, normals=normals)
         self.nodes.append(_NodeRecord(name=name, mesh_index=prim, extras=extras))
         return len(self.nodes) - 1
 
@@ -414,7 +428,8 @@ def _pack_buffer(scene: GLBScene) -> tuple[bytes, list[dict[str, Any]], list[dic
 
     for prim in scene.primitives:
         key = (id(prim.positions), id(prim.indices),
-               id(prim.colors_rgba) if prim.colors_rgba is not None else 0)
+               id(prim.colors_rgba) if prim.colors_rgba is not None else 0,
+               id(prim.normals) if prim.normals is not None else 0)
         slot = cache.get(key)
         if slot is None:
             slot = {
@@ -423,10 +438,14 @@ def _pack_buffer(scene: GLBScene) -> tuple[bytes, list[dict[str, Any]], list[dic
             }
             if prim.colors_rgba is not None:
                 slot["COLOR_0"] = _add_accessor_colors(prim.colors_rgba)
+            if prim.normals is not None:
+                slot["NORMAL"] = _add_accessor_floats(prim.normals, "VEC3")
             cache[key] = slot
         attrs = {"POSITION": slot["POSITION"]}
         if "COLOR_0" in slot:
             attrs["COLOR_0"] = slot["COLOR_0"]
+        if "NORMAL" in slot:
+            attrs["NORMAL"] = slot["NORMAL"]
         primitive_records.append({
             "attributes": attrs,
             "indices": slot["INDICES"],
@@ -470,7 +489,7 @@ def encode_glb(scene: GLBScene) -> bytes:
 
     materials_table = []
     for mat in scene.materials:
-        materials_table.append({
+        entry: dict[str, Any] = {
             "name": mat.name,
             "pbrMetallicRoughness": {
                 "baseColorFactor": list(mat.base_color),
@@ -478,7 +497,10 @@ def encode_glb(scene: GLBScene) -> bytes:
                 "roughnessFactor": mat.roughness,
             },
             "doubleSided": mat.double_sided,
-        })
+        }
+        if mat.alpha_mode and mat.alpha_mode != "OPAQUE":
+            entry["alphaMode"] = mat.alpha_mode
+        materials_table.append(entry)
 
     gltf: dict[str, Any] = {
         "asset": {"version": "2.0", "generator": "rosa-agent export-view"},

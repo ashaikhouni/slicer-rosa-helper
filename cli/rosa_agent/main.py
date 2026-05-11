@@ -24,6 +24,7 @@ Subcommands::
     rosa-agent rosa-to-nifti --rosa-folder DIR --output DIR [--volume NAME ...]
     rosa-agent match-ros     (--rosa-folder DIR | --ros-file FILE) --ct ct.nii --output DIR
     rosa-agent export-view   <ros_folder|subj_id> --freesurfer-dir DIR --out-dir DIR
+    rosa-agent view          <export-view-out-dir> [--port N] [--no-open]
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ SUBCOMMANDS = {
     "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
     "match-ros":     "rosa_agent.commands.match_ros",
     "export-view":   "rosa_agent.commands.export_view",
+    "view":          "rosa_agent.commands.view",
 }
 
 

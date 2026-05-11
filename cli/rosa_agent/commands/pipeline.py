@@ -294,6 +294,8 @@ def run_pipeline(
     wm_path: str | None = None,
     wm_lut: str | None = None,
     atlas_base_path: str | None = None,
+    write_figures: bool = True,
+    library: str | None = None,
 ) -> dict[str, Any]:
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -335,13 +337,17 @@ def run_pipeline(
         trajs = list(result.get("trajectories") or [])
 
     # Contacts (placement always runs in the working CT frame).
-    contact_groups = place_contacts(ct_path, [
-        {"name": t.get("name", f"T{idx:02d}"),
-         "start_ras": t["start_ras"],
-         "end_ras": t["end_ras"],
-         "electrode_model": t.get("electrode_model") or ""}
-        for idx, t in enumerate(trajs, start=1)
-    ])
+    contact_groups, placement_batch = place_contacts(
+        ct_path,
+        [
+            {"name": t.get("name", f"T{idx:02d}"),
+             "start_ras": t["start_ras"],
+             "end_ras": t["end_ras"],
+             "electrode_model": t.get("electrode_model") or ""}
+            for idx, t in enumerate(trajs, start=1)
+        ],
+        pitch_strategy=library,
+    )
 
     # Output-frame transform. Working frame is the working CT's RAS;
     # we may want results in the ROSA reference frame instead.
@@ -378,6 +384,32 @@ def run_pipeline(
     contacts_path = out / "contacts.tsv"
     n_contacts = write_contacts_tsv(contacts_path, contact_groups)
     _stderr(f"[pipeline] wrote {contacts_path} ({n_contacts} contacts, frame={output_label})")
+
+    # QC figures (per-trajectory PNGs). Skipped on --no-figures or when
+    # matplotlib isn't installed. ``placement_batch`` carries the LoG /
+    # Frangi / hull-distance features the renderer needs, so we don't
+    # reload the CT.
+    figures_summary = {"written": 0, "skipped_reason": None}
+    if write_figures and placement_batch is not None:
+        try:
+            from rosa_core.qc_figures import render_all_figures
+            n_fig = render_all_figures(
+                placement_batch.trajectories, out / "figures",
+                features=placement_batch.features,
+                bolts=placement_batch.bolts,
+            )
+            figures_summary["written"] = int(n_fig)
+            if n_fig == 0:
+                figures_summary["skipped_reason"] = "matplotlib unavailable"
+                _stderr("[pipeline] figures skipped (matplotlib not available)")
+            else:
+                _stderr(f"[pipeline] wrote {out / 'figures'} ({n_fig} PNGs)")
+        except Exception as exc:  # noqa: BLE001
+            figures_summary["skipped_reason"] = f"{type(exc).__name__}: {exc}"
+            _stderr(f"[pipeline] figure-render failed: {exc}")
+    elif not write_figures:
+        figures_summary["skipped_reason"] = "disabled by --no-figures"
+        _stderr("[pipeline] figures skipped (--no-figures)")
 
     # Label (skipped silently when no provider configured).
     label_summary = {"written": False, "n_contacts": n_contacts}
@@ -419,6 +451,7 @@ def run_pipeline(
             and not skip_registration
         ),
         "labels": label_summary,
+        "figures": figures_summary,
     }
 
 
@@ -459,6 +492,18 @@ def main(argv: list[str] | None = None) -> int:
              "resampled onto the working-CT grid before sampling, so atlas "
              "labels align with contacts that live in CT RAS.",
     )
+    parser.add_argument(
+        "--no-figures", action="store_true",
+        help="Skip the per-trajectory QC PNG render step (default: figures "
+             "are written to <out-dir>/figures/ when matplotlib is "
+             "available).",
+    )
+    parser.add_argument(
+        "--library", default="",
+        help="Electrode-library strategy key — restrict matching to a "
+             "vendor subset (e.g. 'dixi', 'pmt_35', 'adtech'). "
+             "Default: full bundled library.",
+    )
     args = parser.parse_args(argv)
 
     summary = run_pipeline(
@@ -475,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         wm_path=args.wm or None,
         wm_lut=args.wm_lut or None,
         atlas_base_path=args.atlas_base or None,
+        write_figures=not bool(args.no_figures),
+        library=args.library or None,
     )
     print(json.dumps(summary, indent=2))
     return 0

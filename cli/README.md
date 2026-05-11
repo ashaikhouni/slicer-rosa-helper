@@ -50,6 +50,7 @@ iteration only; production use should `pip install`.
 | `rosa-to-nifti` | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`          |
 | `match-ros`     | Name detector emissions on any-frame CT from a `.ros` plan via line-geometry RANSAC  |
 | `export-view`   | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB   |
+| `view`          | Serve an `export-view` output dir over HTTP and open it in your browser              |
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
@@ -472,6 +473,34 @@ Mattes MI, same algorithm `--atlas-base` uses inside `pipeline`) and
 applies that transform. The same registration is used to resample
 `aparc+aseg.mgz` onto the CT grid for labeling, so contacts and
 surfaces share a single alignment.
+
+---
+
+## `view` — serve an export-view directory and open it in a browser
+
+The HTML viewer that `export-view` writes needs to be served over
+HTTP, not opened from `file://` — `<script type="importmap">` plus
+the `fetch()` calls for `scene.glb` / `scene_meta.json` /
+`t1_in_ct.nii.gz` are both CORS-blocked under `file://`. This
+subcommand bundles "spin up a local server in the right dir + open
+the URL" into one step:
+
+```bash
+rosa-agent view /tmp/case_view
+```
+
+Picks port 8765 by default; if it's busy, it falls back to whatever
+port the OS hands out so you can leave it running across sessions
+without port-clash babysitting. Holds the server in the foreground
+until you Ctrl-C.
+
+Flags:
+
+- `--port N` — preferred port (default `8765`)
+- `--no-open` — print the URL and skip auto-launching the browser
+  (useful over SSH or in headless CI checks)
+
+No new dependencies — wraps stdlib `http.server` + `webbrowser`.
 
 ---
 

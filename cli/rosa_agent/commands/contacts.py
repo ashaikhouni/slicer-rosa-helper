@@ -37,14 +37,21 @@ def place_contacts(
     trajectories: list[dict[str, Any]],
     *,
     pitch_strategy: str | None = None,
-) -> list[dict[str, Any]]:
+):
     """Run the staged placement pipeline for each trajectory.
 
-    Returns a list of contact-group dicts in the format expected by
-    ``write_contacts_tsv``::
+    Returns ``(contact_groups, batch)``:
 
-        {"trajectory": <name>, "electrode_model": <id>,
-         "positions_ras": [...], "peak_detected": [...]}
+      * ``contact_groups`` — list of dicts in the format expected by
+        ``write_contacts_tsv``::
+
+            {"trajectory": <name>, "electrode_model": <id>,
+             "positions_ras": [...], "peak_detected": [...]}
+
+      * ``batch`` — the full ``PlacementBatch`` from ``place_seeg`` so
+        downstream callers can render QC figures (``batch.features`` +
+        ``batch.bolts`` are the inputs ``rosa_core.qc_figures`` needs
+        without re-loading the CT). ``None`` when there were no seeds.
 
     Mode dispatch:
       * Trajectories with ``electrode_model`` → mode 4 (force the vouched
@@ -79,7 +86,7 @@ def place_contacts(
         ))
 
     if not seeds:
-        return []
+        return [], None
 
     batch = place_seeg(
         str(ct_path),
@@ -103,7 +110,7 @@ def place_contacts(
             # peak_detected for back-compat with the TSV schema.
             "peak_detected": [True] * len(contacts_ras),
         })
-    return out
+    return out, batch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
 
     trajs = read_seeds_tsv(args.trajectories_tsv)
     _stderr(f"[contacts] {len(trajs)} trajectories from {args.trajectories_tsv}")
-    groups = place_contacts(args.ct_path, trajs, pitch_strategy=args.library)
+    groups, _batch = place_contacts(args.ct_path, trajs, pitch_strategy=args.library)
     n = write_contacts_tsv(args.out, groups)
     _stderr(f"[contacts] wrote {args.out} ({n} contacts)")
     return 0
