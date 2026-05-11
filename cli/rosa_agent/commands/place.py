@@ -172,19 +172,23 @@ def main(argv: list[str] | None = None) -> int:
     # Write the QC directory.
     # --------------------------------------------------------------
     from rosa_core.qc_output import write_qc_directory
-    from rosa_core.volume_loader import load_features_and_bolts
 
-    # Re-load features+bolts for the figure renderer — place_seeg loaded
-    # them internally but PlacementBatch doesn't expose them. Cheap on the
-    # second call (no caching layer yet — opportunity for follow-up).
-    features = bolts = None
-    if not args.no_figures:
-        log("[place] re-loading features + bolts for figure rendering")
+    # Reuse the (features, bolts) the placer already computed. Skips
+    # the ~5-10 s second LoG/Frangi/hull pass that the prior
+    # "re-load for figure rendering" path incurred. Falls back to a
+    # fresh load only if the batch didn't carry them (older cached
+    # PlacementBatch from a stale install).
+    features = batch.features
+    bolts = batch.bolts
+    if not args.no_figures and features is None:
+        log("[place] features not on batch; loading fresh for figure rendering")
         try:
+            from rosa_core.volume_loader import load_features_and_bolts
             features, bolts = load_features_and_bolts(str(ct_path))
         except Exception as exc:  # noqa: BLE001
-            _stderr(f"warning: failed to reload features for figures ({exc}); "
+            _stderr(f"warning: failed to load features for figures ({exc}); "
                     f"writing TSVs only")
+            features = bolts = None
 
     out_dir = Path(args.output)
     write_qc_directory(

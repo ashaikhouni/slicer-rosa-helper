@@ -101,12 +101,24 @@ class PlacementBatch:
 
     ``trajectories`` is in input-seed order (or candidate-emission order for
     auto modes). ``qc_dir`` is set when the caller passes ``output_dir``;
-    Session 3 will populate it via ``rosa_core.qc_output.write_qc_directory``.
+    ``rosa_core.qc_output.write_qc_directory`` is the writer that
+    populates it.
+
+    ``features`` / ``bolts`` are the precomputed inputs the placer used
+    internally — exposed on the batch so downstream callers (figure
+    renderers, QC writers, post-pass analyses) don't have to reload the
+    CT just to get the LoG / Frangi / hull-distance arrays back. The
+    feature dict can be 50-100 MB so callers that don't need it should
+    not hold a reference to the batch indefinitely; the placer itself
+    drops its references after building the batch so the only lingering
+    holders are whatever the caller does with the returned object.
     """
 
     trajectories: list[PlacedTrajectory]
     qc_dir: Path | None = None
     diagnostics: dict = field(default_factory=dict)
+    features: dict | None = None
+    bolts: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------
@@ -696,6 +708,8 @@ def place_seeg(
         trajectories=placed,
         qc_dir=Path(output_dir) if output_dir is not None else None,
         diagnostics=diagnostics,
+        features=features,
+        bolts=bolts,
     )
 
 
