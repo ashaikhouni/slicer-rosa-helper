@@ -25,7 +25,7 @@ from dataclasses import replace
 
 import numpy as np
 
-from ..matched_filter import matched_filter_pick
+from ..matched_filter import MatchedFilterResult, matched_filter_pick
 from .constants import PICK_OVERRIDE_MARGIN, WALK_TIP_PAD_MM
 from .context import PlacementCtx
 
@@ -36,9 +36,22 @@ def per_model_corrs(ctx: PlacementCtx) -> list[tuple]:
     Returns list of ``(model_id, n_slots, n_covered, corr)`` sorted desc by corr.
     Used by ``pick_extent_aware`` for the denominator correction and by
     ``score_simple`` for the model-corr uniformity / margin features.
+
+    Reads from ``ctx.match.per_model`` when available — populated by
+    ``pick_matched_filter`` in a single library pass — so the ``stage_d``
+    pipeline doesn't redo per-model scoring. Falls back to a fresh
+    library scan when ``ctx.match`` is None or carries no per-model
+    data (older callers that bypass pick_matched_filter).
     """
     if ctx.walk_arcs is None or ctx.walk_signal is None:
         return []
+    if ctx.match is not None and ctx.match.per_model is not None:
+        return [
+            (str(r.best_model_id or ""), int(r.n_slots), int(r.n_covered), float(r.corr))
+            for r in ctx.match.per_model
+        ]
+    # Fallback path — preserves the old shape when callers run
+    # per_model_corrs without a prior pick_matched_filter.
     cl = np.asarray(ctx.centerline, dtype=float)
     cl_max = float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum())
     max_extend = WALK_TIP_PAD_MM if ctx.bolt_source == "metal" else 0.0
@@ -76,9 +89,10 @@ def pick_extent_aware(ctx: PlacementCtx) -> PlacementCtx:
     """Re-rank by ``corr × √(n_covered / max_n_covered)`` (denominator correction).
 
     Margin defer: only re-rank when raw ``top1 − top2 < PICK_OVERRIDE_MARGIN``.
-    If the preferred winner differs, re-run ``matched_filter_pick`` against
-    just that model so its ``slot_arcs`` (used by Stage E) align with the
-    better template.
+    When the preferred winner differs from the matched-filter pick, swap
+    in the preferred model's ``MatchedFilterResult`` from the cached
+    ``ctx.match.per_model`` list — same data ``matched_filter_pick``
+    already produced in the single library pass, no redundant rescoring.
     """
     if ctx.match is None or ctx.walk_arcs is None or ctx.centerline is None:
         return ctx
@@ -98,6 +112,27 @@ def pick_extent_aware(ctx: PlacementCtx) -> PlacementCtx:
     if preferred_id == ctx.match.best_model_id:
         return ctx
 
+    # Pull the preferred model's already-computed result out of the
+    # per-model cache. Carry the per_model list forward so the picked
+    # ctx.match still exposes the full ranking to downstream stages
+    # (score_simple reads it for the model-corr-uniformity feature).
+    if ctx.match.per_model is not None:
+        preferred = next(
+            (r for r in ctx.match.per_model if r.best_model_id == preferred_id),
+            None,
+        )
+        if preferred is not None:
+            new_match = MatchedFilterResult(
+                best_model_id=preferred.best_model_id,
+                tip_arc=preferred.tip_arc,
+                slot_arcs=preferred.slot_arcs,
+                n_slots=preferred.n_slots,
+                n_covered=preferred.n_covered,
+                corr=preferred.corr,
+                per_model=ctx.match.per_model,
+            )
+            return replace(ctx, match=new_match)
+    # Fallback (no per_model cache available — older caller path).
     lookup = {str(m.get("id") or ""): m for m in ctx.library_models}
     preferred_model = lookup.get(preferred_id)
     if preferred_model is None:

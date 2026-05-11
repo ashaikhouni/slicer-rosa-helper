@@ -52,6 +52,15 @@ class MatchedFilterResult:
     ``best_model_id`` is None when no candidate scored above the empty
     sentinel (e.g. zero in-zone signal, or every candidate violated the
     bolt-zone fraction cap).
+
+    ``per_model`` carries the per-model best (one entry per library
+    model that passed the geometric gates and produced a finite
+    correlation). Sorted by corr descending. Stage-D's
+    ``pick_extent_aware`` re-rank reads from here instead of re-calling
+    ``matched_filter_pick`` per model — same data, single pass over the
+    tip grid. Each entry includes the model's own ``tip_arc`` and
+    ``slot_arcs`` so a preferred-model switch can use them directly
+    without another matched_filter_pick call.
     """
 
     best_model_id: str | None
@@ -60,11 +69,13 @@ class MatchedFilterResult:
     n_slots: int
     n_covered: int
     corr: float
+    per_model: list["MatchedFilterResult"] | None = None
 
 
 _EMPTY = MatchedFilterResult(
     best_model_id=None, tip_arc=None, slot_arcs=None,
     n_slots=0, n_covered=0, corr=0.0,
+    per_model=None,
 )
 
 
@@ -211,6 +222,7 @@ def matched_filter_pick(
     # wins (which is what blocks an 18-contact model from quietly
     # covering 12 real contacts + 6 bolt-zone phantoms).
     best = {"corr": -np.inf, "n_covered": -1, "n_slots": float("inf")}
+    per_model_best: dict[str, dict] = {}
     for m in library_models:
         offs = np.asarray(m["contact_center_offsets_from_tip_mm"], dtype=float)
         n_slots = len(offs)
@@ -223,6 +235,7 @@ def matched_filter_pick(
             max_tip = min(max_tip, float(max_tip_override) + offs_min)
         if min_tip > max_tip:
             continue
+        model_id = str(m.get("id") or "")
         for tip in np.arange(min_tip, max_tip + 1e-6, tip_grid_step_mm):
             slot_arcs = tip - offs
             in_contact = slot_arcs >= cutoff
@@ -293,8 +306,38 @@ def matched_filter_pick(
                     "slot_arcs": slot_arcs, "corr": corr,
                     "n_slots": int(n_slots), "n_covered": int(n_covered),
                 }
+            # Per-model best uses the same hierarchical tie-break as
+            # the global best. Stores tip_arc + slot_arcs so a downstream
+            # extent-aware re-rank can adopt this model's pick directly
+            # without another matched_filter_pick call.
+            mb = per_model_best.get(model_id)
+            if mb is None or corr > mb["corr"] + tie_eps or (
+                abs(corr - mb["corr"]) <= tie_eps
+                and (n_covered > mb["n_covered"]
+                     or (n_covered == mb["n_covered"] and n_slots < mb["n_slots"]))
+            ):
+                per_model_best[model_id] = {
+                    "model_id": model_id, "tip_arc": float(tip),
+                    "slot_arcs": slot_arcs, "corr": corr,
+                    "n_slots": int(n_slots), "n_covered": int(n_covered),
+                }
+    per_model_results = sorted(
+        (
+            MatchedFilterResult(
+                best_model_id=mb["model_id"], tip_arc=mb["tip_arc"],
+                slot_arcs=mb["slot_arcs"], n_slots=mb["n_slots"],
+                n_covered=mb["n_covered"], corr=mb["corr"], per_model=None,
+            )
+            for mb in per_model_best.values()
+        ),
+        key=lambda r: -r.corr,
+    ) or None
     if "model_id" not in best:
-        return _EMPTY
+        return MatchedFilterResult(
+            best_model_id=None, tip_arc=None, slot_arcs=None,
+            n_slots=0, n_covered=0, corr=0.0,
+            per_model=per_model_results,
+        )
     return MatchedFilterResult(
         best_model_id=best["model_id"],
         tip_arc=best["tip_arc"],
@@ -302,6 +345,7 @@ def matched_filter_pick(
         n_slots=best["n_slots"],
         n_covered=best["n_covered"],
         corr=best["corr"],
+        per_model=per_model_results,
     )
 
 
