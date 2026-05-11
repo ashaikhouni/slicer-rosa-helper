@@ -502,9 +502,13 @@ _HTML_TEMPLATE = """<!doctype html>
   #app {{ display: grid; grid-template-columns: 1fr 320px 320px; height: 100%; }}
   #canvas-host {{ position: relative; }}
   #canvas-host canvas {{ display: block; }}
-  #toolbar {{ position: absolute; top: 10px; left: 10px; z-index: 5; display: flex; gap: 6px; }}
+  #toolbar {{ position: absolute; top: 10px; left: 10px; right: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }}
   #toolbar button {{ background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
   #toolbar button:hover {{ background: rgba(70,70,70,0.95); }}
+  .plane-ctl {{ display: inline-flex; align-items: center; gap: 6px; background: rgba(40,40,40,0.85); border: 1px solid #444; padding: 4px 8px; border-radius: 4px; font-size: 11px; color: #ddd; }}
+  .plane-ctl input[type="range"] {{ width: 120px; }}
+  .plane-ctl .axis {{ font-weight: 600; min-width: 52px; }}
+  .plane-ctl .coord {{ color: #888; font-family: ui-monospace, monospace; min-width: 42px; text-align: right; }}
   #slices {{ background: #0d0d0d; border-left: 1px solid #2a2a2a; padding: 8px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }}
   .slice-panel {{ position: relative; background: #000; border: 1px solid #1d1d1d; }}
   .slice-panel canvas {{ display: block; width: 100%; height: auto; image-rendering: crisp-edges; }}
@@ -553,6 +557,21 @@ _HTML_TEMPLATE = """<!doctype html>
     <div id="toolbar">
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
+      <label class="plane-ctl" data-axis="axial">
+        <input type="checkbox" /><span class="axis">Axial</span>
+        <input type="range" min="0" max="1" step="0.5" disabled />
+        <span class="coord">—</span>
+      </label>
+      <label class="plane-ctl" data-axis="coronal">
+        <input type="checkbox" /><span class="axis">Coronal</span>
+        <input type="range" min="0" max="1" step="0.5" disabled />
+        <span class="coord">—</span>
+      </label>
+      <label class="plane-ctl" data-axis="sagittal">
+        <input type="checkbox" /><span class="axis">Sagittal</span>
+        <input type="range" min="0" max="1" step="0.5" disabled />
+        <span class="coord">—</span>
+      </label>
     </div>
   </div>
   <div id="slices">
@@ -628,13 +647,21 @@ function fitToObject(obj) {{
 }}
 
 function resize() {{
-  const w = Math.max(200, window.innerWidth - rightStripWidth);
-  const h = window.innerHeight;
-  renderer.setSize(w, h, false);
+  // Drive the canvas from the host's measured rect — that's the
+  // grid-column width. setSize(w, h, true) syncs both the WebGL buffer
+  // AND the canvas's CSS size, so the canvas fills its column instead
+  // of collapsing to the default 300x150.
+  const r = host.getBoundingClientRect();
+  const w = Math.max(64, Math.floor(r.width));
+  const h = Math.max(64, Math.floor(r.height));
+  renderer.setSize(w, h, true);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }}
 window.addEventListener("resize", resize);
+// CSS grid resizes don't always fire window 'resize' — observe the
+// host directly so the canvas tracks column reflows too.
+new ResizeObserver(resize).observe(host);
 resize();
 
 (function loop() {{
@@ -644,31 +671,52 @@ resize();
 }})();
 
 // ---------- load GLB + index nodes ---------------------------------
+//
+// glTF puts our metadata (kind / shank / label / region) on the *node*
+// extras, not the mesh. GLTFLoader mirrors that as two Object3Ds per
+// element: an outer Object3D named "contact/RHH1" carrying the extras
+// in userData, with a child Mesh named "contact/RHH1_mesh" carrying
+// the geometry + material. We index the outer Object3D (so click /
+// isolate logic uses the same names the metadata uses) and stash a
+// reference to its mesh child for live material swapping.
 
-const nodesByName = new Map();           // mesh.name -> THREE.Mesh
-const shankNodes = new Map();            // shank id -> [mesh, ...]
-const surfaceNodes = [];                 // FS pial meshes
-const originalMaterials = new Map();     // mesh -> material
+const nodesByName = new Map();           // node.name -> outer Object3D
+const shankNodes = new Map();            // shank id -> [Object3D, ...]
+const surfaceNodes = [];                 // FS pial Object3D nodes
+const originalMaterials = new Map();     // outer Object3D -> child Mesh's original material
 let gltfRoot = null;
 
 const RED = new THREE.MeshStandardMaterial({{ color: 0xff2030, metalness: 0.75, roughness: 0.25 }});
+
+function _firstMeshChild(obj) {{
+  let mesh = null;
+  obj.traverse(c => {{ if (!mesh && c.isMesh) mesh = c; }});
+  return mesh;
+}}
 
 const loader = new GLTFLoader();
 loader.load("scene.glb", gltf => {{
   gltfRoot = gltf.scene;
   scene.add(gltfRoot);
   gltfRoot.traverse(obj => {{
-    if (!obj.isMesh) return;
-    nodesByName.set(obj.name, obj);
-    originalMaterials.set(obj, obj.material);
     const extras = obj.userData || {{}};
-    if (extras.kind === "freesurfer_surface") {{
-      // Brain mesh: ensure it's transparent so electrodes show through.
-      // glTF's alphaMode=BLEND already sets transparent=true; this is
-      // belt-and-suspenders for renderers that don't honor it perfectly.
-      if (obj.material) {{
-        obj.material.transparent = true;
-        obj.material.depthWrite = false;
+    const kind = extras.kind;
+    if (!kind) return;  // only the outer nodes carry kind/shank
+    nodesByName.set(obj.name, obj);
+    const mesh = _firstMeshChild(obj);
+    if (mesh) {{
+      originalMaterials.set(obj, mesh.material);
+      // Cache the mesh so material swaps (red highlight) don't have
+      // to re-traverse.
+      obj.userData._mesh = mesh;
+    }}
+    if (kind === "freesurfer_surface") {{
+      // Belt-and-suspenders: glTF's alphaMode=BLEND already marks the
+      // material transparent, but some renderers don't honor it without
+      // explicit depthWrite=false too.
+      if (mesh && mesh.material) {{
+        mesh.material.transparent = true;
+        mesh.material.depthWrite = false;
       }}
       surfaceNodes.push(obj);
     }} else if (extras.shank) {{
@@ -907,6 +955,8 @@ async function loadMri(t1Meta) {{
     ];
     mriRasCursor = _apply4x4(mriVolume.affine, mriVoxCursor);
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+    // Kick the 3D cut planes — they reuse the same parsed volume.
+    initCutPlanes(mriVolume);
   }} catch (err) {{
     console.error("MRI load failed", err);
     for (const axis of ["axial","coronal","sagittal"]) {{
@@ -917,6 +967,199 @@ async function loadMri(t1Meta) {{
       ctx.fillText("MRI load failed: " + err.message, 6, 18);
     }}
   }}
+}}
+
+// ---------- 3D cut planes ------------------------------------------
+//
+// Once the NIfTI is parsed we upload it as a 3D texture and add three
+// textured quads (axial / coronal / sagittal) to the scene. A custom
+// shader maps each fragment's world position back to voxel coords via
+// the inverse affine and samples the volume.
+//
+// Defaults: planes are HIDDEN. Each plane has its own checkbox+slider
+// in the toolbar; clicking a contact also moves all three sliders so
+// the planes intersect at the contact.
+
+const cutPlanes = {{}};     // axis -> THREE.Mesh
+let cutVolumeBox = null;   // world-RAS bbox of the volume corners
+
+function _volumeRasBbox(vol) {{
+  const [Nx, Ny, Nz] = vol.dim;
+  let xmin = Infinity, xmax = -Infinity;
+  let ymin = Infinity, ymax = -Infinity;
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 0; i <= 1; i++) for (let j = 0; j <= 1; j++) for (let k = 0; k <= 1; k++) {{
+    const [x, y, z] = _apply4x4(vol.affine, [i * Nx, j * Ny, k * Nz]);
+    if (x < xmin) xmin = x; if (x > xmax) xmax = x;
+    if (y < ymin) ymin = y; if (y > ymax) ymax = y;
+    if (z < zmin) zmin = z; if (z > zmax) zmax = z;
+  }}
+  return {{ xmin, xmax, ymin, ymax, zmin, zmax }};
+}}
+
+function _buildVolumeTexture(vol) {{
+  // Data3DTexture wants Uint8Array (R-channel) for our use case. The
+  // FS T1 is already uint8; float32 inputs get windowed to uint8.
+  let arr = vol.data;
+  if (!(arr instanceof Uint8Array)) {{
+    const out = new Uint8Array(arr.length);
+    const range = Math.max(1e-6, vol.displayMax - vol.displayMin);
+    const lo = vol.displayMin;
+    for (let i = 0; i < arr.length; i++) {{
+      out[i] = Math.max(0, Math.min(255, Math.round((arr[i] - lo) / range * 255)));
+    }}
+    arr = out;
+  }}
+  const tex = new THREE.Data3DTexture(arr, vol.dim[0], vol.dim[1], vol.dim[2]);
+  tex.format = THREE.RedFormat;
+  tex.type = THREE.UnsignedByteType;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.wrapR = THREE.ClampToEdgeWrapping;
+  tex.wrapS = THREE.ClampToEdgeWrapping;
+  tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}}
+
+function _makeCutPlane(axis, bbox, volTex, vol) {{
+  // axis: "axial" (world Z), "coronal" (world Y), "sagittal" (world X).
+  // PlaneGeometry default is XY plane with +Z normal; we rotate as
+  // needed so the plane lies in the chosen RAS plane.
+  let width, height;
+  if (axis === "axial") {{ width = bbox.xmax - bbox.xmin; height = bbox.ymax - bbox.ymin; }}
+  else if (axis === "coronal") {{ width = bbox.xmax - bbox.xmin; height = bbox.zmax - bbox.zmin; }}
+  else {{ width = bbox.ymax - bbox.ymin; height = bbox.zmax - bbox.zmin; }}
+
+  const geo = new THREE.PlaneGeometry(width, height);
+
+  // Inverse affine: world RAS -> voxel index. mat4 stored row-major in
+  // affineInv; THREE.Matrix4 wants column-major (set() takes row-major
+  // and transposes for you).
+  const inv = vol.affineInv;
+  const rasToVox = new THREE.Matrix4().set(
+    inv[0][0], inv[0][1], inv[0][2], inv[0][3],
+    inv[1][0], inv[1][1], inv[1][2], inv[1][3],
+    inv[2][0], inv[2][1], inv[2][2], inv[2][3],
+    0, 0, 0, 1,
+  );
+
+  const mat = new THREE.ShaderMaterial({{
+    uniforms: {{
+      uVolume: {{ value: volTex }},
+      uRasToVox: {{ value: rasToVox }},
+      uVolumeSize: {{ value: new THREE.Vector3(vol.dim[0], vol.dim[1], vol.dim[2]) }},
+      uOpacity: {{ value: 0.95 }},
+    }},
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {{
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }}
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+      uniform sampler3D uVolume;
+      uniform mat4 uRasToVox;
+      uniform vec3 uVolumeSize;
+      uniform float uOpacity;
+      varying vec3 vWorldPos;
+      void main() {{
+        vec3 vox = (uRasToVox * vec4(vWorldPos, 1.0)).xyz;
+        vec3 uvw = (vox + 0.5) / uVolumeSize;
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) discard;
+        float intensity = texture(uVolume, uvw).r;
+        gl_FragColor = vec4(vec3(intensity), uOpacity);
+      }}
+    `,
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+  }});
+
+  const plane = new THREE.Mesh(geo, mat);
+  plane.userData.axis = axis;
+  // Rotate so the plane lies in the right RAS plane.
+  if (axis === "sagittal") plane.rotation.y = Math.PI / 2;          // normal = +X
+  else if (axis === "coronal") plane.rotation.x = -Math.PI / 2;     // normal = +Y
+  // axial keeps default normal = +Z
+  // Initial center (mid of bbox):
+  const cx = 0.5 * (bbox.xmin + bbox.xmax);
+  const cy = 0.5 * (bbox.ymin + bbox.ymax);
+  const cz = 0.5 * (bbox.zmin + bbox.zmax);
+  if (axis === "axial") plane.position.set(cx, cy, cz);
+  else if (axis === "coronal") plane.position.set(cx, cy, cz);
+  else plane.position.set(cx, cy, cz);
+  plane.visible = false;
+  return plane;
+}}
+
+function _bboxRangeForAxis(bbox, axis) {{
+  if (axis === "axial") return [bbox.zmin, bbox.zmax];
+  if (axis === "coronal") return [bbox.ymin, bbox.ymax];
+  return [bbox.xmin, bbox.xmax];
+}}
+
+function _setCutPlaneValue(axis, value) {{
+  const plane = cutPlanes[axis];
+  if (!plane) return;
+  if (axis === "axial") plane.position.z = value;
+  else if (axis === "coronal") plane.position.y = value;
+  else plane.position.x = value;
+  // Reflect into the slider + coord label.
+  const ctl = document.querySelector(`.plane-ctl[data-axis="${{axis}}"]`);
+  if (ctl) {{
+    const slider = ctl.querySelector('input[type="range"]');
+    if (slider && !slider.disabled) slider.value = String(value);
+    const coord = ctl.querySelector(".coord");
+    if (coord) coord.textContent = value.toFixed(1);
+  }}
+}}
+
+function initCutPlanes(vol) {{
+  // Wipe any previous planes (defensive — loadMri can fire twice).
+  for (const axis of Object.keys(cutPlanes)) {{
+    scene.remove(cutPlanes[axis]);
+    delete cutPlanes[axis];
+  }}
+  cutVolumeBox = _volumeRasBbox(vol);
+  const tex = _buildVolumeTexture(vol);
+  for (const axis of ["axial", "coronal", "sagittal"]) {{
+    const plane = _makeCutPlane(axis, cutVolumeBox, tex, vol);
+    cutPlanes[axis] = plane;
+    scene.add(plane);
+    // Wire toolbar control
+    const ctl = document.querySelector(`.plane-ctl[data-axis="${{axis}}"]`);
+    if (!ctl) continue;
+    const cb = ctl.querySelector('input[type="checkbox"]');
+    const slider = ctl.querySelector('input[type="range"]');
+    const coord = ctl.querySelector(".coord");
+    const [lo, hi] = _bboxRangeForAxis(cutVolumeBox, axis);
+    slider.min = String(lo.toFixed(1));
+    slider.max = String(hi.toFixed(1));
+    slider.step = "0.5";
+    slider.value = String(((lo + hi) / 2).toFixed(1));
+    slider.disabled = false;
+    coord.textContent = slider.value;
+    cb.checked = false;
+    plane.visible = false;
+    cb.addEventListener("change", () => {{ plane.visible = cb.checked; }});
+    slider.addEventListener("input", () => {{
+      const v = parseFloat(slider.value);
+      _setCutPlaneValue(axis, v);
+    }});
+  }}
+}}
+
+function snapCutPlanesToRas(ras) {{
+  // Move each plane onto the RAS coordinate; do not toggle visibility.
+  if (!cutVolumeBox) return;
+  _setCutPlaneValue("axial", ras[2]);
+  _setCutPlaneValue("coronal", ras[1]);
+  _setCutPlaneValue("sagittal", ras[0]);
 }}
 
 // ---------- sidebar -----------------------------------------------
@@ -1008,17 +1251,24 @@ function isolateShank(shank, toggle) {{
   }}
 }}
 
+function _setContactMaterial(node, material) {{
+  // node is the outer Object3D; the visible geometry is on its child
+  // mesh, which we cached during the GLB traversal.
+  const mesh = node && node.userData && node.userData._mesh;
+  if (mesh) mesh.material = material;
+}}
+
 function selectContact(label, shank) {{
   isolateShank(shank, /*toggle=*/false);
 
   // Restore previously selected contact's material
   if (selectedContact && originalMaterials.has(selectedContact)) {{
-    selectedContact.material = originalMaterials.get(selectedContact);
+    _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
   }}
   const node = nodesByName.get("contact/" + label);
   if (node) {{
     selectedContact = node;
-    node.material = RED;
+    _setContactMaterial(node, RED);
     // Snap the controls target onto the contact center and pull camera in close.
     const pos = node.getWorldPosition(new THREE.Vector3());
     controls.target.copy(pos);
@@ -1029,6 +1279,7 @@ function selectContact(label, shank) {{
     // Snap the MRI slice viewer to the contact's RAS coordinate so the
     // axial/coronal/sagittal planes pass through it.
     snapSlicesToRas([pos.x, pos.y, pos.z]);
+    snapCutPlanesToRas([pos.x, pos.y, pos.z]);
   }}
   // Toggle selection in sidebar UI
   document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
@@ -1043,7 +1294,7 @@ function showAll() {{
   selectedShank = null;
   for (const [, nodes] of shankNodes) for (const n of nodes) n.visible = true;
   if (selectedContact && originalMaterials.has(selectedContact)) {{
-    selectedContact.material = originalMaterials.get(selectedContact);
+    _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
     selectedContact = null;
   }}
   document.querySelectorAll(".shank-card").forEach(c => c.classList.remove("active"));
