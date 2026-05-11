@@ -606,8 +606,8 @@ _HTML_TEMPLATE = """<!doctype html>
       </label>
       <label class="plane-ctl" data-control="brain-alpha">
         <span class="axis">Brain α</span>
-        <input type="range" min="0" max="1" step="0.05" value="0.35" />
-        <span class="coord">0.35</span>
+        <input type="range" min="0" max="1" step="0.05" value="0.45" />
+        <span class="coord">0.45</span>
       </label>
       <label class="plane-ctl" data-control="plane-alpha">
         <span class="axis">Slice α</span>
@@ -804,8 +804,14 @@ loader.load("scene.glb", gltf => {{
     }}
   }});
   setDbg("glb", `${{nSurf}} surface · ${{nShafts}} shafts · ${{nContacts}} contacts`, "ok");
-  // Apply the default Surface color now that surfaces are indexed.
+  // Apply the default Surface color + Brain α slider value now that
+  // surfaces are indexed. Without these, the GLB's authored material
+  // state (opaque white) would persist until the user touched a
+  // slider — even though both controls have non-default initial
+  // positions in the toolbar. The result was a counter-intuitive
+  // "slider says 0.45 but brain is solid" boot state.
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
+  if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
   fitToObject(gltfRoot);
 }}, undefined, err => {{
   console.error("GLB load failed", err);
@@ -1471,6 +1477,24 @@ function _applyInitialSurfaceColor() {{
 // Brain α slider — opacity for every FS surface mesh. Surfaces are
 // indexed during GLB load, so this works regardless of how many
 // hemispheres / surface kinds got loaded.
+function _applyBrainAlpha(v) {{
+  for (const node of surfaceNodes) {{
+    const mesh = node.userData && node.userData._mesh;
+    if (!mesh || !mesh.material) continue;
+    mesh.material.opacity = v;
+    mesh.material.transparent = v < 0.999;
+    mesh.material.depthWrite = v >= 0.999;
+    mesh.material.needsUpdate = true;
+  }}
+}}
+function _applyInitialBrainAlpha() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="brain-alpha"]');
+  if (!ctl) return;
+  const slider = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  if (coord) coord.textContent = parseFloat(slider.value).toFixed(2);
+  _applyBrainAlpha(parseFloat(slider.value));
+}}
 (function _wireBrainAlpha() {{
   const ctl = document.querySelector('.plane-ctl[data-control="brain-alpha"]');
   if (!ctl) return;
@@ -1479,14 +1503,7 @@ function _applyInitialSurfaceColor() {{
   slider.addEventListener("input", () => {{
     const v = parseFloat(slider.value);
     coord.textContent = v.toFixed(2);
-    for (const node of surfaceNodes) {{
-      const mesh = node.userData && node.userData._mesh;
-      if (!mesh || !mesh.material) continue;
-      mesh.material.opacity = v;
-      mesh.material.transparent = v < 0.999;
-      mesh.material.depthWrite = false;
-      mesh.material.needsUpdate = true;
-    }}
+    _applyBrainAlpha(v);
   }});
 }})();
 
