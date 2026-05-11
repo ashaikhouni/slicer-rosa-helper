@@ -122,13 +122,42 @@ def _discover_lut(fs: FSSubject, override: str | None) -> Path | None:
 # ---------------------------------------------------------------------
 
 
+def _load_image_as_sitk(path: Path):
+    """Load any nibabel-supported format and return a SITK ``Image``.
+
+    SITK's pip wheels don't always include the MGH ImageIO (the CI
+    builders carry a slimmer SITK than typical local installs), so a
+    bare ``sitk.ReadImage("...T1.mgz")`` fails with "Unable to determine
+    ImageIO reader" on those systems. nibabel reads MGZ + NIfTI + many
+    others everywhere, so we route through nibabel and stamp the
+    resulting SITK image with the source affine.
+    """
+    import nibabel as nib
+    import SimpleITK as sitk
+    from rosa_detect.service import stamp_ijk_to_ras_on_sitk
+
+    img = nib.load(str(path))
+    arr_ijk = np.asarray(img.dataobj, dtype=np.float32)
+    # nibabel arrays are (i, j, k); SITK's GetImageFromArray expects
+    # (k, j, i) — transpose to match.
+    arr_kji = np.transpose(arr_ijk, (2, 1, 0))
+    sitk_img = sitk.GetImageFromArray(np.ascontiguousarray(arr_kji))
+    zooms = np.asarray(img.header.get_zooms()[:3], dtype=float)
+    sitk_img.SetSpacing(tuple(float(v) for v in zooms))
+    stamp_ijk_to_ras_on_sitk(sitk_img, np.asarray(img.affine, dtype=float))
+    return sitk_img
+
+
 def _register_fs_to_ct(t1_path: Path, ct_path: Path) -> np.ndarray:
     """Rigid Mattes-MI register FS T1 to CT; return the FS-RAS -> CT-RAS 4×4."""
     import SimpleITK as sitk
     from rosa_core.registration import register_rigid_mi
 
+    # CT is a NIfTI written by the pipeline — SITK reads it natively
+    # everywhere. T1 is FS-native (.mgz); route through nibabel so the
+    # MGH IO requirement is satisfied via a portable backend.
     fixed = sitk.ReadImage(str(ct_path))
-    moving = sitk.ReadImage(str(t1_path))
+    moving = _load_image_as_sitk(t1_path)
     _stderr(
         f"[view] registering FS T1 ({t1_path.name}) -> CT ({ct_path.name}) "
         f"(rigid + Mattes MI)…"
