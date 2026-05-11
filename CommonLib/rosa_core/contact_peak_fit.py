@@ -44,9 +44,10 @@ from .volume_sampling import sample_trilinear_at_ras
 # that's not in the scene (CLI agent, peak-driven path with no prior
 # Auto Fit run, dataset evaluation), the consumer must compute the same
 # LoG itself. Three call sites used to do this — CLI's
-# ``commands/contacts.py`` and Slicer's
-# ``ContactsTrajectoryView._compute_log_volume_from_ct`` plus an inline
-# block in ``rosa_detect.contact_pitch_v1_fit``. Same SITK kernel each
+# ``commands/contacts.py``, Slicer's
+# ``ContactsTrajectoryView._compute_log_volume_from_ct``, and the
+# detection orchestrator at
+# ``rosa_detect.candidate_seeds.orchestrator``. Same SITK kernel each
 # time (sigma=1 mm, LaplacianRecursiveGaussian on a float32 view); a
 # single helper keeps them in lockstep.
 

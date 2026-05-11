@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "vendor": "DIXI Medical",
   "series": "D08",
   "units": "mm",
@@ -17,6 +17,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 16.0,
       "contact_center_offsets_from_tip_mm": [
@@ -38,6 +39,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 26.5,
       "contact_center_offsets_from_tip_mm": [
@@ -62,6 +64,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.5,
       "contact_center_offsets_from_tip_mm": [
@@ -88,6 +91,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.5,
       "contact_center_offsets_from_tip_mm": [
@@ -116,7 +120,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 26.5,
       "contact_center_offsets_from_tip_mm": [
@@ -141,7 +145,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.5,
       "contact_center_offsets_from_tip_mm": [
@@ -168,7 +172,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.5,
       "contact_center_offsets_from_tip_mm": [
@@ -197,7 +201,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 47.5,
       "contact_center_offsets_from_tip_mm": [
@@ -228,7 +232,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 54.5,
       "contact_center_offsets_from_tip_mm": [
@@ -261,7 +265,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.97,
-      "center_to_center_separation_mm": 3.97,
+      "pitch_mm": 3.97,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 61.5,
       "contact_center_offsets_from_tip_mm": [
@@ -294,7 +298,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 2.43,
-      "center_to_center_separation_mm": 4.43,
+      "pitch_mm": 4.43,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 68.5,
       "contact_center_offsets_from_tip_mm": [
@@ -327,6 +331,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 51.0,
       "contact_center_offsets_from_tip_mm": [
@@ -358,6 +363,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 61.5,
       "contact_center_offsets_from_tip_mm": [
@@ -394,6 +400,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": 7.0,
       "total_exploration_length_mm": 62.0,
       "contact_center_offsets_from_tip_mm": [
@@ -427,6 +434,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": 11.0,
       "total_exploration_length_mm": 70.0,
       "contact_center_offsets_from_tip_mm": [
@@ -460,6 +468,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": 11.0,
       "total_exploration_length_mm": 80.5,
       "contact_center_offsets_from_tip_mm": [
@@ -494,7 +503,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 1.9,
-      "center_to_center_separation_mm": 3.9,
+      "pitch_mm": 3.9,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 33.2,
       "contact_center_offsets_from_tip_mm": [
@@ -520,7 +529,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 2.8,
-      "center_to_center_separation_mm": 4.8,
+      "pitch_mm": 4.8,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 40.4,
       "contact_center_offsets_from_tip_mm": [
@@ -546,7 +555,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 0.8,
       "intra_contact_insulation_mm": 4.1,
-      "center_to_center_separation_mm": 6.1,
+      "pitch_mm": 6.1,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 50.8,
       "contact_center_offsets_from_tip_mm": [
@@ -573,7 +582,7 @@
       "contact_length_mm": 1.5,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.0,
+      "pitch_mm": 3.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 12.0,
       "contact_center_offsets_from_tip_mm": [
@@ -601,7 +610,7 @@
       "contact_length_mm": 1.5,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 0.5,
-      "center_to_center_separation_mm": 2.0,
+      "pitch_mm": 2.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 9.0,
       "contact_center_offsets_from_tip_mm": [
@@ -629,7 +638,7 @@
       "contact_length_mm": 3.0,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 4.0,
-      "center_to_center_separation_mm": 7.0,
+      "pitch_mm": 7.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 25.5,
       "contact_center_offsets_from_tip_mm": [
@@ -657,7 +666,7 @@
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
       "intra_contact_insulation_mm": 0.5,
-      "center_to_center_separation_mm": 2.0,
+      "pitch_mm": 2.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 8.5,
       "contact_center_offsets_from_tip_mm": [
@@ -685,7 +694,7 @@
       "contact_length_mm": 1.5,
       "diameter_mm": 1.36,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.0,
+      "pitch_mm": 3.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 11.5,
       "contact_center_offsets_from_tip_mm": [
@@ -713,7 +722,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 1.5,
-      "center_to_center_separation_mm": 3.5,
+      "pitch_mm": 3.5,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 11.5,
       "contact_center_offsets_from_tip_mm": [
@@ -742,7 +751,7 @@
       "contact_length_mm": 2.0,
       "diameter_mm": 1.27,
       "intra_contact_insulation_mm": 8.0,
-      "center_to_center_separation_mm": 10.0,
+      "pitch_mm": 10.0,
       "inter_group_insulation_mm": null,
       "total_exploration_length_mm": 31.0,
       "contact_center_offsets_from_tip_mm": [

@@ -57,11 +57,20 @@ def run_guided_detect(
     roi_radius_mm: float = 5.0,
     max_angle_deg: float = 12.0,
     max_lateral_shift_mm: float = 6.0,
+    match_against_auto: bool = True,
 ) -> list[dict[str, Any]]:
-    """Per-seed guided fit using a single shared feature volume.
+    """Per-seed guided fit. Thin wrapper over
+    ``rosa_detect.guided_fit_engine.fit_seeds_against_auto`` so the CLI
+    and the Slicer Guided Fit module share a single canonical fit path.
 
-    Returns a list of trajectory dicts shaped like ``DetectedTrajectory``
-    so the same writer can serialize them.
+    When ``match_against_auto`` is True (default), runs Auto Fit
+    internally once and matches each seed against the resulting
+    trajectories before falling back to PCA. This eliminates the failure
+    class where a planned seed is laterally offset from the imaged shank
+    by more than the PCA ROI radius (e.g. T22/LMFG: planned-vs-imaged
+    drift drops to "too few LoG blobs in ROI" without auto-match).
+
+    Returns a list of trajectory dicts shaped like ``DetectedTrajectory``.
     """
     import SimpleITK as sitk
     from shank_core.io import image_ijk_ras_matrices
@@ -72,24 +81,27 @@ def run_guided_detect(
     ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
     _stderr(f"[detect] computing guided-fit features on {p.name}…")
     features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk)
-    img = features["img"]
     ijk_to_ras = features["ijk_to_ras_mat"]
     ras_to_ijk = features["ras_to_ijk_mat"]
 
+    fits = gfe.fit_seeds_against_auto(
+        seeds=seeds,
+        features=features,
+        ijk_to_ras_mat=ijk_to_ras,
+        ras_to_ijk_mat=ras_to_ijk,
+        auto_trajs=None if match_against_auto else [],
+        auto_run_if_missing=match_against_auto,
+        roi_radius_mm=roi_radius_mm,
+        max_angle_deg=max_angle_deg,
+        max_lateral_shift_mm=max_lateral_shift_mm,
+        progress_log=_stderr,
+    )
+
     out: list[dict[str, Any]] = []
-    for seed in seeds:
-        name = str(seed.get("name") or f"seed_{len(out)+1}")
-        fit = gfe.fit_trajectory(
-            seed["start_ras"], seed["end_ras"], features,
-            ijk_to_ras, ras_to_ijk,
-            roi_radius_mm=roi_radius_mm,
-            max_angle_deg=max_angle_deg,
-            max_lateral_shift_mm=max_lateral_shift_mm,
-        )
+    for seed, fit in zip(seeds, fits):
+        name = str(fit.get("name") or seed.get("name") or f"seed_{len(out)+1}")
         if not fit.get("success"):
             _stderr(f"[detect] guided fit failed for {name}: {fit.get('reason')}")
-            # Keep the seed in the output so downstream stages still see
-            # the planned trajectory; mark it low/zero confidence.
             out.append({
                 "name": name,
                 "start_ras": list(seed["start_ras"]),
@@ -100,6 +112,7 @@ def run_guided_detect(
                 "bolt": {"source": "none"},
                 "guided_fit_failed": True,
                 "guided_fit_reason": fit.get("reason"),
+                "matched_path": fit.get("matched_path", "failed"),
             })
             continue
         traj: dict[str, Any] = {
@@ -110,6 +123,7 @@ def run_guided_detect(
             "confidence_label": str(fit.get("confidence_label") or ""),
             "electrode_model": seed.get("electrode_model") or "",
             "bolt": {"source": str(fit.get("bolt_source") or "none")},
+            "matched_path": fit.get("matched_path", "pca"),
         }
         if fit.get("skull_entry_ras"):
             traj["skull_entry_ras"] = list(fit["skull_entry_ras"])
@@ -130,6 +144,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--roi-radius-mm", type=float, default=5.0)
     parser.add_argument("--max-angle-deg", type=float, default=12.0)
     parser.add_argument("--max-lateral-shift-mm", type=float, default=6.0)
+    parser.add_argument(
+        "--no-match-against-auto",
+        dest="match_against_auto",
+        action="store_false",
+        default=True,
+        help="Skip the Auto Fit pass that --seeds normally runs to match "
+             "seeds against; falls back to pure PCA fit_trajectory.",
+    )
     args = parser.parse_args(argv)
 
     if args.seeds:
@@ -140,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             roi_radius_mm=args.roi_radius_mm,
             max_angle_deg=args.max_angle_deg,
             max_lateral_shift_mm=args.max_lateral_shift_mm,
+            match_against_auto=args.match_against_auto,
         )
     else:
         result = run_auto_detect(args.ct_path)

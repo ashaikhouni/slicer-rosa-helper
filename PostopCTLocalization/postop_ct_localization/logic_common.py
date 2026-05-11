@@ -128,7 +128,7 @@ class PostopCTLocalizationLogicBaseMixin:
                 # Pull the canonical-resampled volume from the same
                 # `prepare_volume` path that detection uses, so manual
                 # picks stay consistent with Auto / Guided picks.
-                from rosa_detect.contact_pitch_v1_fit import prepare_volume
+                from rosa_detect.primitives.preprocessing import prepare_volume
                 _img = _sitk.GetImageFromArray(
                     slicer.util.arrayFromVolume(ct_volume_for_pick)
                 )

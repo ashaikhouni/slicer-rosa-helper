@@ -25,19 +25,14 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_core import (
-    candidate_ids_for_vendors,
     compute_qc_metrics,
-    detect_contacts_on_axis,
     electrode_length_mm,
     generate_contacts,
     load_electrode_library,
     lps_to_ras_point,
     model_map,
-    ras_contacts_to_contact_records,
-    suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_core.electrode_classifier import classify_electrode_model
 from rosa_scene import (
     ElectrodeSceneService,
     LayoutService,
@@ -107,12 +102,17 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
-        self.lastPeakDriftFlags = []
         # User-chosen model per trajectory name. Persists across
         # `_populate_contact_table` rebuilds (Refresh, source change,
         # rename) so the manual choice doesn't get clobbered by
         # Auto Fit's `Rosa.BestModelId` suggestion.
         self._userModelOverrides: dict[str, str] = {}
+        # Per-CT cache of (features, bolts) so back-to-back placement
+        # passes (Suggest models -> Generate contacts -> Update
+        # contacts) don't recompute LoG / Frangi / hull-distance / bolt
+        # extraction. Keyed by (volume_node_id, mtime); auto-invalidates
+        # when the user re-loads the CT or its data changes.
+        self._featuresCache: dict[tuple, tuple] = {}
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -342,7 +342,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         self.contactTable = qt.QTableWidget()
-        self.contactTable.setColumnCount(8)
+        self.contactTable.setColumnCount(7)
         # Short header labels to fit narrow columns; tooltips on the
         # header items carry the full meaning for the user to hover.
         _contact_headers = [
@@ -350,11 +350,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             ("Traj",    "Trajectory name"),
             ("Len mm",  "Trajectory length (entry → tip) in mm"),
             ("Model",   "Electrode model picked for this trajectory"),
-            ("# C",     "Number of contacts (read from the picked model)"),
+            ("# C",     "Number of contacts — derived from the picked model "
+                        "(read-only). Pick a different model to change."),
             ("Elec mm", "Active electrode length in mm"),
             ("Tip At",  "Where the tip sits relative to the trajectory line "
-                        "(target vs entry)"),
-            ("Shift",   "Tip shift along the axis in mm"),
+                        "(target vs entry). Controls electrode-render direction."),
         ]
         self.contactTable.setHorizontalHeaderLabels(
             [label for label, _ in _contact_headers]
@@ -383,7 +383,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             (4, 70),    # # Contacts
             (5, 90),    # Elec Length
             (6, 70),    # Tip At
-            (7, 90),    # Tip Shift
         ):
             self.contactTable.setColumnWidth(col, width)
         header.setStretchLastSection(False)
@@ -407,6 +406,21 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.applyModelAllButton = qt.QPushButton("Apply model to all")
         self.applyModelAllButton.clicked.connect(self.onApplyModelAllClicked)
         defaults_row.addWidget(self.applyModelAllButton)
+        # "Suggest models" — opt-in CT-aware classification for empty rows.
+        # The library subset used for the suggestion comes from the pitch-
+        # strategy combo below ("dixi" / "pmt_35" / "auto" / etc.).
+        # Per user feedback (2026-05-10): the on-load auto-classify was
+        # guessing every row from the entire library — wrong default.
+        # User now opts in by clicking this button.
+        self.suggestModelsButton = qt.QPushButton("Suggest models")
+        self.suggestModelsButton.setToolTip(
+            "Run the CT-aware electrode classifier to fill in model_id "
+            "for any row whose model is empty. Library subset comes from "
+            "the 'Pitch strategy' combo below."
+        )
+        self.suggestModelsButton.clicked.connect(self.onSuggestModelsClicked)
+        self.suggestModelsButton.setEnabled(False)
+        defaults_row.addWidget(self.suggestModelsButton)
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
 
@@ -428,15 +442,22 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         form.addRow("Pitch strategy", self.contactsPitchStrategyCombo)
 
-        # Model-driven: synthesize contacts at the assigned electrode
-        # model's nominal offsets along the fitted line.
-        # Peak-driven: sample LoG sigma=1 along the axis, pick peaks,
-        # match to the library, emit contacts at the detected peak
-        # positions. Falls back to model-driven per-trajectory when
-        # the axis doesn't produce enough peaks to resolve a model.
+        # Detection mode (per the 2026-05-09 staged-pipeline lift):
+        #
+        # Staged (snap + matched filter): runs the full
+        #     ``rosa_core.placement_modes.place_seeg`` pipeline. Per-row
+        #     model picker drives mode 4 (vouched) vs mode 5 (library
+        #     match). Snaps each user seed to its closest v1 candidate so
+        #     placement inherits bolt-anchored geometry — same code path
+        #     as the CLI's ``rosa-agent place``.
+        #
+        # Model-driven (nominal): synthesizes contacts at the assigned
+        #     electrode model's nominal slot offsets along the fitted
+        #     line. Manual fallback when staged rejects (off-axis seed,
+        #     missing v1 candidate, etc.).
         self.detectionModeCombo = qt.QComboBox()
+        self.detectionModeCombo.addItem("Staged (snap + matched filter)", "staged")
         self.detectionModeCombo.addItem("Model-driven (nominal)", "model_driven")
-        self.detectionModeCombo.addItem("Peak-driven (CT peaks)", "peak_driven")
         form.addRow("Detection mode", self.detectionModeCombo)
 
         self.contactsNodeNameEdit = qt.QLineEdit("ROSA_Contacts")
@@ -645,33 +666,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         combo.addItems(["target", "entry"])
         return combo
 
-    def _build_tip_shift_spinbox(self):
-        spin = qt.QDoubleSpinBox()
-        spin.setDecimals(2)
-        spin.setRange(-50.0, 50.0)
-        spin.setSingleStep(0.25)
-        spin.setValue(0.0)
-        spin.setSuffix(" mm")
-        return spin
-
-    def _build_contact_count_spinbox(self):
-        """Integer spinbox for the # Contacts column. Auto-populated
-        when an electrode model is assigned; editable independently for
-        peak-driven model-free emission. ``0`` = "use the model" (or
-        emit all detected peaks if no model is assigned).
-        """
-        spin = qt.QSpinBox()
-        spin.setRange(0, 32)
-        spin.setValue(0)
-        spin.setToolTip(
-            "Number of contacts to emit in peak-driven mode.\n"
-            "  - 0 (default): use the assigned model's contact count "
-            "(or emit all detected peaks if no model is assigned).\n"
-            "  - >0: emit exactly N contacts as the strongest peaks "
-            "along the axis. Lets you skip the model assignment when "
-            "the count is known but the exact electrode pattern isn't."
-        )
-        return spin
+    # Tip-shift used to be a QDoubleSpinBox here, but the staged placer
+    # owns contact positions entirely — there's no `tip_shift_mm` input
+    # on `place_seeg` and the value the spinbox produced was silently
+    # dropped. If the user wants a different tip location, they should
+    # move the trajectory line's endpoints (which DOES re-seed the
+    # placer). UI affordance removed 2026-05-10.
 
     def _build_use_checkbox(self):
         check = qt.QCheckBox()
@@ -727,35 +727,31 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._set_readonly_text_item(row, 5, length_text)
 
     def _update_contact_count_cell(self, row):
-        """Sync the # Contacts spinbox to the currently-selected
-        electrode model. Overwrites any prior user value — the model
-        change is the implicit "I want this many contacts" signal; the
-        user can re-edit afterward to override.
+        """Display the picked electrode model's contact count in the
+        read-only ``# C`` cell. Updates whenever the Model combo
+        changes (via ``_bind_model_length_update``).
+
+        The contact count is NOT a user input — it's derived from
+        whichever library model is selected. Pick a different model
+        to change the count. Empty when no model is assigned.
         """
-        spin = self.contactTable.cellWidget(row, 4)
-        if spin is None:
-            return
         model_combo = self.contactTable.cellWidget(row, 3)
-        model_id = widget_current_text(model_combo).strip()
-        n = 0
+        model_id = widget_current_text(model_combo).strip() if model_combo else ""
+        text = ""
         if model_id:
             offsets = self.modelsById.get(model_id, {}).get(
                 "contact_center_offsets_from_tip_mm",
             ) or []
-            n = len(offsets)
-        spin.blockSignals(True)
-        try:
-            spin.setValue(int(n))
-        finally:
-            spin.blockSignals(False)
+            text = str(len(offsets))
+        self._set_readonly_text_item(row, 4, text)
 
     def _get_contact_count(self, row):
-        spin = self.contactTable.cellWidget(row, 4)
-        if spin is None:
+        item = self.contactTable.item(row, 4)
+        if item is None:
             return 0
         try:
-            return int(spin.value)
-        except Exception:
+            return int(item.text() or "0")
+        except (TypeError, ValueError):
             return 0
 
     def _load_electrode_library(self):
@@ -775,9 +771,25 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.log(f"[electrodes] loaded {len(self.modelIds)} models")
 
     def _populate_contact_table(self, trajectories):
+        """Populate the per-row table.
+
+        Per user feedback (2026-05-10): default the model combo to empty
+        regardless of trajectory source. Even ``best_model_id`` stamped by
+        PostopCT Auto Fit's classifier is ignored on load — the user must
+        explicitly opt in to populate models via the "Suggest models"
+        button (which re-runs the CT-aware classifier scoped to the
+        selected pitch-strategy library) or pick manually per row.
+
+        Why: Auto Fit's per-trajectory classification is informational on
+        the line-node attribute but should not silently drive CTV's model
+        selection. The user controls what gets placed.
+
+        Only the user's manual override (from a prior CTV interaction)
+        persists across re-populate — that's what
+        ``_record_user_model_override`` is for.
+        """
         self._updatingContactTable = True
         self.contactTable.setRowCount(0)
-        auto_assigned = 0
         for row, traj in enumerate(trajectories):
             self.contactTable.insertRow(row)
             self.contactTable.setCellWidget(row, 0, self._build_use_checkbox())
@@ -786,46 +798,43 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            # Precedence: user's manual override > Auto-Fit suggestion >
-            # unified PaCER-style picker run live (CT-aware). Without this,
-            # manually-picked models silently revert to `best_model_id`
-            # on every populate cycle, and rows imported from sources
-            # that didn't stamp `best_model_id` (legacy planned/imported
-            # without picker) get the unified picker as a one-shot here.
-            suggested_model = self._userModelOverrides.get(traj["name"], "")
-            if not suggested_model:
-                suggested_model = str(traj.get("best_model_id") or "").strip()
-            if not suggested_model:
-                pick = self._classify_with_unified_picker(traj)
-                suggested_model = str(pick or "")
-            if not suggested_model:
-                # Last-ditch length-only fallback (no CT volume available).
-                suggested_model = suggest_model_id_for_trajectory(
-                    trajectory=traj,
-                    models_by_id=self.modelsById,
-                    model_ids=self.modelIds,
-                    tolerance_mm=5.0,
-                )
-            if suggested_model:
-                idx = model_combo.findText(suggested_model)
+            # Default empty. Only the user's manual override (sticky across
+            # re-populate) pre-fills.
+            override = self._userModelOverrides.get(traj["name"], "")
+            if override:
+                idx = model_combo.findText(override)
                 if idx >= 0:
                     model_combo.setCurrentIndex(idx)
-                    auto_assigned += 1
             self.contactTable.setCellWidget(row, 3, model_combo)
-            self.contactTable.setCellWidget(row, 4, self._build_contact_count_spinbox())
+            # Column 4 (# C) and column 5 (Elec mm) are both read-only;
+            # they're derived from the picked model and refresh whenever
+            # the Model combo changes (via _bind_model_length_update).
+            self._set_readonly_text_item(row, 4, "")
             self._set_readonly_text_item(row, 5, "")
             self._update_electrode_length_cell(row)
             self._update_contact_count_cell(row)
             self.contactTable.setCellWidget(row, 6, self._build_tip_at_combo())
-            self.contactTable.setCellWidget(row, 7, self._build_tip_shift_spinbox())
 
         enabled = bool(trajectories) and bool(self.modelsById)
         self.generateContactsButton.setEnabled(enabled)
         self.updateContactsButton.setEnabled(enabled)
         self.applyModelAllButton.setEnabled(enabled)
+        if hasattr(self, "suggestModelsButton"):
+            self.suggestModelsButton.setEnabled(enabled)
         if trajectories:
-            self.log(f"[contacts] ready for {len(trajectories)} trajectories")
-            self.log(f"[contacts] auto-assigned models for {auto_assigned}/{len(trajectories)}")
+            n_user_pre_assigned = sum(
+                1 for traj in trajectories
+                if self._userModelOverrides.get(traj["name"], "")
+            )
+            note = (
+                f"({n_user_pre_assigned} restored from prior session)"
+                if n_user_pre_assigned else
+                "(all empty — use 'Suggest models' to classify from CT, "
+                "or pick per row)"
+            )
+            self.log(
+                f"[contacts] ready for {len(trajectories)} trajectories {note}"
+            )
             self.contactTable.selectRow(0)
         else:
             self.log("[contacts] no trajectories available")
@@ -904,21 +913,23 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 continue
             model_combo = self.contactTable.cellWidget(row, 3)
             tip_at_combo = self.contactTable.cellWidget(row, 6)
-            tip_shift_spin = self.contactTable.cellWidget(row, 7)
             model_id = widget_current_text(model_combo).strip()
+            # Contact count is derived from the picked model (column 4
+            # is read-only) — surfaced in the assignment dict for the
+            # downstream electrode_scene render path that wants to know
+            # how many contacts a row will produce, but never used as
+            # a placer input. tip_shift_mm is similarly stamped as 0.0
+            # for downstream-schema compatibility; the staged placer
+            # has no tip-shift parameter. If a user wants to shift the
+            # tip, they move the trajectory's endpoints.
             n_contacts = self._get_contact_count(row)
-            # Rows without a model are kept for the peak-driven path —
-            # the engine emits all detected peaks (or the strongest
-            # ``n_contacts`` of them when set). Model-driven generation
-            # still requires a model and skips no-model rows
-            # downstream.
             rows.append(
                 {
                     "trajectory": traj_item.text(),
                     "model_id": model_id,
                     "n_contacts_target": int(n_contacts) if n_contacts > 0 else None,
                     "tip_at": widget_current_text(tip_at_combo) or "target",
-                    "tip_shift_mm": self._widget_value(tip_shift_spin),
+                    "tip_shift_mm": 0.0,
                     "xyz_offset_mm": [0.0, 0.0, 0.0],
                 }
             )
@@ -1057,6 +1068,106 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._set_workflow_active_source(self._selected_source_key())
         self.onRefreshClicked()
 
+    def onSuggestModelsClicked(self):
+        """Run the staged ``place_seeg`` pipeline to suggest models for
+        rows with empty model_id.
+
+        Crucially this uses the SAME engine ``Generate Contacts`` will use
+        when the user clicks it next — so the suggested picks match what
+        the eventual placement will pick. Previously this called the older
+        ``classify_electrode_model`` cascade (PaCER + walker-signature +
+        length fallback) which can disagree with the staged matched-filter
+        picker (the divergence the user flagged on 2026-05-10).
+
+        The button only fills rows whose model_id is currently empty.
+        Rows with a user override are left alone — clear them manually to
+        re-suggest. Library subset comes from the pitch-strategy combo.
+
+        This is expensive (full v1 detection + per-seed snap + scoring,
+        same cost as Generate Contacts) — wrapped in a progress dialog.
+        """
+        # Collect rows to suggest for (currently-empty ones only).
+        empty_rows = []
+        for row in range(self.contactTable.rowCount):
+            traj_item = self.contactTable.item(row, 1)
+            if traj_item is None:
+                continue
+            model_combo = self.contactTable.cellWidget(row, 3)
+            if model_combo is None:
+                continue
+            if widget_current_text(model_combo).strip():
+                continue
+            traj_name = traj_item.text()
+            traj = next(
+                (t for t in self.loadedTrajectories if t.get("name") == traj_name),
+                None,
+            )
+            if traj is None:
+                continue
+            empty_rows.append((row, traj_name, traj))
+
+        if not empty_rows:
+            self.log("[contacts:suggest] no empty rows to suggest for")
+            return
+
+        self.log(
+            f"[contacts:suggest] running place_seeg on {len(empty_rows)} "
+            f"empty rows (mode 5: snap + library matching)"
+        )
+
+        # Build a fake "assignments" dict so _generate_contacts_staged routes
+        # via mode 5 (no model_ids vouched). Then read back the placer's
+        # picked model_id per row.
+        trajectories = [traj for _row, _name, traj in empty_rows]
+        empty_assignments = {
+            "schema_version": "1.0",
+            "assignments": [
+                {
+                    "trajectory": name, "model_id": "",
+                    "tip_at": "target", "tip_shift_mm": 0.0,
+                    "xyz_offset_mm": [0.0, 0.0, 0.0],
+                }
+                for _row, name, _traj in empty_rows
+            ],
+        }
+        try:
+            _contacts, updated_assignments, _placed = self._generate_contacts_staged(
+                trajectories=trajectories,
+                assignments=empty_assignments,
+                log_context="suggest",
+            )
+        except Exception as exc:
+            self.log(f"[contacts:suggest] place_seeg failed: {exc}")
+            return
+
+        # Push picks back into the row combos.
+        picked_by_name = {
+            row.get("trajectory", ""): row.get("model_id", "")
+            for row in updated_assignments.get("assignments", [])
+        }
+        n_filled = 0
+        n_failed = 0
+        for row, name, _traj in empty_rows:
+            picked = picked_by_name.get(name, "")
+            if not picked:
+                n_failed += 1
+                continue
+            combo = self.contactTable.cellWidget(row, 3)
+            if combo is None:
+                n_failed += 1
+                continue
+            idx = combo.findText(picked)
+            if idx < 0:
+                n_failed += 1
+                continue
+            combo.setCurrentIndex(idx)
+            self._record_user_model_override(row)
+            n_filled += 1
+        self.log(
+            f"[contacts:suggest] filled {n_filled}/{len(empty_rows)} from "
+            f"staged-pipeline picks; failed {n_failed}"
+        )
+
     def onApplyModelAllClicked(self):
         model_id = widget_current_text(self.defaultModelCombo).strip()
         if not model_id:
@@ -1080,242 +1191,260 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         return nodes[0] if nodes else None
 
-    def _classify_with_unified_picker(self, traj):
-        """Run the unified electrode-model picker on one trajectory dict.
-
-        PaCER template-correlation against the canonical-resampled CT
-        when available, else the legacy length-only fallback (which the
-        caller does directly). Returns a model_id string or empty.
+    def _features_and_bolts_for(self, ct_node):
+        """Return ``(features, bolts)`` for ``ct_node``, cached per
+        (node id, mtime) so successive placement passes on the same
+        CT skip the (~5-10 s) LoG / Frangi / hull-distance / bolt
+        extraction. Cache is invalidated automatically when the
+        volume's MTime changes (re-load, pixel edit, etc.).
         """
+        from rosa_core.volume_loader import load_features_and_bolts
+        from rosa_scene.sitk_volume_adapter import image_from_volume_node
+
         try:
-            ct_node = self._resolve_postop_ct_node()
-            if ct_node is None:
-                return ""
-            import SimpleITK as sitk
-            from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.contact_pitch_v1_fit import prepare_volume
-            arr = slicer.util.arrayFromVolume(ct_node)
-            img = sitk.GetImageFromArray(arr)
-            i2r, r2i = image_ijk_ras_matrices(ct_node)
-            img, _i2r_canon, r2i_canon = prepare_volume(img, i2r, r2i)
-            ct_arr_kji = sitk.GetArrayFromImage(img).astype("float32")
-            start_ras = traj.get("start_ras") or traj.get("start")
-            end_ras = traj.get("end_ras") or traj.get("end")
-            if not start_ras or not end_ras:
-                return ""
-            strategy = "auto"
-            combo = getattr(self, "contactsPitchStrategyCombo", None)
-            if combo is not None:
-                data = combo.currentData
-                if isinstance(data, str) and data:
-                    strategy = data
-            pick = classify_electrode_model(
-                start_ras=start_ras, end_ras=end_ras,
-                pitch_strategy=strategy,
-                ct_volume_kji=ct_arr_kji,
-                ras_to_ijk_mat=r2i_canon,
-            )
-            if pick is None:
-                return ""
-            return str(pick.get("model_id") or "")
+            mtime = int(ct_node.GetMTime())
         except Exception:
-            return ""
+            mtime = 0
+        key = (ct_node.GetID(), mtime)
+        cached = self._featuresCache.get(key)
+        if cached is not None:
+            return cached
 
-    def _resolve_log_volume_node(self, ct_node):
-        """Look up the Auto-Fit-stashed LoG volume in the scene by the
-        canonical name owned by ``rosa_detect``. Returns None when
-        missing — caller falls back to recomputing.
+        sitk_img, _i2r, _r2i = image_from_volume_node(ct_node)
+        features, bolts = load_features_and_bolts(sitk_img)
+
+        # One-entry cache: drop any stale entries for the same node id
+        # (covers the "user re-loaded the volume" case where mtime
+        # bumped). Memory cost is dominated by the LoG/Frangi arrays
+        # in `features` — keeping more than the latest is wasteful.
+        same_id = [k for k in self._featuresCache if k[0] == ct_node.GetID()]
+        for stale in same_id:
+            self._featuresCache.pop(stale, None)
+        self._featuresCache[key] = (features, bolts)
+        return features, bolts
+
+    def _generate_contacts_staged(self, trajectories, assignments, log_context):
+        """Staged contact placement via ``rosa_core.placement_modes.place_seeg``.
+
+        Returns ``(contacts, updated_assignments, placed_by_traj)``.
+
+        Per-row model picker drives the dispatcher mode:
+          * Every selected row has an assigned model_id → mode 4
+            (placement-only with vouched model).
+          * At least one row has model_id="" → mode 5
+            (library matching via snap-to-v1).
+
+        Both modes snap the user-supplied seed to its closest v1 candidate
+        emission (inheriting bolt-anchored geometry) before running the
+        placer's stages A→F. Falls back to per-seed placement when no
+        v1 candidate is within tolerance.
+
+        Same code path as the CLI's ``rosa-agent place`` — keeps Slicer
+        and CLI bit-identical on the algorithm side.
         """
-        if ct_node is None:
-            return None
-        base = ct_node.GetName() or ""
-        if not base:
-            return None
-        from rosa_detect.service import feature_volume_node_name, feature_volume_spec
-        spec = feature_volume_spec()
-        log_label = str(spec.get("log_label") or "LoG_sigma1")
-        candidate_name = feature_volume_node_name(base, log_label)
-        found = slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
-        for node in found:
-            if node.GetName() == candidate_name:
-                return node
-        return None
+        from rosa_core.contact_placement import sample_neg_log_max
+        from rosa_core.placement_modes import Seed, place_seeg
+        from rosa_core.electrode_classifier import filter_models_for_strategy
 
-    def _compute_log_volume_from_ct(self, ct_node):
-        """Compute LoG sigma=1 on the CT node's image data, in memory."""
-        import numpy as np
-        from rosa_core.contact_peak_fit import compute_log_sigma1_volume
-
-        arr_kji = slicer.util.arrayFromVolume(ct_node)
-        if arr_kji is None:
-            raise RuntimeError("CT volume has no array data")
-        spacing = [0.0, 0.0, 0.0]
-        ct_node.GetSpacing(spacing)
-        return compute_log_sigma1_volume(
-            np.asarray(arr_kji, dtype=np.float32),
-            spacing_xyz=tuple(float(s) for s in spacing),
-        )
-
-    def _ras_to_ijk_matrix_np(self, volume_node):
-        """Return the 4x4 RAS→IJK matrix of a scalar volume as numpy."""
-        from rosa_scene.sitk_volume_adapter import volume_node_geometry
-
-        return volume_node_geometry(volume_node)[1]
-
-    def _candidate_ids_from_default_combo(self):
-        """Return the electrode ids matching the vendor token of the
-        ``defaultModelCombo`` text, or all ids when the combo is blank.
-        Gives a lightweight vendor filter without adding more UI.
-        """
-        default = widget_current_text(self.defaultModelCombo).strip()
-        if not default:
-            return candidate_ids_for_vendors(
-                self.modelsById, vendors=["DIXI", "PMT", "AdTech"],
-            )
-        vendor = default.split("-", 1)[0]
-        return candidate_ids_for_vendors(self.modelsById, vendors=[vendor])
-
-    def _generate_contacts_peak_driven(self, trajectories, assignments, log_context):
-        """Peak-driven contact detection path. Returns
-        ``(contacts, peak_fit_by_traj, updated_assignments)``.
-
-        For each trajectory:
-          1. Resolve the CT volume + LoG volume (precomputed by Auto
-             Fit, or computed here via SITK).
-          2. Convert trajectory LPS endpoints to RAS.
-          3. Run ``detect_contacts_on_axis`` restricted to the user-
-             assigned model when one is set; otherwise let the engine
-             choose the best-matching library model.
-          4. Emit contact records at the detected peak positions;
-             fall back to the model-driven nominal-offset synthesis
-             when the engine rejects the fit.
-        """
         ct_node = self._resolve_postop_ct_node()
         if ct_node is None:
             raise ValueError(
-                "PostopCT volume not available in the workflow — peak-driven "
-                "mode needs the CT to sample. Assign it via the Focus view "
-                "selectors or run Auto Fit first."
+                "PostopCT volume not available in the workflow — staged "
+                "placement needs the CT to sample. Assign it via the Focus "
+                "view selectors or run Auto Fit first.",
             )
-        log_node = self._resolve_log_volume_node(ct_node)
-        if log_node is not None:
-            import numpy as np
-            log_arr = np.asarray(slicer.util.arrayFromVolume(log_node))
-            self.log(
-                f"[contacts:{log_context}] reusing LoG volume '{log_node.GetName()}'"
-            )
-        else:
-            self.log(
-                f"[contacts:{log_context}] no cached LoG volume — computing sigma=1 on CT"
-            )
-            log_arr = self._compute_log_volume_from_ct(ct_node)
-        ras_to_ijk = self._ras_to_ijk_matrix_np(ct_node)
 
-        candidate_ids = self._candidate_ids_from_default_combo()
+        # `_features_and_bolts_for` caches (features, bolts) per CT
+        # (node id, mtime) so back-to-back passes (Suggest models →
+        # Generate contacts → Update contacts) skip the ~5-10 s
+        # LoG / Frangi / hull-distance / bolt-extraction recomputation.
+        # The adapter still preserves the Slicer node's IJK→RAS geometry
+        # (no temp-NIfTI round trip) on the cache miss path.
+        cached = (ct_node.GetID(), int(ct_node.GetMTime() or 0)) in self._featuresCache
+        self.log(
+            f"[contacts:{log_context}] features/bolts for "
+            f"{ct_node.GetName()}: {'cache hit' if cached else 'computing…'}"
+        )
+        features, bolts = self._features_and_bolts_for(ct_node)
+
+        # Build Seed list from the selected rows + their assignments.
+        #
+        # Preferred seed start: ``bolt_tip_ras`` when present (Auto Fit
+        # stamps it on the line node so consumers can recover the
+        # original bolt-to-tip range — the line node itself is cropped
+        # to skull_entry → deep_tip for display). Falls back to the
+        # node's start endpoint otherwise.
+        #
+        # Why this matters: place_seeg's stage A anchor walker
+        # (estimate_bolt_end_from_metal_mass) walks from seed_start
+        # looking for the bolt. With seed_start = skull_entry (already
+        # past the bolt), the walker can't find it → falls back to
+        # bolt_less, producing different placements than the notebook
+        # flow (which uses the full bolt-to-tip range).
+        n_with_bolt_tip = 0
         assignment_by_name = {
             row.get("trajectory", ""): row for row in assignments.get("assignments", [])
         }
-        contacts = []
-        peak_fit_by_traj = {}
-        fallback_names = []
+        seeds: list[Seed] = []
         for traj in trajectories:
             name = traj.get("name", "")
             row = assignment_by_name.get(name)
-            tip_at = (row.get("tip_at") if row else "target") or "target"
-            assigned_model = (row.get("model_id") if row else "") or ""
-            n_contacts_target = row.get("n_contacts_target") if row else None
-            # Two modes: model-driven (with assigned model, peaks are
-            # snapped to the model's slot pattern) and model-free
-            # (no model — emit detected peaks directly, optionally
-            # capped at ``n_contacts_target`` strongest peaks).
-            use_model_free = not assigned_model
-            start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+            assigned_model = (row.get("model_id") if row else "") or None
+            bolt_tip_ras = traj.get("bolt_tip_ras")
+            if bolt_tip_ras is not None and len(list(bolt_tip_ras)) >= 3:
+                entry_ras = [float(v) for v in list(bolt_tip_ras)[:3]]
+                n_with_bolt_tip += 1
+            else:
+                start_lps = traj.get("start") or [0.0, 0.0, 0.0]
+                entry_ras = lps_to_ras_point(list(start_lps))
             end_lps = traj.get("end") or [0.0, 0.0, 0.0]
-            # Trajectories travel from entry → target; the deep tip is
-            # the target end by convention (same as model-driven mode).
-            entry_ras = lps_to_ras_point(list(start_lps))
             target_ras = lps_to_ras_point(list(end_lps))
-            try:
-                result = detect_contacts_on_axis(
-                    start_ras=entry_ras,
-                    end_ras=target_ras,
-                    log_volume_kji=log_arr,
-                    ras_to_ijk_mat=ras_to_ijk,
-                    models_by_id=self.modelsById,
-                    candidate_ids=candidate_ids,
-                    restrict_to_model_id=assigned_model or None,
-                    model_free=use_model_free,
-                    n_contacts_target=n_contacts_target if use_model_free else None,
-                )
-            except Exception as exc:
-                self.log(
-                    f"[contacts:{log_context}] peak fit failed for {name}: {exc}"
-                )
-                result = None
-
-            peak_fit_by_traj[name] = result
-            if result is not None and result.model_id:
-                records = ras_contacts_to_contact_records(
-                    result, traj, tip_at_for_schema=tip_at,
-                )
-                if row is not None and not use_model_free:
-                    # Engine may have chosen a different model than
-                    # the combo — reflect that in the stored
-                    # assignment so downstream consumers see the
-                    # winner. (Skipped in model-free mode: there's no
-                    # model selection to write back, ``result.model_id``
-                    # is the "manual" sentinel.)
-                    row["model_id"] = result.model_id
-                contacts.extend(records)
-                if use_model_free:
-                    self.log(
-                        f"[contacts:{log_context}] {name}: model-free peak fit "
-                        f"({result.n_matched} peaks emitted from "
-                        f"{result.n_peaks_found} detected)"
-                    )
-                else:
-                    self.log(
-                        f"[contacts:{log_context}] {name}: peak fit "
-                        f"{result.model_id} "
-                        f"({result.n_matched}/{result.n_model_slots} peaks, "
-                        f"mean res {result.mean_residual_mm:.2f} mm)"
-                    )
-                continue
-
-            # Fallback: synthesize at the user-assigned model's nominal
-            # offsets. Require an assigned model to fall back; empty
-            # means the user hasn't picked anything for this row.
-            reason = (
-                result.rejected_reason
-                if result is not None
-                else "engine_error"
-            )
-            fallback_names.append(f"{name} ({reason})")
-            if not assigned_model:
-                continue
-            fallback = generate_contacts(
-                [traj], self.modelsById,
-                {"schema_version": "1.0", "assignments": [row]} if row else {
-                    "schema_version": "1.0",
-                    "assignments": [{
-                        "trajectory": name,
-                        "model_id": assigned_model,
-                        "tip_at": tip_at,
-                        "tip_shift_mm": 0.0,
-                        "xyz_offset_mm": [0.0, 0.0, 0.0],
-                    }],
-                },
-            )
-            for rec in fallback:
-                rec["peak_detected"] = False  # nominal
-            contacts.extend(fallback)
-
-        if fallback_names:
+            seeds.append(Seed(
+                name=str(name),
+                start_ras=entry_ras,
+                end_ras=target_ras,
+                model_id=assigned_model,
+            ))
+        if n_with_bolt_tip:
             self.log(
-                f"[contacts:{log_context}] peak→nominal fallback for: "
-                + ", ".join(fallback_names)
+                f"[contacts:{log_context}] {n_with_bolt_tip}/{len(trajectories)} "
+                f"seeds use bolt_tip_ras (Rosa.BoltTipRas attribute) for full "
+                f"bolt-to-tip range; rest use line-node start"
             )
-        return contacts, peak_fit_by_traj, assignments
+
+        # Library subset: pitch-strategy combo controls library filter
+        # (matches Auto Fit / Guided Fit semantics). When the combo says
+        # "auto" / no strategy, pass None for full-library matching.
+        strategy = self._selected_pitch_strategy()
+        library = strategy if strategy and strategy.lower() != "auto" else None
+
+        self.log(
+            f"[contacts:{log_context}] running place_seeg on {len(seeds)} seeds "
+            f"(library={library or 'full'}); per-seed model picker drives mode 4 vs 5",
+        )
+
+        # Wrap the call in a progress dialog so the user gets visual feedback
+        # for the v1-detection (~10s) + per-seed placement (~1s/seed) cost.
+        # Made indeterminate (busy spinner) since we don't have per-stage
+        # callbacks fine enough for a real percentage.
+        progress = qt.QProgressDialog(
+            "Running place_seeg…\n(v1 detection + per-seed snap + scoring)",
+            "",  # no Cancel button — partial cancel mid-pipeline is unsafe
+            0, 0,
+            slicer.util.mainWindow(),
+        )
+        progress.setWindowTitle("Place Contacts")
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
+        progress.setWindowModality(qt.Qt.WindowModal)
+        progress.show()
+        slicer.app.processEvents()
+        try:
+            batch = place_seeg(
+                None,
+                features=features,
+                bolts=bolts,
+                seeds=seeds,
+                library=library,
+                sample_fn=sample_neg_log_max,
+                progress_logger=lambda msg: (
+                    progress.setLabelText(f"place_seeg: {msg}"[:120]),
+                    self.log(msg),
+                    slicer.app.processEvents(),
+                ),
+            )
+        finally:
+            progress.close()
+
+        diag = batch.diagnostics or {}
+        # Surface per-mode diag so the user sees WHY a mode-5 run returned
+        # 0 contacts (e.g. all seeds fell to fallback because v1 produced
+        # nothing snappable). Same for mode 4.
+        mode = diag.get("mode")
+        if mode == 5 and "mode5" in diag:
+            md = diag["mode5"]
+            self.log(
+                f"[contacts:{log_context}] mode 5 snap: "
+                f"snapped={md.get('n_seeds_snapped')}/{md.get('n_input_seeds')}, "
+                f"fallback_per_seed={md.get('n_seeds_fallback')}, "
+                f"v1_candidates={md.get('n_candidates_generated')} "
+                f"(angle≤{md.get('snap_angle_tol_deg')}°, "
+                f"perp≤{md.get('snap_perp_tol_mm')}mm)"
+            )
+        elif mode == 4 and "mode4" in diag:
+            md = diag["mode4"]
+            self.log(
+                f"[contacts:{log_context}] mode 4: "
+                f"snap_passthrough={md.get('n_snapped_passthrough')}, "
+                f"snap_re_placed={md.get('n_snapped_re_placed')}, "
+                f"fallback_per_seed={md.get('n_fallback_per_seed')}"
+            )
+        self.log(
+            f"[contacts:{log_context}] place_seeg mode {mode}: "
+            f"emitted {len(batch.trajectories)}; bands="
+            f"{[t.band for t in batch.trajectories]}",
+        )
+
+        # Convert PlacedTrajectory → ContactRecord-shape list. Same shape
+        # as the previous peak-driven path produced.
+        contacts: list[dict] = []
+        placed_by_traj = {}
+        for traj_pt in batch.trajectories:
+            traj_dict = next(
+                (t for t in trajectories if t.get("name") == traj_pt.name),
+                None,
+            )
+            tip_at = "target"
+            if traj_dict is not None:
+                row = assignment_by_name.get(traj_pt.name)
+                if row:
+                    tip_at = (row.get("tip_at") or "target")
+            label_prefix = traj_pt.name
+            for idx, ras_pt in enumerate(traj_pt.contacts_ras or [], start=1):
+                lps = lps_to_ras_point(list(ras_pt))  # symmetric flip
+                rec = {
+                    "trajectory": label_prefix,
+                    "model_id": traj_pt.model_id or "",
+                    "index": idx,
+                    "label": f"{label_prefix}{idx}",
+                    "position_lps": lps,
+                    "tip_at": tip_at,
+                    "peak_detected": True,  # staged placer is never nominal
+                }
+                contacts.append(rec)
+            placed_by_traj[traj_pt.name] = traj_pt
+
+            # Reflect placer-picked model + band back into the assignment row
+            # so the UI shows what was actually picked (mode 5 with empty
+            # model_id otherwise wouldn't update the per-row combo).
+            if traj_pt.model_id:
+                row = assignment_by_name.setdefault(traj_pt.name, {
+                    "trajectory": traj_pt.name,
+                    "model_id": "",
+                    "tip_at": tip_at,
+                    "tip_shift_mm": 0.0,
+                    "xyz_offset_mm": [0.0, 0.0, 0.0],
+                })
+                row["model_id"] = traj_pt.model_id
+                row["band"] = traj_pt.band
+                row["compound_score"] = traj_pt.compound_score
+
+        # Rebuild the assignments dict so callers see updated model_ids.
+        updated_assignments = {
+            "schema_version": assignments.get("schema_version", "1.0"),
+            "assignments": list(assignment_by_name.values()),
+        }
+        return contacts, updated_assignments, placed_by_traj
+
+    def _selected_pitch_strategy(self) -> str:
+        """Read the pitch-strategy combo's current value as a string."""
+        try:
+            value = self.contactsPitchStrategyCombo.currentData
+            if value is None:
+                value = self.contactsPitchStrategyCombo.currentText
+        except AttributeError:
+            value = ""
+        return str(value or "")
 
     def _sync_model_combos_from_assignments(self, assignments):
         """Push assignment model_id back into the row model combos so
@@ -1338,68 +1467,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             idx = combo.findText(model_id)
             if idx >= 0:
                 combo.setCurrentIndex(idx)
-
-    def _compute_peak_vs_nominal_drift(self, peak_fit_by_traj,
-                                        trajectories_by_name, assignments,
-                                        drift_threshold_mm=1.0):
-        """Compute per-slot drift between peak-detected positions and
-        the same model's nominal positions along the assigned axis.
-
-        Returns a list of dicts (one per trajectory) with keys:
-          trajectory, model_id, max_drift_mm, mean_drift_mm,
-          n_slots_above_threshold, n_slots_detected.
-        """
-        import numpy as np
-        assignment_by_name = {
-            row.get("trajectory", ""): row for row in assignments.get("assignments", [])
-        }
-        out = []
-        for name, result in peak_fit_by_traj.items():
-            if result is None or not result.model_id:
-                continue
-            # Drift is "peak vs model nominal" — undefined for the
-            # model-free path (``model_id="manual"``), since there's
-            # no slot pattern to compare against.
-            if result.model_id not in self.modelsById:
-                continue
-            traj = trajectories_by_name.get(name)
-            row = assignment_by_name.get(name)
-            if traj is None or row is None:
-                continue
-            nominal = generate_contacts([traj], self.modelsById, {
-                "schema_version": "1.0",
-                "assignments": [{
-                    "trajectory": name,
-                    "model_id": result.model_id,
-                    "tip_at": row.get("tip_at", "target"),
-                    "tip_shift_mm": 0.0,
-                    "xyz_offset_mm": [0.0, 0.0, 0.0],
-                }],
-            })
-            # nominal positions are LPS; peak positions are RAS.
-            # Convert both to the same frame by flipping the peak ones.
-            drift = []
-            for idx, (peak_ras, detected) in enumerate(zip(
-                result.positions_ras, result.peak_detected,
-            )):
-                if not detected or idx >= len(nominal):
-                    continue
-                peak_lps = lps_to_ras_point(list(peak_ras))
-                nom_lps = nominal[idx]["position_lps"]
-                d = float(np.linalg.norm(
-                    np.asarray(peak_lps) - np.asarray(nom_lps)
-                ))
-                drift.append(d)
-            drift_arr = np.asarray(drift, dtype=float) if drift else np.array([])
-            out.append({
-                "trajectory": name,
-                "model_id": result.model_id,
-                "max_drift_mm": float(drift_arr.max()) if drift_arr.size else 0.0,
-                "mean_drift_mm": float(drift_arr.mean()) if drift_arr.size else 0.0,
-                "n_slots_above_threshold": int((drift_arr > drift_threshold_mm).sum()),
-                "n_slots_detected": int(drift_arr.size),
-            })
-        return out
 
     def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
         selected_rows = [row for row in range(self.contactTable.rowCount) if self._row_is_selected(row)]
@@ -1425,22 +1492,39 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
 
         mode = self._selected_detection_mode()
-        if mode == "peak_driven":
-            contacts, peak_fit_by_traj, assignments = self._generate_contacts_peak_driven(
+        if mode == "staged":
+            contacts, assignments, _placed_by_traj = self._generate_contacts_staged(
                 trajectories=selected_trajectories,
                 assignments=assignments,
                 log_context=log_context,
             )
             self._sync_model_combos_from_assignments(assignments)
             self.lastAssignments = assignments
-            self.lastPeakDriftFlags = self._compute_peak_vs_nominal_drift(
-                peak_fit_by_traj=peak_fit_by_traj,
-                trajectories_by_name=traj_map,
-                assignments=assignments,
-            )
         else:
+            # Model-driven mode places contacts at nominal library
+            # offsets along each trajectory; no library-matching step,
+            # so a row with model_id="" produces zero contacts and
+            # silently confuses the user. Refuse before doing the work
+            # and tell them which rows are missing models. (Staged mode
+            # legitimately accepts a mix of with/without model_id —
+            # that's how mode 4 vs mode 5 dispatch works.)
+            missing = [
+                row.get("trajectory", "<unnamed>")
+                for row in assignments.get("assignments", [])
+                if not (row.get("model_id") or "").strip()
+            ]
+            if missing:
+                preview = ", ".join(missing[:5])
+                more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                raise ValueError(
+                    f"Model-driven generation requires a model per row, "
+                    f"but {len(missing)} selected trajectories have no "
+                    f"model assigned: {preview}{more}. Pick a model for "
+                    f"each row, click 'Suggest models' to fill them, or "
+                    f"switch to Staged mode (which can pick the model "
+                    f"from CT)."
+                )
             contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
-            self.lastPeakDriftFlags = []
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
         contact_nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(
@@ -1494,15 +1578,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
-        if self.lastPeakDriftFlags:
-            for row in self.lastPeakDriftFlags:
-                flag = "⚠ drift>1mm" if row["n_slots_above_threshold"] > 0 else "ok"
-                self.log(
-                    f"[peak-vs-nominal:{log_context}] {row['trajectory']} "
-                    f"model={row['model_id']} max={row['max_drift_mm']:.2f} mm "
-                    f"mean={row['mean_drift_mm']:.2f} mm "
-                    f"n={row['n_slots_detected']} {flag}"
-                )
         if self.lastQCMetricsRows:
             self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
         self._refresh_summary()
@@ -1804,6 +1879,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _align_focus_views_for_selected(self, align_trajectory_views=True):
         trajectory = self._selected_trajectory()
         scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        # When contacts have been placed for this trajectory, hand them
+        # to focus_selected so the slice axis is refit through the actual
+        # contacts (mitigates centerline drift / slight electrode bend).
+        # Falls back to seed line silently when no contacts are available.
+        placed_ras = self._placed_contacts_for_selected(trajectory)
         try:
             return bool(
                 self.logic.focus_controller.focus_selected(
@@ -1812,11 +1892,36 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     jump_cardinal=True,
                     align_focus_views=bool(align_trajectory_views),
                     focus="entry",
+                    placed_contacts_ras=placed_ras,
                 )
             )
         except Exception as exc:
             self.log(f"[focus] alignment fallback: {exc}")
             return False
+
+    def _placed_contacts_for_selected(self, trajectory):
+        """Return RAS positions of the placed contacts for ``trajectory``,
+        or None when none have been generated yet for this row.
+
+        ``lastGeneratedContacts`` items carry ``position_lps`` (placed by
+        ``_run_contact_generation``); we flip to RAS for the slice axis
+        refit.
+        """
+        if trajectory is None or not self.lastGeneratedContacts:
+            return None
+        traj_name = trajectory.get("name", "")
+        if not traj_name:
+            return None
+        out = []
+        for rec in self.lastGeneratedContacts:
+            if rec.get("trajectory") != traj_name:
+                continue
+            lps = rec.get("position_lps")
+            if not lps or len(lps) != 3:
+                continue
+            # symmetric flip LPS↔RAS (lps_to_ras_point is its own inverse)
+            out.append(lps_to_ras_point(list(lps)))
+        return out or None
 
     def _follow_selected_trajectory_if_enabled(self):
         if self._syncingFocusControls:

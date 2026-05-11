@@ -20,8 +20,8 @@ from __main__ import qt, slicer
 
 from rosa_core import lps_to_ras_point, trajectory_length_mm
 
-from rosa_detect import contact_pitch_v1_fit as cpfit
 from rosa_detect import guided_fit_engine as gfe
+from rosa_detect.candidate_seeds.crossing_tips import retreat_crossing_tips
 
 
 # Seed sources the Guided Fit tab offers. Excludes "working" and
@@ -774,46 +774,43 @@ class GuidedFitWidgetMixin:
         except Exception as exc:
             self.log(f"[guided] seed-cloud diagnostic failed: {exc}")
 
-        # Two-phase: first collect fit records, then run crossing-tip
-        # retreat across all records, then emit the scene nodes with
-        # the post-retreat geometry. Mirrors Auto Fit's flow.
+        # Two-phase: first collect fit records (via the shared CLI helper
+        # so Slicer + headless surfaces have identical fit behavior),
+        # then run crossing-tip retreat across all records, then emit
+        # the scene nodes. Mirrors Auto Fit's flow.
+        seed_specs = []
+        for row, traj in seed_rows:
+            seed_start, seed_end = self._seed_start_end_ras(traj)
+            seed_specs.append({
+                "name": str(traj.get("name", "")) or "?",
+                "start_ras": seed_start,
+                "end_ras": seed_end,
+                "_row": row,
+            })
+
+        # Pass `auto_trajs` from the workflow if available; otherwise
+        # `fit_seeds_against_auto` will run Auto Fit internally so a
+        # fresh "Fit All" produces auto-aware results without the user
+        # needing to remember to run Auto Fit first. Same default the
+        # CLI uses.
+        fits = gfe.fit_seeds_against_auto(
+            seeds=seed_specs,
+            features=features,
+            ijk_to_ras_mat=ijk_to_ras,
+            ras_to_ijk_mat=ras_to_ijk,
+            auto_trajs=auto_trajs if auto_trajs else None,
+            auto_run_if_missing=True,
+            roi_radius_mm=roi_mm,
+            max_angle_deg=max_angle,
+            max_lateral_shift_mm=max_lat,
+            progress_log=self.log,
+        )
+
         fit_records = []
         missed_names = []
-        for row, traj in seed_rows:
-            name = str(traj.get("name", "")) or "?"
-            seed_start, seed_end = self._seed_start_end_ras(traj)
-            fit = None
-            # Try matching against Auto Fit first.
-            if auto_trajs:
-                try:
-                    fit = gfe.match_seed_to_auto_traj(
-                        planned_start_ras=seed_start,
-                        planned_end_ras=seed_end,
-                        auto_trajs=auto_trajs,
-                        max_angle_deg=max_angle,
-                        max_lateral_shift_mm=max_lat,
-                    )
-                except Exception as exc:
-                    self.log(f"[guided] {name}: match-auto crashed ({exc})")
-                    fit = None
-            # Fall back to PCA fit when no auto match.
-            if fit is None:
-                try:
-                    fit = gfe.fit_trajectory(
-                        planned_start_ras=seed_start,
-                        planned_end_ras=seed_end,
-                        features=features,
-                        ijk_to_ras_mat=ijk_to_ras,
-                        ras_to_ijk_mat=ras_to_ijk,
-                        roi_radius_mm=roi_mm,
-                        max_angle_deg=max_angle,
-                        max_lateral_shift_mm=max_lat,
-                    )
-                except Exception as exc:
-                    self.log(f"[guided] {name}: fit crashed ({exc})")
-                    self._set_seed_status(row, False, f"crash: {exc}")
-                    missed_names.append(name)
-                    continue
+        for spec, fit in zip(seed_specs, fits):
+            name = spec["name"]
+            row = spec["_row"]
 
             if not bool(fit.get("success")):
                 reason = str(fit.get("reason", "unknown"))
@@ -852,7 +849,7 @@ class GuidedFitWidgetMixin:
         # inside each other's contact tubes.
         if fit_records:
             try:
-                cpfit._retreat_crossing_tips(
+                retreat_crossing_tips(
                     fit_records,
                     log_arr=features["log"],
                     ras_to_ijk_mat=ras_to_ijk,

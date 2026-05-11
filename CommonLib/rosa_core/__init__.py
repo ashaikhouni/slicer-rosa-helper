@@ -50,6 +50,66 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # contact_fit — numpy.
     "fit_electrode_axis_and_tip":                         ("contact_fit", "fit_electrode_axis_and_tip"),
     "refine_fit_batch_with_exclusive_terminal_assignment": ("contact_fit", "refine_fit_batch_with_exclusive_terminal_assignment"),
+    # contact_placement — numpy + (lazily) SimpleITK / rosa_detect features.
+    "ContactPlacementBatch":                              ("contact_placement", "ContactPlacementBatch"),
+    "ContactPlacementConfig":                             ("contact_placement", "ContactPlacementConfig"),
+    "ContactPlacementResult":                             ("contact_placement", "ContactPlacementResult"),
+    "assign_axis_owners":                                 ("contact_placement", "assign_axis_owners"),
+    "place_contacts_for_axis":                            ("contact_placement", "place_contacts_for_axis"),
+    "place_contacts_for_trajectories":                    ("contact_placement", "place_contacts_for_trajectories"),
+    # Bolt-end estimation building blocks.
+    "median_library_pitch_mm":                            ("contact_placement", "median_library_pitch_mm"),
+    "refine_axis_via_centroid":                           ("contact_placement", "refine_axis_via_centroid"),
+    "sample_disk_along_polyline":                         ("contact_placement", "sample_disk_along_polyline"),
+    "entry_arc_from_metal_mass":                          ("contact_placement", "entry_arc_from_metal_mass"),
+    "estimate_bolt_end_from_metal_mass":                  ("contact_placement", "estimate_bolt_end_from_metal_mass"),
+    # matched_filter — numpy. Single-knob library scoring (σ_contact ≈ 1 mm)
+    # via Pearson cross-correlation against a sum-of-Gaussians template at
+    # the candidate model's slot positions. Replaces the heuristic
+    # template_match_signal/_peaks scoring; see project memory note
+    # project_staged_walker_2026-05-05_evening.md.
+    "MatchedFilterResult":                                ("matched_filter", "MatchedFilterResult"),
+    "SIGMA_CONTACT_MM_DEFAULT":                           ("matched_filter", "SIGMA_CONTACT_MM_DEFAULT"),
+    "matched_filter_pick":                                ("matched_filter", "matched_filter_pick"),
+    # contact_placement (staged) — public 5-mode dispatcher + composer.
+    # See handoff_v3_production_lift_2026-05-09.md.
+    "PlacementCtx":                                       ("contact_placement", "PlacementCtx"),
+    "place_seed":                                         ("contact_placement", "place_seed"),
+    "run_two_pass":                                       ("contact_placement", "run_two_pass"),
+    "apply_subject_fft_normalization":                    ("contact_placement", "apply_subject_fft_normalization"),
+    # placement_modes — 5-mode user-facing API.
+    "PlacedTrajectory":                                   ("placement_modes", "PlacedTrajectory"),
+    "PlacementBatch":                                     ("placement_modes", "PlacementBatch"),
+    "Seed":                                               ("placement_modes", "Seed"),
+    "place_seeg":                                         ("placement_modes", "place_seeg"),
+    # cross_volume_match — line-geometry RANSAC for naming detector
+    # emissions on a different-frame CT from a .ros file's planned
+    # trajectories. No reference volume / image registration required.
+    "CrossVolumeMatch":                                   ("cross_volume_match", "CrossVolumeMatch"),
+    "TrajectoryLine":                                     ("cross_volume_match", "TrajectoryLine"),
+    "cross_volume_match":                                 ("cross_volume_match", "cross_volume_match"),
+    # volume_loader — CT path / SimpleITK.Image → features + bolt CCs.
+    "load_features_and_bolts":                            ("volume_loader", "load_features_and_bolts"),
+    # qc_output — write a standardized QC directory for a PlacementBatch.
+    "QC_TRAJECTORY_COLUMNS":                              ("qc_output", "QC_TRAJECTORY_COLUMNS"),
+    "PIPELINE_VERSION":                                   ("qc_output", "PIPELINE_VERSION"),
+    "write_qc_directory":                                 ("qc_output", "write_qc_directory"),
+    "write_trajectories_tsv":                             ("qc_output", "write_trajectories_tsv"),
+    "write_contacts_tsv":                                 ("qc_output", "write_contacts_tsv"),
+    "write_manifest_json":                                ("qc_output", "write_manifest_json"),
+    "trajectory_to_qc_row":                               ("qc_output", "trajectory_to_qc_row"),
+    # qc_figures — headless matplotlib renderer for staged-pipeline
+    # PlacedTrajectory output (the only emission-figure renderer now;
+    # emission_qc and its alternate render_emission_figure were retired
+    # in Session 4 alongside unified_detect).
+    "render_placed_trajectory_figure":                    ("qc_figures", "render_placed_trajectory_figure"),
+    "render_all_figures":                                 ("qc_figures", "render_all_figures"),
+    # The validator constants that used to live on contact_placement_v2
+    # are now public on rosa_core.contact_placement (see
+    # rosa_core.contact_placement.constants).
+    "MIN_CORR_FOR_REAL_SHANK":                            ("contact_placement", "MIN_CORR_FOR_REAL_SHANK"),
+    "MAX_SLOT_CC_VOLUME_P90_MM3":                         ("contact_placement", "MAX_SLOT_CC_VOLUME_P90_MM3"),
+    "MIN_SLOT_HU_MEAN":                                   ("contact_placement", "MIN_SLOT_HU_MEAN"),
     # contact_peak_fit — numpy + SimpleITK (LoG helper).
     "PeakFitResult":                                      ("contact_peak_fit", "PeakFitResult"),
     "candidate_ids_for_vendors":                          ("contact_peak_fit", "candidate_ids_for_vendors"),
@@ -62,6 +122,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "contacts_to_pom_points":                             ("curry_export", "contacts_to_pom_points"),
     "trajectory_endpoints_to_pom_points":                 ("curry_export", "trajectory_endpoints_to_pom_points"),
     "write_curry_pom":                                    ("curry_export", "write_curry_pom"),
+    # electrode_classifier — numpy.
+    "filter_models_for_strategy":                         ("electrode_classifier", "filter_models_for_strategy"),
+    "signal_derived_entry_arc":                           ("electrode_classifier", "signal_derived_entry_arc"),
     # electrode_models — light (pure Python).
     "default_electrode_library_path":                     ("electrode_models", "default_electrode_library_path"),
     "load_electrode_library":                             ("electrode_models", "load_electrode_library"),

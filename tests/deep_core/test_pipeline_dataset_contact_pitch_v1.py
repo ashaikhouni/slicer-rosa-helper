@@ -15,8 +15,9 @@ Two test surfaces:
     ``feedback_gt_completeness.md``), asserts recall + orphan budget.
     Runtime ≈ 70 s. This is the regression net for refactor work.
 
-See ``slicer-rosa-helper/docs/HANDOFF.md`` for current pipeline
-state, recall numbers, and the score-band policy.
+See ``slicer-rosa-helper/docs/DEVELOPER_GUIDE.md`` for the test
+matrix and ``feedback_score_band_policy.md`` (memory) for the
+score-band policy.
 """
 import os
 import sys

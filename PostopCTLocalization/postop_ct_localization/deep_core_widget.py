@@ -133,7 +133,16 @@ class ContactPitchV1WidgetMixin:
         self.contactPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
             self.contactPitchStrategyCombo.addItem(label, key)
-        self.contactPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
+        # Default: "auto" (all vendors). Vendor-restricted strategies
+        # (e.g. pmt_35, dixi) propagate into _StrategyBoundsScope and
+        # tighten MIN_LINE_SPAN_MM / MAX_INLIER_GAP_MM to the smallest
+        # in-vendor model — which drops real shanks with under-resolved
+        # contacts (AMC137/LPT under pmt_35). The full-vendor union
+        # gives the loosest geometry gates so chain formation isn't
+        # gated by vendor selection. Library filtering for the model
+        # picker still happens downstream.
+        _auto_idx = self.contactPitchStrategyCombo.findData("auto")
+        self.contactPitchStrategyCombo.setCurrentIndex(_auto_idx if _auto_idx >= 0 else 0)
         self.contactPitchStrategyCombo.setToolTip(
             "Walker pitch set + suggestion vendor filter. Detection "
             "results are identical across strategies that share the "
@@ -167,9 +176,9 @@ class ContactPitchV1WidgetMixin:
         form.addRow("Status:", self.contactPitchStatusLabel)
 
     # Vendor sets implied by each strategy. Mirrors
-    # ``PITCH_STRATEGY_VENDORS`` in ``contact_pitch_v1_fit`` — duplicated
-    # here so the widget can log sensible messages without importing
-    # the fit module.
+    # ``PITCH_STRATEGY_VENDORS`` in ``rosa_core.electrode_classifier`` —
+    # duplicated here so the widget can log sensible messages without
+    # importing the classifier module just for a string lookup.
     _CONTACT_PITCH_STRATEGY_VENDORS = {
         "dixi":     ("Dixi",),
         "dixi_mm":  ("Dixi",),

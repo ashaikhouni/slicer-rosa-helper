@@ -394,7 +394,7 @@ _PACER_BOLT_PEAK_HU = 2400.0
 _PACER_BOLT_GAP_MIN_MM = 1.0       # min dim region between bolt and electrode
 
 
-def _signal_derived_entry_arc(profile_arc_mm, profile_values):
+def signal_derived_entry_arc(profile_arc_mm, profile_values):
     """Detect the bolt → electrode boundary by the bolt's sustained-
     bright signature, and return the arc-position where the actual
     electrode region starts.
@@ -462,6 +462,12 @@ def _signal_derived_entry_arc(profile_arc_mm, profile_values):
     if bolt_end_idx >= len(profile_arc_mm) - 1:
         return None
     return float(profile_arc_mm[bolt_end_idx]) + float(_PACER_BOLT_GAP_MIN_MM)
+
+
+# Backwards-compat alias. Callers (notebooks, tests/deep_core probes,
+# the in-module ``find_pacer_pick`` orchestrator) imported the
+# underscore name before this was promoted to the public surface.
+_signal_derived_entry_arc = signal_derived_entry_arc
 
 
 def _signal_derived_tip_arc(profile_arc_mm, profile_values):
@@ -587,7 +593,7 @@ def classify_pacer_template(start_ras, end_ras, ct_volume_kji, ras_to_ijk_mat,
     # mute prevents bolt brightness from contributing to NCC; the
     # coverage-bound penalty drops longer templates that try to
     # "explain" the bolt with their entry-side contacts.
-    entry_arc = _signal_derived_entry_arc(arc_mm, profile)
+    entry_arc = signal_derived_entry_arc(arc_mm, profile)
     arc_lower = float(arc_mm[0])
     if entry_arc is not None:
         cutoff = float(entry_arc) - 1.0  # 1 mm safety margin

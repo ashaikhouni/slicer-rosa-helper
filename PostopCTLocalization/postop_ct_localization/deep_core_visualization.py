@@ -366,6 +366,23 @@ class DeepCoreVisualizationLogicMixin:
                 "Rosa.AutoFitEndRas",
                 ",".join(f"{float(v):.6f}" for v in end_ras),
             )
+            # The line node is rendered skull_entry → deep_tip
+            # (intracranial only — see deep_core_widget.py where the
+            # publish loop crops ``start_ras`` to ``skull_entry_ras``).
+            # Persist the ORIGINAL bolt-tip endpoint as a MRML attribute
+            # so downstream consumers (CTV's staged placement, anywhere
+            # else that needs the full bolt-to-tip range) can recover
+            # it after re-reading the line node from disk / re-loading
+            # the scene. Without this, the placer's stage A anchor
+            # walker — which assumes seed_start is at the bolt — finds
+            # nothing and falls back to bolt_less, producing different
+            # placements than the notebook flow.
+            bolt_tip_ras = proposal.get("bolt_tip_ras")
+            if bolt_tip_ras is not None and len(list(bolt_tip_ras)) >= 3:
+                node.SetAttribute(
+                    "Rosa.BoltTipRas",
+                    ",".join(f"{float(v):.6f}" for v in list(bolt_tip_ras)[:3]),
+                )
             node.SetAttribute("Rosa.DeepCoreProposalFamily", family)
             node.SetAttribute("Rosa.DeepCoreProposalScore", f"{float(proposal.get('score', 0.0)):.3f}")
             node.SetAttribute("Rosa.ProposalLengthMm", f"{float(proposal.get('span_mm', 0.0)):.3f}")

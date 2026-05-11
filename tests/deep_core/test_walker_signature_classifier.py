@@ -17,14 +17,14 @@ sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
 sys.path.insert(0, str(REPO_ROOT / "PostopCTLocalization"))
 
 LIBRARY_PATH = (
-    REPO_ROOT / "CommonLib" / "resources" / "electrodes" / "electrode_models.json"
+    REPO_ROOT / "CommonLib" / "rosa_core" / "resources" / "electrodes" / "electrode_models.json"
 )
 
 
 class WalkerSignatureClassifierTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        from rosa_detect.contact_pitch_v1_fit import (
+        from rosa_core.electrode_classifier import (
             classify_by_walker_signature,
             suggest_shortest_covering_model,
         )
@@ -124,7 +124,7 @@ class StrategyLibraryFilterTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from rosa_detect.contact_pitch_v1_fit import (
+        from rosa_core.electrode_classifier import (
             filter_models_for_strategy, classify_by_walker_signature,
         )
         cls.filter = staticmethod(filter_models_for_strategy)

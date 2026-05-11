@@ -2,28 +2,38 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19994662.svg)](https://doi.org/10.5281/zenodo.19994662)
 
-Last updated: 2026-05-02
+Last updated: 2026-05-11
 
 A modular toolkit for SEEG planning, localization, atlas labeling, and
 export workflows. Two surfaces share one algorithm core:
 
 - **3D Slicer extension** — clinical / research workflow with full UI
   (load ROSA case, fit trajectories on postop CT, place contacts,
-  label against atlases, export).
+  label against atlases, export). See [`docs/SLICER_GUIDE.md`](docs/SLICER_GUIDE.md).
 - **`rosa-agent` CLI** — headless `pip install`-able command-line agent
-  that runs the same pipeline (`load` / `detect` / `contacts` / `label`
-  / `pipeline`) outside Slicer for batch processing, regression
-  testing, and reproducible scripting.
+  that runs the same pipeline outside Slicer for batch processing,
+  regression testing, and reproducible scripting. Eight subcommands:
+  `load`, `detect`, `contacts`, `label`, `pipeline`, `place`,
+  `rosa-to-nifti`, `match-ros`. See [`cli/README.md`](cli/README.md).
 
 ## Capabilities
 
-- ROSA case loading from `.ros` + Analyze image pairs (`.img/.hdr`)
+- ROSA case loading from `.ros` + Analyze image pairs (`.img/.hdr`),
+  with a `rosa-to-nifti` CLI command to bake displays + plan into
+  ready-to-use NIfTI inputs
 - custom MRI/CT import and base-space registration (rigid Versor3D +
   Mattes mutual information; same algorithm in both surfaces)
 - guided and de novo trajectory localization on postop CT
 - contact generation with electrode model assignment and QC metrics,
   either at the model's nominal pitch ("model-driven") or at CT-image
   peaks along the trajectory ("peak-driven")
+- 5-mode staged contact placer (auto / count / named / seeded /
+  seeded+model) exposed as `rosa-agent place` and as the
+  `rosa_core.placement_modes.place_seeg` library API
+- cross-volume trajectory matching: pair a `.ros` plan with a CT in any
+  RAS frame (no reference volume / image registration needed) via
+  `rosa-agent match-ros` — useful when the post-op CT was registered to
+  a different MRI atlas than the one the surgeon planned on
 - atlas source loading (FreeSurfer, THOMAS, WM) and contact labeling,
   with optional inline registration of an atlas T1 to the contact
   volume
@@ -68,12 +78,19 @@ rosa-agent pipeline /path/to/ROSA_CASE --ct external_ct.nii.gz --out-dir /tmp/ou
 CT-only auto-detection (no ROSA folder, no seeds):
 
 ```bash
-rosa-agent detect postop_ct.nii.gz --out trajectories.tsv
-rosa-agent contacts trajectories.tsv postop_ct.nii.gz --out contacts.tsv
+rosa-agent place --ct postop_ct.nii.gz --output /tmp/out --library dixi
 ```
 
-See [`cli/README.md`](cli/README.md) for the full subcommand and TSV
-column reference.
+Cross-volume naming (same patient, two RAS frames — no registration
+needed):
+
+```bash
+rosa-agent match-ros --rosa-folder PLAN/ --ct any_frame_ct.nii.gz --output /tmp/out
+```
+
+See [`cli/README.md`](cli/README.md) for the full subcommand reference,
+TSV column contract, and the Library API (calling `rosa_core` /
+`rosa_detect` from Python).
 
 ## Architecture (high level)
 
@@ -103,11 +120,13 @@ LoG kernel) so changes can't drift between the two surfaces.
 
 ## Documentation
 
+- Overview + capabilities: this file
 - Install: [`INSTALL.md`](INSTALL.md)
-- User guide: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
-- Developer guide: [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)
-- CLI reference: [`cli/README.md`](cli/README.md)
-- Pipeline state + score-band policy: [`docs/HANDOFF.md`](docs/HANDOFF.md)
+- User guide (cross-surface, conceptual workflow): [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
+- Slicer guide (per-module reference): [`docs/SLICER_GUIDE.md`](docs/SLICER_GUIDE.md)
+- CLI guide (every subcommand + Library API): [`cli/README.md`](cli/README.md)
+- Pipeline constants reference (all tunable knobs + rationale): [`docs/PIPELINE_CONSTANTS.md`](docs/PIPELINE_CONSTANTS.md)
+- Developer guide (architecture, parity invariants, extension points): [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md)
 
 ## License
 

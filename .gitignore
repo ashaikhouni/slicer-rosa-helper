@@ -25,3 +25,8 @@ CLAUDE.md
 # tracked tsv/txt fixtures. Keep them on local disk only.
 tests/data/**/*.nii
 tests/data/**/*.nii.gz
+
+# Research notebooks: local-path-bound (point at private data dirs);
+# kept out of the repo. Memory references them as resume anchors;
+# they live on local disk only.
+notebooks/

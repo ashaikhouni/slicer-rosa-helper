@@ -7,8 +7,8 @@ Public surface for callers (Slicer modules, CLI, tests):
 
 Lazy re-exports (PEP 562). Importing this package runs only this file
 plus the pure-stdlib contracts + diagnostics modules. The heavy
-algorithm modules (``service``, ``contact_pitch_v1_fit``,
-``guided_fit_engine``) — which require NumPy, SciPy, SimpleITK — are
+algorithm modules (``service``, ``guided_fit_engine``,
+``candidate_seeds.*``) — which require NumPy, SciPy, SimpleITK — are
 imported on first attribute access via ``__getattr__``.
 
 Why: callers reaching pure-Python types (``DetectionContext``,
@@ -51,17 +51,15 @@ from .diagnostics import DiagnosticsCollector, StageExecutionError
 
 # Lazy — heavy modules (numpy / scipy / SimpleITK consumers).
 # Map public attribute name -> (submodule, attribute or None).
-# attribute=None means "the submodule itself" (for ``from rosa_detect import
-# contact_pitch_v1_fit``-style consumers in tests / probes).
+# attribute=None means "the submodule itself".
 _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     # service entry points
     "run_contact_pitch_v1":              ("service", "run_contact_pitch_v1"),
     "run_contact_pitch_v1_with_features": ("service", "run_contact_pitch_v1_with_features"),
     "feature_volume_spec":               ("service", "feature_volume_spec"),
     "feature_volume_node_name":          ("service", "feature_volume_node_name"),
-    # whole-module access (legacy probe / test usage)
+    # whole-module access
     "service":                           ("service", None),
-    "contact_pitch_v1_fit":              ("contact_pitch_v1_fit", None),
     "guided_fit_engine":                 ("guided_fit_engine", None),
 }
 
@@ -90,7 +88,6 @@ __all__ = [
     "run_contact_pitch_v1_with_features",
     "feature_volume_spec",
     "feature_volume_node_name",
-    "contact_pitch_v1_fit",
     "guided_fit_engine",
 ]
 

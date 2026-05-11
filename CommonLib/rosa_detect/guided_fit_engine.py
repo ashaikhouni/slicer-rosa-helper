@@ -36,7 +36,29 @@ from typing import Any
 
 import numpy as np
 
-from . import contact_pitch_v1_fit as cpfit
+from .candidate_seeds.blob_extraction import extract_blob_cloud_ras
+from .candidate_seeds.confidence_score import compute_trajectory_score
+from .candidate_seeds.deep_end_refine import refine_deep_end_via_axis_log
+from .candidate_seeds.frangi_sampling import frangi_along_line_stats
+from .candidate_seeds.metal_evidence import (
+    compute_metal_evidence_volume,
+    frac_strong_metal_along_line,
+)
+from .primitives.bolt_anchor import (
+    BOLT_HULL_PROXIMITY_MM,
+    METAL_BOLT_THRESHOLD,
+    anchor_trajectory_to_bolt,
+    extract_bolt_candidates,
+)
+from .primitives.geometry import sample_dist_at_ras
+from .primitives.preprocessing import (
+    FRANGI_STAGE1_SIGMA,
+    LOG_SIGMA_MM,
+    build_masks,
+    frangi_single,
+    log_sigma,
+    prepare_volume,
+)
 
 
 DEFAULT_ROI_RADIUS_MM = 5.0
@@ -86,15 +108,15 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None)
     on a grid that doesn't match where the LoG / Frangi peaks live.
     """
     import SimpleITK as sitk
-    img, ijk_to_ras_mat, ras_to_ijk_mat = cpfit.prepare_volume(
+    img, ijk_to_ras_mat, ras_to_ijk_mat = prepare_volume(
         img, ijk_to_ras_mat, ras_to_ijk_mat,
     )
-    hull_arr, intracranial, dist_arr = cpfit.build_masks(img)
-    log1 = cpfit.log_sigma(img, sigma_mm=cpfit.LOG_SIGMA_MM)
-    frangi_s1 = cpfit.frangi_single(img, sigma=cpfit.FRANGI_STAGE1_SIGMA)
+    hull_arr, intracranial, dist_arr = build_masks(img)
+    log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
+    frangi_s1 = frangi_single(img, sigma=FRANGI_STAGE1_SIGMA)
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
 
-    pts_ras, amps = cpfit.extract_blob_cloud_ras(log1, ijk_to_ras_mat)
+    pts_ras, amps = extract_blob_cloud_ras(log1, ijk_to_ras_mat)
 
     # ``spacing_xyz`` overrides the (now-canonical) image spacing only
     # when the caller has a reason to lie about it. Default: trust the
@@ -109,12 +131,12 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None)
     # Unified metal-evidence bolt extraction — same path as Auto Fit's
     # ``run_two_stage_detection``. Picks up bolts that LoG alone misses
     # (HU-saturated metal CCs).
-    metal_evidence_vol = cpfit.compute_metal_evidence_volume(log1, ct_arr_kji)
-    bolts, bolt_mask = cpfit.extract_bolt_candidates(
+    metal_evidence_vol = compute_metal_evidence_volume(log1, ct_arr_kji)
+    bolts, bolt_mask = extract_bolt_candidates(
         log1, dist_arr, ijk_to_ras_mat, spacing,
         ct_arr=metal_evidence_vol,
-        hu_threshold=cpfit.METAL_BOLT_THRESHOLD,
-        hull_proximity_mm=cpfit.BOLT_HULL_PROXIMITY_MM,
+        hu_threshold=METAL_BOLT_THRESHOLD,
+        hull_proximity_mm=BOLT_HULL_PROXIMITY_MM,
     )
 
     return {
@@ -282,7 +304,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     amps = features.get("blob_amps")
     if pts_ras is None or amps is None:
         # Lazy extraction if compute_features was skipped
-        pts_ras, amps = cpfit.extract_blob_cloud_ras(
+        pts_ras, amps = extract_blob_cloud_ras(
             features["log"], np.asarray(ijk_to_ras_mat, dtype=float),
         )
     if pts_ras.shape[0] == 0:
@@ -380,7 +402,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
 
     rec = {"start_ras": shallow_ras, "end_ras": deep_ras}
     try:
-        refined_end = cpfit._refine_deep_end_via_axis_log(
+        refined_end = refine_deep_end_via_axis_log(
             rec, features["log"], np.asarray(ras_to_ijk_mat, dtype=float),
             max_extend_mm=DEEP_REFINE_MAX_EXTEND_MM,
         )
@@ -402,8 +424,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     bolts = features.get("bolts") or []
     if bolts:
         try:
-            fwd = cpfit.anchor_trajectory_to_bolt(shallow_ras, deep_ras, bolts)
-            bwd = cpfit.anchor_trajectory_to_bolt(deep_ras, shallow_ras, bolts)
+            fwd = anchor_trajectory_to_bolt(shallow_ras, deep_ras, bolts)
+            bwd = anchor_trajectory_to_bolt(deep_ras, shallow_ras, bolts)
             fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
             bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
             if bwd_n > fwd_n:
@@ -448,8 +470,8 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     ras_to_ijk = np.asarray(ras_to_ijk_mat, dtype=float)
     if dist_arr is not None:
         try:
-            shallow_d = cpfit._sample_dist_at_ras(dist_arr, ras_to_ijk, intracranial_endpoint)
-            deep_d = cpfit._sample_dist_at_ras(dist_arr, ras_to_ijk, deep_ras)
+            shallow_d = sample_dist_at_ras(dist_arr, ras_to_ijk, intracranial_endpoint)
+            deep_d = sample_dist_at_ras(dist_arr, ras_to_ijk, deep_ras)
             dist_min_mm = float(min(shallow_d, deep_d))
             dist_max_mm = float(max(shallow_d, deep_d))
             dist_mean_mm = float(0.5 * (shallow_d + deep_d))
@@ -463,7 +485,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     frangi_mean_mm = frangi_median_mm = 0.0
     if frangi_arr is not None:
         try:
-            f_mean, f_med = cpfit._frangi_along_line_stats(
+            f_mean, f_med = frangi_along_line_stats(
                 start_out, deep_ras, frangi_arr, ras_to_ijk,
             )
             frangi_mean_mm = float(f_mean)
@@ -475,7 +497,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     ct_arr_kji = features.get("ct_arr_kji")
     if ct_arr_kji is not None:
         try:
-            frac_strong = cpfit._frac_strong_metal_along_line(
+            frac_strong = frac_strong_metal_along_line(
                 start_out, deep_ras,
                 features.get("log"), ct_arr_kji, ras_to_ijk,
             )
@@ -504,7 +526,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
         "dist_mean_mm": dist_mean_mm,
         "bolt_source": bolt_source,
     }
-    confidence, confidence_label, score_components = cpfit._compute_trajectory_score(score_rec)
+    confidence, confidence_label, score_components = compute_trajectory_score(score_rec)
 
     result = {
         "success": True,
@@ -542,3 +564,153 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     if warnings:
         result["warnings"] = list(warnings)
     return result
+
+
+# ---------------------------------------------------------------------
+# Unified seed-fitting entry point — used by BOTH:
+#   * Slicer Guided Fit module (PostopCTLocalization/guided_fit.py)
+#   * CLI `rosa-agent detect --seeds` (cli/rosa_agent/commands/detect.py)
+#
+# Single source of truth so both surfaces have identical fit behavior.
+# ---------------------------------------------------------------------
+
+
+def fit_seeds_against_auto(
+    seeds,
+    features,
+    ijk_to_ras_mat,
+    ras_to_ijk_mat,
+    *,
+    auto_trajs=None,
+    auto_run_if_missing=True,
+    roi_radius_mm=DEFAULT_ROI_RADIUS_MM,
+    max_angle_deg=DEFAULT_MAX_ANGLE_DEG,
+    max_lateral_shift_mm=DEFAULT_MAX_LATERAL_SHIFT_MM,
+    min_inliers=DEFAULT_MIN_INLIERS,
+    progress_log=None,
+):
+    """Per-seed guided fit, match-against-auto then PCA fallback.
+
+    For each seed:
+      1. If an auto trajectory is in tolerance (`max_angle_deg` /
+         `max_lateral_shift_mm`), inherit its fit verbatim. Each auto
+         trajectory can be claimed by at most one seed.
+      2. Otherwise, run ``fit_trajectory`` (PCA-based walker fit).
+
+    The auto trajectory pool comes from:
+      * ``auto_trajs`` if explicitly supplied (Slicer passes its scene
+        cache; pass ``[]`` to disable match-against-auto entirely).
+      * ``run_contact_pitch_v1_with_features`` run internally on the
+        canonical CT in ``features["img"]`` when ``auto_trajs is None``
+        and ``auto_run_if_missing`` is True. This is what makes a fresh
+        Slicer "Fit All" or CLI ``rosa-agent detect --seeds`` invocation
+        produce auto-aware results without the caller having to remember
+        to run Auto Fit first.
+
+    Args:
+        seeds: list of dicts with keys ``name``, ``start_ras``, ``end_ras``.
+        features: dict from ``compute_features``. Must include ``img``,
+            ``ijk_to_ras_mat``, ``ras_to_ijk_mat`` if ``auto_run_if_missing``.
+        ijk_to_ras_mat / ras_to_ijk_mat: canonical-grid matrices (must
+            match those returned by ``compute_features``).
+        auto_trajs: pre-computed auto-fit trajectories (list of dicts with
+            ``start_ras`` / ``end_ras``), or ``None`` to auto-compute.
+        auto_run_if_missing: when ``auto_trajs is None``, whether to run
+            auto fit. Set False to disable match-against-auto entirely.
+        roi_radius_mm / max_angle_deg / max_lateral_shift_mm /
+            min_inliers: forwarded to ``fit_trajectory`` and used as
+            tolerances for ``match_seed_to_auto_traj``.
+        progress_log: callable taking one string; receives status lines
+            (auto-fit start/end, per-seed match/fail). Defaults to no-op.
+
+    Returns:
+        list of fit-result dicts in the same order as ``seeds``. Each
+        fit dict has the keys returned by ``match_seed_to_auto_traj``
+        or ``fit_trajectory`` (``success``, ``start_ras`` / ``end_ras``
+        on success, ``reason`` on failure), plus:
+          * ``name``: the seed's name
+          * ``matched_path``: ``'auto'`` / ``'pca'`` / ``'failed'``
+    """
+    log = progress_log if callable(progress_log) else (lambda _msg: None)
+
+    # Resolve the auto trajectory pool.
+    if auto_trajs is None:
+        if auto_run_if_missing:
+            from .service import run_contact_pitch_v1_with_features
+            log("[guided] no auto trajectories supplied; running auto fit")
+            try:
+                ctx = {
+                    "img": features.get("img"),
+                    "ijk_to_ras_4x4": np.asarray(ijk_to_ras_mat, dtype=float),
+                    "ras_to_ijk_4x4": np.asarray(ras_to_ijk_mat, dtype=float),
+                }
+                auto_result, _features = run_contact_pitch_v1_with_features(ctx)
+                auto_trajs = list(auto_result.get("trajectories") or [])
+                log(f"[guided] auto fit produced {len(auto_trajs)} trajectories")
+            except Exception as exc:
+                log(f"[guided] auto fit failed ({exc}); falling back to PCA-only")
+                auto_trajs = []
+        else:
+            auto_trajs = []
+    else:
+        auto_trajs = list(auto_trajs)
+
+    remaining = list(auto_trajs)
+    out: list[dict] = []
+    for seed in seeds:
+        name = str(seed.get("name") or f"seed_{len(out) + 1}")
+        ss = seed["start_ras"]
+        se = seed["end_ras"]
+        fit = None
+
+        if remaining:
+            try:
+                fit = match_seed_to_auto_traj(
+                    planned_start_ras=ss, planned_end_ras=se,
+                    auto_trajs=remaining,
+                    max_angle_deg=max_angle_deg,
+                    max_lateral_shift_mm=max_lateral_shift_mm,
+                )
+            except Exception as exc:
+                log(f"[guided] {name}: match-auto crashed ({exc})")
+                fit = None
+            if fit is not None:
+                # Remove the claimed auto traj from the pool so other
+                # seeds don't double-claim it.
+                claimed_start = list(fit.get("start_ras") or [])
+                claimed_end = list(fit.get("end_ras") or [])
+                consumed = False
+                next_remaining = []
+                for t in remaining:
+                    if (not consumed
+                            and list(t.get("start_ras") or []) == claimed_start
+                            and list(t.get("end_ras") or []) == claimed_end):
+                        consumed = True
+                        continue
+                    next_remaining.append(t)
+                remaining = next_remaining
+                fit = dict(fit)
+                fit["matched_path"] = "auto"
+
+        if fit is None:
+            try:
+                fit = fit_trajectory(
+                    planned_start_ras=ss, planned_end_ras=se,
+                    features=features,
+                    ijk_to_ras_mat=ijk_to_ras_mat,
+                    ras_to_ijk_mat=ras_to_ijk_mat,
+                    roi_radius_mm=roi_radius_mm,
+                    max_angle_deg=max_angle_deg,
+                    max_lateral_shift_mm=max_lateral_shift_mm,
+                    min_inliers=min_inliers,
+                )
+                fit = dict(fit)
+                fit["matched_path"] = "pca" if fit.get("success") else "failed"
+            except Exception as exc:
+                log(f"[guided] {name}: fit_trajectory crashed ({exc})")
+                fit = {"success": False, "reason": f"crash: {exc}", "matched_path": "failed"}
+
+        fit["name"] = name
+        out.append(fit)
+
+    return out
