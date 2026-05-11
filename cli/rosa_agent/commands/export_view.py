@@ -261,26 +261,42 @@ def _build_scene(
     contacts,
     contact_labels,
     lut_index,
-    contact_radius_mm: float,
-    trajectory_radius_mm: float,
+    shaft_radius_mm: float = 0.35,
+    contact_band_radius_mm: float = 0.55,
+    contact_band_length_mm: float = 2.0,
 ) -> tuple[GLBScene, list[dict[str, Any]]]:
     """Assemble the GLB scene and return (scene, contact-metadata-rows).
 
-    ``contact-metadata-rows`` is the listing the HTML viewer hydrates into
-    a sidebar so a click on a node can show its anatomical label.
+    Geometry layout per electrode (a "shank"):
+
+      * ``shaft/<name>``  — thin dark cylinder running the full
+        ``start`` → ``end`` length (radius ~0.35 mm, matching real SEEG
+        electrode insulation).
+      * ``contact/<label>`` — short cylinder centered on each contact,
+        ~2 mm long along the trajectory axis, slightly thicker than the
+        shaft so the bands look metallic and protrude (radius ~0.55 mm).
+        Coloured by the contact's FreeSurfer region when available.
+
+    Brain surfaces use ``alphaMode: BLEND`` so the electrodes show
+    through the cortex by default.
+
+    Every electrode node carries ``extras.shank`` (the trajectory name)
+    so the in-browser viewer can isolate a single shank with one
+    lookup. Every contact node also carries the contact label, index,
+    electrode model, FS/THOMAS/WM region, and peak-detection flag.
     """
     scene = GLBScene()
 
-    # Surfaces — one material per hemisphere, semi-transparent so contacts
-    # show through. Vertex colors from the .annot override the material's
-    # base color when present.
+    # Surfaces — one material per hemisphere, alpha-blended so the
+    # electrodes inside the cortex stay visible. Vertex colors from the
+    # .annot override the material's base color when present.
     lh_mat = scene.add_material(
         "fs_lh_pial", (0.92, 0.88, 0.84, 0.35),
-        metallic=0.0, roughness=0.85, double_sided=True,
+        metallic=0.0, roughness=0.85, double_sided=True, alpha_mode="BLEND",
     )
     rh_mat = scene.add_material(
         "fs_rh_pial", (0.84, 0.88, 0.92, 0.35),
-        metallic=0.0, roughness=0.85, double_sided=True,
+        metallic=0.0, roughness=0.85, double_sided=True, alpha_mode="BLEND",
     )
     for surf in surfaces:
         mat = lh_mat if surf.hemi == "lh" else rh_mat
@@ -299,22 +315,37 @@ def _build_scene(
             },
         )
 
-    # Trajectories — one cylinder per shank, colored by confidence band.
-    band_materials = {
-        band: scene.add_material(f"trajectory_{band or 'unknown'}", color, metallic=0.4, roughness=0.4)
-        for band, color in _TRAJ_BAND_COLORS.items()
-    }
+    # Electrode shaft material — dark insulation. One material reused
+    # across all shanks so the JS viewer can recolor / hide one shank
+    # without forking the material list.
+    shaft_mat = scene.add_material(
+        "electrode_shaft", (0.08, 0.08, 0.10, 1.0),
+        metallic=0.0, roughness=0.95,
+    )
+
+    # Per-shank axis cache so each contact band can be oriented along
+    # its trajectory.
+    traj_axis: dict[str, np.ndarray] = {}
     for traj in trajectories:
-        band = (traj.get("confidence_label") or "").strip().lower()
-        mat = band_materials.get(band, band_materials[""])
+        start = np.asarray(traj["start"], dtype=float)
+        end = np.asarray(traj["end"], dtype=float)
+        length = float(np.linalg.norm(end - start))
+        if length < 1e-6:
+            # Degenerate shank — fall back to +Z so add_segment can still
+            # emit a tiny placeholder cylinder.
+            unit = np.array([0.0, 0.0, 1.0])
+        else:
+            unit = (end - start) / length
+        traj_axis[traj["name"]] = unit
+
         scene.add_segment(
-            name=f"traj/{traj['name']}",
+            name=f"shaft/{traj['name']}",
             p0=traj["start"], p1=traj["end"],
-            radius=trajectory_radius_mm,
-            material_index=mat,
+            radius=shaft_radius_mm,
+            material_index=shaft_mat,
             extras={
-                "kind": "trajectory",
-                "name": traj["name"],
+                "kind": "shaft",
+                "shank": traj["name"],
                 "confidence": traj.get("confidence", ""),
                 "confidence_label": traj.get("confidence_label", ""),
                 "electrode_model": traj.get("electrode_model", ""),
@@ -323,14 +354,17 @@ def _build_scene(
             },
         )
 
-    # Contacts — one sphere per contact, colored by FS label when available.
+    # Contact bands — short cylinder per contact, aligned along the
+    # trajectory axis, coloured by FS region.
     contact_meta: list[dict[str, Any]] = []
     color_to_material: dict[tuple[float, float, float, float], int] = {}
-    fallback_mat = scene.add_material("contact_unlabeled", (0.95, 0.95, 0.95, 1.0),
-                                      metallic=0.7, roughness=0.3)
+    fallback_mat = scene.add_material(
+        "contact_unlabeled", (0.95, 0.95, 0.95, 1.0),
+        metallic=0.7, roughness=0.3,
+    )
+    half_len = 0.5 * float(contact_band_length_mm)
     for contact in contacts:
         label_row = contact_labels.get(contact["label"], {})
-        # Prefer the FS-specific column; fall back to whichever source was closest.
         fs_label_name = label_row.get("freesurfer_label", "") or label_row.get("closest_label", "")
         fs_label_value = label_row.get("freesurfer_label_value") or label_row.get("closest_label_value")
         fs_distance = label_row.get("freesurfer_distance_to_voxel_mm") or label_row.get("closest_distance_to_voxel_mm")
@@ -348,9 +382,14 @@ def _build_scene(
         if not fs_label_value:
             mat = fallback_mat
 
+        center = np.asarray(contact["position"], dtype=float)
+        axis = traj_axis.get(contact["trajectory"], np.array([0.0, 0.0, 1.0]))
+        p0 = center - half_len * axis
+        p1 = center + half_len * axis
+
         extras = {
             "kind": "contact",
-            "trajectory": contact["trajectory"],
+            "shank": contact["trajectory"],
             "label": contact["label"],
             "contact_index": contact["contact_index"],
             "electrode_model": contact["electrode_model"],
@@ -359,11 +398,12 @@ def _build_scene(
             "thomas_label": thomas_label,
             "wm_label": wm_label,
             "distance_mm": fs_distance,
+            "position": [float(center[0]), float(center[1]), float(center[2])],
         }
-        scene.add_sphere(
+        scene.add_segment(
             name=f"contact/{contact['label']}",
-            center=contact["position"],
-            radius=contact_radius_mm,
+            p0=p0, p1=p1,
+            radius=contact_band_radius_mm,
             material_index=mat,
             extras=extras,
         )
@@ -371,8 +411,9 @@ def _build_scene(
             "label": contact["label"],
             "trajectory": contact["trajectory"],
             "contact_index": contact["contact_index"],
-            "position": list(contact["position"]),
+            "position": [float(center[0]), float(center[1]), float(center[2])],
             "electrode_model": contact["electrode_model"],
+            "peak_detected": bool(contact["peak_detected"]),
             "freesurfer_label": fs_label_name,
             "thomas_label": thomas_label,
             "wm_label": wm_label,
@@ -393,62 +434,293 @@ _HTML_TEMPLATE = """<!doctype html>
 <meta charset="utf-8" />
 <title>{title}</title>
 <style>
-  html, body {{ margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #1a1a1a; color: #eee; }}
-  #app {{ display: grid; grid-template-columns: 1fr 320px; height: 100%; }}
-  model-viewer {{ width: 100%; height: 100%; background: #1a1a1a; --poster-color: transparent; }}
-  #side {{ overflow-y: auto; padding: 12px 14px; border-left: 1px solid #333; font-size: 13px; }}
-  #side h2 {{ font-size: 14px; margin: 16px 0 6px; color: #ccc; letter-spacing: 0.04em; text-transform: uppercase; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  th, td {{ text-align: left; padding: 3px 6px; border-bottom: 1px solid #2b2b2b; vertical-align: top; }}
-  th {{ color: #999; font-weight: 500; font-size: 11px; }}
-  tr.contact {{ cursor: pointer; }}
-  tr.contact:hover {{ background: #2a2a2a; }}
-  tr.highlight {{ background: #3a4a30; }}
-  .badge {{ display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #333; color: #ddd; margin-right: 4px; }}
+  html, body {{ margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111; color: #eee; overflow: hidden; }}
+  #app {{ display: grid; grid-template-columns: 1fr 360px; height: 100%; }}
+  #canvas-host {{ position: relative; }}
+  #canvas-host canvas {{ display: block; }}
+  #toolbar {{ position: absolute; top: 10px; left: 10px; z-index: 5; display: flex; gap: 6px; }}
+  #toolbar button {{ background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
+  #toolbar button:hover {{ background: rgba(70,70,70,0.95); }}
+  #side {{ overflow-y: auto; padding: 12px 14px; border-left: 1px solid #2a2a2a; font-size: 13px; background: #161616; }}
+  #side h2 {{ font-size: 12px; margin: 14px 0 6px; color: #999; letter-spacing: 0.08em; text-transform: uppercase; }}
+  #subject {{ font-size: 14px; color: #ddd; font-weight: 500; }}
+  .small {{ color: #888; font-size: 11px; }}
+  .shank-card {{ border: 1px solid #2a2a2a; border-radius: 4px; margin-bottom: 6px; overflow: hidden; }}
+  .shank-header {{ padding: 6px 8px; background: #1f1f1f; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }}
+  .shank-header:hover {{ background: #262626; }}
+  .shank-card.active .shank-header {{ background: #2a3a2a; }}
+  .shank-name {{ font-weight: 500; }}
+  .shank-meta {{ color: #888; font-size: 11px; }}
+  .shank-contacts {{ display: none; }}
+  .shank-card.expanded .shank-contacts {{ display: block; }}
+  .badge {{ display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; background: #333; color: #ddd; margin-left: 4px; }}
   .band-high {{ background: #225a25; }}
   .band-medium {{ background: #6a5418; }}
   .band-low {{ background: #6a2515; }}
-  .small {{ color: #888; font-size: 11px; }}
+  .contact-row {{ padding: 4px 8px 4px 18px; cursor: pointer; display: flex; justify-content: space-between; font-size: 12px; border-top: 1px solid #1c1c1c; }}
+  .contact-row:hover {{ background: #232323; }}
+  .contact-row.selected {{ background: #4a1f1f; color: #ffdcdc; }}
+  .contact-row .label {{ font-family: ui-monospace, monospace; }}
+  .contact-row .region {{ color: #aaa; }}
+  .contact-row.selected .region {{ color: #ffdcdc; }}
 </style>
-<script type="module" src="https://cdn.jsdelivr.net/npm/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+<script type="importmap">
+{{
+  "imports": {{
+    "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+  }}
+}}
+</script>
 </head>
 <body>
 <div id="app">
-  <model-viewer id="viewer" src="scene.glb" camera-controls touch-action="pan-y" exposure="1" shadow-intensity="0" interaction-prompt="none"></model-viewer>
+  <div id="canvas-host">
+    <div id="toolbar">
+      <button id="btn-reset">Show all</button>
+      <button id="btn-fit">Fit view</button>
+    </div>
+  </div>
   <div id="side">
-    <h2>Subject</h2>
-    <div class="small" id="subject"></div>
-    <h2>Trajectories</h2>
-    <table id="traj-table"><thead><tr><th>Name</th><th>Band</th><th>Model</th></tr></thead><tbody></tbody></table>
-    <h2>Contacts</h2>
-    <table id="contact-table"><thead><tr><th>Label</th><th>Region</th></tr></thead><tbody></tbody></table>
+    <div id="subject"></div>
+    <div class="small" id="summary"></div>
+    <h2>Trajectories &amp; contacts</h2>
+    <div id="shanks"></div>
   </div>
 </div>
-<script>
-async function main() {{
-  const meta = await fetch("scene_meta.json").then(r => r.json());
+<script type="module">
+import * as THREE from "three";
+import {{ OrbitControls }} from "three/addons/controls/OrbitControls.js";
+import {{ GLTFLoader }} from "three/addons/loaders/GLTFLoader.js";
+
+const sideWidth = 360;
+
+const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const host = document.getElementById("canvas-host");
+host.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101010);
+scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+const key = new THREE.DirectionalLight(0xffffff, 0.9);
+key.position.set(1, 1.2, 0.8);
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.45);
+fill.position.set(-1, -0.7, -0.6);
+scene.add(fill);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+camera.position.set(220, 140, 220);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+
+function fitToObject(obj) {{
+  const box = new THREE.Box3().setFromObject(obj);
+  if (box.isEmpty()) return;
+  const center = box.getCenter(new THREE.Vector3());
+  const diag = box.getSize(new THREE.Vector3()).length();
+  controls.target.copy(center);
+  const dir = new THREE.Vector3(0.7, 0.45, 0.8).normalize();
+  camera.position.copy(center).addScaledVector(dir, diag * 0.95);
+  camera.near = Math.max(0.1, diag * 0.001);
+  camera.far = diag * 10;
+  camera.updateProjectionMatrix();
+  controls.update();
+}}
+
+function resize() {{
+  const w = window.innerWidth - sideWidth;
+  const h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}}
+window.addEventListener("resize", resize);
+resize();
+
+(function loop() {{
+  requestAnimationFrame(loop);
+  controls.update();
+  renderer.render(scene, camera);
+}})();
+
+// ---------- load GLB + index nodes ---------------------------------
+
+const nodesByName = new Map();           // mesh.name -> THREE.Mesh
+const shankNodes = new Map();            // shank id -> [mesh, ...]
+const surfaceNodes = [];                 // FS pial meshes
+const originalMaterials = new Map();     // mesh -> material
+let gltfRoot = null;
+
+const RED = new THREE.MeshStandardMaterial({{ color: 0xff2030, metalness: 0.75, roughness: 0.25 }});
+
+const loader = new GLTFLoader();
+loader.load("scene.glb", gltf => {{
+  gltfRoot = gltf.scene;
+  scene.add(gltfRoot);
+  gltfRoot.traverse(obj => {{
+    if (!obj.isMesh) return;
+    nodesByName.set(obj.name, obj);
+    originalMaterials.set(obj, obj.material);
+    const extras = obj.userData || {{}};
+    if (extras.kind === "freesurfer_surface") {{
+      // Brain mesh: ensure it's transparent so electrodes show through.
+      // glTF's alphaMode=BLEND already sets transparent=true; this is
+      // belt-and-suspenders for renderers that don't honor it perfectly.
+      if (obj.material) {{
+        obj.material.transparent = true;
+        obj.material.depthWrite = false;
+      }}
+      surfaceNodes.push(obj);
+    }} else if (extras.shank) {{
+      if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
+      shankNodes.get(extras.shank).push(obj);
+    }}
+  }});
+  fitToObject(gltfRoot);
+}}, undefined, err => {{
+  console.error("GLB load failed", err);
+  document.getElementById("subject").textContent = "Failed to load scene.glb: " + err;
+}});
+
+// ---------- sidebar -----------------------------------------------
+
+let selectedContact = null;
+let selectedShank = null;
+
+function renderSidebar(meta) {{
   document.getElementById("subject").textContent = meta.subject_label || "(unnamed)";
-  const trajTbody = document.querySelector("#traj-table tbody");
-  for (const t of meta.trajectories) {{
-    const tr = document.createElement("tr");
-    const band = (t.confidence_label || "").toLowerCase();
-    tr.innerHTML = `<td>${{t.name}}</td><td><span class="badge band-${{band}}">${{band || "?"}}</span></td><td class="small">${{t.electrode_model || ""}}</td>`;
-    trajTbody.appendChild(tr);
-  }}
-  const cTbody = document.querySelector("#contact-table tbody");
+  document.getElementById("summary").textContent =
+    `${{meta.trajectories.length}} trajectories · ${{meta.contacts.length}} contacts`;
+
+  const contactsByShank = new Map();
   for (const c of meta.contacts) {{
-    const tr = document.createElement("tr");
-    tr.className = "contact";
-    tr.dataset.label = c.label;
-    tr.innerHTML = `<td>${{c.label}}</td><td>${{c.freesurfer_label || c.thomas_label || c.wm_label || "<span class=small>—</span>"}}</td>`;
-    tr.addEventListener("click", () => {{
-      document.querySelectorAll("tr.contact").forEach(r => r.classList.remove("highlight"));
-      tr.classList.add("highlight");
+    if (!contactsByShank.has(c.trajectory)) contactsByShank.set(c.trajectory, []);
+    contactsByShank.get(c.trajectory).push(c);
+  }}
+  for (const arr of contactsByShank.values()) {{
+    arr.sort((a, b) => (a.contact_index|0) - (b.contact_index|0));
+  }}
+
+  const host = document.getElementById("shanks");
+  host.innerHTML = "";
+  for (const t of meta.trajectories) {{
+    const card = document.createElement("div");
+    card.className = "shank-card";
+    card.dataset.shank = t.name;
+    const band = (t.confidence_label || "").toLowerCase();
+    const contacts = contactsByShank.get(t.name) || [];
+    card.innerHTML = `
+      <div class="shank-header">
+        <div>
+          <span class="shank-name">${{t.name}}</span>
+          <span class="badge band-${{band}}">${{band || "?"}}</span>
+        </div>
+        <div class="shank-meta">${{t.electrode_model || ""}} · ${{contacts.length}}</div>
+      </div>
+      <div class="shank-contacts"></div>
+    `;
+    const list = card.querySelector(".shank-contacts");
+    for (const c of contacts) {{
+      const row = document.createElement("div");
+      row.className = "contact-row";
+      row.dataset.label = c.label;
+      const region = c.freesurfer_label || c.thomas_label || c.wm_label || "—";
+      const dist = c.distance_mm ? ` <span class="small">${{(+c.distance_mm).toFixed(1)}}mm</span>` : "";
+      row.innerHTML = `<span class="label">${{c.label}}</span><span class="region">${{region}}${{dist}}</span>`;
+      row.addEventListener("click", ev => {{ ev.stopPropagation(); selectContact(c.label, c.trajectory); }});
+      list.appendChild(row);
+    }}
+    card.querySelector(".shank-header").addEventListener("click", () => {{
+      card.classList.toggle("expanded");
+      isolateShank(t.name, /*toggle=*/true);
     }});
-    cTbody.appendChild(tr);
+    host.appendChild(card);
   }}
 }}
-main().catch(err => {{ console.error(err); document.getElementById("subject").textContent = "Failed to load metadata: " + err.message; }});
+
+function isolateShank(shank, toggle) {{
+  // Hide every electrode node that doesn't belong to `shank`.
+  // Brain surfaces stay visible (semi-transparent). Pass shank=null
+  // (or toggle=true on an already-selected one) to restore all.
+  if (toggle && selectedShank === shank) {{
+    showAll();
+    return;
+  }}
+  selectedShank = shank;
+  for (const [s, nodes] of shankNodes) {{
+    const visible = s === shank;
+    for (const n of nodes) n.visible = visible;
+  }}
+  // Highlight active shank card
+  document.querySelectorAll(".shank-card").forEach(c => c.classList.remove("active", "expanded"));
+  const card = document.querySelector(`.shank-card[data-shank="${{shank}}"]`);
+  if (card) card.classList.add("active", "expanded");
+  // Frame the shank in the camera.
+  const sNodes = shankNodes.get(shank) || [];
+  if (sNodes.length) {{
+    const box = new THREE.Box3();
+    for (const n of sNodes) box.expandByObject(n);
+    if (!box.isEmpty()) {{
+      const center = box.getCenter(new THREE.Vector3());
+      const diag = box.getSize(new THREE.Vector3()).length();
+      controls.target.copy(center);
+      const dir = camera.position.clone().sub(controls.target).normalize();
+      camera.position.copy(center).addScaledVector(dir, Math.max(60, diag * 1.6));
+      controls.update();
+    }}
+  }}
+}}
+
+function selectContact(label, shank) {{
+  isolateShank(shank, /*toggle=*/false);
+
+  // Restore previously selected contact's material
+  if (selectedContact && originalMaterials.has(selectedContact)) {{
+    selectedContact.material = originalMaterials.get(selectedContact);
+  }}
+  const node = nodesByName.get("contact/" + label);
+  if (node) {{
+    selectedContact = node;
+    node.material = RED;
+    // Snap the controls target onto the contact center and pull camera in close.
+    const pos = node.getWorldPosition(new THREE.Vector3());
+    controls.target.copy(pos);
+    const dir = camera.position.clone().sub(pos).normalize();
+    if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
+    camera.position.copy(pos).addScaledVector(dir, 35);
+    controls.update();
+  }}
+  // Toggle selection in sidebar UI
+  document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
+  const row = document.querySelector(`.contact-row[data-label="${{label}}"]`);
+  if (row) {{
+    row.classList.add("selected");
+    row.scrollIntoView({{ block: "nearest" }});
+  }}
+}}
+
+function showAll() {{
+  selectedShank = null;
+  for (const [, nodes] of shankNodes) for (const n of nodes) n.visible = true;
+  if (selectedContact && originalMaterials.has(selectedContact)) {{
+    selectedContact.material = originalMaterials.get(selectedContact);
+    selectedContact = null;
+  }}
+  document.querySelectorAll(".shank-card").forEach(c => c.classList.remove("active"));
+  document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
+}}
+
+document.getElementById("btn-reset").addEventListener("click", showAll);
+document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
+
+fetch("scene_meta.json").then(r => r.json()).then(renderSidebar).catch(err => {{
+  console.error(err);
+  document.getElementById("subject").textContent = "Failed to load metadata: " + err.message;
+}});
 </script>
 </body>
 </html>
@@ -480,8 +752,9 @@ def run_export_view(
     seeds_path: str | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
-    contact_radius_mm: float = 0.7,
-    trajectory_radius_mm: float = 0.5,
+    shaft_radius_mm: float = 0.35,
+    contact_band_radius_mm: float = 0.55,
+    contact_band_length_mm: float = 2.0,
     skip_registration: bool = False,
     output_frame: str = "ct",
 ) -> dict[str, Any]:
@@ -556,8 +829,9 @@ def run_export_view(
         contacts=contacts,
         contact_labels=contact_labels,
         lut_index=lut_index,
-        contact_radius_mm=contact_radius_mm,
-        trajectory_radius_mm=trajectory_radius_mm,
+        shaft_radius_mm=shaft_radius_mm,
+        contact_band_radius_mm=contact_band_radius_mm,
+        contact_band_length_mm=contact_band_length_mm,
     )
     glb_path = out / "scene.glb"
     glb_bytes = write_glb(glb_path, scene)
@@ -624,8 +898,19 @@ def main(argv: list[str] | None = None) -> int:
         help="FreeSurfer annotation to paint onto surfaces (default: aparc). "
              "Pass empty string to disable vertex coloring.",
     )
-    parser.add_argument("--contact-radius-mm", type=float, default=0.7)
-    parser.add_argument("--trajectory-radius-mm", type=float, default=0.5)
+    parser.add_argument(
+        "--shaft-radius-mm", type=float, default=0.35,
+        help="Electrode shaft (insulation) radius in mm — default 0.35.",
+    )
+    parser.add_argument(
+        "--contact-band-radius-mm", type=float, default=0.55,
+        help="Metallic contact band radius in mm — slightly larger than the "
+             "shaft so the contacts look raised. Default 0.55.",
+    )
+    parser.add_argument(
+        "--contact-band-length-mm", type=float, default=2.0,
+        help="Metallic contact band length along the trajectory axis (mm). Default 2.0.",
+    )
     parser.add_argument(
         "--skip-registration", action="store_true",
         help="When --ct is supplied alongside a ROSA folder, assume the external CT "
@@ -655,8 +940,9 @@ def main(argv: list[str] | None = None) -> int:
         seeds_path=args.seeds or None,
         surface_kinds=surface_kinds,
         annotation=args.annotation,
-        contact_radius_mm=float(args.contact_radius_mm),
-        trajectory_radius_mm=float(args.trajectory_radius_mm),
+        shaft_radius_mm=float(args.shaft_radius_mm),
+        contact_band_radius_mm=float(args.contact_band_radius_mm),
+        contact_band_length_mm=float(args.contact_band_length_mm),
         skip_registration=bool(args.skip_registration),
         output_frame=args.output_frame,
     )
