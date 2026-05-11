@@ -509,6 +509,17 @@ _HTML_TEMPLATE = """<!doctype html>
   .plane-ctl input[type="range"] {{ width: 120px; }}
   .plane-ctl .axis {{ font-weight: 600; min-width: 52px; }}
   .plane-ctl .coord {{ color: #888; font-family: ui-monospace, monospace; min-width: 42px; text-align: right; }}
+  #status-bar {{
+    position: absolute; left: 10px; right: 10px; bottom: 8px; z-index: 4;
+    background: rgba(15,15,15,0.92); color: #ccc; border: 1px solid #333;
+    border-radius: 4px; padding: 6px 10px; font-family: ui-monospace, monospace;
+    font-size: 11px; display: flex; gap: 18px; flex-wrap: wrap;
+    pointer-events: none;
+  }}
+  #status-bar .lbl {{ color: #888; margin-right: 4px; }}
+  #status-bar .ok {{ color: #6fcf6f; }}
+  #status-bar .warn {{ color: #f5b13b; }}
+  #status-bar .err {{ color: #ff6464; }}
   #slices {{ background: #0d0d0d; border-left: 1px solid #2a2a2a; padding: 8px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }}
   .slice-panel {{ position: relative; background: #000; border: 1px solid #1d1d1d; }}
   .slice-panel canvas {{ display: block; width: 100%; height: auto; image-rendering: crisp-edges; }}
@@ -557,6 +568,14 @@ _HTML_TEMPLATE = """<!doctype html>
     <div id="toolbar">
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
+      <label class="plane-ctl" data-control="brain-color">
+        <span class="axis">Surface</span>
+        <select>
+          <option value="skin">Skin</option>
+          <option value="parcellation" selected>Parcellation</option>
+          <option value="white">White</option>
+        </select>
+      </label>
       <label class="plane-ctl" data-control="brain-alpha">
         <span class="axis">Brain α</span>
         <input type="range" min="0" max="1" step="0.05" value="0.35" />
@@ -582,6 +601,12 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" min="0" max="1" step="0.5" disabled />
         <span class="coord">—</span>
       </label>
+    </div>
+    <div id="status-bar">
+      <span><span class="lbl">MRI:</span><span id="dbg-mri">init</span></span>
+      <span><span class="lbl">GLB:</span><span id="dbg-glb">init</span></span>
+      <span><span class="lbl">Click:</span><span id="dbg-click">—</span></span>
+      <span><span class="lbl">Snap:</span><span id="dbg-snap">—</span></span>
     </div>
   </div>
   <div id="slices">
@@ -619,6 +644,17 @@ import {{ GLTFLoader }} from "three/addons/loaders/GLTFLoader.js";
 // Width reserved for everything to the right of the 3D canvas:
 // slices column (320px) + sidebar column (320px).
 const rightStripWidth = 320 + 320;
+
+// Tiny debug-strip writer — every key event funnels through here so
+// the user can see what's actually happening without opening devtools.
+const _dbg = {{}};
+function setDbg(slot, msg, cls) {{
+  const el = document.getElementById("dbg-" + slot);
+  if (!el) return;
+  el.textContent = msg;
+  el.className = cls || "";
+  _dbg[slot] = msg;
+}}
 
 const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
 renderer.setPixelRatio(window.devicePixelRatio);
@@ -705,13 +741,18 @@ function _firstMeshChild(obj) {{
 }}
 
 const loader = new GLTFLoader();
+setDbg("glb", "loading…");
 loader.load("scene.glb", gltf => {{
   gltfRoot = gltf.scene;
   scene.add(gltfRoot);
+  let nContacts = 0, nShafts = 0, nSurf = 0;
   gltfRoot.traverse(obj => {{
     const extras = obj.userData || {{}};
     const kind = extras.kind;
     if (!kind) return;  // only the outer nodes carry kind/shank
+    if (kind === "contact") nContacts++;
+    else if (kind === "shaft") nShafts++;
+    else if (kind === "freesurfer_surface") nSurf++;
     nodesByName.set(obj.name, obj);
     const mesh = _firstMeshChild(obj);
     if (mesh) {{
@@ -734,9 +775,13 @@ loader.load("scene.glb", gltf => {{
       shankNodes.get(extras.shank).push(obj);
     }}
   }});
+  setDbg("glb", `${{nSurf}} surface · ${{nShafts}} shafts · ${{nContacts}} contacts`, "ok");
+  // Apply the default Surface color now that surfaces are indexed.
+  if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   fitToObject(gltfRoot);
 }}, undefined, err => {{
   console.error("GLB load failed", err);
+  setDbg("glb", "load failed: " + (err.message || err), "err");
   document.getElementById("subject").textContent = "Failed to load scene.glb: " + err;
 }});
 
@@ -937,10 +982,17 @@ function renderSlice(axis) {{
 }}
 
 function snapSlicesToRas(ras) {{
-  if (!mriVolume) return;
+  if (!mriVolume) {{
+    setDbg("snap", `RAS ${{ras[0].toFixed(1)}},${{ras[1].toFixed(1)}},${{ras[2].toFixed(1)}} (MRI not loaded)`, "warn");
+    return;
+  }}
   const vox = mriVolume.rasToVox(ras);
   mriVoxCursor = [Math.round(vox[0]), Math.round(vox[1]), Math.round(vox[2])];
   mriRasCursor = ras;
+  setDbg("snap",
+    `RAS ${{ras[0].toFixed(1)}},${{ras[1].toFixed(1)}},${{ras[2].toFixed(1)}} ` +
+    `→ vox ${{mriVoxCursor[0]}},${{mriVoxCursor[1]}},${{mriVoxCursor[2]}}`,
+    "ok");
   renderSlice("axial");
   renderSlice("coronal");
   renderSlice("sagittal");
@@ -948,6 +1000,7 @@ function snapSlicesToRas(ras) {{
 
 async function loadMri(t1Meta) {{
   if (!t1Meta || !t1Meta.path) {{
+    setDbg("mri", "not exported", "warn");
     // No T1 was exported (no FS surfaces); leave the slice panels blank.
     for (const axis of ["axial","coronal","sagittal"]) {{
       const p = slicePanels[axis]; if (!p) continue;
@@ -961,6 +1014,7 @@ async function loadMri(t1Meta) {{
     return;
   }}
   try {{
+    setDbg("mri", "fetching…");
     const resp = await fetch(t1Meta.path);
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const raw = await resp.arrayBuffer();
@@ -974,6 +1028,7 @@ async function loadMri(t1Meta) {{
     ];
     mriRasCursor = _apply4x4(mriVolume.affine, mriVoxCursor);
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+    setDbg("mri", `loaded ${{mriVolume.dim[0]}}×${{mriVolume.dim[1]}}×${{mriVolume.dim[2]}}`, "ok");
     // Kick the 3D cut planes — they reuse the same parsed volume.
     initCutPlanes(mriVolume);
     // If the user clicked a contact while the 16MB T1 was still
@@ -986,6 +1041,7 @@ async function loadMri(t1Meta) {{
     }}
   }} catch (err) {{
     console.error("MRI load failed", err);
+    setDbg("mri", "load failed: " + (err.message || err), "err");
     for (const axis of ["axial","coronal","sagittal"]) {{
       const p = slicePanels[axis]; if (!p) continue;
       const ctx = p.ctx;
@@ -1293,6 +1349,9 @@ function selectContact(label, shank) {{
     _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
   }}
   const node = nodesByName.get("contact/" + label);
+  setDbg("click",
+    `${{label}} (shank=${{shank}}) — ${{node ? "node FOUND" : "node MISSING"}}`,
+    node ? "ok" : "err");
   if (node) {{
     selectedContact = node;
     _setContactMaterial(node, RED);
@@ -1340,6 +1399,46 @@ function showAll() {{
 
 document.getElementById("btn-reset").addEventListener("click", showAll);
 document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
+
+// Surface color mode dropdown. The GLB already has per-vertex RGBA
+// colors painted from the FS aparc.annot; the surface material's
+// baseColor multiplies with them. Setting baseColor to white lets
+// the parcellation come through at full saturation; the "skin" tan
+// gives the soft cortex look the v2 viewer shipped with.
+const SURFACE_COLORS = {{
+  skin: [0.92, 0.88, 0.84],
+  parcellation: [1.0, 1.0, 1.0],
+  white: [0.95, 0.95, 0.95],
+}};
+function _applySurfaceColor(modeKey) {{
+  const rgb = SURFACE_COLORS[modeKey] || SURFACE_COLORS.parcellation;
+  for (const node of surfaceNodes) {{
+    const mesh = node.userData && node.userData._mesh;
+    if (!mesh || !mesh.material || !mesh.material.color) continue;
+    mesh.material.color.setRGB(rgb[0], rgb[1], rgb[2]);
+    // Vertex colors are already enabled on the material from glTF
+    // (COLOR_0 attribute); nothing else to flip.
+    mesh.material.needsUpdate = true;
+  }}
+}}
+(function _wireSurfaceColor() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="brain-color"]');
+  if (!ctl) return;
+  const sel = ctl.querySelector("select");
+  sel.addEventListener("change", () => _applySurfaceColor(sel.value));
+  // Apply once on first GLB completion (surfaces may not be indexed
+  // yet at module init time). The MutationObserver-free version: defer
+  // a beat after gltfRoot loads — we trigger from inside the GLB
+  // callback below.
+  ctl.dataset.initialApplied = "0";
+}})();
+// Apply the initial selection right after surfaces are indexed.
+function _applyInitialSurfaceColor() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="brain-color"]');
+  if (!ctl) return;
+  const sel = ctl.querySelector("select");
+  _applySurfaceColor(sel.value);
+}}
 
 // Brain α slider — opacity for every FS surface mesh. Surfaces are
 // indexed during GLB load, so this works regardless of how many
