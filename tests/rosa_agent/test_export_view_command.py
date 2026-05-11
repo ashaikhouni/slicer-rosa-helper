@@ -1,0 +1,208 @@
+"""Synthetic-fixture smoke test for ``rosa-agent export-view``.
+
+Builds a tiny ROSA folder (one display + one planned trajectory) and a
+minimal FreeSurfer recon-all subject (T1.mgz + lh.pial + rh.pial + an
+aparc+aseg.mgz that's just a uniform label), then exercises the
+end-to-end ``run_export_view`` to pin the output contract:
+
+  * ``scene.glb`` exists and parses as a valid glTF 2.0 binary container.
+  * ``index.html`` and ``scene_meta.json`` exist.
+  * ``view_manifest.json`` records the surfaces that were loaded.
+
+We don't gate on detected trajectory count or surface vertex count — the
+toy phantom isn't realistic enough for the SEEG detector. We only pin
+the IO contract.
+"""
+
+from __future__ import annotations
+
+import json
+import struct
+import sys
+import tempfile
+import textwrap
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "cli"))
+sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
+
+
+def _try_imports():
+    try:
+        import numpy  # noqa: F401
+        import nibabel  # noqa: F401
+        import SimpleITK  # noqa: F401
+        from rosa_agent.commands import export_view  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+DEPS_AVAILABLE = _try_imports()
+
+
+def _write_synthetic_analyze(path: Path, *, size=(20, 20, 20)) -> None:
+    import numpy as np
+    import SimpleITK as sitk
+
+    arr = np.zeros(size, dtype=np.float32)
+    arr[5:9, 5:9, 5:9] = 100.0
+    img = sitk.GetImageFromArray(arr)
+    img.SetSpacing((1.0, 1.0, 1.0))
+    sitk.WriteImage(img, str(path.with_suffix(".img")))
+
+
+def _build_synthetic_rosa_case(case_dir: Path) -> None:
+    analyze_root = case_dir / "DICOM" / "uid_a"
+    analyze_root.mkdir(parents=True, exist_ok=True)
+    _write_synthetic_analyze(analyze_root / "ref_vol")
+    ros_text = textwrap.dedent("""
+        [TRdicomRdisplay]
+        1 0 0 0
+        0 1 0 0
+        0 0 1 0
+        0 0 0 1
+        [VOLUME]
+        DICOM/uid_a/ref_vol
+        [IMAGERY_NAME]
+        ref_vol
+        [SERIE_UID]
+        uid_a
+        [IMAGERY_3DREF]
+        0
+        [TRAJECTORY]
+        traj1
+        T1 1 0 0 -1.0 -2.0 3.0 0 -10.0 -20.0 30.0
+        [END]
+    """).strip()
+    (case_dir / "case.ros").write_text(ros_text)
+
+
+def _build_synthetic_fs_subject(fs_dir: Path) -> None:
+    """Minimal recon-all skeleton with T1.mgz + small lh/rh.pial + aparc+aseg.mgz."""
+    import numpy as np
+    import nibabel as nib
+
+    surf_dir = fs_dir / "surf"
+    mri_dir = fs_dir / "mri"
+    label_dir = fs_dir / "label"
+    for d in (surf_dir, mri_dir, label_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # T1.mgz: same shape as the ROSA-folder phantom for fast registration.
+    size = 20
+    arr = np.zeros((size, size, size), dtype=np.uint8)
+    arr[5:9, 5:9, 5:9] = 80
+    affine = np.eye(4)
+    mgh = nib.MGHImage(arr, affine)
+    nib.save(mgh, str(mri_dir / "T1.mgz"))
+
+    # aparc+aseg with one nonzero region.
+    parc = np.zeros((size, size, size), dtype=np.int32)
+    parc[5:9, 5:9, 5:9] = 17  # Left-Hippocampus per FS LUT
+    parc_img = nib.MGHImage(parc.astype(np.int32), affine)
+    nib.save(parc_img, str(mri_dir / "aparc+aseg.mgz"))
+
+    # Tiny pial surfaces (4-vertex tetrahedra) — enough for the loader
+    # to round-trip; not enough for anything meaningful in 3D.
+    def _write_pial(path: Path, offset_x: float):
+        verts = np.array([
+            [offset_x + 0.0, 0.0, 0.0],
+            [offset_x + 2.0, 0.0, 0.0],
+            [offset_x + 1.0, 2.0, 0.0],
+            [offset_x + 1.0, 1.0, 2.0],
+        ], dtype=np.float32)
+        faces = np.array([
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 1],
+            [1, 3, 2],
+        ], dtype=np.int32)
+        nib.freesurfer.io.write_geometry(str(path), verts, faces)
+
+    _write_pial(surf_dir / "lh.pial", offset_x=-3.0)
+    _write_pial(surf_dir / "rh.pial", offset_x=+3.0)
+
+
+def _validate_glb(path: Path) -> dict:
+    """Parse the GLB header + JSON chunk; return the glTF document."""
+    with open(path, "rb") as f:
+        magic, ver, total = struct.unpack("<III", f.read(12))
+        assert magic == 0x46546C67, f"bad GLB magic: {hex(magic)}"
+        assert ver == 2
+        assert total == path.stat().st_size
+        json_len, json_type = struct.unpack("<II", f.read(8))
+        assert json_type == 0x4E4F534A, f"first chunk must be JSON, got {hex(json_type)}"
+        return json.loads(f.read(json_len).rstrip(b" ").decode("utf-8"))
+
+
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/nibabel/SimpleITK/rosa_agent not importable in this environment.",
+)
+class ExportViewSmokeTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.case_dir = self.tmp / "rosa_case"
+        self.case_dir.mkdir()
+        _build_synthetic_rosa_case(self.case_dir)
+        self.fs_dir = self.tmp / "fs_subject"
+        _build_synthetic_fs_subject(self.fs_dir)
+        self.out_dir = self.tmp / "view_out"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_writes_glb_and_html(self):
+        from rosa_agent.commands.export_view import run_export_view
+
+        try:
+            summary = run_export_view(
+                target=str(self.case_dir),
+                freesurfer_dir=str(self.fs_dir),
+                out_dir=self.out_dir,
+                ref_volume="ref_vol",
+                # No annotation = no vertex coloring; .annot isn't written
+                # in this fixture and the loader treats absence as benign.
+                annotation="",
+            )
+        except SystemExit:
+            self.fail("export_view raised SystemExit before assembling the GLB")
+        except Exception:
+            # Detection may not find anything on the toy phantom or the
+            # registration may fail to converge — that's OK. We still
+            # need the GLB/HTML to either be written, or for the call
+            # to fail before the assembly step (which is what would
+            # happen if the pipeline call itself raised). In the latter
+            # case, scene.glb won't exist and the assertion below will
+            # surface the failure precisely.
+            pass
+
+        self.assertTrue(
+            (self.out_dir / "scene.glb").exists(),
+            "scene.glb must be written",
+        )
+        self.assertTrue((self.out_dir / "index.html").exists())
+        self.assertTrue((self.out_dir / "scene_meta.json").exists())
+        self.assertTrue((self.out_dir / "view_manifest.json").exists())
+
+        gltf = _validate_glb(self.out_dir / "scene.glb")
+        self.assertEqual(gltf["asset"]["version"], "2.0")
+        # Surfaces should be present (lh.pial + rh.pial nodes).
+        node_names = {n["name"] for n in gltf["nodes"]}
+        self.assertTrue(any("lh.pial" in n for n in node_names),
+                        f"expected lh.pial in scene nodes; got {node_names}")
+        self.assertTrue(any("rh.pial" in n for n in node_names))
+
+        # Scene metadata sidecar must list trajectories + contacts arrays
+        # (lengths can be zero on the phantom, but the keys must exist).
+        meta = json.loads((self.out_dir / "scene_meta.json").read_text())
+        self.assertIn("trajectories", meta)
+        self.assertIn("contacts", meta)
+
+
+if __name__ == "__main__":
+    unittest.main()

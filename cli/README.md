@@ -49,6 +49,7 @@ iteration only; production use should `pip install`.
 | `place`         | 5-mode staged placer (auto / count / named / seeded / seeded+model) on any CT        |
 | `rosa-to-nifti` | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`          |
 | `match-ros`     | Name detector emissions on any-frame CT from a `.ros` plan via line-geometry RANSAC  |
+| `export-view`   | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB   |
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
@@ -387,6 +388,90 @@ output/
   match.tsv                    # per-ROS-plan match (ros_name, det_name, angle°, perp_mm)
   cross_volume_match.json      # recovered transform + RANSAC diagnostics
 ```
+
+---
+
+## `export-view` — pipeline + FreeSurfer brain into a browser GLB
+
+`export-view` runs the full pipeline on a ROSA case and packs the
+result into a `scene.glb` that you can open in any modern browser
+(via the auto-emitted `index.html`). The FreeSurfer recon-all directory
+serves two roles in one pass: its `aparc+aseg.mgz` drives the
+per-contact anatomical labeling (same `labels.tsv` the `pipeline` /
+`label` subcommands emit), and its `surf/?h.pial` surfaces become the
+3D brain mesh in the GLB.
+
+```bash
+rosa-agent export-view /path/to/CASE \
+    --freesurfer-dir /path/to/Recon \
+    --out-dir /tmp/case_view
+```
+
+Required:
+
+- positional: ROSA case folder (or dataset subject id — same as `pipeline`)
+- `--freesurfer-dir`: recon-all subject directory (contains `surf/`, `mri/`, `label/`)
+- `--out-dir`: output directory
+
+The command auto-discovers:
+
+- the parcellation labelmap (`mri/aparc+aseg.mgz`, falling back to
+  `aparc.DKTatlas+aseg.mgz` / `aparc.a2009s+aseg.mgz` in that order;
+  override with `--parcellation`)
+- the FreeSurfer base T1 (`mri/T1.mgz`, falling back to `orig.mgz` /
+  `brain.mgz` / `rawavg.mgz`)
+- the LUT (explicit `--lut` → `$FREESURFER_HOME/FreeSurferColorLUT.txt`
+  → bundled copy under `CommonLib/resources/freesurfer/`)
+- the surface annotation (`--annotation aparc` by default; pass an empty
+  string to disable per-vertex coloring)
+
+Useful flags:
+
+- `--surfaces pial,white` — comma-separated FS surface kinds. Defaults
+  to `pial` (one hemisphere = ~150k vertices, so the GLB stays small).
+- `--thomas DIR` — adds a THOMAS thalamic provider so the per-contact
+  `labels.tsv` also carries thalamic-segment labels.
+- `--contact-radius-mm`, `--trajectory-radius-mm` — geometry sizing.
+- All `pipeline` frame flags work too (`--ct`, `--ref-volume`,
+  `--seeds`, `--skip-registration`, `--output-frame`).
+
+Output layout:
+
+```text
+out_dir/
+  trajectories.tsv      # pipeline output
+  contacts.tsv          # pipeline output
+  labels.tsv            # per-contact FS / WM / THOMAS labels
+  ct.nii.gz             # working CT (only when ROSA-folder mode)
+  manifest.json         # pipeline manifest
+  scene.glb             # the 3D scene (surfaces + trajectories + contacts)
+  scene_meta.json       # contacts/trajectories listings the HTML sidebar consumes
+  index.html            # static viewer (uses model-viewer from CDN)
+  view_manifest.json    # what was loaded + counts
+```
+
+To view: serve the directory over HTTP and open `index.html` in a
+browser (`<model-viewer>` + the `scene_meta.json` fetch both need
+`http://`, not `file://`):
+
+```bash
+cd /tmp/case_view && python -m http.server 8000
+# then open http://localhost:8000/
+```
+
+The sidebar lists every detected contact with its closest FreeSurfer
+/ THOMAS / WM label. The GLB also works in any external glTF viewer
+(e.g. <https://gltf-viewer.donmccurdy.com/> via drag-and-drop) — you
+just lose the sidebar.
+
+How frames line up: contacts and trajectories live in the working CT
+RAS frame the `pipeline` runs in. FreeSurfer surfaces are originally
+in tkrRAS; the loader converts them to scanner RAS using the T1.mgz
+matrices, then rigidly registers the T1 to the working CT (rigid +
+Mattes MI, same algorithm `--atlas-base` uses inside `pipeline`) and
+applies that transform. The same registration is used to resample
+`aparc+aseg.mgz` onto the CT grid for labeling, so contacts and
+surfaces share a single alignment.
 
 ---
 
