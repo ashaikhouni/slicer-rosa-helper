@@ -1,6 +1,6 @@
 # Developer Guide
 
-Last updated: 2026-05-02
+Last updated: 2026-05-11
 
 ## 1) Architecture Overview
 
@@ -28,13 +28,17 @@ Primary packages in `CommonLib`:
 
 - **`rosa_core`** — pure-Python domain logic. ROS parser + case
   loader + transforms (LPS/RAS), contact placement
-  (`contact_peak_fit`, `contact_fit`), atlas-assignment policy +
-  shared atlas-index helpers (`atlas_assignment_policy`,
-  `atlas_index`), electrode classifier, registration helper
-  (`registration.register_rigid_mi` — rigid Versor3D + Mattes MI
-  mirroring BRAINSFit), volume sampling primitives. Lazy
-  `__init__.py` (PEP 562) so `from rosa_core.X import Y` for pure
-  modules doesn't pull NumPy as a side effect.
+  (`contact_peak_fit`, `contact_fit`, `contact_placement` — the
+  staged 5-mode dispatcher composed by `placement_modes.place_seeg`),
+  matched-filter electrode picker (`matched_filter`),
+  cross-volume line matcher (`cross_volume_match` — line-RANSAC for
+  naming detector emissions across coordinate frames without image
+  registration), atlas-assignment policy + shared atlas-index helpers
+  (`atlas_assignment_policy`, `atlas_index`), electrode classifier,
+  registration helper (`registration.register_rigid_mi` — rigid
+  Versor3D + Mattes MI mirroring BRAINSFit), volume sampling
+  primitives. Lazy `__init__.py` (PEP 562) so `from rosa_core.X import
+  Y` for pure modules doesn't pull NumPy as a side effect.
 - **`rosa_detect`** — pure-Python detection algorithm with a sealed
   public seam:
   - `from rosa_detect.service import run_contact_pitch_v1` is the
@@ -132,16 +136,20 @@ Slicer modules:
 
 Headless surface:
 
-- `cli/rosa_agent` — `rosa-agent` console script (5 subcommands:
-  `load`, `detect`, `contacts`, `label`, `pipeline`). Runs the same
-  algorithm against ROSA folders, dataset subjects, or external CTs
-  with no Slicer install required. See `cli/README.md`.
+- `cli/rosa_agent` — `rosa-agent` console script (8 subcommands:
+  `load`, `detect`, `contacts`, `label`, `pipeline`, `place`,
+  `rosa-to-nifti`, `match-ros`). Runs the same algorithm against
+  ROSA folders, dataset subjects, or external CTs with no Slicer
+  install required. See [`cli/README.md`](../cli/README.md) for the
+  full per-subcommand reference and the Library API section
+  (`rosa_core` / `rosa_detect` calling patterns from Python).
 
 Keep responsibilities separate. If a feature spans modules, connect through workflow roles.
 
 ## 5) Atlas Extension Pattern
 
 To add a new atlas source:
+
 1. Implement provider using typed interface in `CommonLib/rosa_scene/atlas_provider_types.py`.
 2. Register provider in `CommonLib/rosa_scene/atlas_provider_registry.py`.
 3. Add source loading/publishing in `AtlasSources`.
@@ -169,6 +177,17 @@ Compatibility:
 
 - preserve workflow role names unless migration is planned
 - if schema changes, update exporters and tests in the same change
+
+Tunable knobs:
+
+- the v1 detector and the staged placer each have a single
+  `constants.py` (in `CommonLib/rosa_detect/candidate_seeds/` and
+  `CommonLib/rosa_core/contact_placement/` respectively); these are the
+  single source of truth for tunable knobs.
+- when adding or changing a knob, also update
+  [`docs/PIPELINE_CONSTANTS.md`](PIPELINE_CONSTANTS.md) — it mirrors the
+  inline calibration prose so users can read the rationale without
+  diving into code.
 
 ## 7) Testing
 
@@ -201,9 +220,6 @@ Dataset-gated regressions (need a postop CT dataset on disk; set
   median per-contact error ≤ 1.75 mm and T2 ≤ 1.5 mm vs. the
   subject's `contacts.tsv` ground truth.
 
-For the canonical project state, current pipeline version, and
-score-band policy, see [`HANDOFF.md`](HANDOFF.md).
-
 Probes (diagnostic, not asserted):
 
 - `tests/deep_core/probe_contact_peak_filters.py` — compares LoG σ=1,
@@ -214,6 +230,7 @@ Probes (diagnostic, not asserted):
 ## 8) Adding New Functionality
 
 Recommended sequence:
+
 1. Define workflow inputs/outputs and role/table impact.
 2. Add or update pure logic in `rosa_core`/`shank_core` if possible.
 3. Add scene/workflow service hooks in `rosa_scene`/`rosa_workflow`.
