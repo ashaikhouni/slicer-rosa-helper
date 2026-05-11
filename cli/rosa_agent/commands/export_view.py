@@ -370,7 +370,7 @@ def _build_scene(
     for surf in surfaces:
         mat = lh_mat if surf.hemi == "lh" else rh_mat
         scene.add_surface(
-            name=f"fs/{surf.name}",
+            name=f"fs_{surf.name.replace('.', '_')}",
             positions=surf.vertices_ras,
             faces=surf.faces,
             material_index=mat,
@@ -432,7 +432,7 @@ def _build_scene(
         shaft_mat_by_shank[str(traj["name"])] = shaft_mat
 
         scene.add_segment(
-            name=f"shaft/{traj['name']}",
+            name=f"shaft_{traj['name']}",
             p0=traj["start"], p1=traj["end"],
             radius=shaft_radius_mm,
             material_index=shaft_mat,
@@ -494,7 +494,7 @@ def _build_scene(
             "position": [float(center[0]), float(center[1]), float(center[2])],
         }
         scene.add_segment(
-            name=f"contact/{contact['label']}",
+            name=f"contact_{contact['label']}",
             p0=p0, p1=p1,
             radius=contact_band_radius_mm,
             material_index=mat,
@@ -782,7 +782,16 @@ loader.load("scene.glb", gltf => {{
     if (kind === "contact") nContacts++;
     else if (kind === "shaft") nShafts++;
     else if (kind === "freesurfer_surface") nSurf++;
-    nodesByName.set(obj.name, obj);
+    // Key the lookup by extras (the canonical, unmangled identifier),
+    // not by obj.name. Three.js's GLTFLoader runs every node name
+    // through PropertyBinding.sanitizeNodeName, which strips any char
+    // outside [A-Za-z0-9_-] — so a Python-side name like "contact/RHH5"
+    // becomes "contactRHH5" on the JS side and the slash lookup misses.
+    // Using extras.label / extras.shank sidesteps that entirely.
+    let lookupKey = obj.name;
+    if (kind === "contact" && extras.label) lookupKey = "contact:" + extras.label;
+    else if (kind === "shaft" && extras.shank) lookupKey = "shaft:" + extras.shank;
+    nodesByName.set(lookupKey, obj);
     const mesh = _firstMeshChild(obj);
     if (mesh) {{
       originalMaterials.set(obj, mesh.material);
@@ -1383,7 +1392,7 @@ function selectContact(label, shank) {{
   if (selectedContact && originalMaterials.has(selectedContact)) {{
     _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
   }}
-  const node = nodesByName.get("contact/" + label);
+  const node = nodesByName.get("contact:" + label);
   setDbg("click",
     `${{label}} (shank=${{shank}}) — ${{node ? "node FOUND" : "node MISSING"}}`,
     node ? "ok" : "err");
