@@ -338,7 +338,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
 
         self.contactTable = qt.QTableWidget()
-        self.contactTable.setColumnCount(8)
+        self.contactTable.setColumnCount(7)
         # Short header labels to fit narrow columns; tooltips on the
         # header items carry the full meaning for the user to hover.
         _contact_headers = [
@@ -346,11 +346,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             ("Traj",    "Trajectory name"),
             ("Len mm",  "Trajectory length (entry → tip) in mm"),
             ("Model",   "Electrode model picked for this trajectory"),
-            ("# C",     "Number of contacts (read from the picked model)"),
+            ("# C",     "Number of contacts — derived from the picked model "
+                        "(read-only). Pick a different model to change."),
             ("Elec mm", "Active electrode length in mm"),
             ("Tip At",  "Where the tip sits relative to the trajectory line "
-                        "(target vs entry)"),
-            ("Shift",   "Tip shift along the axis in mm"),
+                        "(target vs entry). Controls electrode-render direction."),
         ]
         self.contactTable.setHorizontalHeaderLabels(
             [label for label, _ in _contact_headers]
@@ -379,7 +379,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             (4, 70),    # # Contacts
             (5, 90),    # Elec Length
             (6, 70),    # Tip At
-            (7, 90),    # Tip Shift
         ):
             self.contactTable.setColumnWidth(col, width)
         header.setStretchLastSection(False)
@@ -663,33 +662,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         combo.addItems(["target", "entry"])
         return combo
 
-    def _build_tip_shift_spinbox(self):
-        spin = qt.QDoubleSpinBox()
-        spin.setDecimals(2)
-        spin.setRange(-50.0, 50.0)
-        spin.setSingleStep(0.25)
-        spin.setValue(0.0)
-        spin.setSuffix(" mm")
-        return spin
-
-    def _build_contact_count_spinbox(self):
-        """Integer spinbox for the # Contacts column. Auto-populated
-        when an electrode model is assigned; editable independently for
-        peak-driven model-free emission. ``0`` = "use the model" (or
-        emit all detected peaks if no model is assigned).
-        """
-        spin = qt.QSpinBox()
-        spin.setRange(0, 32)
-        spin.setValue(0)
-        spin.setToolTip(
-            "Number of contacts to emit in peak-driven mode.\n"
-            "  - 0 (default): use the assigned model's contact count "
-            "(or emit all detected peaks if no model is assigned).\n"
-            "  - >0: emit exactly N contacts as the strongest peaks "
-            "along the axis. Lets you skip the model assignment when "
-            "the count is known but the exact electrode pattern isn't."
-        )
-        return spin
+    # Tip-shift used to be a QDoubleSpinBox here, but the staged placer
+    # owns contact positions entirely — there's no `tip_shift_mm` input
+    # on `place_seeg` and the value the spinbox produced was silently
+    # dropped. If the user wants a different tip location, they should
+    # move the trajectory line's endpoints (which DOES re-seed the
+    # placer). UI affordance removed 2026-05-10.
 
     def _build_use_checkbox(self):
         check = qt.QCheckBox()
@@ -745,35 +723,31 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._set_readonly_text_item(row, 5, length_text)
 
     def _update_contact_count_cell(self, row):
-        """Sync the # Contacts spinbox to the currently-selected
-        electrode model. Overwrites any prior user value — the model
-        change is the implicit "I want this many contacts" signal; the
-        user can re-edit afterward to override.
+        """Display the picked electrode model's contact count in the
+        read-only ``# C`` cell. Updates whenever the Model combo
+        changes (via ``_bind_model_length_update``).
+
+        The contact count is NOT a user input — it's derived from
+        whichever library model is selected. Pick a different model
+        to change the count. Empty when no model is assigned.
         """
-        spin = self.contactTable.cellWidget(row, 4)
-        if spin is None:
-            return
         model_combo = self.contactTable.cellWidget(row, 3)
-        model_id = widget_current_text(model_combo).strip()
-        n = 0
+        model_id = widget_current_text(model_combo).strip() if model_combo else ""
+        text = ""
         if model_id:
             offsets = self.modelsById.get(model_id, {}).get(
                 "contact_center_offsets_from_tip_mm",
             ) or []
-            n = len(offsets)
-        spin.blockSignals(True)
-        try:
-            spin.setValue(int(n))
-        finally:
-            spin.blockSignals(False)
+            text = str(len(offsets))
+        self._set_readonly_text_item(row, 4, text)
 
     def _get_contact_count(self, row):
-        spin = self.contactTable.cellWidget(row, 4)
-        if spin is None:
+        item = self.contactTable.item(row, 4)
+        if item is None:
             return 0
         try:
-            return int(spin.value)
-        except Exception:
+            return int(item.text() or "0")
+        except (TypeError, ValueError):
             return 0
 
     def _load_electrode_library(self):
@@ -828,12 +802,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 if idx >= 0:
                     model_combo.setCurrentIndex(idx)
             self.contactTable.setCellWidget(row, 3, model_combo)
-            self.contactTable.setCellWidget(row, 4, self._build_contact_count_spinbox())
+            # Column 4 (# C) and column 5 (Elec mm) are both read-only;
+            # they're derived from the picked model and refresh whenever
+            # the Model combo changes (via _bind_model_length_update).
+            self._set_readonly_text_item(row, 4, "")
             self._set_readonly_text_item(row, 5, "")
             self._update_electrode_length_cell(row)
             self._update_contact_count_cell(row)
             self.contactTable.setCellWidget(row, 6, self._build_tip_at_combo())
-            self.contactTable.setCellWidget(row, 7, self._build_tip_shift_spinbox())
 
         enabled = bool(trajectories) and bool(self.modelsById)
         self.generateContactsButton.setEnabled(enabled)
@@ -933,21 +909,23 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 continue
             model_combo = self.contactTable.cellWidget(row, 3)
             tip_at_combo = self.contactTable.cellWidget(row, 6)
-            tip_shift_spin = self.contactTable.cellWidget(row, 7)
             model_id = widget_current_text(model_combo).strip()
+            # Contact count is derived from the picked model (column 4
+            # is read-only) — surfaced in the assignment dict for the
+            # downstream electrode_scene render path that wants to know
+            # how many contacts a row will produce, but never used as
+            # a placer input. tip_shift_mm is similarly stamped as 0.0
+            # for downstream-schema compatibility; the staged placer
+            # has no tip-shift parameter. If a user wants to shift the
+            # tip, they move the trajectory's endpoints.
             n_contacts = self._get_contact_count(row)
-            # Rows without a model are kept for the peak-driven path —
-            # the engine emits all detected peaks (or the strongest
-            # ``n_contacts`` of them when set). Model-driven generation
-            # still requires a model and skips no-model rows
-            # downstream.
             rows.append(
                 {
                     "trajectory": traj_item.text(),
                     "model_id": model_id,
                     "n_contacts_target": int(n_contacts) if n_contacts > 0 else None,
                     "tip_at": widget_current_text(tip_at_combo) or "target",
-                    "tip_shift_mm": self._widget_value(tip_shift_spin),
+                    "tip_shift_mm": 0.0,
                     "xyz_offset_mm": [0.0, 0.0, 0.0],
                 }
             )
