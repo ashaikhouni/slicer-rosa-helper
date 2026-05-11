@@ -55,12 +55,13 @@ _ensure_commonlib_importable()
 
 
 SUBCOMMANDS = {
-    "load":     "rosa_agent.commands.load",
-    "detect":   "rosa_agent.commands.detect",
-    "contacts": "rosa_agent.commands.contacts",
-    "label":    "rosa_agent.commands.label",
-    "pipeline": "rosa_agent.commands.pipeline",
-    "place":    "rosa_agent.commands.place",
+    "load":          "rosa_agent.commands.load",
+    "detect":        "rosa_agent.commands.detect",
+    "contacts":      "rosa_agent.commands.contacts",
+    "label":         "rosa_agent.commands.label",
+    "pipeline":      "rosa_agent.commands.pipeline",
+    "place":         "rosa_agent.commands.place",
+    "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
 }
 
 

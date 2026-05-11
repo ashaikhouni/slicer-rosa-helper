@@ -3,6 +3,11 @@
 Wraps ``rosa_core.placement_modes.place_seeg`` and writes a standardized
 QC directory via ``rosa_core.qc_output.write_qc_directory``.
 
+For ROSA-folder input (.ros + Analyze volumes), use ``rosa-agent fit-rosa``
+instead — it resolves the .ros file, loads the chosen display volume,
+and imports planned trajectories as seeds before delegating to the
+same staged-placement core this command uses.
+
 Usage::
 
     rosa-agent place --ct ct.nii.gz --output qc/                  # mode 1 (auto)
