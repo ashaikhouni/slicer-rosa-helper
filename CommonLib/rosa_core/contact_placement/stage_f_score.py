@@ -43,14 +43,21 @@ from .stage_d_pick import per_model_corrs
 # ---------------------------------------------------------------------
 
 
-def _model_uniform_pitch(model: dict) -> tuple[float | None, bool]:
+def _model_uniform_pitch(model) -> tuple[float | None, bool]:
     """Return ``(pitch_mm, uniform)`` for a library model.
 
     Uniform = all consecutive contact spacings within 0.1 mm. Non-uniform
     models (CM/BM) get FFT'd per cluster instead.
+
+    Accepts either a plain library dict or a
+    ``rosa_core.matched_filter.NormalizedLibraryModel``.
     """
-    offs = model.get("contact_center_offsets_from_tip_mm")
-    if not offs or len(offs) < 2:
+    from ..matched_filter import NormalizedLibraryModel
+    if isinstance(model, NormalizedLibraryModel):
+        offs = model.offsets_np
+    else:
+        offs = model.get("contact_center_offsets_from_tip_mm")
+    if offs is None or len(offs) < 2:
         return None, False
     diffs = np.diff(np.sort(np.asarray(offs, dtype=float)))
     pitch = float(np.mean(diffs))
@@ -258,9 +265,11 @@ def score_simple(ctx: PlacementCtx) -> PlacementCtx:
             ctx.walk_arcs, ctx.walk_signal, ctx.bolt_end_arc, cl_total,
         )
         m = ctx.match
+        target_id = m.best_model_id if m else ""
+        from ..matched_filter import NormalizedLibraryModel as _NLM
         picked = next(
             (mm for mm in ctx.library_models
-             if str(mm.get("id") or "") == (m.best_model_id if m else "")),
+             if (mm.model_id if isinstance(mm, _NLM) else str(mm.get("id") or "")) == target_id),
             None,
         )
         if picked is not None:

@@ -45,6 +45,60 @@ import numpy as np
 SIGMA_CONTACT_MM_DEFAULT = 1.0
 
 
+@dataclass(frozen=True)
+class NormalizedLibraryModel:
+    """Per-model fields needed by the matched-filter inner loop, with
+    expensive conversions done once.
+
+    The library JSON ships ``contact_center_offsets_from_tip_mm`` as a
+    plain Python list and stores ``id`` as a free-form string. The
+    matched-filter loop wants those repackaged as a numpy array plus
+    derived scalars (``offs.min()``, ``len(offs)``, ``str(id)``). With
+    plain dicts, those casts run inside the per-trajectory hot loop —
+    every trajectory, every model. Pre-normalize once per library
+    selection (typically once per ``place_seeg`` call) and the inner
+    loop just reads attributes.
+
+    ``raw`` is kept for downstream consumers that still want the
+    original dict (``filter_models_for_strategy``, electrode-rendering
+    code that reads ``shaft_radius_mm`` etc.).
+    """
+
+    model_id: str
+    raw: dict
+    offsets_np: np.ndarray
+    offs_min: float
+    n_slots: int
+
+
+def normalize_library(library_models: Sequence[dict | NormalizedLibraryModel]
+                      ) -> list[NormalizedLibraryModel]:
+    """Return a normalized library, dropping models that wouldn't enter
+    the matched filter anyway (n_slots < 2). Idempotent: if the input
+    already contains ``NormalizedLibraryModel`` entries they pass
+    through unchanged.
+    """
+    out: list[NormalizedLibraryModel] = []
+    for m in library_models:
+        if isinstance(m, NormalizedLibraryModel):
+            out.append(m)
+            continue
+        offs_raw = m.get("contact_center_offsets_from_tip_mm")
+        if not offs_raw:
+            continue
+        offs = np.asarray(offs_raw, dtype=float)
+        if len(offs) < 2:
+            continue
+        out.append(NormalizedLibraryModel(
+            model_id=str(m.get("id") or ""),
+            raw=m,
+            offsets_np=offs,
+            offs_min=float(offs.min()),
+            n_slots=int(len(offs)),
+        ))
+    return out
+
+
 @dataclass
 class MatchedFilterResult:
     """Result of a matched-filter library pick.
@@ -221,21 +275,26 @@ def matched_filter_pick(
     # when two models have equal n_covered, the smaller n_slots still
     # wins (which is what blocks an 18-contact model from quietly
     # covering 12 real contacts + 6 bolt-zone phantoms).
+    # Normalize the library on the way in. ``normalize_library`` is
+    # idempotent so callers that pass an already-normalized list pay
+    # nothing here; callers that pass plain dicts get a one-time cast
+    # whose cost is amortized across every (tip, candidate) inside the
+    # inner loop. The per-model loop then reads ``model.offsets_np`` /
+    # ``model.offs_min`` / ``model.n_slots`` as attributes.
+    normalized = normalize_library(library_models)
     best = {"corr": -np.inf, "n_covered": -1, "n_slots": float("inf")}
     per_model_best: dict[str, dict] = {}
-    for m in library_models:
-        offs = np.asarray(m["contact_center_offsets_from_tip_mm"], dtype=float)
-        n_slots = len(offs)
-        if n_slots < 2:
-            continue
-        offs_min = float(offs.min())
+    for model in normalized:
+        offs = model.offsets_np
+        n_slots = model.n_slots
+        offs_min = model.offs_min
         min_tip = cutoff + offs_min
         max_tip = float(profile_end_arc) + float(max_extend_tip_mm) + offs_min
         if max_tip_override is not None:
             max_tip = min(max_tip, float(max_tip_override) + offs_min)
         if min_tip > max_tip:
             continue
-        model_id = str(m.get("id") or "")
+        model_id = model.model_id
         for tip in np.arange(min_tip, max_tip + 1e-6, tip_grid_step_mm):
             slot_arcs = tip - offs
             in_contact = slot_arcs >= cutoff
@@ -302,7 +361,7 @@ def matched_filter_pick(
                 takes = False
             if takes:
                 best = {
-                    "model_id": m["id"], "tip_arc": float(tip),
+                    "model_id": model_id, "tip_arc": float(tip),
                     "slot_arcs": slot_arcs, "corr": corr,
                     "n_slots": int(n_slots), "n_covered": int(n_covered),
                 }
@@ -321,17 +380,29 @@ def matched_filter_pick(
                     "slot_arcs": slot_arcs, "corr": corr,
                     "n_slots": int(n_slots), "n_covered": int(n_covered),
                 }
-    per_model_results = sorted(
-        (
-            MatchedFilterResult(
+    # Per-model results list: one entry per library model that survived
+    # the n_slots ≥ 2 / min_tip ≤ max_tip prefilter, including
+    # placeholder entries for models that had no valid tip (corr=0,
+    # n_slots = the model's n_slots, n_covered=0). The placeholder
+    # preserves the OLD ``per_model_corrs`` shape that callers (e.g.
+    # ``score_simple``'s model_corr_uniformity feature) depend on —
+    # they expect one entry per scoring-eligible library model.
+    per_model_entries: list[MatchedFilterResult] = []
+    for model in normalized:
+        mb = per_model_best.get(model.model_id)
+        if mb is not None:
+            per_model_entries.append(MatchedFilterResult(
                 best_model_id=mb["model_id"], tip_arc=mb["tip_arc"],
                 slot_arcs=mb["slot_arcs"], n_slots=mb["n_slots"],
                 n_covered=mb["n_covered"], corr=mb["corr"], per_model=None,
-            )
-            for mb in per_model_best.values()
-        ),
-        key=lambda r: -r.corr,
-    ) or None
+            ))
+        else:
+            per_model_entries.append(MatchedFilterResult(
+                best_model_id=model.model_id, tip_arc=None, slot_arcs=None,
+                n_slots=model.n_slots, n_covered=0, corr=0.0, per_model=None,
+            ))
+    per_model_entries.sort(key=lambda r: -r.corr)
+    per_model_results = per_model_entries or None
     if "model_id" not in best:
         return MatchedFilterResult(
             best_model_id=None, tip_arc=None, slot_arcs=None,
@@ -351,6 +422,8 @@ def matched_filter_pick(
 
 __all__ = [
     "MatchedFilterResult",
+    "NormalizedLibraryModel",
     "SIGMA_CONTACT_MM_DEFAULT",
     "matched_filter_pick",
+    "normalize_library",
 ]

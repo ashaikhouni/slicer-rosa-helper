@@ -52,6 +52,7 @@ def per_model_corrs(ctx: PlacementCtx) -> list[tuple]:
         ]
     # Fallback path — preserves the old shape when callers run
     # per_model_corrs without a prior pick_matched_filter.
+    from ..matched_filter import NormalizedLibraryModel as _NLM
     cl = np.asarray(ctx.centerline, dtype=float)
     cl_max = float(np.linalg.norm(np.diff(cl, axis=0), axis=1).sum())
     max_extend = WALK_TIP_PAD_MM if ctx.bolt_source == "metal" else 0.0
@@ -64,7 +65,8 @@ def per_model_corrs(ctx: PlacementCtx) -> list[tuple]:
                 profile_end_arc=cl_max,
                 max_extend_tip_mm=max_extend,
             )
-            out.append((str(m.get("id") or ""), int(r.n_slots), int(r.n_covered), float(r.corr)))
+            mid = m.model_id if isinstance(m, _NLM) else str(m.get("id") or "")
+            out.append((mid, int(r.n_slots), int(r.n_covered), float(r.corr)))
         except Exception:
             continue
     out.sort(key=lambda t: -t[3])
@@ -133,7 +135,11 @@ def pick_extent_aware(ctx: PlacementCtx) -> PlacementCtx:
             )
             return replace(ctx, match=new_match)
     # Fallback (no per_model cache available — older caller path).
-    lookup = {str(m.get("id") or ""): m for m in ctx.library_models}
+    from ..matched_filter import NormalizedLibraryModel as _NLM
+    lookup = {
+        (m.model_id if isinstance(m, _NLM) else str(m.get("id") or "")): m
+        for m in ctx.library_models
+    }
     preferred_model = lookup.get(preferred_id)
     if preferred_model is None:
         return ctx
