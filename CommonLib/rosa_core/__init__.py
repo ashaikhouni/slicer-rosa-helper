@@ -82,6 +82,12 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "PlacementBatch":                                     ("placement_modes", "PlacementBatch"),
     "Seed":                                               ("placement_modes", "Seed"),
     "place_seeg":                                         ("placement_modes", "place_seeg"),
+    # cross_volume_match — line-geometry RANSAC for naming detector
+    # emissions on a different-frame CT from a .ros file's planned
+    # trajectories. No reference volume / image registration required.
+    "CrossVolumeMatch":                                   ("cross_volume_match", "CrossVolumeMatch"),
+    "TrajectoryLine":                                     ("cross_volume_match", "TrajectoryLine"),
+    "cross_volume_match":                                 ("cross_volume_match", "cross_volume_match"),
     # volume_loader — CT path / SimpleITK.Image → features + bolt CCs.
     "load_features_and_bolts":                            ("volume_loader", "load_features_and_bolts"),
     # qc_output — write a standardized QC directory for a PlacementBatch.

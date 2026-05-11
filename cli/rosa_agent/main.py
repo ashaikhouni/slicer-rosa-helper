@@ -15,11 +15,14 @@ Two ways to run:
 
 Subcommands::
 
-    rosa-agent load     <ros_folder>           [--out manifest.json]
-    rosa-agent detect   <ct.nii> [--seeds tsv]  --out trajectories.tsv
-    rosa-agent contacts <traj.tsv> <ct.nii>     --out contacts.tsv
-    rosa-agent label    <contacts.tsv> [...]    --out labels.tsv
-    rosa-agent pipeline <ros_folder|subj_id> --out-dir DIR [...]
+    rosa-agent load          <ros_folder>           [--out manifest.json]
+    rosa-agent detect        <ct.nii> [--seeds tsv]  --out trajectories.tsv
+    rosa-agent contacts      <traj.tsv> <ct.nii>     --out contacts.tsv
+    rosa-agent label         <contacts.tsv> [...]    --out labels.tsv
+    rosa-agent pipeline      <ros_folder|subj_id> --out-dir DIR [...]
+    rosa-agent place         --ct ct.nii [--seeds tsv | --expected tsv | --n-expected N] --output DIR
+    rosa-agent rosa-to-nifti --rosa-folder DIR --output DIR [--volume NAME ...]
+    rosa-agent match-ros     (--rosa-folder DIR | --ros-file FILE) --ct ct.nii --output DIR
 """
 
 from __future__ import annotations
@@ -62,6 +65,7 @@ SUBCOMMANDS = {
     "pipeline":      "rosa_agent.commands.pipeline",
     "place":         "rosa_agent.commands.place",
     "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
+    "match-ros":     "rosa_agent.commands.match_ros",
 }
 
 
