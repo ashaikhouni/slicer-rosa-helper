@@ -78,6 +78,7 @@ class _Material:
     metallic: float = 0.1
     roughness: float = 0.7
     double_sided: bool = True
+    alpha_mode: str = "OPAQUE"  # "OPAQUE" | "MASK" | "BLEND"
 
 
 @dataclass
@@ -101,11 +102,13 @@ class GLBScene:
         metallic: float = 0.1,
         roughness: float = 0.7,
         double_sided: bool = True,
+        alpha_mode: str = "OPAQUE",
     ) -> int:
         self.materials.append(_Material(
             name=name,
             base_color=(float(rgba[0]), float(rgba[1]), float(rgba[2]), float(rgba[3])),
             metallic=metallic, roughness=roughness, double_sided=double_sided,
+            alpha_mode=alpha_mode,
         ))
         return len(self.materials) - 1
 
@@ -470,7 +473,7 @@ def encode_glb(scene: GLBScene) -> bytes:
 
     materials_table = []
     for mat in scene.materials:
-        materials_table.append({
+        entry: dict[str, Any] = {
             "name": mat.name,
             "pbrMetallicRoughness": {
                 "baseColorFactor": list(mat.base_color),
@@ -478,7 +481,10 @@ def encode_glb(scene: GLBScene) -> bytes:
                 "roughnessFactor": mat.roughness,
             },
             "doubleSided": mat.double_sided,
-        })
+        }
+        if mat.alpha_mode and mat.alpha_mode != "OPAQUE":
+            entry["alphaMode"] = mat.alpha_mode
+        materials_table.append(entry)
 
     gltf: dict[str, Any] = {
         "asset": {"version": "2.0", "generator": "rosa-agent export-view"},
