@@ -1590,6 +1590,7 @@ def run_export_view(
     skip_registration: bool = False,
     output_frame: str = "ct",
     write_figures: bool = True,
+    library: str | None = None,
 ) -> dict[str, Any]:
     """Run the pipeline + assemble the GLB viewer."""
     out = Path(out_dir).expanduser().resolve()
@@ -1624,6 +1625,7 @@ def run_export_view(
         freesurfer_lut=str(lut) if lut else None,
         atlas_base_path=str(fs.t1_path),
         write_figures=write_figures,
+        library=library,
     )
 
     ct_path = Path(pipeline_summary["ct_path"])
@@ -1776,6 +1778,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip the per-trajectory QC PNG render step (default: figures "
              "are written to <out-dir>/figures/ when matplotlib is available).",
     )
+    parser.add_argument(
+        "--library", default="",
+        help="Electrode-library strategy key — restrict matching to a "
+             "vendor subset (e.g. 'dixi', 'pmt_35', 'adtech'). "
+             "Default: full bundled library.",
+    )
     args = parser.parse_args(argv)
 
     surface_kinds = tuple(
@@ -1802,6 +1810,7 @@ def main(argv: list[str] | None = None) -> int:
         skip_registration=bool(args.skip_registration),
         output_frame=args.output_frame,
         write_figures=not bool(args.no_figures),
+        library=args.library or None,
     )
     print(json.dumps(summary, indent=2))
     return 0

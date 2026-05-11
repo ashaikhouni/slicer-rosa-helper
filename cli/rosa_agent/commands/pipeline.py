@@ -295,6 +295,7 @@ def run_pipeline(
     wm_lut: str | None = None,
     atlas_base_path: str | None = None,
     write_figures: bool = True,
+    library: str | None = None,
 ) -> dict[str, Any]:
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -336,13 +337,17 @@ def run_pipeline(
         trajs = list(result.get("trajectories") or [])
 
     # Contacts (placement always runs in the working CT frame).
-    contact_groups, placement_batch = place_contacts(ct_path, [
-        {"name": t.get("name", f"T{idx:02d}"),
-         "start_ras": t["start_ras"],
-         "end_ras": t["end_ras"],
-         "electrode_model": t.get("electrode_model") or ""}
-        for idx, t in enumerate(trajs, start=1)
-    ])
+    contact_groups, placement_batch = place_contacts(
+        ct_path,
+        [
+            {"name": t.get("name", f"T{idx:02d}"),
+             "start_ras": t["start_ras"],
+             "end_ras": t["end_ras"],
+             "electrode_model": t.get("electrode_model") or ""}
+            for idx, t in enumerate(trajs, start=1)
+        ],
+        pitch_strategy=library,
+    )
 
     # Output-frame transform. Working frame is the working CT's RAS;
     # we may want results in the ROSA reference frame instead.
@@ -493,6 +498,12 @@ def main(argv: list[str] | None = None) -> int:
              "are written to <out-dir>/figures/ when matplotlib is "
              "available).",
     )
+    parser.add_argument(
+        "--library", default="",
+        help="Electrode-library strategy key — restrict matching to a "
+             "vendor subset (e.g. 'dixi', 'pmt_35', 'adtech'). "
+             "Default: full bundled library.",
+    )
     args = parser.parse_args(argv)
 
     summary = run_pipeline(
@@ -510,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         wm_lut=args.wm_lut or None,
         atlas_base_path=args.atlas_base or None,
         write_figures=not bool(args.no_figures),
+        library=args.library or None,
     )
     print(json.dumps(summary, indent=2))
     return 0
