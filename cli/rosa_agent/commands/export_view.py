@@ -1589,6 +1589,7 @@ def run_export_view(
     contact_band_length_mm: float = 2.0,
     skip_registration: bool = False,
     output_frame: str = "ct",
+    write_figures: bool = True,
 ) -> dict[str, Any]:
     """Run the pipeline + assemble the GLB viewer."""
     out = Path(out_dir).expanduser().resolve()
@@ -1622,6 +1623,7 @@ def run_export_view(
         freesurfer_path=str(parcellation) if parcellation else None,
         freesurfer_lut=str(lut) if lut else None,
         atlas_base_path=str(fs.t1_path),
+        write_figures=write_figures,
     )
 
     ct_path = Path(pipeline_summary["ct_path"])
@@ -1769,6 +1771,11 @@ def main(argv: list[str] | None = None) -> int:
         "--output-frame", default="ct", choices=("ct", "rosa"),
         help="Frame for trajectory/contact coordinates in the output TSVs and GLB.",
     )
+    parser.add_argument(
+        "--no-figures", action="store_true",
+        help="Skip the per-trajectory QC PNG render step (default: figures "
+             "are written to <out-dir>/figures/ when matplotlib is available).",
+    )
     args = parser.parse_args(argv)
 
     surface_kinds = tuple(
@@ -1794,6 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
         contact_band_length_mm=float(args.contact_band_length_mm),
         skip_registration=bool(args.skip_registration),
         output_frame=args.output_frame,
+        write_figures=not bool(args.no_figures),
     )
     print(json.dumps(summary, indent=2))
     return 0
