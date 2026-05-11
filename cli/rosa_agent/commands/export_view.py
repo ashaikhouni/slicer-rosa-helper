@@ -375,6 +375,7 @@ def _build_scene(
             faces=surf.faces,
             material_index=mat,
             vertex_colors_rgba=surf.vertex_colors_rgba,
+            normals=surf.vertex_normals,
             extras={
                 "kind": "freesurfer_surface",
                 "hemi": surf.hemi,
@@ -790,13 +791,13 @@ loader.load("scene.glb", gltf => {{
       obj.userData._mesh = mesh;
     }}
     if (kind === "freesurfer_surface") {{
-      // Belt-and-suspenders: glTF's alphaMode=BLEND already marks the
-      // material transparent, but some renderers don't honor it without
-      // explicit depthWrite=false too.
-      if (mesh && mesh.material) {{
-        mesh.material.transparent = true;
-        mesh.material.depthWrite = false;
-      }}
+      // We deliberately do NOT toggle transparent here. The GLB ships
+      // alphaMode=OPAQUE; the Brain α slider initializer below
+      // sets transparent + opacity from a clean baseline. Forcing
+      // transparent=true at load was the v2 default, but it left the
+      // material's shader stuck in BLEND mode even after the slider
+      // dialed back to 1.0 — the source of the "fractured cortex at
+      // α=1" report.
       surfaceNodes.push(obj);
     }} else if (extras.shank) {{
       if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
@@ -1483,7 +1484,15 @@ function _applyBrainAlpha(v) {{
     if (!mesh || !mesh.material) continue;
     mesh.material.opacity = v;
     mesh.material.transparent = v < 0.999;
-    mesh.material.depthWrite = v >= 0.999;
+    // Keep depthWrite TRUE even at α<1. Three.js otherwise draws the
+    // brain's triangles in index order, so deep cortical folds bleed
+    // through the front of the brain at intermediate alpha and the
+    // surface looks fragmented. With depthWrite enabled, the closest
+    // brain fragment at each pixel wins; the alpha-blend happens
+    // against opaque electrodes that were already drawn underneath.
+    // Trade-off: the back of the brain is occluded by the front (which
+    // is what the user wants — they're looking from outside).
+    mesh.material.depthWrite = true;
     mesh.material.needsUpdate = true;
   }}
 }}

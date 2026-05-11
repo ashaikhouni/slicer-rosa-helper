@@ -37,6 +37,7 @@ class FSSurface:
     kind: str                  # "pial" | "white" | "inflated" | ...
     vertices_ras: np.ndarray   # (N, 3) float32, scanner RAS mm
     faces: np.ndarray          # (M, 3) int32
+    vertex_normals: np.ndarray | None = None     # (N, 3) float32 unit normals
     vertex_labels: np.ndarray | None = None      # (N,) int32 or None
     vertex_colors_rgba: np.ndarray | None = None # (N, 4) uint8 or None
     annotation_name: str | None = None           # e.g. "aparc.annot"
@@ -220,6 +221,22 @@ def load_fs_surfaces(
             h[:, :3] = verts_tkr
             verts_ras = (combined @ h.T).T[:, :3].astype(np.float32)
 
+            # Smooth (area-weighted) per-vertex normals. Without these the
+            # glTF receivers fall back to flat-shading the triangles,
+            # which makes a folded cortical surface look like a chunky
+            # mosaic in any viewer (the v2 GLB had this look).
+            v0 = verts_ras[faces[:, 0]]
+            v1 = verts_ras[faces[:, 1]]
+            v2 = verts_ras[faces[:, 2]]
+            face_normals = np.cross(v1 - v0, v2 - v0).astype(np.float64)
+            vertex_normals = np.zeros_like(verts_ras, dtype=np.float64)
+            np.add.at(vertex_normals, faces[:, 0], face_normals)
+            np.add.at(vertex_normals, faces[:, 1], face_normals)
+            np.add.at(vertex_normals, faces[:, 2], face_normals)
+            n_norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+            n_norms = np.where(n_norms < 1e-12, 1.0, n_norms)
+            normals_ras = (vertex_normals / n_norms).astype(np.float32)
+
             labels = colors = None
             annot_used = None
             if annotation:
@@ -256,6 +273,7 @@ def load_fs_surfaces(
             out.append(FSSurface(
                 name=name, hemi=hemi, kind=kind,
                 vertices_ras=verts_ras, faces=faces,
+                vertex_normals=normals_ras,
                 vertex_labels=labels, vertex_colors_rgba=colors,
                 annotation_name=annot_used,
             ))
