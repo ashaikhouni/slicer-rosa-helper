@@ -34,7 +34,6 @@ from rosa_core import (
     suggest_model_id_for_trajectory,
     trajectory_length_mm,
 )
-from rosa_core.electrode_classifier import classify_electrode_model
 from rosa_scene import (
     ElectrodeSceneService,
     LayoutService,
@@ -1187,47 +1186,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         return nodes[0] if nodes else None
 
-    def _classify_with_unified_picker(self, traj):
-        """Run the unified electrode-model picker on one trajectory dict.
-
-        PaCER template-correlation against the canonical-resampled CT
-        when available, else the legacy length-only fallback (which the
-        caller does directly). Returns a model_id string or empty.
-        """
-        try:
-            ct_node = self._resolve_postop_ct_node()
-            if ct_node is None:
-                return ""
-            import SimpleITK as sitk
-            from shank_core.io import image_ijk_ras_matrices
-            from rosa_detect.primitives.preprocessing import prepare_volume
-            arr = slicer.util.arrayFromVolume(ct_node)
-            img = sitk.GetImageFromArray(arr)
-            i2r, r2i = image_ijk_ras_matrices(ct_node)
-            img, _i2r_canon, r2i_canon = prepare_volume(img, i2r, r2i)
-            ct_arr_kji = sitk.GetArrayFromImage(img).astype("float32")
-            start_ras = traj.get("start_ras") or traj.get("start")
-            end_ras = traj.get("end_ras") or traj.get("end")
-            if not start_ras or not end_ras:
-                return ""
-            strategy = "auto"
-            combo = getattr(self, "contactsPitchStrategyCombo", None)
-            if combo is not None:
-                data = combo.currentData
-                if isinstance(data, str) and data:
-                    strategy = data
-            pick = classify_electrode_model(
-                start_ras=start_ras, end_ras=end_ras,
-                pitch_strategy=strategy,
-                ct_volume_kji=ct_arr_kji,
-                ras_to_ijk_mat=r2i_canon,
-            )
-            if pick is None:
-                return ""
-            return str(pick.get("model_id") or "")
-        except Exception:
-            return ""
-
     def _generate_contacts_staged(self, trajectories, assignments, log_context):
         """Staged contact placement via ``rosa_core.placement_modes.place_seeg``.
 
@@ -1509,6 +1467,29 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             self._sync_model_combos_from_assignments(assignments)
             self.lastAssignments = assignments
         else:
+            # Model-driven mode places contacts at nominal library
+            # offsets along each trajectory; no library-matching step,
+            # so a row with model_id="" produces zero contacts and
+            # silently confuses the user. Refuse before doing the work
+            # and tell them which rows are missing models. (Staged mode
+            # legitimately accepts a mix of with/without model_id —
+            # that's how mode 4 vs mode 5 dispatch works.)
+            missing = [
+                row.get("trajectory", "<unnamed>")
+                for row in assignments.get("assignments", [])
+                if not (row.get("model_id") or "").strip()
+            ]
+            if missing:
+                preview = ", ".join(missing[:5])
+                more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+                raise ValueError(
+                    f"Model-driven generation requires a model per row, "
+                    f"but {len(missing)} selected trajectories have no "
+                    f"model assigned: {preview}{more}. Pick a model for "
+                    f"each row, click 'Suggest models' to fill them, or "
+                    f"switch to Staged mode (which can pick the model "
+                    f"from CT)."
+                )
             contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
