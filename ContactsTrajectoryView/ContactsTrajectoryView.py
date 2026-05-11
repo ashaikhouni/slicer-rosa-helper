@@ -107,6 +107,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # rename) so the manual choice doesn't get clobbered by
         # Auto Fit's `Rosa.BestModelId` suggestion.
         self._userModelOverrides: dict[str, str] = {}
+        # Per-CT cache of (features, bolts) so back-to-back placement
+        # passes (Suggest models -> Generate contacts -> Update
+        # contacts) don't recompute LoG / Frangi / hull-distance / bolt
+        # extraction. Keyed by (volume_node_id, mtime); auto-invalidates
+        # when the user re-loads the CT or its data changes.
+        self._featuresCache: dict[tuple, tuple] = {}
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -1185,6 +1191,38 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         return nodes[0] if nodes else None
 
+    def _features_and_bolts_for(self, ct_node):
+        """Return ``(features, bolts)`` for ``ct_node``, cached per
+        (node id, mtime) so successive placement passes on the same
+        CT skip the (~5-10 s) LoG / Frangi / hull-distance / bolt
+        extraction. Cache is invalidated automatically when the
+        volume's MTime changes (re-load, pixel edit, etc.).
+        """
+        from rosa_core.volume_loader import load_features_and_bolts
+        from rosa_scene.sitk_volume_adapter import image_from_volume_node
+
+        try:
+            mtime = int(ct_node.GetMTime())
+        except Exception:
+            mtime = 0
+        key = (ct_node.GetID(), mtime)
+        cached = self._featuresCache.get(key)
+        if cached is not None:
+            return cached
+
+        sitk_img, _i2r, _r2i = image_from_volume_node(ct_node)
+        features, bolts = load_features_and_bolts(sitk_img)
+
+        # One-entry cache: drop any stale entries for the same node id
+        # (covers the "user re-loaded the volume" case where mtime
+        # bumped). Memory cost is dominated by the LoG/Frangi arrays
+        # in `features` — keeping more than the latest is wasteful.
+        same_id = [k for k in self._featuresCache if k[0] == ct_node.GetID()]
+        for stale in same_id:
+            self._featuresCache.pop(stale, None)
+        self._featuresCache[key] = (features, bolts)
+        return features, bolts
+
     def _generate_contacts_staged(self, trajectories, assignments, log_context):
         """Staged contact placement via ``rosa_core.placement_modes.place_seeg``.
 
@@ -1207,8 +1245,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         from rosa_core.contact_placement import sample_neg_log_max
         from rosa_core.placement_modes import Seed, place_seeg
         from rosa_core.electrode_classifier import filter_models_for_strategy
-        from rosa_core.volume_loader import load_features_and_bolts
-        from rosa_scene.sitk_volume_adapter import image_from_volume_node
 
         ct_node = self._resolve_postop_ct_node()
         if ct_node is None:
@@ -1218,19 +1254,18 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "view selectors or run Auto Fit first.",
             )
 
-        # Build the SITK image directly from the Slicer node — preserves
-        # the node's IJK→RAS geometry without round-tripping through a
-        # temp NIfTI on disk. This way Slicer-only volumes (no storage
-        # node, e.g. registered volumes built in-memory) work the same
-        # way as on-disk ones, and the placement pipeline sees the
-        # exact same coordinate frame the rest of Slicer is operating on.
-        sitk_img, _i2r, _r2i = image_from_volume_node(ct_node)
+        # `_features_and_bolts_for` caches (features, bolts) per CT
+        # (node id, mtime) so back-to-back passes (Suggest models →
+        # Generate contacts → Update contacts) skip the ~5-10 s
+        # LoG / Frangi / hull-distance / bolt-extraction recomputation.
+        # The adapter still preserves the Slicer node's IJK→RAS geometry
+        # (no temp-NIfTI round trip) on the cache miss path.
+        cached = (ct_node.GetID(), int(ct_node.GetMTime() or 0)) in self._featuresCache
         self.log(
-            f"[contacts:{log_context}] adapted CT volume node "
-            f"(name={ct_node.GetName()}) → SITK directly; "
-            f"computing features + bolts…"
+            f"[contacts:{log_context}] features/bolts for "
+            f"{ct_node.GetName()}: {'cache hit' if cached else 'computing…'}"
         )
-        features, bolts = load_features_and_bolts(sitk_img)
+        features, bolts = self._features_and_bolts_for(ct_node)
 
         # Build Seed list from the selected rows + their assignments.
         #
