@@ -149,6 +149,68 @@ class MatchedFilterPickTests(unittest.TestCase):
         else:
             self.assertIsNotNone(r_loose.best_model_id)
 
+    def test_max_tip_short_mm_rejects_short_template_in_bolt_zone(self):
+        """The deep-tip-coverage gate rejects (model, tip-position)
+        candidates whose deepest slot leaves the deep half of the
+        trajectory unexplained — even when the template correlates well
+        over a bolt-saturated proximal region.
+
+        Setup: bright bolt zone in the proximal arc (u=4..16) plus the
+        actual shank contacts at u=22..50.  Without the gate, PMT-5
+        (5 contacts, 14mm span) wins by fitting in the bright bolt
+        zone, leaving u=22..50 unfit.  With ``max_tip_short_mm=5`` the
+        small electrode is rejected and a longer model that reaches
+        within 5mm of the trajectory tip is picked instead.
+        """
+        # Synthetic that reproduces the s57 RIPR failure structurally:
+        # PMT-5 placed against a uniformly-bright proximal "bolt"
+        # plateau scores the same correlation regardless of where in
+        # the plateau its tip sits, so the picker has no opposing
+        # force to prefer the deep end. Without the gate the picker
+        # accepts the proximal placement (tip in the bolt zone, deep
+        # half of trajectory unfit). With the gate, only deep-tip
+        # placements survive.
+        # Wide bright "bolt" plateau u=4..18 (saturated metal): 3x
+        # higher amplitude than the real contact peaks at u=22..50.
+        plateau = np.where(
+            (self.arcs >= 4.0) & (self.arcs <= 18.0), 4500.0, 0.0,
+        )
+        contact_peaks = [22.0 + i * 3.5 for i in range(9)]
+        signal = plateau + _make_comb_signal(
+            self.arcs, contact_peaks, peak_amp=1500.0,
+        )
+        models = [_make_library_model("PMT-5", 5)]
+
+        # Without gate: PMT-5 picks SOME tip — its best position is
+        # in the bright plateau (deepest slot inside the bolt).
+        r_no_gate = self.pick(
+            self.arcs, signal, models,
+            bolt_end_arc=2.0, first_contact_min_mm=1.0,
+            profile_end_arc=50.0, max_extend_tip_mm=3.0,
+            sigma_contact_mm=1.0, max_tip_short_mm=None,
+        )
+        self.assertEqual(r_no_gate.best_model_id, "PMT-5")
+        no_gate_tip = float(r_no_gate.slot_arcs.max())
+        # Without the gate, the picker's chosen deepest slot is far
+        # from the trajectory tip (sitting in the bolt plateau).
+        self.assertGreater(50.0 - no_gate_tip, 10.0)
+
+        # With gate (5 mm tolerance): the bolt-zone position is
+        # rejected; the only PMT-5 placements that survive are deep-
+        # tip ones (deepest slot within 5 mm of profile_end).
+        r_gated = self.pick(
+            self.arcs, signal, models,
+            bolt_end_arc=2.0, first_contact_min_mm=1.0,
+            profile_end_arc=50.0, max_extend_tip_mm=3.0,
+            sigma_contact_mm=1.0, max_tip_short_mm=5.0,
+        )
+        self.assertEqual(r_gated.best_model_id, "PMT-5")
+        gated_tip = float(r_gated.slot_arcs.max())
+        self.assertLessEqual(50.0 - gated_tip, 5.0)
+        # The gate moved the placement: the new deepest-slot position
+        # is closer to the trajectory tip than the ungated one.
+        self.assertGreater(gated_tip, no_gate_tip)
+
     def test_valley_anti_template_rejects_uniform_high_signal(self):
         """A constant-high signal (e.g., bone with chance peaks aligned at
         library pitch) gives high basic-Pearson but valley-aware Pearson

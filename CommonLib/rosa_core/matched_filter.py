@@ -80,6 +80,7 @@ def matched_filter_pick(
     tip_grid_step_mm: float = 0.25,
     sigma_contact_mm: float = SIGMA_CONTACT_MM_DEFAULT,
     max_bolt_frac: float = 0.5,
+    max_tip_short_mm: float | None = 5.0,
     max_tip_override: float | None = None,
     tie_eps: float = 1e-6,
     add_valley_anti_template: bool = False,
@@ -106,6 +107,17 @@ def matched_filter_pick(
             half-length).
         max_bolt_frac: reject candidates with more than this fraction of
             slots in the bolt zone.
+        max_tip_short_mm: reject any (model, tip-position) candidate whose
+            deepest slot is more than this many mm proximal to
+            ``profile_end_arc``. The deep tip is the one anchor that
+            survives across user conventions (start_ras can be the bolt
+            outer, the intracranial entry, or the contact-array start
+            depending on the planner; end_ras consistently marks the
+            implant target). Without this gate, a small electrode
+            template can win on correlation while leaving the deep half
+            of the trajectory uncovered (failure mode: contacts placed in
+            a uniformly-bright bolt zone). ``None`` disables the gate
+            (equivalent to the pre-2026-05 behaviour).
         max_tip_override: hard cap on the model's deepest slot arc (used
             in bolt-less mode to clamp to the actual metal extent).
         tie_eps: correlation tolerance for the hierarchical tie-break.
@@ -188,6 +200,20 @@ def matched_filter_pick(
                 continue
             if (n_slots - n_covered) / n_slots > float(max_bolt_frac):
                 continue
+            # Tip-coverage gate (see ``max_tip_short_mm`` docstring).
+            # The deepest slot must reach within ``max_tip_short_mm`` of
+            # ``profile_end_arc``; templates that leave the deep half of
+            # the trajectory unexplained are rejected here even if
+            # they correlate well over the bolt-zone signal.
+            #
+            # Skip the gate when the caller has supplied
+            # ``max_tip_override`` — that's an explicit "clamp deepest
+            # slot to X" instruction, conflicting with "deepest slot
+            # must reach the unclamped profile_end".
+            if max_tip_short_mm is not None and max_tip_override is None:
+                tip_short = float(profile_end_arc) - float(slot_arcs.max())
+                if tip_short > float(max_tip_short_mm):
+                    continue
             slots_cz = slot_arcs[in_contact]
             d = arcs_in[:, None] - slots_cz[None, :]
             template = np.exp(-(d * d) * inv_2sig2).sum(axis=1)
