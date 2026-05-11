@@ -351,16 +351,21 @@ def _build_scene(
     """
     scene = GLBScene()
 
-    # Surfaces — one material per hemisphere, alpha-blended so the
-    # electrodes inside the cortex stay visible. Vertex colors from the
-    # .annot override the material's base color when present.
+    # Surfaces — one material per hemisphere. Default to OPAQUE +
+    # white so vertex colors from ``aparc.annot`` come through at full
+    # saturation in any static viewer (Preview, QuickLook,
+    # gltf-viewer.donmccurdy.com, etc.). The HTML viewer flips opacity
+    # at runtime via the Brain α slider (it sets material.transparent
+    # = true, depthWrite = false when alpha < 1), so we don't sacrifice
+    # the see-through electrodes view — we just stop showing a
+    # washed-out ghost brain in tools that don't honor alphaMode=BLEND.
     lh_mat = scene.add_material(
-        "fs_lh_pial", (0.92, 0.88, 0.84, 0.35),
-        metallic=0.0, roughness=0.85, double_sided=True, alpha_mode="BLEND",
+        "fs_lh_pial", (1.0, 1.0, 1.0, 1.0),
+        metallic=0.0, roughness=0.85, double_sided=True,
     )
     rh_mat = scene.add_material(
-        "fs_rh_pial", (0.84, 0.88, 0.92, 0.35),
-        metallic=0.0, roughness=0.85, double_sided=True, alpha_mode="BLEND",
+        "fs_rh_pial", (1.0, 1.0, 1.0, 1.0),
+        metallic=0.0, roughness=0.85, double_sided=True,
     )
     for surf in surfaces:
         mat = lh_mat if surf.hemi == "lh" else rh_mat
@@ -379,17 +384,33 @@ def _build_scene(
             },
         )
 
-    # Electrode shaft material — dark insulation. One material reused
-    # across all shanks so the JS viewer can recolor / hide one shank
-    # without forking the material list.
-    shaft_mat = scene.add_material(
-        "electrode_shaft", (0.08, 0.08, 0.10, 1.0),
-        metallic=0.0, roughness=0.95,
-    )
+    # Per-shank shaft colors. Static viewers (Preview, QuickLook,
+    # online glTF viewers) don't run our JS, so a single-material
+    # "all shafts dark gray" makes the scene visually homogeneous in
+    # those tools. A deterministic hue per shank name produces
+    # distinguishable electrodes everywhere.
+    def _shaft_color_for(name: str) -> tuple[float, float, float, float]:
+        import hashlib
+        h = int(hashlib.sha1(name.encode("utf-8")).hexdigest()[:8], 16)
+        hue = (h % 360) / 360.0
+        # HSV -> RGB with high value (0.85) and moderate saturation
+        # (0.65): saturated enough to read against the white brain,
+        # not so bright they overwhelm the parcellation colors.
+        c = 0.85 * 0.65
+        x = c * (1 - abs((hue * 6) % 2 - 1))
+        m = 0.85 - c
+        if hue < 1 / 6:    r, g, b = c, x, 0.0
+        elif hue < 2 / 6:  r, g, b = x, c, 0.0
+        elif hue < 3 / 6:  r, g, b = 0.0, c, x
+        elif hue < 4 / 6:  r, g, b = 0.0, x, c
+        elif hue < 5 / 6:  r, g, b = x, 0.0, c
+        else:              r, g, b = c, 0.0, x
+        return (r + m, g + m, b + m, 1.0)
 
     # Per-shank axis cache so each contact band can be oriented along
     # its trajectory.
     traj_axis: dict[str, np.ndarray] = {}
+    shaft_mat_by_shank: dict[str, int] = {}
     for traj in trajectories:
         start = np.asarray(traj["start"], dtype=float)
         end = np.asarray(traj["end"], dtype=float)
@@ -401,6 +422,13 @@ def _build_scene(
         else:
             unit = (end - start) / length
         traj_axis[traj["name"]] = unit
+
+        color = _shaft_color_for(str(traj["name"]))
+        shaft_mat = scene.add_material(
+            f"shaft_{traj['name']}", color,
+            metallic=0.3, roughness=0.55,
+        )
+        shaft_mat_by_shank[str(traj["name"])] = shaft_mat
 
         scene.add_segment(
             name=f"shaft/{traj['name']}",
