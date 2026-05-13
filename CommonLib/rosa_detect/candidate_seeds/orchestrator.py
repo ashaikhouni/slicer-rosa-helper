@@ -64,6 +64,7 @@ from .deep_end_refine import (
     clip_deep_end_to_inliers,
     refine_deep_end_via_axis_log,
 )
+from .shared_cc_tip_refine import refine_shared_cc_tips
 from .dedup import dedup_trajectories
 from .frangi_sampling import frangi_along_line_stats
 from .metal_evidence import (
@@ -572,6 +573,21 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         log_arr=log1,
         ras_to_ijk_mat=ras_to_ijk_mat,
         min_length_mm=bounds.min_post_anchor_len_mm,
+        logger=_log,
+    )
+
+    # Shared-CC tip refinement: catch antiparallel midline bridges where
+    # two trajectories' deep tips converge on the same fused LoG blob.
+    # retreat_crossing_tips's perp-clearance trigger misses these because
+    # the small crossing angle keeps the offending tip ~3 mm perp from
+    # the other segment. Splits the shared CC into sub-contacts by local
+    # |LoG| max, assigns each to A or B by perp-to-axis margin, retreats
+    # each tip to the deep edge of its deepest owned sub-contact.
+    _log("shared-CC tip refine…")
+    refine_shared_cc_tips(
+        anchored,
+        log_arr=log1,
+        ras_to_ijk_mat=ras_to_ijk_mat,
         logger=_log,
     )
 
