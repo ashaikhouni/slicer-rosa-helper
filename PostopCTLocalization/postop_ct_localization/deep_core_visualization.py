@@ -331,15 +331,15 @@ class DeepCoreVisualizationLogicMixin:
     def show_deep_core_proposals(self, volume_node, proposals):
         self.trajectory_scene.remove_preview_lines()
         star_node_name = f"{volume_node.GetName()}_DeepCoreSkullJumpStars" if volume_node is not None else "DeepCoreSkullJumpStars"
-        shallow_node_name = f"{volume_node.GetName()}_DeepCoreProposalShallow" if volume_node is not None else "DeepCoreProposalShallow"
-        deep_node_name = f"{volume_node.GetName()}_DeepCoreProposalDeep" if volume_node is not None else "DeepCoreProposalDeep"
+        # Legacy "Shallow" / "Deep" fiducial node names — keep the
+        # cleanup in case they exist from older scenes / earlier runs.
+        legacy_shallow_node_name = f"{volume_node.GetName()}_DeepCoreProposalShallow" if volume_node is not None else "DeepCoreProposalShallow"
+        legacy_deep_node_name = f"{volume_node.GetName()}_DeepCoreProposalDeep" if volume_node is not None else "DeepCoreProposalDeep"
         self._remove_node_if_exists(star_node_name)
-        self._remove_node_if_exists(shallow_node_name)
-        self._remove_node_if_exists(deep_node_name)
+        self._remove_node_if_exists(legacy_shallow_node_name)
+        self._remove_node_if_exists(legacy_deep_node_name)
         nodes = []
         skull_jump_records = []
-        shallow_records = []
-        deep_records = []
         for idx, proposal in enumerate(list(proposals or []), start=1):
             family = str(proposal.get("proposal_family") or "unknown")
             style = self._deep_core_proposal_family_style(family)
@@ -430,29 +430,6 @@ class DeepCoreVisualizationLogicMixin:
                         "description": "bolt base (bone->brain)",
                     }
                 )
-            shallow_name = str(proposal.get("shallow_endpoint_name") or "").strip().lower()
-            deep_name = str(proposal.get("deep_endpoint_name") or "").strip().lower()
-            shallow_ras = end_ras if shallow_name == "end" else start_ras
-            if deep_name == "start":
-                deep_ras = start_ras
-            elif deep_name == "end":
-                deep_ras = end_ras
-            else:
-                deep_ras = end_ras if shallow_name == "start" else start_ras
-            shallow_records.append(
-                {
-                    "point_ras": [float(v) for v in np.asarray(shallow_ras, dtype=float).reshape(3)],
-                    "label": f"{line_tag}{idx:02d}Sh",
-                    "description": "trajectory shallow end",
-                }
-            )
-            deep_records.append(
-                {
-                    "point_ras": [float(v) for v in np.asarray(deep_ras, dtype=float).reshape(3)],
-                    "label": f"{line_tag}{idx:02d}Dp",
-                    "description": "trajectory deep end",
-                }
-            )
             atom_ids = [int(v) for v in list(proposal.get("atom_id_list") or []) if int(v) > 0]
             blob_ids = [int(v) for v in list(proposal.get("blob_id_list") or []) if int(v) > 0]
             node.SetAttribute("Rosa.DeepCoreAtomIds", ",".join(str(v) for v in atom_ids))
@@ -484,26 +461,6 @@ class DeepCoreVisualizationLogicMixin:
                     star_display.SetGlyphTypeFromString("StarBurst2D")
                 except Exception:
                     pass
-        if shallow_records:
-            shallow_node = self._get_or_create_fiducial_node(
-                shallow_node_name,
-                color_rgb=(0.10, 0.90, 1.00),
-                glyph_scale=1.3,
-                text_scale=1.2,
-                show_labels=True,
-            )
-            self._copy_parent_transform(volume_node, shallow_node)
-            self._set_fiducials_from_point_records(shallow_node, shallow_records, show_labels=True, text_scale=1.2)
-        if deep_records:
-            deep_node = self._get_or_create_fiducial_node(
-                deep_node_name,
-                color_rgb=(1.00, 0.90, 0.10),
-                glyph_scale=1.3,
-                text_scale=1.2,
-                show_labels=True,
-            )
-            self._copy_parent_transform(volume_node, deep_node)
-            self._set_fiducials_from_point_records(deep_node, deep_records, show_labels=True, text_scale=1.2)
         return nodes
 
     def _get_or_create_fiducial_node(self, node_name, color_rgb, glyph_scale=1.0, text_scale=0.8, show_labels=False):
