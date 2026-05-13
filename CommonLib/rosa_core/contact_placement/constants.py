@@ -34,6 +34,17 @@ SNAP_LOG_THRESHOLD: float = 500.0
 SNAP_STEP_MM: float = 0.5
 SNAP_SMOOTH_WINDOW: int = 5
 
+# Per-voxel ownership snap (off by default; opt in via the
+# ``use_voxel_ownership`` flag on ``run_two_pass`` / ``place_seeg``).
+# ``OWN_R_MM`` is the max perp distance a bright voxel may be from a
+# seed line to claim it; ``OWN_CONTEST_MARGIN_MM`` is how close the
+# 2nd-closest seed has to be (in mm) for the voxel to be marked
+# contested instead of unique. ``OWN_MIN_VOXELS_PER_ARC`` is the snap-
+# step floor below which the arc is invalidated and later interpolated.
+OWN_R_MM: float = 4.0
+OWN_CONTEST_MARGIN_MM: float = 1.0
+OWN_MIN_VOXELS_PER_ARC: int = 4
+
 
 # ---------------------------------------------------------------------
 # Stage C — sample (walker disk-stat sampling)
@@ -163,6 +174,9 @@ __all__ = [
     "MIN_SLOT_HU_MEAN",
     "PICK_OVERRIDE_MARGIN",
     "SEEDER_LABEL_TO_SCORE",
+    "OWN_CONTEST_MARGIN_MM",
+    "OWN_MIN_VOXELS_PER_ARC",
+    "OWN_R_MM",
     "SNAP_LOG_THRESHOLD",
     "SNAP_RADIUS_MM",
     "SNAP_SMOOTH_WINDOW",

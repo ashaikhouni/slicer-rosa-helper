@@ -29,7 +29,6 @@ def generate_candidate_seeds(
     *,
     bolts: list[dict[str, Any]] | None = None,
     pitch_strategy: str | None = None,
-    suggestion_vendors: Sequence[str] | None = None,
     progress_logger=None,
 ) -> list[Seed]:
     """Run v1 stage1 + bolt anchoring; return candidate seeds.
@@ -45,7 +44,6 @@ def generate_candidate_seeds(
             re-extracts internally; passing them here is a forward-compat
             placeholder for when stage1 accepts them as input (Session 3+).
         pitch_strategy: ``"dixi"`` / ``"pmt_35"`` / ``"auto"`` / ``None``.
-        suggestion_vendors: optional vendor allowlist.
         progress_logger: callable forwarded to v1's stage1 progress reporter.
 
     Returns:
@@ -74,10 +72,12 @@ def generate_candidate_seeds(
         img, i2r, r2i,
         return_features=True,
         progress_logger=progress_logger,
-        suggestion_vendors=suggestion_vendors,
         pitch_strategy=pitch_strategy,
     )
 
+    # ``seeder_model`` is left None — the detection stage no longer
+    # classifies an electrode model (canonical picker is the placement
+    # matched filter in ``stage_d_pick.pick_matched_filter``).
     seeds: list[Seed] = []
     for idx, t in enumerate(trajectories or []):
         seeds.append(Seed(
@@ -87,7 +87,7 @@ def generate_candidate_seeds(
             model_id=None,
             seeder_label=str(t.get("confidence_label") or ""),
             seeder_confidence=float(t.get("confidence") or 0.0),
-            seeder_model=t.get("electrode_model"),
+            seeder_model=None,
         ))
     return seeds
 

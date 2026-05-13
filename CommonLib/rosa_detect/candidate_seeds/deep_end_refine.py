@@ -25,6 +25,7 @@ from .constants import (
 
 
 def refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
+                                 *, others=None,
                                  step_mm=AXIS_REFINE_STEP_MM,
                                  max_extend_mm=AXIS_REFINE_MAX_MM,
                                  min_abs_log=AXIS_REFINE_MIN_ABS,
@@ -42,6 +43,13 @@ def refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
         real contact (walker / extension / anchor over-reach, e.g.
         subject-137 L_3's thin-wire PMT), walk INWARD until the first
         strong-LoG position and clip end to it.
+
+    When ``others`` is provided (a list of other trajectory records),
+    the disk sampler skips voxels that sit closer to any neighbour's
+    axis than to ours — same ownership pattern as
+    ``snap_centerline_owned``. This prevents the disk-sampling at
+    radii 1.5/2.5 mm from leaking into a kissing-partner's contacts
+    and driving spurious extension into a gap (T1/6,3 + T1/7,4).
 
     Returns a new ``end_ras`` point or ``None`` when neither direction
     finds a contact peak (end is far from any contact signal).
@@ -86,9 +94,36 @@ def refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
             disk_offsets.append((radius * float(np.cos(ang)),
                                   radius * float(np.sin(ang))))
 
+    # Build neighbor segments for ownership masking (skip disk voxels
+    # closer to a partner's axis than to ours).
+    other_seg_pairs = []
+    if others:
+        for o in others:
+            o_s = np.asarray(o.get("start_ras"), dtype=float)
+            o_e = np.asarray(o.get("end_ras"), dtype=float)
+            if np.linalg.norm(o_e - o_s) > 1e-9:
+                other_seg_pairs.append((o_s, o_e))
+
+    def _perp_to_others(p):
+        best = np.inf
+        for o_s, o_e in other_seg_pairs:
+            ab = o_e - o_s
+            LL2 = float(np.dot(ab, ab))
+            if LL2 < 1e-18:
+                continue
+            t = float(np.clip(np.dot(p - o_s, ab) / LL2, 0.0, 1.0))
+            d = float(np.linalg.norm(p - (o_s + t * ab)))
+            if d < best:
+                best = d
+        return best
+
     def _disk_hit(p_axis):
         for dr_u, dr_v in disk_offsets:
             p = p_axis + dr_u * u + dr_v * v
+            if other_seg_pairs:
+                dist_self = float(np.hypot(dr_u, dr_v))
+                if _perp_to_others(p) < dist_self:
+                    continue  # voxel is closer to a neighbour — skip
             if _sample(p) <= -min_abs_log:
                 return True
         return False
@@ -111,14 +146,10 @@ def refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
     return last_hit
 
 
-def clip_deep_end_to_inliers(rec, log_arr=None, ras_to_ijk_mat=None,
+def clip_deep_end_to_inliers(rec,
                              margin_mm=DEEP_END_MARGIN_PAST_LAST_CONTACT_MM):
     """Clip ``end_ras`` back so it sits no more than ``margin_mm`` past
-    the deepest walker inlier projected onto the shank axis. Walker
-    inliers are already vetted by pitch + geometry tests in the
-    walker + extension stages, so a separate LoG-amp filter is
-    redundant and brittle across subjects with varying saturation
-    (T4 saturates at ~1500, T22 at 2200+). All inliers count.
+    the deepest walker inlier projected onto the shank axis.
 
     No-op when the trajectory has no ``inlier_ras``.
     """

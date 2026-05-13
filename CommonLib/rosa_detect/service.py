@@ -289,10 +289,11 @@ def run_contact_pitch_v1_with_features(
 
     try:
         img, ijk_to_ras, ras_to_ijk = _load_image_and_matrices(ctx)
-        # Optional Slicer-tab parameters; CLI/tests leave them unset and
-        # the algorithm defaults to the Dixi-only walker + full-library
-        # suggestion (the regression baseline).
-        vendors = ctx.get("contact_pitch_v1_vendors")
+        # Optional Slicer-tab pitch-strategy parameter. CLI/tests leave it
+        # unset and the algorithm defaults to the Dixi-only walker.
+        # (The former ``contact_pitch_v1_vendors`` field drove the
+        # detection-time model-suggestion classifier; that classifier was
+        # removed 2026-05-11 — see ``orchestrator.py`` rationale comment.)
         pitch_strategy = ctx.get("contact_pitch_v1_pitch_strategy")
 
         def _run_detect():
@@ -300,7 +301,6 @@ def run_contact_pitch_v1_with_features(
                 img, ijk_to_ras, ras_to_ijk,
                 return_features=True,
                 progress_logger=logger,
-                suggestion_vendors=vendors,
                 pitch_strategy=pitch_strategy,
             )
 

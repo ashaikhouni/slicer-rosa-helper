@@ -198,6 +198,7 @@ def _place_mode_4(
     progress_logger,
     angle_tol_deg: float,
     perp_tol_mm: float,
+    use_voxel_ownership: bool = False,
 ) -> tuple[list[tuple[str, PlacementCtx]], dict]:
     """Mode 4 inner: snap to v1 emissions then force the user's model.
 
@@ -229,6 +230,7 @@ def _place_mode_4(
         features=features, bolts=bolts, library_models=library_models,
         pitch_strategy=pitch_strategy, sample_fn=sample_fn,
         progress_logger=progress_logger,
+        use_voxel_ownership=use_voxel_ownership,
     )
     matches = _greedy_axis_match(
         seeds, auto_pairs,
@@ -303,6 +305,7 @@ def _place_mode_5(
     progress_logger,
     angle_tol_deg: float,
     perp_tol_mm: float,
+    use_voxel_ownership: bool = False,
 ) -> tuple[list[tuple[str, PlacementCtx]], dict]:
     """Mode 5 inner: snap user seeds to mode-1 candidate emissions.
 
@@ -327,6 +330,7 @@ def _place_mode_5(
         features=features, bolts=bolts, library_models=library_models,
         pitch_strategy=pitch_strategy, sample_fn=sample_fn,
         progress_logger=progress_logger,
+        use_voxel_ownership=use_voxel_ownership,
     )
     n_candidates = len(auto_pairs)
     matches = _greedy_axis_match(
@@ -428,6 +432,7 @@ def _place_two_pass(
     library_models: list[dict],
     bolts: list[dict] | None,
     sample_fn: Callable[[PlacementCtx], PlacementCtx],
+    use_voxel_ownership: bool = False,
 ) -> list[tuple[str, PlacementCtx]]:
     """Run cross-shank-aware two-pass placement on a seed batch.
 
@@ -451,6 +456,7 @@ def _place_two_pass(
         library_models=library_models,
         bolts=bolts,
         sample_fn=sample_fn,
+        use_voxel_ownership=use_voxel_ownership,
     )
     return [(s.name, c) for s, c in zip(seeds, ctxs)]
 
@@ -568,6 +574,7 @@ def place_seeg(
     snap_angle_tol_deg: float = 12.0,
     snap_perp_tol_mm: float = 8.0,
     progress_logger=None,
+    use_voxel_ownership: bool = False,
 ) -> PlacementBatch:
     """Single user-facing entry — see module docstring for the 5-mode table.
 
@@ -633,6 +640,7 @@ def place_seeg(
             features=features, bolts=bolts, library_models=library_models,
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
+            use_voxel_ownership=use_voxel_ownership,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -644,6 +652,7 @@ def place_seeg(
             features=features, bolts=bolts, library_models=library_models,
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
+            use_voxel_ownership=use_voxel_ownership,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -656,6 +665,7 @@ def place_seeg(
             features=features, bolts=bolts, library_models=library_models,
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
+            use_voxel_ownership=use_voxel_ownership,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -669,6 +679,7 @@ def place_seeg(
             sample_fn=sample_fn, progress_logger=progress_logger,
             angle_tol_deg=snap_angle_tol_deg,
             perp_tol_mm=snap_perp_tol_mm,
+            use_voxel_ownership=use_voxel_ownership,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -684,6 +695,7 @@ def place_seeg(
             sample_fn=sample_fn, progress_logger=progress_logger,
             angle_tol_deg=snap_angle_tol_deg,
             perp_tol_mm=snap_perp_tol_mm,
+            use_voxel_ownership=use_voxel_ownership,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -773,6 +785,7 @@ def _run_auto(
     pitch_strategy: str | None,
     sample_fn: Callable[[PlacementCtx], PlacementCtx],
     progress_logger,
+    use_voxel_ownership: bool = False,
 ) -> list[tuple[str, PlacementCtx]]:
     """Modes 1/2/3 inner: candidate generation → two-pass placement.
 
@@ -789,6 +802,7 @@ def _run_auto(
     return _place_two_pass(
         seeds, features=features, library_models=library_models,
         bolts=bolts, sample_fn=sample_fn,
+        use_voxel_ownership=use_voxel_ownership,
     )
 
 

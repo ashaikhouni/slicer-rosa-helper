@@ -53,6 +53,15 @@ class PlacementCtx:
     # by ``run_two_pass`` between pass 1 and pass 2.
     other_centerlines: list[np.ndarray] | None = None
 
+    # Precomputed per-voxel ownership label volume (kji int16) and this
+    # ctx's seed index within it. When both are set, Stage B uses
+    # ``snap_centerline_voxel_owned`` (per-voxel masked snap with arc
+    # interpolation across contested regions) instead of the production
+    # LoG-centroid snap. Populated by ``run_two_pass`` when called with
+    # ``use_voxel_ownership=True``.
+    voxel_ownership: np.ndarray | None = None
+    voxel_seed_idx: int | None = None
+
     # Seeder-side metadata (carried through from a v1 trajectory dict so
     # the compound score can fuse seeder confidence with the placement-side
     # signals — same direction as the user's 5-mode input API).
