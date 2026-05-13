@@ -25,12 +25,6 @@ from typing import Any
 
 import numpy as np
 
-from rosa_core.electrode_classifier import (
-    PITCH_STRATEGY_VENDORS,
-    VENDOR_ID_PREFIXES,
-    classify_electrode_model,
-    filter_models_for_strategy,
-)
 
 from ..primitives.bolt_anchor import (
     BOLT_HULL_PROXIMITY_MM,
@@ -59,7 +53,6 @@ from .constants import (
     LOG_BLOB_MAX_VOXELS,
     LOG_BLOB_THRESHOLD,
     MIN_BLOBS_PER_LINE,
-    MODEL_SUGGEST_MIN_INTRACRANIAL_MM,
     PITCH_MM,
     WIRE_CLASS_MIN_DEPTH_MM,
     WIRE_CLASS_MIN_ELONGATION,
@@ -71,6 +64,7 @@ from .deep_end_refine import (
     clip_deep_end_to_inliers,
     refine_deep_end_via_axis_log,
 )
+from .shared_cc_tip_refine import refine_shared_cc_tips
 from .dedup import dedup_trajectories
 from .frangi_sampling import frangi_along_line_stats
 from .metal_evidence import (
@@ -88,7 +82,6 @@ from .synth_anchor import axis_to_skull_synth
 
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                             return_features=False, progress_logger=None,
-                            suggestion_vendors=None,
                             pitch_strategy=None,
                             pitches_mm=None):
     """Run the full SEEG shank detector on a SITK image.
@@ -546,9 +539,11 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     # distinct 3D minima). Sample the LoG profile 1-dimensionally along
     # the trajectory axis and push ``end_ras`` out to the last real
     # contact peak.
-    for rec in anchored:
+    for ri, rec in enumerate(anchored):
+        others = [r for j, r in enumerate(anchored) if j != ri]
         new_end = refine_deep_end_via_axis_log(
             rec, log1, ras_to_ijk_mat,
+            others=others,
         )
         if new_end is not None:
             rec["end_ras"] = new_end
@@ -581,6 +576,21 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         logger=_log,
     )
 
+    # Shared-CC tip refinement: catch antiparallel midline bridges where
+    # two trajectories' deep tips converge on the same fused LoG blob.
+    # retreat_crossing_tips's perp-clearance trigger misses these because
+    # the small crossing angle keeps the offending tip ~3 mm perp from
+    # the other segment. Splits the shared CC into sub-contacts by local
+    # |LoG| max, assigns each to A or B by perp-to-axis margin, retreats
+    # each tip to the deep edge of its deepest owned sub-contact.
+    _log("shared-CC tip refine…")
+    refine_shared_cc_tips(
+        anchored,
+        log_arr=log1,
+        ras_to_ijk_mat=ras_to_ijk_mat,
+        logger=_log,
+    )
+
     # Intracranial-only length (skull entry → deep tip). The existing
     # ``length_mm`` is bolt-tip → deep-tip and includes ~15–25 mm of bolt
     # protrusion outside the skull; downstream displays/clinical reporting
@@ -593,107 +603,18 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         end = np.asarray(rec["end_ras"], dtype=float)
         rec["intracranial_length_mm"] = float(np.linalg.norm(end - entry))
 
-    # Suggested electrode model per stage-1 trajectory. Uses the
-    # pre-anchor contact span + inlier count against the library,
-    # filtered by the caller's ``suggestion_vendors`` selection (or
-    # all known vendors when not specified). Advisory only — downstream
-    # modules such as Contacts & Trajectory View do the actual contact
-    # fitting and the user can override this suggestion.
-    if suggestion_vendors is not None:
-        vendors_for_suggest = tuple(suggestion_vendors)
-    elif pitch_strategy is not None:
-        strat_key = str(pitch_strategy).lower()
-        vendors_for_suggest = PITCH_STRATEGY_VENDORS.get(
-            strat_key, tuple(VENDOR_ID_PREFIXES.keys()),
-        )
-    else:
-        vendors_for_suggest = tuple(VENDOR_ID_PREFIXES.keys())
-    if not vendors_for_suggest:
-        _log("no vendors selected; skipping electrode suggestions")
-        _models = []
-    else:
-        try:
-            from rosa_core.electrode_models import load_electrode_library
-            _library = load_electrode_library()
-            _models = list(_library.get("models") or [])
-        except Exception as exc:
-            _log(f"electrode library load failed ({exc}); no suggestions emitted")
-            _models = []
-    # Strategy-aware library filter: when the user picks a specific
-    # pitch strategy (e.g. "Dixi AM (3.5 mm)"), suggestions should
-    # come only from that strategy's library family — vendor + pitch
-    # set jointly. The vendor-only filter inside the classifiers is
-    # too loose to distinguish DIXI-AM from DIXI-MM (both pass "Dixi"
-    # prefix but ride different pitch families).
-    _models_filtered = filter_models_for_strategy(
-        _models, pitch_strategy if _models else None,
-    )
-    if _models and not _models_filtered:
-        _log(
-            f"library filter for strategy '{pitch_strategy}' "
-            f"eliminated all models; keeping vendor-prefix subset "
-            f"of {len(_models)} for fallback"
-        )
-        _models_filtered = _models  # safety: don't strand suggestions
-    if _models_filtered:
-        n_suggested = 0
-        for rec in anchored:
-            intra = float(rec.get("intracranial_length_mm") or 0.0)
-            if intra < MODEL_SUGGEST_MIN_INTRACRANIAL_MM:
-                continue
-            # Unified picker (`classify_electrode_model`): preferred
-            # path is PaCER template-correlation against the canonical-
-            # resampled CT volume; falls back to walker-signature joint
-            # scoring (when CT path returns no candidate), then to
-            # length-only with dura tolerance. Same picker is called
-            # from Manual Fit / Guided Fit / Contacts & Trajectory View.
-            pitch_obs = float(rec.get("original_median_pitch_mm") or 0.0)
-            n_obs = int(rec.get("n_inliers") or 0)
-            span_obs = float(rec.get("contact_span_mm") or 0.0)
-            start_ras = rec.get("skull_entry_ras", rec.get("start_ras"))
-            end_ras = rec.get("end_ras")
-            walker_sig = (
-                (n_obs, pitch_obs, span_obs)
-                if (n_obs > 0 and pitch_obs > 0.0) else None
-            )
-            best = classify_electrode_model(
-                start_ras=start_ras, end_ras=end_ras,
-                models=_models_filtered,
-                vendors=vendors_for_suggest,
-                ct_volume_kji=ct_arr_kji,
-                ras_to_ijk_mat=ras_to_ijk_mat,
-                walker_signature=walker_sig,
-                intracranial_length_mm=intra,
-            )
-            if best is None:
-                continue
-            rec["suggested_model_id"] = str(best["model_id"])
-            rec["suggested_model_method"] = str(best.get("method") or "")
-            rec["suggested_model_score"] = float(best.get("score") or 0.0)
-            # Method-specific diagnostics — kept on rec for QC + logged.
-            if best.get("method") == "pacer_template":
-                rec["suggested_tip_arc_mm"] = float(best.get("tip_arc_mm") or 0.0)
-                rec["suggested_coverage"] = float(best.get("coverage") or 0.0)
-                rec["suggested_runner_up_id"] = str(best.get("runner_up_id") or "")
-                rec["suggested_margin"] = float(best.get("margin") or 0.0)
-                # PaCER also returns expected per-contact RAS positions —
-                # downstream contact-generation can reuse these without
-                # recomputing from scratch.
-                rec["suggested_contacts_ras"] = list(best.get("contacts_ras") or [])
-            elif best.get("method") == "walker_signature":
-                rec["suggested_model_length_mm"] = float(best.get("model_total_mm") or 0.0)
-                rec["suggested_model_gap_mm"] = float(best.get("length_err_mm") or 0.0)
-                rec["suggested_model_pitch_err_mm"] = float(best.get("pitch_err_mm") or 0.0)
-                rec["suggested_model_count_err"] = int(best.get("count_err") or 0)
-                rec["suggested_model_span_err_mm"] = float(best.get("span_err_mm") or 0.0)
-            elif best.get("method") == "shortest_covering":
-                rec["suggested_model_length_mm"] = float(best.get("model_length_mm") or 0.0)
-                rec["suggested_model_gap_mm"] = float(best.get("gap_mm") or 0.0)
-            n_suggested += 1
-        _log(
-            f"suggested electrodes: {n_suggested} trajectories "
-            f"(vendors={'+'.join(vendors_for_suggest)})"
-        )
+    # Electrode-model suggestion intentionally NOT computed here. The
+    # canonical picker is the matched filter in
+    # ``rosa_core.contact_placement.stage_d_pick.pick_matched_filter``,
+    # which runs as part of ``place_seeg`` whenever contacts are placed.
+    # The detection-time per-trajectory classifier (formerly invoked here
+    # via ``rosa_core.electrode_classifier.classify_electrode_model``)
+    # was removed 2026-05-11: it wrote ``Rosa.BestModelId`` to MRML node
+    # attributes that no Slicer module reads (CTV explicitly defaults its
+    # dropdowns to empty per the 2026-05-10 user-feedback comment in
+    # ``ContactsTrajectoryView._populate_contact_table``), and the CLI
+    # placement path never consumed it. Keeping it would double-classify
+    # every trajectory (detection + placement) for no downstream effect.
 
     # Confidence score (v1). Each survivor gets a continuous physical-
     # evidence score in [0, 1] plus a coarse confidence label.

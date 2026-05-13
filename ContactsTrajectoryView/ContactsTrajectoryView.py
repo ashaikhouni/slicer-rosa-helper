@@ -104,8 +104,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastQCMetricsRows = []
         # User-chosen model per trajectory name. Persists across
         # `_populate_contact_table` rebuilds (Refresh, source change,
-        # rename) so the manual choice doesn't get clobbered by
-        # Auto Fit's `Rosa.BestModelId` suggestion.
+        # rename) so the manual choice doesn't get reset to empty on each
+        # rebuild.
         self._userModelOverrides: dict[str, str] = {}
         # Per-CT cache of (features, bolts) so back-to-back placement
         # passes (Suggest models -> Generate contacts -> Update
@@ -424,11 +424,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
 
-        # Restrict the model library used by the unified picker fallback
-        # for rows that arrive without a stamped `Rosa.BestModelId`
-        # (legacy planned / imported trajectories). Auto / Guided /
-        # Manual Fit each have their own copy of this combo, so
-        # restrictions apply per-module.
+        # Restrict the model library used by "Suggest models" /
+        # "Generate contacts". Auto / Guided / Manual Fit each have their
+        # own copy of this combo, so restrictions apply per-module.
         from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.contactsPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
@@ -690,9 +688,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # Both the electrode-length cell AND the # Contacts spinbox
         # auto-update when the model selection changes. The user
         # override is recorded too so the choice survives the next
-        # ``_populate_contact_table`` rebuild — without this, Refresh
-        # / source change / rename all silently revert to Auto Fit's
-        # ``Rosa.BestModelId`` suggestion.
+        # ``_populate_contact_table`` rebuild — without this, Refresh /
+        # source change / rename all silently reset the row to empty.
         def _on_model_change(_arg, row_index=row):
             if not self._updatingContactTable:
                 self._record_user_model_override(row_index)
@@ -774,19 +771,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         """Populate the per-row table.
 
         Per user feedback (2026-05-10): default the model combo to empty
-        regardless of trajectory source. Even ``best_model_id`` stamped by
-        PostopCT Auto Fit's classifier is ignored on load — the user must
-        explicitly opt in to populate models via the "Suggest models"
-        button (which re-runs the CT-aware classifier scoped to the
-        selected pitch-strategy library) or pick manually per row.
-
-        Why: Auto Fit's per-trajectory classification is informational on
-        the line-node attribute but should not silently drive CTV's model
-        selection. The user controls what gets placed.
-
-        Only the user's manual override (from a prior CTV interaction)
-        persists across re-populate — that's what
+        regardless of trajectory source. The user must explicitly opt in
+        to populate models via the "Suggest models" button (runs the
+        matched-filter picker via ``place_seeg``) or pick manually per
+        row. Only the user's manual override (from a prior CTV
+        interaction) persists across re-populate — that's what
         ``_record_user_model_override`` is for.
+
+        Note: the detection/fit-time PaCER classifier that stamped
+        ``Rosa.BestModelId`` was removed 2026-05-11; the row builder
+        never read that attribute anyway.
         """
         self._updatingContactTable = True
         self.contactTable.setRowCount(0)
@@ -1072,12 +1066,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         """Run the staged ``place_seeg`` pipeline to suggest models for
         rows with empty model_id.
 
-        Crucially this uses the SAME engine ``Generate Contacts`` will use
-        when the user clicks it next — so the suggested picks match what
-        the eventual placement will pick. Previously this called the older
-        ``classify_electrode_model`` cascade (PaCER + walker-signature +
-        length fallback) which can disagree with the staged matched-filter
-        picker (the divergence the user flagged on 2026-05-10).
+        This uses the SAME engine ``Generate Contacts`` will use when the
+        user clicks it next — so the suggested picks match what the
+        eventual placement will pick. The canonical picker is the matched
+        filter in ``rosa_core.contact_placement.stage_d_pick``.
 
         The button only fills rows whose model_id is currently empty.
         Rows with a user override are left alone — clear them manually to

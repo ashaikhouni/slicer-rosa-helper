@@ -917,45 +917,13 @@ class GuidedFitWidgetMixin:
                         node.SetAttribute("Rosa.MatchedAutoName", matched_name)
             except Exception:
                 pass
-            # Unified electrode-model picker (same code path as Auto Fit
-            # and Manual Fit). PaCER template-correlation against the
-            # canonical CT volume is the preferred mode; walker signature
-            # / length-only are fallbacks. Phase 2 match-against-auto
-            # already inherits the matched auto trajectory's attributes
-            # via the auto-source path; only PCA fallback needs to pick
-            # here.
-            try:
-                from rosa_core.electrode_classifier import classify_electrode_model
-                walker_sig = None
-                n_obs = int(fit.get("n_inliers") or 0)
-                pitch_obs = float(fit.get("original_median_pitch_mm") or 0.0)
-                span_obs = float(fit.get("contact_span_mm") or 0.0)
-                if n_obs > 0 and pitch_obs > 0.0:
-                    walker_sig = (n_obs, pitch_obs, span_obs)
-                strategy = "auto"
-                combo = getattr(self, "guidedPitchStrategyCombo", None)
-                if combo is not None:
-                    data = combo.currentData
-                    if isinstance(data, str) and data:
-                        strategy = data
-                else:
-                    fallback = getattr(self, "_selected_contact_pitch_strategy", None)
-                    if callable(fallback):
-                        strategy = str(fallback() or "auto")
-                pick = classify_electrode_model(
-                    start_ras=line_start, end_ras=line_end,
-                    pitch_strategy=strategy,
-                    ct_volume_kji=features.get("ct_arr_kji"),
-                    ras_to_ijk_mat=ras_to_ijk,
-                    walker_signature=walker_sig,
-                )
-                if pick is not None:
-                    node.SetAttribute("Rosa.BestModelId", str(pick.get("model_id") or ""))
-                    method = str(pick.get("method") or "")
-                    if method:
-                        node.SetAttribute("Rosa.SuggestedElectrodeMethod", method)
-            except Exception as exc:
-                self.log(f"[guided] {name}: model-pick warning — {exc}")
+            # Electrode-model pick intentionally NOT computed here.
+            # ContactsTrajectoryView ignores ``Rosa.BestModelId`` (defaults
+            # its dropdowns to empty) and the matched-filter picker in
+            # ``rosa_core.contact_placement.stage_d_pick`` is the canonical
+            # picker run when the user clicks "Suggest models" / "Generate
+            # contacts". The detection-time classifier was removed
+            # 2026-05-11.
             applied_nodes.append(node)
             self._set_seed_status(row, True)
             anchored = "bolt" if fit.get("bolt_anchored") else "no-bolt"

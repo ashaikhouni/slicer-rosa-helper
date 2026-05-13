@@ -201,6 +201,178 @@ def extend_deep_end(line, pts_c, amps_c, claimed_blobs,
     return line
 
 
+def extend_deep_end_two_pass(lines, pts_c, amps_c,
+                              dist_arr=None, ras_to_ijk_mat=None,
+                              max_gap_mm: float = EXTEND_MAX_GAP_MM,
+                              perp_tol_mm: float = EXTEND_PERP_TOL_MM,
+                              max_extra: int = EXTEND_MAX_EXTRA,
+                              max_outer_iter: int = EXTEND_MAX_OUTER_ITER,
+                              bounds: WalkerBounds | None = None,
+                              perp_margin_mm: float = 0.5):
+    """Two-pass deep-end extension with conflict resolution.
+
+    Replaces the per-line greedy ``extend_deep_end`` loop that mutated
+    a shared ``claimed_blobs`` set in amp-sum order. The greedy version
+    let the first-processed line grab kissing-partner contacts that
+    sat within ``perp_tol_mm`` of its axis (T8/6 stealing T8/9's tip;
+    T9/8,11; T18/4,6; T1/6 similar) — then refit the axis to include
+    them, making the leak invisible to downstream perp-based checks.
+
+    Two-pass design:
+      Pass 1 (propose, no exclusion): each line independently identifies
+        its next deep-side and shallow-side candidate blob, ignoring
+        already-claimed blobs from other lines.
+      Pass 2 (resolve & apply): for each blob proposed by >1 line, pick
+        the owner using
+          (a) perp-to-axis: line whose axis passes closer wins when the
+              perp difference exceeds ``perp_margin_mm``;
+          (b) chain-pitch tiebreaker (colinear-kissing case): the
+              candidate arc closest to that line's deepest-inlier-arc
+              + typical_pitch wins.
+      Refit every line whose inliers changed. Loop until no new claims.
+
+    Single-claim blobs (one line wants them) are assigned to their sole
+    claimant — orphan-grab semantics for CM/BM cluster gaps are
+    preserved. Conflict resolution only kicks in when 2+ lines reach.
+    """
+    n = len(lines)
+    if n == 0:
+        return lines
+    pts = np.asarray(pts_c, dtype=float)
+    amps = np.asarray(amps_c, dtype=float)
+
+    def _state(line):
+        s = np.asarray(line["start_ras"], dtype=float)
+        e = np.asarray(line["end_ras"], dtype=float)
+        d = e - s
+        L = float(np.linalg.norm(d))
+        if L < 1e-6:
+            return None
+        axis = d / L
+        center = np.asarray(line["center"], dtype=float)
+        diffs = pts - center
+        along = diffs @ axis
+        perp = np.linalg.norm(
+            diffs - np.outer(along, axis), axis=1,
+        )
+        return {"s": s, "e": e, "axis": axis, "center": center,
+                "along": along, "perp": perp}
+
+    def _typical_pitch(line, state):
+        inliers = list(line["inlier_idx"])
+        if len(inliers) < 2:
+            return 3.5
+        arcs = sorted(float(state["along"][int(bi)]) for bi in inliers)
+        gaps = [arcs[i + 1] - arcs[i] for i in range(len(arcs) - 1)]
+        gaps_plausible = [g for g in gaps if 1.5 <= g <= 8.0]
+        if gaps_plausible:
+            return float(np.median(gaps_plausible))
+        return float(np.median(gaps)) if gaps else 3.5
+
+    for outer in range(max_outer_iter):
+        states = []
+        for line in lines:
+            if dist_arr is not None and ras_to_ijk_mat is not None:
+                s_ras = np.asarray(line["start_ras"], dtype=float)
+                e_ras = np.asarray(line["end_ras"], dtype=float)
+                s_ras, e_ras = orient_shallow_to_deep(
+                    s_ras, e_ras, dist_arr, ras_to_ijk_mat,
+                )
+                line["start_ras"] = s_ras
+                line["end_ras"] = e_ras
+            states.append(_state(line))
+
+        proposals = {}
+        for li, line in enumerate(lines):
+            st = states[li]
+            if st is None: continue
+            inliers = set(line["inlier_idx"])
+            inlier_arcs_self = [float(st["along"][int(bi)]) for bi in inliers]
+            if not inlier_arcs_self:
+                continue
+            deep_proj = max(inlier_arcs_self)
+            shallow_proj = min(inlier_arcs_self)
+
+            # Deep candidate
+            mask_d = ((st["along"] > deep_proj)
+                      & (st["along"] - deep_proj <= max_gap_mm)
+                      & (st["perp"] <= perp_tol_mm))
+            cand_d = [int(bi) for bi in np.where(mask_d)[0]
+                       if int(bi) not in inliers]
+            if cand_d:
+                best = max(cand_d, key=lambda bi: float(amps[bi]))
+                proposals.setdefault(best, []).append(
+                    (li, "deep", float(st["along"][best]),
+                     float(st["perp"][best]))
+                )
+            # Shallow candidate
+            mask_s = ((st["along"] < shallow_proj)
+                      & (shallow_proj - st["along"] <= max_gap_mm)
+                      & (st["perp"] <= perp_tol_mm))
+            cand_s = [int(bi) for bi in np.where(mask_s)[0]
+                       if int(bi) not in inliers]
+            if cand_s:
+                best = max(cand_s, key=lambda bi: float(amps[bi]))
+                proposals.setdefault(best, []).append(
+                    (li, "shallow", float(st["along"][best]),
+                     float(st["perp"][best]))
+                )
+
+        if not proposals:
+            break
+
+        any_added = False
+        for blob_idx, claimants in proposals.items():
+            if len(claimants) == 1:
+                li, side, arc, perp = claimants[0]
+                if int(blob_idx) not in set(lines[li]["inlier_idx"]):
+                    lines[li]["inlier_idx"].append(int(blob_idx))
+                    any_added = True
+                continue
+            sorted_by_perp = sorted(claimants, key=lambda c: c[3])
+            best = sorted_by_perp[0]
+            runner = sorted_by_perp[1]
+            if runner[3] - best[3] >= perp_margin_mm:
+                winner = best
+            else:
+                best_score = float("inf")
+                winner = best
+                for c in claimants:
+                    li, side, arc, _ = c
+                    pitch = _typical_pitch(lines[li], states[li])
+                    inliers = list(lines[li]["inlier_idx"])
+                    arcs_self = [float(states[li]["along"][int(bi)]) for bi in inliers]
+                    if not arcs_self: continue
+                    if side == "deep":
+                        own_extreme = max(arcs_self)
+                        expected = own_extreme + pitch
+                    else:
+                        own_extreme = min(arcs_self)
+                        expected = own_extreme - pitch
+                    score = abs(arc - expected)
+                    if score < best_score:
+                        best_score = score; winner = c
+            wli, _, _, _ = winner
+            if int(blob_idx) not in set(lines[wli]["inlier_idx"]):
+                lines[wli]["inlier_idx"].append(int(blob_idx))
+                any_added = True
+
+        if not any_added:
+            break
+
+        new_lines = []
+        for line in lines:
+            line["inlier_idx"] = sorted(line["inlier_idx"])
+            refit = refit_line_from_inliers(line, pts_c, amps_c, bounds=bounds)
+            if refit is None:
+                new_lines.append(line)
+            else:
+                new_lines.append(refit)
+        lines = new_lines
+
+    return lines
+
+
 def dedup_stage1_lines(lines):
     """Remove near-duplicate stage-1 walker hypotheses.
 
@@ -324,17 +496,15 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
             )
     lines = arbitrate_blob_ownership(lines, pts_c, amps_c, bounds=bounds)
 
-    claimed: set[int] = set()
-    for l in lines:
-        for bi in l["inlier_idx"]:
-            claimed.add(int(bi))
-    lines.sort(key=lambda l: -float(l.get("amp_sum", 0.0)))
-    lines = [
-        extend_deep_end(l, pts_c, amps_c, claimed,
-                         dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat,
-                         bounds=bounds)
-        for l in lines
-    ]
+    # Two-pass deep-end extension with conflict resolution. Replaces
+    # the per-line greedy ``extend_deep_end`` loop that mutated a
+    # shared ``claimed`` set in amp-sum order, letting the
+    # first-processed line steal kissing-partner contacts (T8/6 leak).
+    lines = extend_deep_end_two_pass(
+        lines, pts_c, amps_c,
+        dist_arr=dist_arr, ras_to_ijk_mat=ras_to_ijk_mat,
+        bounds=bounds,
+    )
 
     second_pass_lines = second_pass_orphan_walker(
         lines, pts_c, amps_c, pitches_mm=pitches_mm, bounds=bounds,
@@ -351,6 +521,13 @@ def run_stage1(log_arr, kji_to_ras_fn, dist_arr, ras_to_ijk_mat,
                 kept_sp.append(nl)
         second_pass_lines = kept_sp
     if second_pass_lines:
+        # Rebuild `claimed` from current stage1 lines (the two-pass
+        # extend above doesn't keep one), then add the second-pass
+        # orphan walker's own inliers before letting them extend.
+        claimed: set[int] = set()
+        for l in lines:
+            for bi in l["inlier_idx"]:
+                claimed.add(int(bi))
         for nl in second_pass_lines:
             for bi in nl["inlier_idx"]:
                 claimed.add(int(bi))
@@ -403,6 +580,7 @@ __all__ = [
     "arbitrate_blob_ownership",
     "second_pass_orphan_walker",
     "extend_deep_end",
+    "extend_deep_end_two_pass",
     "dedup_stage1_lines",
     "run_stage1",
 ]

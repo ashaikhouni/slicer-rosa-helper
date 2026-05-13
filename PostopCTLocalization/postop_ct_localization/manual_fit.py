@@ -121,11 +121,12 @@ class ManualFitWidgetMixin:
         )
         form.addRow("Orientation:", self.manualFitOrientationCombo)
 
-        # Restrict the model library used for the per-line PaCER picker.
-        # On Sync, every manual line gets `Rosa.BestModelId` stamped from
-        # whatever model wins under this strategy — so picking
-        # "Dixi AM (3.5 mm)" prevents the picker from suggesting a PMT
-        # or Medtronic model on a Dixi-only case.
+        # Reserved for a future per-line library-restriction control —
+        # the per-line electrode-model picker that previously ran on Sync
+        # was removed 2026-05-11. Today this combo is only read into the
+        # sync log message; ``ContactsTrajectoryView`` has its own pitch-
+        # strategy combo that controls the canonical matched-filter
+        # picker.
         from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.manualFitPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
@@ -167,7 +168,6 @@ class ManualFitWidgetMixin:
         count, reoriented = self.logic.sync_manual_trajectories_to_workflow(
             workflow_node=self.workflowNode,
             orientation=orientation,
-            pitch_strategy=strategy,
         )
         self.log(
             f"[manual] synced {count} manual trajectory nodes "

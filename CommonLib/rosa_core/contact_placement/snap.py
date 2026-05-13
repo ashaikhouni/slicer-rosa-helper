@@ -18,6 +18,9 @@ from __future__ import annotations
 import numpy as np
 
 from .constants import (
+    OWN_CONTEST_MARGIN_MM,
+    OWN_MIN_VOXELS_PER_ARC,
+    OWN_R_MM,
     SNAP_LOG_THRESHOLD,
     SNAP_RADIUS_MM,
     SNAP_SMOOTH_WINDOW,
@@ -153,4 +156,170 @@ def snap_centerline_owned(
     return snapped
 
 
-__all__ = ["snap_centerline_owned", "snap_centerline_to_centroid"]
+def compute_voxel_ownership(
+    centerlines, log_arr_kji, ras_to_ijk_mat, *,
+    r_own_mm: float = OWN_R_MM,
+    contest_margin_mm: float = OWN_CONTEST_MARGIN_MM,
+    log_threshold: float = SNAP_LOG_THRESHOLD,
+):
+    """Per-voxel closest-seed classification on the LoG-bright voxels.
+
+    For every voxel with ``-LoG > log_threshold``, find its two closest
+    seed-line perp distances. Return a kji-shape ``int16`` label volume:
+
+    * ``0``  — background (no bright voxel here, or closest seed > ``r_own_mm``)
+    * ``-1`` — contested (the two closest seeds are within ``contest_margin_mm``)
+    * ``i+1`` — uniquely owned by seed index ``i`` (``i`` is the position in
+      ``centerlines``).
+
+    The output is consumed by ``snap_centerline_voxel_owned`` (and Stage C /
+    Stage D, when soft ownership propagates downstream).
+    """
+    log_arr_kji = np.asarray(log_arr_kji)
+    own = np.zeros(log_arr_kji.shape, dtype=np.int16)
+    bright = (-log_arr_kji) > log_threshold
+    n_bright = int(bright.sum())
+    if n_bright == 0 or len(centerlines) == 0:
+        return own
+    k_idx, j_idx, i_idx = np.where(bright)
+    ones = np.ones(n_bright, dtype=np.float32)
+    ijk_h = np.stack([i_idx, j_idx, k_idx, ones], axis=1).astype(np.float32)
+    # ras_to_ijk_mat is RAS->IJK; invert for IJK->RAS.
+    i2r = np.linalg.inv(np.asarray(ras_to_ijk_mat, dtype=float))
+    bright_ras = (i2r @ ijk_h.T).T[:, :3]
+    dists = np.full((n_bright, len(centerlines)), np.inf, dtype=np.float32)
+    for ci, cl in enumerate(centerlines):
+        cl = np.asarray(cl, dtype=float)
+        if len(cl) < 2:
+            continue
+        dists[:, ci] = min_dist_pts_to_polyline(bright_ras, cl).astype(np.float32)
+    # Two smallest distances per voxel — partial sort is faster than full sort.
+    if dists.shape[1] >= 2:
+        part = np.argpartition(dists, 1, axis=1)[:, :2]
+        d_part = np.take_along_axis(dists, part, axis=1)
+        order = np.argsort(d_part, axis=1)
+        s1_idx = np.take_along_axis(part, order, axis=1)[:, 0]
+        s2_idx = np.take_along_axis(part, order, axis=1)[:, 1]
+        s1_d = np.take_along_axis(d_part, order, axis=1)[:, 0]
+        s2_d = np.take_along_axis(d_part, order, axis=1)[:, 1]
+    else:
+        s1_idx = np.zeros(n_bright, dtype=np.int64)
+        s1_d = dists[:, 0]
+        s2_idx = s1_idx
+        s2_d = np.full_like(s1_d, np.inf)
+    in_reach = s1_d <= r_own_mm
+    contested = in_reach & (s2_d <= r_own_mm) & ((s2_d - s1_d) < contest_margin_mm)
+    unique = in_reach & ~contested
+    labels = np.zeros(n_bright, dtype=np.int16)
+    labels[unique] = s1_idx[unique].astype(np.int16) + 1
+    labels[contested] = -1
+    own[k_idx, j_idx, i_idx] = labels
+    return own
+
+
+def snap_centerline_voxel_owned(
+    centerline, log_arr_kji, r2i,
+    *, voxel_ownership, seed_idx,
+    snap_radius_mm: float = SNAP_RADIUS_MM,
+    step_mm: float = SNAP_STEP_MM,
+    log_threshold: float = SNAP_LOG_THRESHOLD,
+    n_radii: int = 4, n_angles: int = 16,
+    smooth_window: int = SNAP_SMOOTH_WINDOW,
+    min_owned_voxels: int = OWN_MIN_VOXELS_PER_ARC,
+) -> np.ndarray:
+    """LoG-centroid snap that only sums voxels uniquely owned by ``seed_idx``.
+
+    Mirrors ``snap_centerline_to_centroid`` arc-by-arc, but at each step
+    masks the disk samples to the voxels whose ``voxel_ownership`` label
+    is ``seed_idx + 1`` (uniquely owned). If fewer than ``min_owned_voxels``
+    survive, that arc is marked invalid and the position is linearly
+    interpolated from the neighboring valid arcs after the per-arc loop.
+
+    This is the production form of ``snap_with_ownership`` from
+    ``notebooks/s54_blob_ownership_prototype.ipynb``.
+    """
+    from ..volume_sampling import sample_trilinear_batch
+    from scipy.ndimage import uniform_filter1d
+
+    voxel_ownership = np.asarray(voxel_ownership)
+    target_label = int(seed_idx) + 1
+    starts, dirs, lens, cum_start = polyline_segments(centerline)
+    total_arc = float(cum_start[-1] + lens[-1])
+    arcs = np.arange(0.0, total_arc + 0.5 * step_mm, step_mm)
+    snapped = np.zeros((len(arcs), 3), dtype=float)
+    valid_arc = np.zeros(len(arcs), dtype=bool)
+
+    n_per_disk = n_radii * n_angles
+    off_u = np.zeros(n_per_disk, dtype=float)
+    off_v = np.zeros(n_per_disk, dtype=float)
+    idx = 0
+    for r_i in range(1, n_radii + 1):
+        rr = snap_radius_mm * r_i / n_radii
+        for a_i in range(n_angles):
+            ang = 2.0 * np.pi * a_i / n_angles
+            off_u[idx] = rr * np.cos(ang)
+            off_v[idx] = rr * np.sin(ang)
+            idx += 1
+
+    kshape, jshape, ishape = voxel_ownership.shape
+    r2i_mat = np.asarray(r2i, dtype=float)
+
+    for ai, t in enumerate(arcs):
+        center, tangent = polyline_pos_tan(centerline, float(t))
+        u, v = ortho_uv(tangent)
+        pts = (center[None, :]
+               + off_u[:, None] * u[None, :]
+               + off_v[:, None] * v[None, :])
+        # RAS -> IJK lookup for the ownership label.
+        ones = np.ones((n_per_disk, 1), dtype=float)
+        ijk = (r2i_mat @ np.hstack([pts, ones]).T).T[:, :3]
+        ijk_round = np.round(ijk).astype(int)
+        i_v = ijk_round[:, 0]; j_v = ijk_round[:, 1]; k_v = ijk_round[:, 2]
+        in_bounds = (
+            (k_v >= 0) & (k_v < kshape) &
+            (j_v >= 0) & (j_v < jshape) &
+            (i_v >= 0) & (i_v < ishape)
+        )
+        own_at_sample = np.zeros(n_per_disk, dtype=np.int16)
+        if in_bounds.any():
+            own_at_sample[in_bounds] = voxel_ownership[
+                k_v[in_bounds], j_v[in_bounds], i_v[in_bounds]
+            ]
+        log_vals = sample_trilinear_batch(log_arr_kji, r2i_mat, pts)
+        sig = -log_vals
+        usable = (
+            np.isfinite(sig) & (sig > log_threshold) & (own_at_sample == target_label)
+        )
+        if usable.sum() >= min_owned_voxels:
+            w = sig[usable] - log_threshold
+            mu = float((w * off_u[usable]).sum() / w.sum())
+            mv = float((w * off_v[usable]).sum() / w.sum())
+            snapped[ai] = center + mu * u + mv * v
+            valid_arc[ai] = True
+        else:
+            snapped[ai] = center
+    # Linearly interpolate invalid arcs from neighboring valid arcs along
+    # the centerline. Preserves curvature in trusted segments and fills
+    # contested gaps with a smooth bridge.
+    if valid_arc.any() and (~valid_arc).any():
+        good = np.where(valid_arc)[0]
+        for axis in range(3):
+            snapped[:, axis] = np.interp(
+                np.arange(len(arcs)), good, snapped[good, axis]
+            )
+    elif not valid_arc.any():
+        # No trusted arcs — fall through to the seed centerline. Sampling
+        # ``polyline_pos_tan`` over the full ``arcs`` grid reproduces it.
+        for ai, t in enumerate(arcs):
+            snapped[ai] = polyline_pos_tan(centerline, float(t))[0]
+    if smooth_window > 1:
+        snapped = uniform_filter1d(snapped, size=smooth_window, axis=0, mode="nearest")
+    return snapped
+
+
+__all__ = [
+    "compute_voxel_ownership",
+    "snap_centerline_owned",
+    "snap_centerline_to_centroid",
+    "snap_centerline_voxel_owned",
+]

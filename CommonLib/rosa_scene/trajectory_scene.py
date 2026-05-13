@@ -140,12 +140,14 @@ class TrajectorySceneService:
         """Apply configured color/visibility/lock style for one trajectory group."""
         cfg = TRAJECTORY_GROUP_CONFIG.get(self._normalize_group(group), TRAJECTORY_GROUP_CONFIG[DEFAULT_GROUP])
         node.SetLocked(bool(cfg.get("locked", False)))
-        # Compact labels: show trajectory name once on entry point plus E/T markers.
+        # Compact labels: trajectory name + Sh (shallow / bolt-entry, control
+        # point 0) and Dp (deep tip, control point 1) on both endpoints, so
+        # the shank stays identifiable while either end is being dragged.
         traj_name = (node.GetAttribute("Rosa.TrajectoryName") or "").strip() or (node.GetName() or "").strip()
         if node.GetNumberOfControlPoints() >= 1:
-            node.SetNthControlPointLabel(0, f"{traj_name} E" if traj_name else "E")
+            node.SetNthControlPointLabel(0, f"{traj_name} Sh" if traj_name else "Sh")
         if node.GetNumberOfControlPoints() >= 2:
-            node.SetNthControlPointLabel(1, "T")
+            node.SetNthControlPointLabel(1, f"{traj_name} Dp" if traj_name else "Dp")
         display = node.GetDisplayNode()
         if display is None:
             return
@@ -232,9 +234,10 @@ class TrajectorySceneService:
         node.SetAttribute("Rosa.TrajectoryOrigin", str(origin or grp))
         if node.GetNumberOfControlPoints() >= 1:
             traj_name = str(trajectory_name or "").strip()
-            node.SetNthControlPointLabel(0, f"{traj_name} E" if traj_name else "E")
+            node.SetNthControlPointLabel(0, f"{traj_name} Sh" if traj_name else "Sh")
         if node.GetNumberOfControlPoints() >= 2:
-            node.SetNthControlPointLabel(1, "T")
+            traj_name = str(trajectory_name or "").strip()
+            node.SetNthControlPointLabel(1, f"{traj_name} Dp" if traj_name else "Dp")
 
     def trajectory_from_line_node(self, name, node):
         """Extract one line node as a trajectory dictionary.
@@ -425,8 +428,8 @@ class TrajectorySceneService:
         node.RemoveAllControlPoints()
         node.AddControlPoint(vtk.vtkVector3d(*start_ras))
         node.AddControlPoint(vtk.vtkVector3d(*end_ras))
-        node.SetNthControlPointLabel(0, f"{name} E" if name else "E")
-        node.SetNthControlPointLabel(1, "T")
+        node.SetNthControlPointLabel(0, f"{name} Sh" if name else "Sh")
+        node.SetNthControlPointLabel(1, f"{name} Dp" if name else "Dp")
         self.set_trajectory_metadata(node, trajectory_name=name, group=grp, origin=origin or grp)
         self._apply_group_display(node, grp)
         return node

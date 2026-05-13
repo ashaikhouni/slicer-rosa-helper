@@ -6,9 +6,18 @@ Two interchangeable implementations:
 * ``sample_neg_log_max`` — negative polarity on LoG σ=1
 
 Both wrap ``walk_centerline`` and emit per-arc ``WALK_AGGREGATOR``-statistic
-of disk samples. When ``ctx.other_centerlines`` is set, voxels closer to
-another shank's centerline than ours are zeroed before aggregating — the
-cross-shank ownership mask. Eliminates passing-shank artifacts.
+of disk samples.
+
+Cross-shank ownership is honored when set (priority order):
+
+1. ``ctx.voxel_ownership`` (precomputed per-voxel label volume) — the
+   ``use_voxel_ownership=True`` path. Each disk sample is masked in only if
+   its voxel is uniquely owned by this seed (``label == seed_idx + 1``).
+2. ``ctx.other_centerlines`` (per-disk nearest-line) — the legacy path.
+   Each sample is owned by whichever centerline it's closest to.
+
+Both routes prevent the walker from inflating the per-arc signal with a
+neighbor's metal voxels. Without either, no masking is applied.
 
 Disk geometry: 1 + ``WALK_N_RADII`` × ``WALK_N_ANGLES`` = 37 samples per disk
 (more stable than ``sample_disk_along_polyline``'s 17-sample default).
@@ -103,6 +112,13 @@ def walk_centerline(
               if ocl is not None and len(ocl) >= 2]
     dist_self = np.sqrt(off_u ** 2 + off_v ** 2)
 
+    own_vol = ctx.voxel_ownership
+    own_idx = ctx.voxel_seed_idx
+    use_vox = own_vol is not None and own_idx is not None
+    target_label = (int(own_idx) + 1) if use_vox else 0
+    if use_vox:
+        own_kshape, own_jshape, own_ishape = own_vol.shape
+
     for ai, t in enumerate(arcs):
         i = int(np.searchsorted(cum, t, side="right") - 1)
         i = max(0, min(i, len(diffs) - 1))
@@ -112,7 +128,25 @@ def walk_centerline(
         u, v = ortho_uv(tangent)
         pts = center[None, :] + off_u[:, None] * u[None, :] + off_v[:, None] * v[None, :]
 
-        if others:
+        if use_vox:
+            # Per-voxel ownership lookup: own only the voxels this seed
+            # uniquely claimed. Unowned (background or contested) voxels
+            # are masked out, same effect as Pass-2's per-disk rule but
+            # consistent with Stage B's earlier ownership decision.
+            ones = np.ones((n_per, 1), dtype=float)
+            ijk = (r2i @ np.hstack([pts, ones]).T).T[:, :3]
+            ijk_round = np.round(ijk).astype(int)
+            i_v, j_v, k_v = ijk_round[:, 0], ijk_round[:, 1], ijk_round[:, 2]
+            in_bounds = (
+                (k_v >= 0) & (k_v < own_kshape) &
+                (j_v >= 0) & (j_v < own_jshape) &
+                (i_v >= 0) & (i_v < own_ishape)
+            )
+            owned = np.zeros(n_per, dtype=bool)
+            if in_bounds.any():
+                labels_at = own_vol[k_v[in_bounds], j_v[in_bounds], i_v[in_bounds]]
+                owned[in_bounds] = (labels_at == target_label)
+        elif others:
             dist_other = np.full(n_per, np.inf, dtype=float)
             for ocl in others:
                 dist_other = np.minimum(dist_other, min_dist_pts_to_polyline(pts, ocl))

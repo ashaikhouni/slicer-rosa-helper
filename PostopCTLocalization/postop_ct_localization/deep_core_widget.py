@@ -263,58 +263,12 @@ class ContactPitchV1WidgetMixin:
             ) or []
             self._lastDeepCoreProposalNodes = nodes
 
-            suggestion_log = []
-            n_suggested = 0
-            for idx, node in enumerate(nodes):
-                if idx >= len(trajectories):
-                    break
-                traj = trajectories[idx]
-                suggested = str(traj.get("suggested_model_id") or "")
-                node_name = node.GetName()
-                n_obs = int(traj.get("n_inliers") or 0)
-                span_mm = float(traj.get("contact_span_mm") or 0.0)
-                intra_mm = float(traj.get("intracranial_length_mm") or 0.0)
-                source = str(traj.get("source") or "unknown")
-                if suggested:
-                    try:
-                        # Rosa.BestModelId is read by
-                        # trajectory_scene.trajectory_from_line_node and
-                        # consumed by the Contacts & Trajectory View
-                        # module's "Electrode Model" dropdown.
-                        node.SetAttribute("Rosa.BestModelId", suggested)
-                        score = float(traj.get("suggested_model_score") or 0.0)
-                        node.SetAttribute("Rosa.BestModelScore", f"{score:.3f}")
-                        method = str(traj.get("suggested_model_method") or "")
-                        if method:
-                            node.SetAttribute("Rosa.SuggestedElectrodeMethod", method)
-                    except Exception:
-                        pass
-                    method_str = str(traj.get("suggested_model_method") or "")
-                    method_tag = f" [{method_str}]" if method_str else ""
-                    suggestion_log.append(
-                        f"  {node_name}: {suggested}{method_tag} "
-                        f"(src={source}, n={n_obs}, span={span_mm:.1f} mm, "
-                        f"intracranial={intra_mm:.1f} mm)"
-                    )
-                    n_suggested += 1
-                else:
-                    if not self._selected_contact_pitch_vendors():
-                        reason = "no manufacturer ticked"
-                    elif intra_mm < 5.0:
-                        reason = "intracranial length too short"
-                    else:
-                        reason = "no model in selected vendors covers intracranial length"
-                    suggestion_log.append(
-                        f"  {node_name}: \u2014 ({reason}; "
-                        f"src={source}, intracranial={intra_mm:.1f} mm)"
-                    )
-            if suggestion_log:
-                self.log(
-                    f"[contact-pitch-v1] suggested electrodes: "
-                    f"{n_suggested}/{len(nodes)}"
-                )
-                for line in suggestion_log:
-                    self.log(line)
+            # Per-trajectory electrode-model suggestion happens later when the
+            # user opens Contacts & Trajectory View and clicks "Suggest models" /
+            # "Generate contacts" \u2014 the canonical picker is the matched filter in
+            # ``rosa_core.contact_placement.stage_d_pick``. The detection-time
+            # PaCER suggestion that previously stamped ``Rosa.BestModelId`` here
+            # was removed 2026-05-11.
 
             if nodes:
                 rows = []
@@ -336,9 +290,6 @@ class ContactPitchV1WidgetMixin:
                     }
                     if ni < len(trajectories):
                         det = trajectories[ni]
-                        suggested = str(det.get("suggested_model_id") or "")
-                        if suggested:
-                            row["suggested_model_id"] = suggested
                         if det.get("intracranial_length_mm") is not None:
                             row["intracranial_length_mm"] = float(det["intracranial_length_mm"])
                     rows.append(row)
