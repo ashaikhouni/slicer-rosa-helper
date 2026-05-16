@@ -70,6 +70,7 @@ SUBCOMMANDS = {
     "match-ros":     "rosa_agent.commands.match_ros",
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
+    "brain-extract": "rosa_agent.commands.brain_extract",
 }
 
 
