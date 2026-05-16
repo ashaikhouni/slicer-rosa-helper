@@ -51,6 +51,7 @@ iteration only; production use should `pip install`.
 | `match-ros`     | Name detector emissions on any-frame CT from a `.ros` plan via line-geometry RANSAC  |
 | `export-view`   | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB   |
 | `view`          | Serve an `export-view` output dir over HTTP and open it in your browser              |
+| `brain-extract` | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)|
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
@@ -504,6 +505,119 @@ No new dependencies — wraps stdlib `http.server` + `webbrowser`.
 
 ---
 
+## `brain-extract` — intracranial brain mask from CT or MRI
+
+```bash
+rosa-agent brain-extract postop_ct.nii.gz -o brain_mask.nii.gz
+```
+
+Produces a binary brain mask for any CT or MRI volume. The mask inherits
+the input volume's full geometry (size + spacing + origin + direction) so
+downstream tooling can resample / overlay without an affine fix-up step.
+
+Two backends with different modality coverage — `--backend auto` (default)
+picks the right one for what's available:
+
+| Backend         | Modalities    | Deps to ship                                    | Typical runtime |
+|-----------------|---------------|-------------------------------------------------|-----------------|
+| `synthstrip`    | CT and MRI    | `mri_synthstrip` binary (FreeSurfer 7.3+)       | 30–90 s CPU     |
+| `log-watershed` | **CT only**   | none beyond rosa_core (SITK + numpy + scipy)    | ~3 s            |
+
+### Modality cheat-sheet
+
+| Input you have        | Recommended call                                                      |
+|-----------------------|-----------------------------------------------------------------------|
+| Postop CT, FS on disk | `brain-extract ct.nii.gz -o mask.nii.gz`  *(auto → synthstrip)*       |
+| Postop CT, no FS      | `brain-extract ct.nii.gz -o mask.nii.gz`  *(auto → log-watershed)*    |
+| T1/T2/FLAIR MRI       | `brain-extract t1.nii.gz -o mask.nii.gz`  *(auto → synthstrip)*       |
+| Pinning the backend   | `brain-extract … --backend synthstrip` *or* `--backend log-watershed` |
+
+`auto` will refuse to use `log-watershed` on MRI input (no air-band voxels
+< −500 HU) and exit with code 5 — point at SynthStrip in that case.
+
+### Backend internals
+
+**SynthStrip** is FreeSurfer's deep-learning brain extractor — modality-
+agnostic, well-validated in the literature, handles wire/bolt/clip
+hardware cleanly. The wrapper:
+
+- Auto-discovers `mri_synthstrip` via, in order: `--synthstrip <path>`,
+  `$ROSA_SYNTHSTRIP`, `PATH`, `$FREESURFER_HOME/bin/`, and the usual
+  install prefixes (`/Applications/freesurfer/*/bin/`, `/usr/local/
+  freesurfer*/`, `/opt/freesurfer*/`).
+- Injects `FREESURFER_HOME` into the subprocess env when needed (derived
+  from the binary path), so callers don't have to source `SetUpFreeSurfer.sh`.
+- Post-writes the mask through SimpleITK with `CopyInformation` so the
+  output inherits the CT's q-form geometry — works around the
+  qform/sform mismatch SynthStrip otherwise propagates on volumes whose
+  NIfTI header carries two inconsistent affines.
+
+Useful flags:
+
+- `--stripped <path>` — also write the skull-stripped volume (input × mask).
+- `--no-csf` — tighter SynthStrip mask, excludes CSF voxels at the surface.
+- `--threads N` — `-t` passed through to SynthStrip.
+- `--timeout S` — subprocess kill after `S` seconds.
+
+**LoG watershed** is a pure-Python CT-only fallback in
+[`rosa_detect.primitives.intracranial.log_watershed_brain_mask`](../CommonLib/rosa_detect/primitives/intracranial.py).
+No deep learning, no external binary, no per-scan tuning. Recipe:
+
+```text
+walls       = (|LoG σ=5 mm| ≥ 10)  AND NOT  (HU ≥ 2000  AND  dist_hull ≥ 10mm)
+deep_seed   = (dist_hull ≥ 30mm)  AND NOT  walls
+markers     = boundary→extracranial(1), deep_seed→intracranial(2)
+brain_mask  = MorphologicalWatershedFromMarkers(-dist(walls), markers) == 2
+```
+
+- `|LoG σ=5 mm| ≥ 10` — the binary wall mask validated in Variant F of
+  [`notebooks/probes/intracranial_mask_lab.ipynb`](../notebooks/probes/intracranial_mask_lab.ipynb).
+  Fires on skull, bolts, and frame; contacts wash out at σ = 5 mm.
+- **Intracranial-metal carve**: saturated metal (HU ≥ 2000) deeper than
+  10 mm from the head hull is *removed* from the wall mask. Without
+  this, high-HU contacts (some scanners report HU > 6000) would fire as
+  walls and fragment the brain basin around every electrode.
+- **Region-based interior marker**: every voxel ≥ 30 mm from the hull is
+  a seed (with a `p99(dist_hull)` fallback if the FOV is too tight).
+  Avoids the single-voxel-seed trap where a sulcus next to the deepest
+  point isolates the marker from the rest of the brain.
+
+Validated on a 10-subject hand-curated cohort
+([`notebooks/cross_modality/03_cross_subject_validation.ipynb`](../notebooks/cross_modality/03_cross_subject_validation.ipynb)):
+
+| metric            | LoG watershed | SynthStrip CT | SynthStrip T1 |
+|-------------------|---------------|---------------|---------------|
+| mean GT recall    | **97.3 %**    | 94.4 %        | 97.0 %        |
+| mean leak %       | 0.50 %        | **0.20 %**    | 0.76 %        |
+| mean mask vol     | 1942 cm³      | 1501 cm³      | 1513 cm³      |
+| recall wins / 10  | **9**         | 1             | n/a           |
+| leak wins / 10    | 0             | **10**        | n/a           |
+
+LoG dominates contact recall; SynthStrip dominates boundary tightness.
+For SEEG-style contact localization, **recall is the metric that matters**
+— a missed contact is unrecoverable while a few mm³ of bolt inside the
+mask is harmless downstream.
+
+### Check whether a backend is available
+
+```bash
+rosa-agent brain-extract --check                    # prints which backend auto would pick
+rosa-agent brain-extract --check --backend synthstrip   # exit 0 if found, 3 otherwise
+rosa-agent brain-extract --check --backend log-watershed  # always exit 0
+```
+
+### Exit codes
+
+| Code | Meaning                                                               |
+|------|-----------------------------------------------------------------------|
+| 0    | mask written                                                          |
+| 2    | input missing or argument error                                       |
+| 3    | chosen backend not available (only fatal with `--backend synthstrip`) |
+| 4    | backend ran but failed                                                |
+| 5    | modality mismatch (log-watershed asked to run on a non-CT volume)     |
+
+---
+
 ## `load` / `detect` / `contacts` / `label` — staged building blocks
 
 The four-stage CLI lets you run one stage at a time when you already
@@ -650,6 +764,49 @@ from rosa_core.atlas_index import (
 # (Provider-agnostic helpers; the CLI label command + Slicer's
 # atlas_providers both go through this same module.)
 ```
+
+### Brain mask (LoG watershed)
+
+```python
+import SimpleITK as sitk
+from rosa_detect.primitives.intracranial import log_watershed_brain_mask
+
+ct = sitk.ReadImage("postop_ct.nii.gz")
+mask = log_watershed_brain_mask(ct)        # SITK image, uint8, same geometry as `ct`
+if mask is None:
+    raise RuntimeError("watershed degenerate (FOV too tight?)")
+sitk.WriteImage(mask, "brain_mask.nii.gz")
+```
+
+Default parameters (`sigma_mm=5`, `wall_thr=10`, `metal_hu_floor=2000`,
+`intracranial_min_mm=10`, `deep_seed_mm=30`) are validated on the 10-subject
+cross-cohort scorecard — see
+[`notebooks/cross_modality/03_cross_subject_validation.ipynb`](../notebooks/cross_modality/03_cross_subject_validation.ipynb).
+
+### Brain mask (SynthStrip backend, programmatic)
+
+```python
+from rosa_agent.services.synthstrip import (
+    find_synthstrip, run_synthstrip, SynthStripNotFound,
+)
+
+# Quietly detect availability:
+binary = find_synthstrip()
+if binary is None:
+    ...  # fall through to log_watershed_brain_mask above
+
+# Or just run it:
+try:
+    mask_path = run_synthstrip("postop_ct.nii.gz", "brain_mask.nii.gz")
+except SynthStripNotFound:
+    ...  # missing dependency; pick another backend
+```
+
+`run_synthstrip` accepts `synthstrip_path=` (override the detection chain),
+`stripped_path=` (also write the masked volume), `no_csf=True` (tighter
+mask), `threads=N`, and `timeout=S`. The wrapper auto-injects
+`FREESURFER_HOME` into the subprocess env and post-fixes the output mask's
+affine to match the input.
 
 For the full algorithm seam see
 [`DEVELOPER_GUIDE.md § Shared Libraries`](../docs/DEVELOPER_GUIDE.md).
