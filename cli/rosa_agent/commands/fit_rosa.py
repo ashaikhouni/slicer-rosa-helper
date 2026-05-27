@@ -572,7 +572,7 @@ def _load_or_compute_features(
         "version":        _FEATURE_CACHE_VERSION,
         "postop_display": postop_name,
         "mask_backend":   mask_backend,
-        "log_sigma_mm":   1.0,
+        "log_sigma_mm":   0.8,
         "frangi_sigma":   1.0,
     }
     cache_key = _feature_cache_key(sitk_img, config)
