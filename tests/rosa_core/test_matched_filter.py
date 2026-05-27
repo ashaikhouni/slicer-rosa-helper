@@ -313,5 +313,164 @@ class MatchedFilterShortcutsTests(unittest.TestCase):
         self.assertAlmostEqual(r.corr, 0.95)
 
 
+@unittest.skipUnless(DEPS_AVAILABLE, "numpy not available")
+class ExtentAwareAndVerifierTests(unittest.TestCase):
+    """Tests for ``extent_aware_pick`` and ``no_metal_rerank``."""
+
+    def _build_result(self, arcs, signal, models):
+        from rosa_core.matched_filter import matched_filter_pick
+        return matched_filter_pick(
+            arcs, signal, models,
+            bolt_end_arc=0.0,
+            profile_end_arc=float(arcs[-1]),
+            max_extend_tip_mm=0.5,
+        )
+
+    # ---- extent_aware_pick ----------------------------------------
+
+    def test_extent_aware_returns_best_when_corr_decisive(self):
+        from rosa_core.matched_filter import (
+            extent_aware_pick, MatchedFilterResult,
+        )
+        per = [
+            MatchedFilterResult("A", 10.0, np.zeros(5), 5, 5, 0.95),
+            MatchedFilterResult("B", 10.0, np.zeros(3), 3, 3, 0.30),
+        ]
+        res = MatchedFilterResult("A", 10.0, np.zeros(5), 5, 5, 0.95,
+                                  per_model=per)
+        self.assertEqual(extent_aware_pick(res), "A")
+
+    def test_extent_aware_prefers_more_coverage_on_corr_tie(self):
+        """Close-corr models — extent-aware should pick the one with
+        more coverage (n_covered)."""
+        from rosa_core.matched_filter import (
+            extent_aware_pick, MatchedFilterResult,
+        )
+        per = [
+            MatchedFilterResult("short", 10.0, np.zeros(3), 3, 3, 0.93),
+            MatchedFilterResult("long",  10.0, np.zeros(8), 8, 8, 0.94),
+        ]
+        res = MatchedFilterResult("short", 10.0, np.zeros(3), 3, 3, 0.93,
+                                  per_model=per)
+        # 0.93 * sqrt(3/8) = 0.57 vs 0.94 * 1.0 = 0.94 → "long" wins
+        self.assertEqual(extent_aware_pick(res), "long")
+
+    def test_extent_aware_falls_through_when_no_per_model(self):
+        from rosa_core.matched_filter import (
+            extent_aware_pick, MatchedFilterResult,
+        )
+        res = MatchedFilterResult("A", 10.0, np.zeros(5), 5, 5, 0.95)
+        self.assertEqual(extent_aware_pick(res), "A")
+
+    # ---- no_metal_rerank ------------------------------------------
+
+    def test_verifier_silent_when_all_slots_on_metal(self):
+        """Clean 8-contact comb, 8AM picked: zero in-brain dead slots →
+        verifier returns the original pick unchanged."""
+        from rosa_core.matched_filter import no_metal_rerank
+        contact_arcs = [3.5 * i for i in range(8)]
+        arcs = np.arange(0.0, 28.0, 0.3)
+        sig = _make_comb_signal(arcs, contact_arcs)
+        lib = [_make_library_model("PMT-8", 8),
+               _make_library_model("PMT-10", 10)]
+        res = self._build_result(arcs, sig, lib)
+        self.assertEqual(res.best_model_id, "PMT-8")
+        self.assertEqual(no_metal_rerank(res, arcs, sig), "PMT-8")
+
+    def test_verifier_downgrades_when_interior_slot_is_dead(self):
+        """A 10-contact template fitted onto an 8-contact signal: the
+        2 deepest (interior) slots fall on no-metal → verifier should
+        swap to a candidate with fewer in-brain dead slots."""
+        from rosa_core.matched_filter import no_metal_rerank, MatchedFilterResult
+        arcs = np.arange(0.0, 35.0, 0.3)
+        # 8 real contacts at the proximal end; arc 28-35 is empty
+        sig = _make_comb_signal(arcs, [3.5 * i + 3.5 for i in range(8)])
+        # Fabricate per_model where 10-slot template has 2 dead interior
+        # slots (at tip-end, arc 31.5 and 35.0) and 8-slot template is
+        # clean.
+        per = [
+            MatchedFilterResult(
+                "PMT-10", 35.0,
+                slot_arcs=np.array([35.0, 31.5, 28.0, 24.5, 21.0,
+                                    17.5, 14.0, 10.5, 7.0, 3.5]),
+                n_slots=10, n_covered=8, corr=0.50,
+            ),
+            MatchedFilterResult(
+                "PMT-8", 28.0,
+                slot_arcs=np.array([28.0, 24.5, 21.0, 17.5, 14.0,
+                                    10.5, 7.0, 3.5]),
+                n_slots=8, n_covered=8, corr=0.55,
+            ),
+        ]
+        res = MatchedFilterResult(
+            "PMT-10", 35.0,
+            slot_arcs=per[0].slot_arcs,
+            n_slots=10, n_covered=8, corr=0.50,
+            per_model=per,
+        )
+        self.assertEqual(no_metal_rerank(res, arcs, sig, anchor_arc=0.0),
+                         "PMT-8")
+
+    def test_verifier_does_not_count_boundary_slot_as_dead(self):
+        """Proximal/distal extreme slots are template-alignment slack
+        (PMT-16A often places its tip slot 1-2 mm past the actual tip
+        in vacuum). One dead boundary slot must NOT trigger downgrade."""
+        from rosa_core.matched_filter import no_metal_rerank, MatchedFilterResult
+        arcs = np.arange(0.0, 30.0, 0.3)
+        # 8 contacts; arc 28+ is empty (template overshoots)
+        sig = _make_comb_signal(arcs, [3.5 * i + 1.0 for i in range(8)])
+        # PMT-8 template aligned so its distal-most slot sits 1mm past
+        # the array. Interior slots all on metal.
+        per = [MatchedFilterResult(
+            "PMT-8", 29.5,
+            slot_arcs=np.array([29.5, 26.0, 22.5, 19.0, 15.5,
+                                12.0, 8.5, 5.0]),
+            n_slots=8, n_covered=7, corr=0.60,
+        )]
+        res = MatchedFilterResult(
+            "PMT-8", 29.5,
+            slot_arcs=per[0].slot_arcs,
+            n_slots=8, n_covered=7, corr=0.60,
+            per_model=per,
+        )
+        self.assertEqual(no_metal_rerank(res, arcs, sig, anchor_arc=0.0),
+                         "PMT-8")
+
+    def test_verifier_ignores_bolt_zone_dead_slots(self):
+        """Slots proximal of the in-brain anchor are tolerated — we
+        can't verify contacts in the bolt zone from CT, and a dead
+        bolt slot is not a placement failure."""
+        from rosa_core.matched_filter import no_metal_rerank, MatchedFilterResult
+        arcs = np.arange(0.0, 40.0, 0.3)
+        # Real contacts only past arc 15 (the in-brain region).
+        sig = _make_comb_signal(arcs, [15.0 + 3.5 * i for i in range(7)])
+        anchor = 15.0
+        # PMT-10 has 3 slots proximal of anchor — those are bolt zone,
+        # should NOT count as dead. Interior in-brain slots fit signal.
+        per = [MatchedFilterResult(
+            "PMT-10", 36.0,
+            slot_arcs=np.array([36.0, 32.5, 29.0, 25.5, 22.0, 18.5,
+                                15.0, 11.5, 8.0, 4.5]),
+            n_slots=10, n_covered=7, corr=0.55,
+        )]
+        res = MatchedFilterResult(
+            "PMT-10", 36.0,
+            slot_arcs=per[0].slot_arcs,
+            n_slots=10, n_covered=7, corr=0.55,
+            per_model=per,
+        )
+        # cur_dead in [anchor, tip] = 0 interior dead → no downgrade.
+        self.assertEqual(no_metal_rerank(res, arcs, sig, anchor_arc=anchor),
+                         "PMT-10")
+
+    def test_verifier_falls_through_on_empty_per_model(self):
+        from rosa_core.matched_filter import no_metal_rerank, MatchedFilterResult
+        arcs = np.arange(0.0, 20.0, 0.3)
+        sig = np.ones_like(arcs)
+        res = MatchedFilterResult(None, None, None, 0, 0, 0.0,
+                                  per_model=None)
+        self.assertIsNone(no_metal_rerank(res, arcs, sig))
+
+
 if __name__ == "__main__":
     unittest.main()
