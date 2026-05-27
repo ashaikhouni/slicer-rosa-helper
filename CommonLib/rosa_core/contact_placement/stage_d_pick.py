@@ -155,4 +155,56 @@ def pick_extent_aware(ctx: PlacementCtx) -> PlacementCtx:
     return replace(ctx, match=new_match)
 
 
-__all__ = ["per_model_corrs", "pick_extent_aware", "pick_matched_filter"]
+def pick_no_metal_verified(ctx: PlacementCtx) -> PlacementCtx:
+    """Downgrade-only verifier on top of the matched-filter pick.
+
+    Calls :func:`rosa_core.matched_filter.no_metal_rerank` against the
+    walker signal. Only fires when ``ctx.match`` is set and its picked
+    model has at least one interior in-brain slot landing on no-metal
+    (sig < 30% of the intracranial max). Bolt-zone slots are tolerated
+    (we cannot verify contacts there from CT). When fired, swaps to
+    the candidate from ``ctx.match.per_model`` with strictly fewer
+    in-brain dead slots; ``corr`` breaks ties.
+
+    Silent on uniform / well-aligned picks — the per-model corr is
+    unchanged, only the chosen model_id may shift.
+    """
+    if (ctx.match is None
+            or ctx.walk_arcs is None
+            or ctx.walk_signal is None
+            or ctx.match.per_model is None
+            or ctx.bolt_end_arc is None):
+        return ctx
+    from ..matched_filter import no_metal_rerank
+    preferred_id = no_metal_rerank(
+        ctx.match,
+        np.asarray(ctx.walk_arcs, dtype=float),
+        np.asarray(ctx.walk_signal, dtype=float),
+        anchor_arc=float(ctx.bolt_end_arc),
+    )
+    if preferred_id is None or preferred_id == ctx.match.best_model_id:
+        return ctx
+    preferred = next(
+        (r for r in ctx.match.per_model if r.best_model_id == preferred_id),
+        None,
+    )
+    if preferred is None:
+        return ctx
+    new_match = MatchedFilterResult(
+        best_model_id=preferred.best_model_id,
+        tip_arc=preferred.tip_arc,
+        slot_arcs=preferred.slot_arcs,
+        n_slots=preferred.n_slots,
+        n_covered=preferred.n_covered,
+        corr=preferred.corr,
+        per_model=ctx.match.per_model,
+    )
+    return replace(ctx, match=new_match)
+
+
+__all__ = [
+    "per_model_corrs",
+    "pick_extent_aware",
+    "pick_matched_filter",
+    "pick_no_metal_verified",
+]

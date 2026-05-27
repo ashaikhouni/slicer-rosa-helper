@@ -24,6 +24,7 @@ from rosa_core.contact_placement import (
     aggregate_disk,
     anchor_bolt_less,
     pick_matched_filter,
+    pick_no_metal_verified,
     place_at_match,
     place_seed,
     refine_log_snap,
@@ -35,6 +36,7 @@ from rosa_core.contact_placement import (
     score_simple,
     stage_anchor,
 )
+from rosa_core.matched_filter import MatchedFilterResult
 
 
 # ---------------------------------------------------------------------
@@ -224,6 +226,92 @@ class AggregateDiskTests(unittest.TestCase):
         samples = np.array([1.0, 100.0])
         mask = np.array([True, False])  # exclude the spike
         self.assertEqual(aggregate_disk(samples, mask, "max"), 1.0)
+
+
+# ---------------------------------------------------------------------
+# Stage D — pick_no_metal_verified focused unit tests
+# ---------------------------------------------------------------------
+
+
+def _ctx_with_match(*, arcs, signal, anchor, best_id, per_model):
+    """Helper: minimal PlacementCtx with a hand-built MatchedFilterResult.
+
+    The verifier reads walk_arcs/walk_signal/bolt_end_arc and
+    match.per_model — everything else can be defaulted."""
+    best = next(r for r in per_model if r.best_model_id == best_id)
+    return PlacementCtx(
+        seed_start=np.zeros(3), seed_end=np.array([10., 0, 0]),
+        features={}, library_models=[],
+        walk_arcs=np.asarray(arcs, dtype=float),
+        walk_signal=np.asarray(signal, dtype=float),
+        bolt_end_arc=float(anchor),
+        match=MatchedFilterResult(
+            best_model_id=best.best_model_id,
+            tip_arc=best.tip_arc,
+            slot_arcs=best.slot_arcs,
+            n_slots=best.n_slots,
+            n_covered=best.n_covered,
+            corr=best.corr,
+            per_model=per_model,
+        ),
+    )
+
+
+class PickNoMetalVerifiedTests(unittest.TestCase):
+    """Verifier on top of ``pick_matched_filter``."""
+
+    def test_silent_when_all_interior_slots_on_metal(self):
+        """Clean 8-contact comb, 8-slot template picked — no in-brain
+        dead interior slot ⇒ ctx unchanged."""
+        arcs = np.arange(0., 28., 0.3)
+        contact_arcs = np.arange(0., 28., 3.5)
+        sig = np.zeros_like(arcs)
+        for c in contact_arcs:
+            sig += 1500. * np.exp(-((arcs - c) ** 2) / (2 * 0.7 ** 2))
+        per = [MatchedFilterResult(
+            "PMT-8", 24.5, np.asarray(contact_arcs[:8][::-1]),
+            8, 8, 0.95,
+        )]
+        ctx = _ctx_with_match(arcs=arcs, signal=sig, anchor=0.0,
+                              best_id="PMT-8", per_model=per)
+        out = pick_no_metal_verified(ctx)
+        self.assertEqual(out.match.best_model_id, "PMT-8")
+        self.assertIs(out.match, ctx.match)  # no swap → same object
+
+    def test_downgrade_when_template_overshoots(self):
+        """8 real contacts, 10-slot template has 2 interior in-brain
+        slots in vacuum ⇒ verifier swaps to PMT-8."""
+        arcs = np.arange(0., 38., 0.3)
+        contact_arcs = np.arange(0., 28., 3.5)  # 8 contacts
+        sig = np.zeros_like(arcs)
+        for c in contact_arcs:
+            sig += 1500. * np.exp(-((arcs - c) ** 2) / (2 * 0.7 ** 2))
+        per = [
+            MatchedFilterResult(
+                "PMT-10", 35.0,
+                np.array([35., 31.5, 28., 24.5, 21., 17.5, 14., 10.5, 7., 3.5]),
+                10, 8, 0.50,
+            ),
+            MatchedFilterResult(
+                "PMT-8", 28.0,
+                np.array([28., 24.5, 21., 17.5, 14., 10.5, 7., 3.5]),
+                8, 8, 0.55,
+            ),
+        ]
+        ctx = _ctx_with_match(arcs=arcs, signal=sig, anchor=0.0,
+                              best_id="PMT-10", per_model=per)
+        out = pick_no_metal_verified(ctx)
+        self.assertEqual(out.match.best_model_id, "PMT-8")
+
+    def test_noop_when_match_missing(self):
+        ctx = PlacementCtx(
+            seed_start=np.zeros(3), seed_end=np.array([10., 0, 0]),
+            features={}, library_models=[],
+            walk_arcs=np.array([0., 1., 2.]),
+            walk_signal=np.array([0., 1., 0.]),
+            bolt_end_arc=0.0,
+        )
+        self.assertIs(pick_no_metal_verified(ctx), ctx)
 
 
 # ---------------------------------------------------------------------
