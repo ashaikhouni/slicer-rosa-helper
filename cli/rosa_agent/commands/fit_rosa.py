@@ -365,11 +365,19 @@ def main(argv: list[str] | None = None) -> int:
             branch = "forced"
             picker_diag["matched_filter_corr"] = None
         else:
+            # Symmetric ±~2 mm tip search around snap's most-distal kept
+            # peak. snap's tip is the deepest contact CENTER; the matcher's
+            # profile_end_arc semantic is "physical centerline tip" (≈
+            # deepest contact center + offs_min). Letting tip slide both
+            # ways absorbs that offset plus the visibility variance (the
+            # rounded electrode tip past the deepest contact may or may
+            # not show up in CT depending on contact-artifact intensity).
             mf_res = matched_filter_pick(
                 mf_arcs, mf_sig, candidate_models,
                 bolt_end_arc=mf_anchor,
                 profile_end_arc=mf_length,
-                max_extend_tip_mm=0.5,
+                max_extend_tip_mm=2.0,
+                max_tip_short_mm=2.5,
             )
             pred_ea = extent_aware_pick(mf_res)
             # Family routing: cluster (CM) trusts extent-aware; AM/MM
