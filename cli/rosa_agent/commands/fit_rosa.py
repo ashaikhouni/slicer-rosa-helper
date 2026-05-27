@@ -60,11 +60,19 @@ def _stderr(msg: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="rosa-agent fit-rosa",
-        description="Fit electrode models per planned trajectory in a ROSA folder.",
+        description=(
+            "Fit electrode models per planned trajectory (snap → matched_filter "
+            "+ no_metal_rerank). Three input modes:\n"
+            "  ROS:    rosa-agent fit-rosa <rosa_folder> ...\n"
+            "  Seeds:  rosa-agent fit-rosa --seeds traj.tsv --postop-ct-path ct.nii.gz ...\n"
+            "  Auto:   rosa-agent fit-rosa --auto --postop-ct-path ct.nii.gz ..."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "rosa_folder",
-        help="ROSA case folder (contains .ros + DICOM/Analyze tree)",
+        "rosa_folder", nargs="?", default=None,
+        help="ROSA case folder (contains .ros + DICOM/Analyze tree). "
+             "Optional when --seeds or --auto is used.",
     )
     parser.add_argument(
         "--output", "-o", required=True,
@@ -72,9 +80,26 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--postop-ct", default=None,
-        help="ROSA display volume name for the postop CT (defaults to the "
-             "first display whose name contains 'post' or 'ct'; falls back "
-             "to the first display when neither matches)",
+        help="ROSA display volume name for the postop CT (ROS mode only; "
+             "defaults to the first display whose name contains 'post' or "
+             "'ct'; falls back to the first display when neither matches)",
+    )
+    parser.add_argument(
+        "--postop-ct-path", default=None,
+        help="raw NIfTI path for the postop CT (used with --seeds or "
+             "--auto; mutually exclusive with rosa_folder positional)",
+    )
+    parser.add_argument(
+        "--seeds", default=None,
+        help="trajectory seeds TSV (start_x/y/z, end_x/y/z, optional name + "
+             "electrode_model columns — same grammar as 'rosa-agent place "
+             "--seeds'). Requires --postop-ct-path.",
+    )
+    parser.add_argument(
+        "--auto", action="store_true",
+        help="run Stage-1 detector (run_contact_pitch_v1) inline on "
+             "--postop-ct-path to produce seeds, then snap + matched_filter "
+             "+ verifier. End-to-end CT-only mode.",
     )
     parser.add_argument(
         "--reference-image", default=None,
@@ -125,10 +150,22 @@ def main(argv: list[str] | None = None) -> int:
 
     log = (lambda _m: None) if args.quiet else _stderr
 
-    rosa_dir = Path(args.rosa_folder).expanduser()
-    if not rosa_dir.is_dir():
-        _stderr(f"error: ROSA folder not found: {rosa_dir}")
+    # ---------------------------------------------------------------
+    # Input-mode resolution: exactly one of {rosa_folder, --seeds, --auto}.
+    # ---------------------------------------------------------------
+    mode_flags = sum([bool(args.rosa_folder), bool(args.seeds), bool(args.auto)])
+    if mode_flags == 0:
+        _stderr("error: must provide one of: rosa_folder, --seeds, --auto")
         return 2
+    if mode_flags > 1:
+        _stderr("error: rosa_folder / --seeds / --auto are mutually exclusive")
+        return 2
+    if (args.seeds or args.auto) and not args.postop_ct_path:
+        _stderr("error: --seeds and --auto require --postop-ct-path")
+        return 2
+    mode = ("ros" if args.rosa_folder
+            else "seeds" if args.seeds
+            else "auto")
 
     out_dir = Path(args.output).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -136,54 +173,18 @@ def main(argv: list[str] | None = None) -> int:
     t0 = time.perf_counter()
 
     # ---------------------------------------------------------------
-    # 1. Load postop CT from ROSA folder.
+    # 1 + 2. Load CT + planned trajectories per input mode.
+    # ROS:    parse .ros, load display volume, lift planned segments.
+    # Seeds:  load NIfTI directly, read seeds TSV.
+    # Auto:   load NIfTI directly, run Stage-1 detector inline.
     # ---------------------------------------------------------------
-    from rosa_core.case_loader import load_rosa_volume_as_sitk, find_ros_file
-    from rosa_core.ros_parser import parse_ros_file
-    from rosa_core.transforms import lps_to_ras_point
-
-    ros_file = find_ros_file(str(rosa_dir))
-    parsed = parse_ros_file(ros_file)
-    displays = parsed.get("displays") or []
-    if not displays:
-        _stderr(f"error: no display volumes in {ros_file}")
-        return 2
-    display_names = [d["volume"] for d in displays]
-    log(f"[fit-rosa] ROSA file: {ros_file}")
-    log(f"[fit-rosa] available displays: {display_names}")
-
-    postop_name = args.postop_ct
-    if postop_name is None:
-        for d in displays:
-            lc = d["volume"].lower()
-            if "post" in lc or lc.startswith("ct") or lc == "post":
-                postop_name = d["volume"]
-                break
-        if postop_name is None:
-            postop_name = displays[0]["volume"]
-    if postop_name not in display_names:
-        _stderr(f"error: --postop-ct {postop_name!r} not in displays {display_names}")
-        return 2
-    log(f"[fit-rosa] postop CT display: {postop_name!r}")
-
-    sitk_img, ct_meta = load_rosa_volume_as_sitk(
-        str(rosa_dir), volume_name=postop_name,
-    )
-
-    # ---------------------------------------------------------------
-    # 2. Compose planned trajectories (RAS, in the ROSA reference frame).
-    # ---------------------------------------------------------------
-    planned: list[dict[str, Any]] = []
-    for t in parsed.get("trajectories") or []:
-        try:
-            s_ras = [float(v) for v in lps_to_ras_point(list(t["start"]))]
-            e_ras = [float(v) for v in lps_to_ras_point(list(t["end"]))]
-        except (KeyError, TypeError, ValueError):
-            continue
-        planned.append({"name": str(t.get("name") or ""),
-                         "start": s_ras, "end": e_ras})
-    if not planned:
-        _stderr(f"error: no planned trajectories in {ros_file}")
+    if mode == "ros":
+        sitk_img, planned, postop_name, rosa_dir = _load_ros_input(args, log)
+    elif mode == "seeds":
+        sitk_img, planned, postop_name, rosa_dir = _load_seeds_input(args, log)
+    else:  # mode == "auto"
+        sitk_img, planned, postop_name, rosa_dir = _load_auto_input(args, log)
+    if sitk_img is None or planned is None:
         return 2
     log(f"[fit-rosa] planned trajectories: {len(planned)}")
 
@@ -203,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     cache_dir = (
         None if args.no_cache
         else Path(args.cache_dir).expanduser() if args.cache_dir
-        else rosa_dir / ".rosa_cache"
+        else (rosa_dir / ".rosa_cache") if rosa_dir is not None
+        else (out_dir / ".rosa_cache")
     )
 
     feats = _load_or_compute_features(
@@ -479,8 +481,12 @@ def main(argv: list[str] | None = None) -> int:
         "ran_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "runtime_sec": round(runtime_sec, 2),
         "inputs": {
-            "rosa_folder": str(rosa_dir),
+            "mode": mode,
+            "rosa_folder": str(rosa_dir) if rosa_dir is not None else None,
             "postop_ct_display": postop_name,
+            "postop_ct_path": (str(args.postop_ct_path)
+                               if args.postop_ct_path else None),
+            "seeds_tsv": str(args.seeds) if args.seeds else None,
             "reference_image": str(reference_image_path) if args.reference_image else None,
             "electrodes_tsv": str(args.electrodes) if args.electrodes else None,
             "mask_backend": args.mask_backend,
@@ -1074,6 +1080,150 @@ def _model_family(model_dict):
     diffs = np.diff(offs)
     cv = float(np.std(diffs) / max(np.mean(diffs), 1e-6))
     return "cluster" if cv > 0.15 else "uniform"
+
+
+# --------------------------------------------------------------------
+# Input-mode loaders. Each returns (sitk_img, planned, postop_name,
+# rosa_dir-or-None). planned[i] = {"name": str, "start": [x,y,z],
+# "end": [x,y,z]} in the RAS frame matching sitk_img. Loaders return
+# (None, None, _, _) on error after logging a message.
+# --------------------------------------------------------------------
+def _load_ros_input(args, log):
+    """ROS mode: rosa_folder positional → parse .ros, lift planned
+    segments, load chosen display volume as SimpleITK image."""
+    from rosa_core.case_loader import load_rosa_volume_as_sitk, find_ros_file
+    from rosa_core.ros_parser import parse_ros_file
+    from rosa_core.transforms import lps_to_ras_point
+
+    rosa_dir = Path(args.rosa_folder).expanduser()
+    if not rosa_dir.is_dir():
+        _stderr(f"error: ROSA folder not found: {rosa_dir}")
+        return None, None, None, None
+    ros_file = find_ros_file(str(rosa_dir))
+    parsed = parse_ros_file(ros_file)
+    displays = parsed.get("displays") or []
+    if not displays:
+        _stderr(f"error: no display volumes in {ros_file}")
+        return None, None, None, None
+    display_names = [d["volume"] for d in displays]
+    log(f"[fit-rosa] ROSA file: {ros_file}")
+    log(f"[fit-rosa] available displays: {display_names}")
+
+    postop_name = args.postop_ct
+    if postop_name is None:
+        for d in displays:
+            lc = d["volume"].lower()
+            if "post" in lc or lc.startswith("ct") or lc == "post":
+                postop_name = d["volume"]; break
+        if postop_name is None:
+            postop_name = displays[0]["volume"]
+    if postop_name not in display_names:
+        _stderr(f"error: --postop-ct {postop_name!r} not in displays "
+                f"{display_names}")
+        return None, None, None, None
+    log(f"[fit-rosa] postop CT display: {postop_name!r}")
+
+    sitk_img, _ = load_rosa_volume_as_sitk(
+        str(rosa_dir), volume_name=postop_name,
+    )
+
+    planned: list[dict[str, Any]] = []
+    for t in parsed.get("trajectories") or []:
+        try:
+            s_ras = [float(v) for v in lps_to_ras_point(list(t["start"]))]
+            e_ras = [float(v) for v in lps_to_ras_point(list(t["end"]))]
+        except (KeyError, TypeError, ValueError):
+            continue
+        planned.append({"name": str(t.get("name") or ""),
+                         "start": s_ras, "end": e_ras})
+    if not planned:
+        _stderr(f"error: no planned trajectories in {ros_file}")
+        return None, None, None, None
+    return sitk_img, planned, postop_name, rosa_dir
+
+
+def _load_postop_sitk_nifti(path_str: str):
+    """Shared helper: load a raw NIfTI for the non-ROS modes."""
+    import SimpleITK as sitk
+    p = Path(path_str).expanduser()
+    if not p.is_file():
+        _stderr(f"error: --postop-ct-path not found: {p}")
+        return None, None
+    return sitk.ReadImage(str(p)), p
+
+
+def _load_seeds_input(args, log):
+    """Seeds mode: --seeds traj.tsv + --postop-ct-path ct.nii.gz."""
+    from rosa_agent.io.trajectory_io import read_seeds_tsv
+
+    sitk_img, ct_path = _load_postop_sitk_nifti(args.postop_ct_path)
+    if sitk_img is None:
+        return None, None, None, None
+    seeds_path = Path(args.seeds).expanduser()
+    if not seeds_path.is_file():
+        _stderr(f"error: --seeds not found: {seeds_path}")
+        return None, None, None, None
+    try:
+        seeds = read_seeds_tsv(seeds_path)
+    except (ValueError, OSError) as exc:
+        _stderr(f"error: failed to read --seeds {seeds_path}: {exc}")
+        return None, None, None, None
+    planned: list[dict[str, Any]] = []
+    for i, s in enumerate(seeds):
+        try:
+            start = [float(v) for v in s["start_ras"]]
+            end   = [float(v) for v in s["end_ras"]]
+        except (KeyError, TypeError, ValueError):
+            continue
+        planned.append({
+            "name": str(s.get("name") or f"S{i+1:02d}"),
+            "start": start, "end": end,
+        })
+    if not planned:
+        _stderr(f"error: --seeds {seeds_path} produced no valid trajectories")
+        return None, None, None, None
+    log(f"[fit-rosa] CT: {ct_path}  (mode: seeds, n={len(planned)})")
+    return sitk_img, planned, ct_path.stem, None
+
+
+def _load_auto_input(args, log):
+    """Auto mode: --auto + --postop-ct-path. Run Stage-1 detector
+    inline to produce seeds, then run the same downstream pipeline.
+    Mirrors the loop in notebooks/seeded_fit/_amc_auto.py."""
+    from rosa_detect.service import run_contact_pitch_v1
+    from rosa_detect.contracts import VolumeRef
+
+    sitk_img, ct_path = _load_postop_sitk_nifti(args.postop_ct_path)
+    if sitk_img is None:
+        return None, None, None, None
+    log(f"[fit-rosa] CT: {ct_path}  (mode: auto — running Stage-1 detector)")
+    ctx = {
+        "run_id": f"fit-rosa-auto-{ct_path.stem}",
+        "ct": VolumeRef(volume_id=ct_path.stem, path=str(ct_path)),
+        "logger": (lambda msg: log(f"  [stage1] {msg}")),
+    }
+    try:
+        result = run_contact_pitch_v1(ctx)
+    except Exception as exc:  # noqa: BLE001
+        _stderr(f"error: Stage-1 detector failed: {type(exc).__name__}: {exc}")
+        return None, None, None, None
+    trajs = result.get("trajectories") or []
+    planned: list[dict[str, Any]] = []
+    for i, t in enumerate(trajs):
+        try:
+            start = [float(v) for v in t["start_ras"]]
+            end   = [float(v) for v in t["end_ras"]]
+        except (KeyError, TypeError, ValueError):
+            continue
+        planned.append({
+            "name": str(t.get("name") or f"D{i+1:02d}"),
+            "start": start, "end": end,
+        })
+    if not planned:
+        _stderr("error: Stage-1 detector emitted no trajectories")
+        return None, None, None, None
+    log(f"[fit-rosa] Stage-1 emitted {len(planned)} trajectories")
+    return sitk_img, planned, ct_path.stem, None
 
 
 if __name__ == "__main__":
