@@ -263,6 +263,26 @@ def _centerline_profile(signal_f32, ras_to_ijk, origin, axis, t_arr):
     return np.where(np.isfinite(vals), vals, 0.0)
 
 
+def _tube_max_profile(signal_f32, ras_to_ijk, origin, axis, t_arr,
+                      disk_u, disk_v, perp1, perp2):
+    """LoG-neg sampled as the MAX over a perpendicular disk at each arc (vs the
+    single-ray :func:`_centerline_profile`).
+
+    Used only as the seed-offset rescue in :func:`snap_via_signal_walk`: it sees
+    a contact even when the seed axis misses it laterally, at the cost of the
+    cross-shank specificity the centerline profile gives — which is why it is a
+    fallback that bootstraps the axis re-centering rather than the primary
+    detector."""
+    centers = origin[None, :] + t_arr[:, None] * axis[None, :]
+    out = np.empty(len(t_arr), dtype=float)
+    for j, c in enumerate(centers):
+        pts = (c[None, :] + disk_u[:, None] * perp1[None, :]
+               + disk_v[:, None] * perp2[None, :])
+        vals = sample_trilinear_batch(signal_f32, ras_to_ijk, pts)
+        out[j] = float(np.nanmax(vals)) if np.isfinite(vals).any() else 0.0
+    return out
+
+
 def snap_via_signal_walk(
     planned_start, planned_end, *,
     signal_vol: np.ndarray,
@@ -333,7 +353,24 @@ def snap_via_signal_walk(
         profile = _centerline_profile(signal_f32, ras_to_ijk, origin, axis, t_arr)
         peaks, _ = find_peaks(profile, height=threshold, distance=dist)
         if len(peaks) < min_n_peaks:
-            return None
+            # Seed-offset rescue. The bare centerline (perp=0) only sees the
+            # contacts when the seed axis already runs through them; if the
+            # planned/seed axis is laterally offset from the real electrode (a
+            # plan-vs-implant / brain-shift mismatch — common on raw surgical
+            # plans), the centerline samples mostly off-metal and finds too few
+            # peaks. Re-detect on a tube-MAX profile (brightest LoG-neg in the
+            # perp disk at each arc) so off-axis contacts still register; the
+            # weighted-centroid localization + axis refit below then pull the
+            # axis onto the real electrode, and the next pass reverts to the
+            # centerline (now on-target) for cross-shank specificity. This is a
+            # pure fallback: when the centerline already finds the contacts
+            # (on-axis seeds) it never runs, so on-axis behaviour is unchanged.
+            profile = _tube_max_profile(
+                signal_f32, ras_to_ijk, origin, axis, t_arr,
+                disk_u, disk_v, perp1, perp2)
+            peaks, _ = find_peaks(profile, height=threshold, distance=dist)
+            if len(peaks) < min_n_peaks:
+                return None
         # Contact-grade tail trim. The bare metal ``threshold`` admits
         # weak on-axis bone (skull base past the array tip, LoG-neg
         # ~300-800) that is not contact metal (contacts saturate, ~1500

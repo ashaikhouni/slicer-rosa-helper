@@ -142,5 +142,45 @@ class TestArbitrate(unittest.TestCase):
                          "contiguous tip must be protected from peeling")
 
 
+@unittest.skipUnless(HAVE_DEPS, "numpy / rosa_core unavailable")
+class TestSeedOffsetRescue(unittest.TestCase):
+    """The tube-max fallback in ``snap_via_signal_walk`` rescues a seed that
+    is laterally offset from the real electrode (plan-vs-implant mismatch)."""
+
+    def test_offaxis_seed_is_rescued_and_recentered(self):
+        # Electrode along +z at x=40, y=40 (pitch 3.5, 10 contacts).
+        C = np.array([[40.0, 40.0, 12.0 + k * 3.5] for k in range(10)])
+        vol = _build_volume(C)               # contact_sigma 0.7
+        ras_to_ijk = np.eye(4, dtype=float)
+        # Seed offset +2.5 mm in x: the bare centerline samples ~2.5 mm off
+        # the blobs (value << threshold), so without the fallback it finds
+        # < 4 peaks and returns None. The tube-max fallback finds the
+        # off-axis contacts; localization then re-centers onto the electrode.
+        off = np.array([2.5, 0.0, 0.0])
+        start = C[0] + off - 1.5 * (C[1] - C[0])
+        end = C[-1] + off + 1.5 * (C[-1] - C[-2])
+        chain = snap_via_signal_walk(
+            start, end, signal_vol=vol, threshold=80.0, ras_to_ijk=ras_to_ijk,
+        )
+        self.assertIsNotNone(chain, "off-axis seed should be rescued by the tube fallback")
+        self.assertGreaterEqual(len(chain["kept_pts"]), 8)
+        # Re-centered onto the real electrode (x ~ 40, not the seed's 42.5).
+        mean_x = float(np.asarray(chain["kept_pts"])[:, 0].mean())
+        self.assertLess(abs(mean_x - 40.0), 0.8,
+                        "rescued chain must re-center onto the real electrode axis")
+
+    def test_onaxis_seed_does_not_trigger_fallback(self):
+        """An on-axis seed snaps via the centerline exactly as before — the
+        fallback is a no-op here (guards the zero-regression property)."""
+        C = np.array([[40.0, 40.0, 12.0 + k * 3.5] for k in range(10)])
+        vol = _build_volume(C)
+        chain = snap_via_signal_walk(
+            C[0] - 1.5 * (C[1] - C[0]), C[-1] + 1.5 * (C[-1] - C[-2]),
+            signal_vol=vol, threshold=80.0, ras_to_ijk=np.eye(4, dtype=float),
+        )
+        self.assertIsNotNone(chain)
+        self.assertGreaterEqual(len(chain["kept_pts"]), 9)
+
+
 if __name__ == "__main__":
     unittest.main()
