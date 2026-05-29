@@ -1130,7 +1130,8 @@ def _sample_log_neg_tube(log_neg, ras_to_ijk, entry_ras, axis_unit, length_mm):
         c = entry_ras + t * axis_unit
         pts = c[None] + du[:, None] * perp1[None] + dv[:, None] * perp2[None]
         v = sample_trilinear_batch(log_neg_f32, ras_to_ijk, pts)
-        sig[i] = float(np.nanmax(v)) if v.size else 0.0
+        finite = v[np.isfinite(v)] if v.size else v
+        sig[i] = float(np.max(finite)) if finite.size else 0.0
     return arcs, sig
 
 

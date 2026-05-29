@@ -222,6 +222,7 @@ def matched_filter_pick(
     signal = np.asarray(signal, dtype=float)
     if arcs.shape != signal.shape:
         raise ValueError(f"arcs/signal shape mismatch: {arcs.shape} vs {signal.shape}")
+    signal = np.nan_to_num(signal, nan=0.0, posinf=0.0, neginf=0.0)
     if signal.size == 0 or not library_models:
         return _EMPTY
     cutoff = float(bolt_end_arc) + float(first_contact_min_mm)
@@ -282,6 +283,7 @@ def matched_filter_pick(
     # inner loop. The per-model loop then reads ``model.offsets_np`` /
     # ``model.offs_min`` / ``model.n_slots`` as attributes.
     normalized = normalize_library(library_models)
+    min_library_slots = min((m.n_slots for m in normalized), default=0)
     best = {"corr": -np.inf, "n_covered": -1, "n_slots": float("inf")}
     per_model_best: dict[str, dict] = {}
     for model in normalized:
@@ -309,13 +311,10 @@ def matched_filter_pick(
             # the trajectory unexplained are rejected here even if
             # they correlate well over the bolt-zone signal.
             #
-            # Metal-extent gate: the proximal-most slot must not fall
-            # before ``metal_start_arc`` — placing contacts in air past
-            # the back of the bolt is physically impossible. This is
-            # what stops the matcher from picking a too-long electrode
-            # (e.g. DIXI-18CM on a short shank) just because its deepest
-            # slot reaches the tip — its proximal slots would have to
-            # sit in air.
+            # Metal-extent gate: the proximal-most scored contact-zone
+            # slot must not fall before ``metal_start_arc``. Slots in
+            # the bolt/out-of-mask zone are handled by ``max_bolt_frac``
+            # and should not block short in-mask PMT axes.
             #
             # Skip both gates when the caller has supplied
             # ``max_tip_override`` — that's an explicit "clamp deepest
@@ -326,6 +325,16 @@ def matched_filter_pick(
                 if tip_short > float(max_tip_short_mm):
                     continue
                 if float(slot_arcs.min()) < metal_start_arc:
+                    # A short in-mask axis can legitimately leave
+                    # proximal contacts outside the sampled metal extent,
+                    # but a longer model must not win by hiding extra
+                    # slots there when the visible support already covers
+                    # more than the shortest library model.
+                    if n_covered > min_library_slots:
+                        continue
+                    if float(slot_arcs[in_contact].min()) < metal_start_arc:
+                        continue
+                elif float(slot_arcs[in_contact].min()) < metal_start_arc:
                     continue
             slots_cz = slot_arcs[in_contact]
             d = arcs_in[:, None] - slots_cz[None, :]
