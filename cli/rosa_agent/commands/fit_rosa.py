@@ -348,10 +348,23 @@ def main(argv: list[str] | None = None) -> int:
         mf_arcs, mf_sig = _sample_log_neg_tube(
             log_neg, ras_to_ijk_mat, entry_ras, axis_unit, mf_length,
         )
-        mf_anchor = _intra_mask_anchor(
+        # Matched-filter proximal anchor = bolt→contact transition arc. The CT
+        # brain mask under-segments at the skull base, so its intracranial
+        # entry can sit DEEPER than the most-superficial real contacts; those
+        # contacts then fall in the matcher's unscored bolt zone and the
+        # coverage tie-break picks a model one contact too short (the proximal
+        # AM under-count). The bone inner-edge landmark is metal/bone-derived
+        # and mask-independent, so it catches the transition where the mask
+        # fails — take whichever is more proximal. Validated on T1-T25
+        # (snap-seeded, DIXI): in-brain recall 97.0→97.4%, in-brain precision
+        # held 98.1%, CM unchanged 59/60.
+        mask_anchor = _intra_mask_anchor(
             intracranial_mask_arr, ras_to_ijk_mat,
             entry_ras, axis_unit, mf_length,
         )
+        bone_anchor = landmarks.bone_arc_mm
+        mf_anchor = (float(min(mask_anchor, bone_anchor))
+                     if bone_anchor is not None else float(mask_anchor))
 
         # Forced model vs auto picker.
         forced = (forced_models or {}).get(name)
@@ -428,6 +441,7 @@ def main(argv: list[str] | None = None) -> int:
             "entry_ras": [float(v) for v in entry_ras],
             "tip_ras":   [float(v) for v in tip_ras],
             "axis":      [float(v) for v in axis_unit],
+            "mf_anchor_mm": float(mf_anchor),
             "votes":     picker_diag.get("votes") or {},
             "contacts_postop_ct_ras": contacts_ras,
             "snap_peaks_ras": [
@@ -984,15 +998,49 @@ def _render_figures(out_dir: Path, per_trajectory: list[dict[str, Any]],
                     ax.scatter(a, p, s=26, c="lime", marker="o",
                                edgecolors="black", linewidths=0.5,
                                label=f"contacts (n={len(contacts)})")
-                ax.scatter([0.0], [0.0], s=70, marker="s", facecolors="none",
-                           edgecolors="gold", linewidths=1.8, label="entry")
-                ax.scatter([L], [0.0], s=70, marker="s", facecolors="none",
-                           edgecolors="deepskyblue", linewidths=1.8,
-                           label="tip")
+                    # First + last contact get an explicit halo so the
+                    # contact-array start/end is easy to compare against
+                    # snap/seed endpoints.
+                    ax.scatter([a[0]], [p[0]], s=140, marker="o",
+                               facecolors="none", edgecolors="lime",
+                               linewidths=1.6,
+                               label="1st contact" if ax is axes[0] else None)
+                    ax.scatter([a[-1]], [p[-1]], s=140, marker="o",
+                               facecolors="none", edgecolors="seagreen",
+                               linewidths=1.6,
+                               label="last contact" if ax is axes[0] else None)
+                ax.scatter([0.0], [0.0], s=80, marker="s", facecolors="none",
+                           edgecolors="gold", linewidths=2.0, label="snap entry")
+                ax.scatter([L], [0.0], s=80, marker="s", facecolors="none",
+                           edgecolors="deepskyblue", linewidths=2.0,
+                           label="snap tip")
+                # Planned (seed) endpoints projected onto the snap axis.
+                # Useful when snap drifted laterally / shortened — the
+                # planned start/end show where the user/seed expected the
+                # array to live.
+                pl = planned_by_name.get(name)
+                if pl is not None and status != "snap_failed":
+                    pln_s = np.asarray(pl["start"], dtype=float)
+                    pln_e = np.asarray(pl["end"],   dtype=float)
+                    a_ps, p_ps = _proj(pln_s[None])[0][0], _proj(pln_s[None])[1][0]
+                    a_pe, p_pe = _proj(pln_e[None])[0][0], _proj(pln_e[None])[1][0]
+                    ax.scatter([a_ps], [p_ps], s=90, marker="D",
+                               c="gold", edgecolors="black", linewidths=0.6,
+                               label="planned start" if ax is axes[0] else None)
+                    ax.scatter([a_pe], [p_pe], s=90, marker="D",
+                               c="deepskyblue", edgecolors="black",
+                               linewidths=0.6,
+                               label="planned end" if ax is axes[0] else None)
+                # mf_anchor (matched_filter proximal floor reference).
+                mf = row.get("mf_anchor_mm")
+                if mf is not None:
+                    ax.axvline(float(mf), color="cyan", ls="--", lw=1.0,
+                               alpha=0.8,
+                               label="mf_anchor" if ax is axes[0] else None)
                 ax.set_ylabel(f"{plabel} (mm)")
                 ax.set_xlim(arcs[0], arcs[-1])
             axes[1].set_xlabel("along axis (mm)")
-            axes[0].legend(loc="upper right", fontsize=7, ncol=4)
+            axes[0].legend(loc="upper right", fontsize=6, ncol=5)
             title = (f"{name}  [{status}]"
                      f"  {row.get('predicted_model') or ''}"
                      f"  {row.get('branch') or ''}".rstrip())
