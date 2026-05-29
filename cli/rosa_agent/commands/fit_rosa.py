@@ -417,30 +417,29 @@ def main(argv: list[str] | None = None) -> int:
             picker_diag["matched_filter_best"] = mf_res.best_model_id
             picker_diag["extent_aware_pick"] = pred_ea
 
-            # AM covering-floor. The matched filter scores by correlation, so
-            # when the proximal contacts are dim (merged toward the bolt, as on
-            # o-arm intraoperative CT) it can pick an AM model one or more sizes
-            # too SHORT — orphaning a clearly-resolved proximal contact. A model
-            # cannot have fewer contacts than the shank visibly resolves: count
-            # the resolved peaks (snap peaks distal of the bolt anchor that show
-            # real local modulation, i.e. a bump with prominence >= PROM, not
-            # flat bolt) and, if the pick under-covers that count, bump UP to the
-            # smallest AM model that covers it. Over-extension into the bolt is
-            # acceptable (the extra contact is inferred, unresolvable); orphaning
-            # a resolved contact is not.
+            # Covering-floor. The matched filter scores by correlation, so when
+            # the proximal contacts are dim (merged toward the bolt, as on o-arm
+            # intraoperative CT) it can pick a model one or more sizes too SHORT
+            # — orphaning a clearly-resolved proximal contact. A model cannot
+            # have fewer contacts than the shank visibly resolves: count the
+            # resolved peaks (contiguous array run distal of the bolt anchor with
+            # real local modulation — see _count_resolved_proximal) and, if the
+            # pick under-covers that count, bump UP to the smallest same-family
+            # model that covers it. Over-extension into the bolt is acceptable
+            # (the extra contact is inferred, unresolvable); orphaning a resolved
+            # contact is not.
             #
-            # DIXI-AM ONLY. The same logic conceptually applies to any
-            # uniform-pitch count ladder (e.g. PMT), but the prominence/anchor
-            # "resolved peak" definition is calibrated on DIXI and does NOT
-            # transfer cleanly to PMT: on the AMC PMT benchmark it over-counts
-            # prominent bolt-adjacent peaks and over-bumps (AMC91 regressed 3
-            # shanks, 12->14/14/10 where the matcher was correct). So the family
-            # gate is restricted to AM until a PMT-validated discriminator
-            # exists. CM/BM/MM and clusters are never resized regardless.
-            # Validated: DIXI T1-T25 89.5->89.8% model-exact (prec held 97.6%,
-            # CM 59/60), o-arm JR 10->14/15, zero regressions; AMC PMT untouched.
-            if (predicted_id is not None
-                    and models_dict[predicted_id].get("type") == "AM"):
+            # Applies to uniform-pitch count-ladder families (DIXI AM, PMT). The
+            # contiguity walk in the resolved count is what makes PMT safe: the
+            # earlier prominence-only count over-bumped AMC PMT shanks because an
+            # isolated bright lead peak sat in the gap between a too-proximal
+            # anchor and the first real contact; requiring contiguity with the
+            # tip excludes it. CM/BM (clustered) and MM (single-count) families
+            # are never resized, so the electrode family is never crossed.
+            # Validated: DIXI T1-T25 89.5->89.8% (prec 97.6%, CM 59/60), o-arm JR
+            # 10->14/15, AMC PMT no over-bump; zero regressions.
+            if predicted_id is not None and _model_family(
+                    models_dict[predicted_id]) == "uniform":
                 n_resolved = _count_resolved_proximal(
                     chain, mf_arcs, mf_sig, mf_anchor)
                 if int(models_dict[predicted_id].get("contact_count") or 0) < n_resolved:
@@ -1155,16 +1154,24 @@ def _intra_mask_anchor(intracranial_mask, ras_to_ijk, entry_ras, axis_unit,
 
 
 _AM_FLOOR_PROMINENCE = 0.15   # min (peak-valley)/peak for a "resolved" bump
+_AM_FLOOR_JUMP_PITCH = 1.3    # gap (in pitch units) that breaks array contiguity
 
 
 def _count_resolved_proximal(chain, mf_arcs, mf_sig, anchor,
-                             prom_thr: float = _AM_FLOOR_PROMINENCE):
-    """Number of snap-detected contacts that are *resolved* — a real local
-    modulation (a bump with local prominence >= ``prom_thr``) lying distal of
-    the bolt anchor. Flat bolt metal (high but unmodulated) and peaks proximal
-    of the anchor (in the bolt zone) are excluded, so this counts contacts the
-    shank visibly resolves without crediting bolt over-reach. Used by the AM
-    covering-floor as the minimum contact count the model must explain."""
+                             prom_thr: float = _AM_FLOOR_PROMINENCE,
+                             jump_pitch: float = _AM_FLOOR_JUMP_PITCH):
+    """Number of *resolved* contacts in the contiguous array — snap peaks that
+    (a) lie distal of the bolt anchor, (b) show real local modulation (a bump
+    with prominence >= ``prom_thr`` on ``mf_sig``, not flat bolt), and (c) are
+    contiguous with the deep tip (no gap > ``jump_pitch`` x pitch).
+
+    The contiguity walk (from the deepest peak proximally, stopping at the first
+    jump) is essential: the bolt anchor is sometimes a few mm proximal of the
+    first real contact, leaving a gap in which an isolated bright lead/bolt peak
+    can sit. That peak passes (a) and (b) but is separated from the array body by
+    a jump, so without (c) it would inflate the count and over-bump the model
+    (observed on AMC PMT shanks). Counting only the contiguous run from the tip
+    credits exactly the contacts the shank resolves as a coherent array."""
     import numpy as np
     from rosa_core.centerline import unit
     pts = np.asarray(chain.get("kept_pts", []), dtype=float)
@@ -1179,18 +1186,29 @@ def _count_resolved_proximal(chain, mf_arcs, mf_sig, anchor,
     arcs = np.asarray(mf_arcs, dtype=float)
     sig = np.asarray(mf_sig, dtype=float)
     half = max(1, int(round(pitch / _MF_STEP_MM)))
-    n = 0
-    for a in snap_arcs[snap_arcs >= float(anchor)]:
+
+    def _prominent(a: float) -> bool:
         i = int(np.argmin(np.abs(arcs - a)))
         lo, hi = max(0, i - half), min(len(sig), i + half + 1)
         if hi - lo < 3:
-            n += 1
-            continue
+            return True
         pk = float(sig[i])
         valley = max(float(sig[lo:i + 1].min()), float(sig[i:hi].min()))
-        if pk > 0 and (pk - valley) / pk >= prom_thr:
-            n += 1
-    return n
+        return pk > 0 and (pk - valley) / pk >= prom_thr
+
+    # Prominent peaks distal of the anchor, sorted shallow -> deep.
+    resolved = [a for a in snap_arcs if a >= float(anchor) and _prominent(a)]
+    if not resolved:
+        return 0
+    # Contiguous run anchored at the deep tip: walk proximally while the gap to
+    # the next-shallower resolved peak stays within the jump gate.
+    run = 1
+    for j in range(len(resolved) - 1, 0, -1):
+        if resolved[j] - resolved[j - 1] <= jump_pitch * pitch:
+            run += 1
+        else:
+            break
+    return run
 
 
 def _smallest_covering(current_id, n_resolved, models_dict, mf_res=None):
