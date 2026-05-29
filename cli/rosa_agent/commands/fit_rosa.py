@@ -417,6 +417,41 @@ def main(argv: list[str] | None = None) -> int:
             picker_diag["matched_filter_best"] = mf_res.best_model_id
             picker_diag["extent_aware_pick"] = pred_ea
 
+            # AM covering-floor. The matched filter scores by correlation, so
+            # when the proximal contacts are dim (merged toward the bolt, as on
+            # o-arm intraoperative CT) it can pick an AM model one or more sizes
+            # too SHORT — orphaning a clearly-resolved proximal contact. A model
+            # cannot have fewer contacts than the shank visibly resolves: count
+            # the resolved peaks (snap peaks distal of the bolt anchor that show
+            # real local modulation, i.e. a bump with prominence >= PROM, not
+            # flat bolt) and, if the pick under-covers that count, bump UP to the
+            # smallest AM model that covers it. Over-extension into the bolt is
+            # acceptable (the extra contact is inferred, unresolvable); orphaning
+            # a resolved contact is not.
+            #
+            # DIXI-AM ONLY. The same logic conceptually applies to any
+            # uniform-pitch count ladder (e.g. PMT), but the prominence/anchor
+            # "resolved peak" definition is calibrated on DIXI and does NOT
+            # transfer cleanly to PMT: on the AMC PMT benchmark it over-counts
+            # prominent bolt-adjacent peaks and over-bumps (AMC91 regressed 3
+            # shanks, 12->14/14/10 where the matcher was correct). So the family
+            # gate is restricted to AM until a PMT-validated discriminator
+            # exists. CM/BM/MM and clusters are never resized regardless.
+            # Validated: DIXI T1-T25 89.5->89.8% model-exact (prec held 97.6%,
+            # CM 59/60), o-arm JR 10->14/15, zero regressions; AMC PMT untouched.
+            if (predicted_id is not None
+                    and models_dict[predicted_id].get("type") == "AM"):
+                n_resolved = _count_resolved_proximal(
+                    chain, mf_arcs, mf_sig, mf_anchor)
+                if int(models_dict[predicted_id].get("contact_count") or 0) < n_resolved:
+                    bumped = _smallest_covering(
+                        predicted_id, n_resolved, models_dict, mf_res)
+                    if bumped != predicted_id:
+                        picker_diag["covering_floor_from"] = predicted_id
+                        picker_diag["covering_floor_n_resolved"] = int(n_resolved)
+                        predicted_id = bumped
+                        branch = "matched_filter_covering_floor"
+
         # Place contacts at the picked model's offsets from the fitted tip.
         contacts_ras: list[list[float]] = []
         if predicted_id is not None:
@@ -1117,6 +1152,74 @@ def _intra_mask_anchor(intracranial_mask, ras_to_ijk, entry_ras, axis_unit,
         inb[i] = float(v[0]) if v.size and np.isfinite(v[0]) else 0.0
     inside = np.where(inb > 0.5)[0]
     return float(ts[inside[0]]) if inside.size else 0.0
+
+
+_AM_FLOOR_PROMINENCE = 0.15   # min (peak-valley)/peak for a "resolved" bump
+
+
+def _count_resolved_proximal(chain, mf_arcs, mf_sig, anchor,
+                             prom_thr: float = _AM_FLOOR_PROMINENCE):
+    """Number of snap-detected contacts that are *resolved* — a real local
+    modulation (a bump with local prominence >= ``prom_thr``) lying distal of
+    the bolt anchor. Flat bolt metal (high but unmodulated) and peaks proximal
+    of the anchor (in the bolt zone) are excluded, so this counts contacts the
+    shank visibly resolves without crediting bolt over-reach. Used by the AM
+    covering-floor as the minimum contact count the model must explain."""
+    import numpy as np
+    from rosa_core.centerline import unit
+    pts = np.asarray(chain.get("kept_pts", []), dtype=float)
+    if len(pts) < 2:
+        return int(len(pts))
+    entry = np.asarray(chain["entry_ras"], dtype=float)
+    axis = unit(np.asarray(chain["axis"], dtype=float))
+    snap_arcs = np.sort((pts - entry) @ axis)
+    pitch = float(np.median(np.diff(snap_arcs)))
+    if not np.isfinite(pitch) or pitch <= 0:
+        return int(len(pts))
+    arcs = np.asarray(mf_arcs, dtype=float)
+    sig = np.asarray(mf_sig, dtype=float)
+    half = max(1, int(round(pitch / _MF_STEP_MM)))
+    n = 0
+    for a in snap_arcs[snap_arcs >= float(anchor)]:
+        i = int(np.argmin(np.abs(arcs - a)))
+        lo, hi = max(0, i - half), min(len(sig), i + half + 1)
+        if hi - lo < 3:
+            n += 1
+            continue
+        pk = float(sig[i])
+        valley = max(float(sig[lo:i + 1].min()), float(sig[i:hi].min()))
+        if pk > 0 and (pk - valley) / pk >= prom_thr:
+            n += 1
+    return n
+
+
+def _smallest_covering(current_id, n_resolved, models_dict, mf_res=None):
+    """Smallest model of the SAME family (same vendor prefix + ``type`` as
+    ``current_id``) whose contact_count >= ``n_resolved``. Caps at the largest
+    family model when none covers; returns ``current_id`` if no ladder exists.
+
+    When several models share the covering contact count (e.g. PMT-16A/B/C —
+    same 16 contacts, different spacing), prefer the variant the matched filter
+    scored highest (so the floor only fixes the COUNT and defers the spacing
+    choice to the matcher), falling back to the first by id."""
+    vendor = str(current_id).split("-", 1)[0]
+    ctype = models_dict[current_id].get("type")
+    ladder = sorted(
+        ((mid, int(m.get("contact_count") or 0)) for mid, m in models_dict.items()
+         if m.get("type") == ctype and str(mid).split("-", 1)[0] == vendor),
+        key=lambda kv: kv[1],
+    )
+    if not ladder:
+        return current_id
+    covering = [(mid, c) for mid, c in ladder if c >= n_resolved]
+    if not covering:
+        return ladder[-1][0]
+    target_count = covering[0][1]
+    variants = [mid for mid, c in covering if c == target_count]
+    if len(variants) == 1 or mf_res is None or not getattr(mf_res, "per_model", None):
+        return variants[0]
+    corr = {r.best_model_id: r.corr for r in mf_res.per_model if r.best_model_id}
+    return max(variants, key=lambda v: corr.get(v, float("-inf")))
 
 
 def _model_family(model_dict):
