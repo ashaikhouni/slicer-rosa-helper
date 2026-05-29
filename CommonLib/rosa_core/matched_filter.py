@@ -420,10 +420,119 @@ def matched_filter_pick(
     )
 
 
+EXTENT_AWARE_MARGIN = 0.05
+
+
+def extent_aware_pick(res: MatchedFilterResult) -> str | None:
+    """Re-rank ``res.per_model`` by ``corr * sqrt(n_covered / max_n_covered)``
+    so a short model can't win by correlating against a sub-segment of a
+    longer signal.
+
+    Returns the original ``best_model_id`` when the top candidate's corr
+    margin over the runner-up exceeds ``EXTENT_AWARE_MARGIN`` — a decisive
+    matched-filter winner is left alone.
+    """
+    pm = res.per_model
+    if not pm or len(pm) < 2:
+        return res.best_model_id
+    ranked = sorted(pm, key=lambda r: -r.corr)
+    if ranked[0].corr - ranked[1].corr > EXTENT_AWARE_MARGIN:
+        return res.best_model_id
+    max_cov = max(r.n_covered for r in ranked)
+    if max_cov == 0:
+        return res.best_model_id
+    weighted = sorted(
+        ((r.best_model_id, r.corr * float(np.sqrt(r.n_covered / max_cov)))
+         for r in ranked),
+        key=lambda x: -x[1],
+    )
+    return weighted[0][0]
+
+
+def no_metal_rerank(
+    res: MatchedFilterResult,
+    arcs: np.ndarray,
+    signal: np.ndarray,
+    anchor_arc: float = 0.0,
+    frac: float = 0.30,
+) -> str | None:
+    """Downgrade-only verifier: swap to a shorter model when the
+    picked model places interior contacts on no-metal in-brain.
+
+    A slot is "in-brain dead" when ``arc >= anchor_arc`` AND
+    ``signal[at slot] < frac * max(signal[arc >= anchor_arc])``.
+    Proximal/distal extreme slots are excluded — they are
+    template-alignment slack (the template length is rarely an exact
+    multiple of pitch + tip offset). Bolt-zone slots (``arc <
+    anchor_arc``) are also ignored: contacts there can't be verified
+    from CT, so a dead bolt slot isn't a real placement failure.
+
+    If the picked model has ≥ 1 in-brain dead slot, the candidate with
+    strictly fewer in-brain dead slots wins, ties broken by corr.
+    Returns the original ``best_model_id`` if no improvement exists
+    or if the verifier has nothing to score (empty per_model, all-
+    proximal anchor, zero in-brain signal).
+
+    History: an UPGRADE branch (try a longer model when its extra
+    in-brain slots fit the pitch grid + on-metal + corr gate) was
+    tested 2026-05-26 and reverted (net -3 on the T-subject AM
+    benchmark, 5 broken / 2 fixed). On uniform-pitch templates
+    matched_filter is often degenerate (multiple lengths score
+    identical corr), so corr-based discrimination can't keep the
+    upgrade conservative. A width-profile-based discriminator is the
+    likely path forward; left for follow-up.
+    """
+    pm = res.per_model
+    if not pm:
+        return res.best_model_id
+    intra = arcs >= anchor_arc
+    if not intra.any():
+        return res.best_model_id
+    smax = float(np.nanmax(signal[intra]))
+    if smax <= 0:
+        return res.best_model_id
+    thr = frac * smax
+
+    def in_brain_dead(r: MatchedFilterResult) -> int:
+        sa = r.slot_arcs
+        if sa is None or len(sa) == 0:
+            return 10 ** 6
+        sa_sorted = np.sort(np.asarray(sa, dtype=float))
+        if len(sa_sorted) <= 2:
+            return 0
+        n_dead = 0
+        for a in sa_sorted[1:-1]:           # exclude boundary slots
+            if a < anchor_arc:               # bolt zone — don't evaluate
+                continue
+            i = int(np.argmin(np.abs(arcs - a)))
+            if signal[i] < thr:
+                n_dead += 1
+        return n_dead
+
+    cur = next((r for r in pm if r.best_model_id == res.best_model_id),
+               None)
+    if cur is None:
+        return res.best_model_id
+    cur_dead = in_brain_dead(cur)
+    if cur_dead == 0:
+        return res.best_model_id
+
+    ranked = [(in_brain_dead(r), -float(r.corr), r.best_model_id)
+              for r in pm]
+    ranked.sort()
+    best_dead, _, best_id = ranked[0]
+    if best_dead < cur_dead:
+        return best_id
+    return res.best_model_id
+
+
 __all__ = [
+    "EXTENT_AWARE_MARGIN",
     "MatchedFilterResult",
     "NormalizedLibraryModel",
     "SIGMA_CONTACT_MM_DEFAULT",
+    "extent_aware_pick",
     "matched_filter_pick",
+    "no_metal_rerank",
     "normalize_library",
 ]

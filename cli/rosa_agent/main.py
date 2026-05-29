@@ -66,10 +66,12 @@ SUBCOMMANDS = {
     "label":         "rosa_agent.commands.label",
     "pipeline":      "rosa_agent.commands.pipeline",
     "place":         "rosa_agent.commands.place",
+    "fit-rosa":      "rosa_agent.commands.fit_rosa",
     "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
     "match-ros":     "rosa_agent.commands.match_ros",
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
+    "brain-extract": "rosa_agent.commands.brain_extract",
 }
 
 
