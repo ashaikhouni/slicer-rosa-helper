@@ -476,11 +476,22 @@ class SnapFlowAutoEngineTests(unittest.TestCase):
             self.assertIsInstance(t.score_components, dict)
             self.assertIn(t.bolt_source, {"metal", "bolt_less"})
 
-    def test_flag_off_is_default_for_auto(self):
-        # Default (no flag) keeps the staged engine — byte-identical legacy path.
+    def test_default_auto_uses_snap_flow(self):
+        # The auto engine default is now the snap-flow (consolidation). The
+        # synthetic dict has no real CT so we only pin routing here; the
+        # dataset A-B pins the accuracy.
         batch = place_seeg(None, features=self.features, bolts=self.bolts,
                            library=self.library, band_floor="low")
         self.assertEqual(batch.diagnostics["mode"], 1)
+        self.assertEqual(batch.diagnostics["auto_engine"], "snap_flow")
+
+    def test_opt_out_to_staged_engine(self):
+        # use_snap_flow=False still runs the legacy staged engine (escape hatch).
+        batch = place_seeg(None, features=self.features, bolts=self.bolts,
+                           library=self.library, band_floor="low",
+                           use_snap_flow=False)
+        self.assertEqual(batch.diagnostics["mode"], 1)
+        self.assertEqual(batch.diagnostics["auto_engine"], "staged")
 
 
 if __name__ == "__main__":
