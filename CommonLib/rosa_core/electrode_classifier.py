@@ -25,7 +25,7 @@ What remains in this module:
   walker-signature score.
 * ``signal_derived_entry_arc`` — bolt -> electrode transition detector
   used as Tier 1 of the bolt-mass walker's bolt-end cascade
-  (``contact_placement_legacy.estimate_bolt_end_from_metal_mass``).
+  (``contact_placement.bolt_end.estimate_bolt_end_from_metal_mass``).
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ def suggest_shortest_covering_model(intracranial_length_mm, models,
 #
 # ``signal_derived_entry_arc`` detects the bolt -> electrode transition
 # from a 1D HU profile sampled along a trajectory. The bolt-mass walker
-# (``contact_placement_legacy.estimate_bolt_end_from_metal_mass``) calls
+# (``contact_placement.bolt_end.estimate_bolt_end_from_metal_mass``) calls
 # this as Tier 1 of its bolt-end cascade.
 #
 # Note: the constants are PaCER-namespaced because they were factored

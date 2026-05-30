@@ -37,7 +37,7 @@ def anchor_metal(ctx: PlacementCtx) -> PlacementCtx | None:
         (no contact zone left after the bolt — common for cropped-bolt shanks
         like AMC137 LI/LPT/RI/RU).
     """
-    from ..contact_placement_legacy import estimate_bolt_end_from_metal_mass
+    from .bolt_end import estimate_bolt_end_from_metal_mass
     try:
         be = estimate_bolt_end_from_metal_mass(
             ctx.seed_start, ctx.seed_end,

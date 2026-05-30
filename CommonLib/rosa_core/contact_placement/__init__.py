@@ -2,30 +2,23 @@
 
 Public surface:
 
-* New staged pipeline (``place_seed``, ``PlacementCtx``, stage functions A-F)
-  lifted from ``slicer-rosa-helper/notebooks/v1_seeds_v2_placement_qc.ipynb``.
-* Legacy production helpers (``place_contacts_for_axis``,
-  ``place_contacts_for_trajectories``, ``estimate_bolt_end_from_metal_mass``,
-  ``sample_disk_along_polyline``, etc.) re-exported from the renamed
-  ``contact_placement_legacy`` module so existing Slicer Auto-Fit, CLI, and
-  test imports keep working without code changes.
+* Staged pipeline (``place_seed``, ``PlacementCtx``, stage functions A-F) — the
+  canonical placement path used by ``placement_modes.place_seeg``.
+* Bolt-end / metal-mass landmark estimators (``estimate_bolt_end_from_metal_mass``,
+  ``entry_arc_from_metal_mass``, ``refine_axis_via_centroid``,
+  ``sample_disk_along_polyline``, ``median_library_pitch_mm``) in
+  ``contact_placement.bolt_end`` — used by ``stage_a_anchor``.
 
-Legacy re-exports will be removed in Session 4 once Slicer Auto-Fit migrates
-to the staged pipeline via ``rosa_core.placement_modes.place_seeg``.
+(The pre-staged v2 ``contact_placement_legacy`` pipeline was retired 2026-05-30;
+its only live survivors are the bolt-end estimators above.)
 """
 from __future__ import annotations
 
-# Legacy re-exports (production Auto-Fit relies on these).
-from ..contact_placement_legacy import (
-    ContactPlacementBatch,
-    ContactPlacementConfig,
-    ContactPlacementResult,
-    assign_axis_owners,
+# Bolt-end / metal-mass landmark estimators.
+from .bolt_end import (
     entry_arc_from_metal_mass,
     estimate_bolt_end_from_metal_mass,
     median_library_pitch_mm,
-    place_contacts_for_axis,
-    place_contacts_for_trajectories,
     refine_axis_via_centroid,
     sample_disk_along_polyline,
 )
@@ -99,16 +92,10 @@ from .two_pass import run_two_pass
 from .postpass_fft import apply_subject_fft_normalization
 
 __all__ = [
-    # Legacy production API.
-    "ContactPlacementBatch",
-    "ContactPlacementConfig",
-    "ContactPlacementResult",
-    "assign_axis_owners",
+    # Bolt-end / metal-mass landmark estimation (rosa_core.contact_placement.bolt_end).
     "entry_arc_from_metal_mass",
     "estimate_bolt_end_from_metal_mass",
     "median_library_pitch_mm",
-    "place_contacts_for_axis",
-    "place_contacts_for_trajectories",
     "refine_axis_via_centroid",
     "sample_disk_along_polyline",
     # Constants.
@@ -178,16 +165,3 @@ __all__ = [
     "run_two_pass",
     "apply_subject_fft_normalization",
 ]
-
-
-# Fallback: any private legacy symbol the package doesn't explicitly export
-# is forwarded to ``contact_placement_legacy``. This keeps the existing
-# ``tests/rosa_core/test_contact_placement.py`` working without enumerating
-# every private helper. Removed in Session 4 with ``contact_placement_legacy``.
-def __getattr__(name: str):
-    from .. import contact_placement_legacy
-    if hasattr(contact_placement_legacy, name):
-        value = getattr(contact_placement_legacy, name)
-        globals()[name] = value  # cache so future lookups skip __getattr__
-        return value
-    raise AttributeError(f"module 'rosa_core.contact_placement' has no attribute {name!r}")

@@ -51,12 +51,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "fit_electrode_axis_and_tip":                         ("contact_fit", "fit_electrode_axis_and_tip"),
     "refine_fit_batch_with_exclusive_terminal_assignment": ("contact_fit", "refine_fit_batch_with_exclusive_terminal_assignment"),
     # contact_placement — numpy + (lazily) SimpleITK / rosa_detect features.
-    "ContactPlacementBatch":                              ("contact_placement", "ContactPlacementBatch"),
-    "ContactPlacementConfig":                             ("contact_placement", "ContactPlacementConfig"),
-    "ContactPlacementResult":                             ("contact_placement", "ContactPlacementResult"),
-    "assign_axis_owners":                                 ("contact_placement", "assign_axis_owners"),
-    "place_contacts_for_axis":                            ("contact_placement", "place_contacts_for_axis"),
-    "place_contacts_for_trajectories":                    ("contact_placement", "place_contacts_for_trajectories"),
     # Bolt-end estimation building blocks.
     "median_library_pitch_mm":                            ("contact_placement", "median_library_pitch_mm"),
     "refine_axis_via_centroid":                           ("contact_placement", "refine_axis_via_centroid"),
