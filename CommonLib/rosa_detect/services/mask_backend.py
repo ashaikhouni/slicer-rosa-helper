@@ -127,6 +127,19 @@ def compute_intracranial_mask(
             synthstrip_path=synthstrip_path, log=_log,
         )
         if used is None:
+            # Every backend failed. On the lenient default (``backend="auto"``)
+            # this is treated as a recoverable degenerate/non-CT input (e.g. an
+            # all-zero synthetic phantom the watershed rejects, with no
+            # SynthStrip installed): fall back to a FULL-VOLUME permissive mask
+            # so downstream candidate generation simply finds nothing and the
+            # caller still produces its normal (empty) outputs — instead of a
+            # hard crash. An EXPLICITLY requested backend that fails still raises
+            # (a real subject should surface a mis-configured mask loudly).
+            if backend == "auto":
+                _log("[mask] all backends failed on backend='auto'; using a "
+                     "full-volume permissive mask (degenerate / non-CT input)")
+                shape = sitk.GetArrayFromImage(img).shape
+                return np.ones(shape, dtype=bool), "full-volume"
             raise RuntimeError(
                 "intracranial mask: all backends failed "
                 f"(backend={backend!r}); FOV may be degenerate or non-CT."
