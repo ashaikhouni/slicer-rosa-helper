@@ -271,11 +271,7 @@ def main(argv: list[str] | None = None) -> int:
         filter_models_for_strategy,
         place_contacts_from_tip,
     )
-    from rosa_core.matched_filter import (
-        matched_filter_pick,
-        extent_aware_pick,
-        no_metal_rerank,
-    )
+    from rosa_core.model_pick import pick_electrode_model
 
     forced_models = _load_electrodes_tsv(args.electrodes) if args.electrodes else None
     if args.electrodes and forced_models is None:
@@ -378,78 +374,17 @@ def main(argv: list[str] | None = None) -> int:
             branch = "forced"
             picker_diag["matched_filter_corr"] = None
         else:
-            # Symmetric ±~2 mm tip search around snap's most-distal kept
-            # peak. snap's tip is the deepest contact CENTER; the matcher's
-            # profile_end_arc semantic is "physical centerline tip" (≈
-            # deepest contact center + offs_min). Letting tip slide both
-            # ways absorbs that offset plus the visibility variance (the
-            # rounded electrode tip past the deepest contact may or may
-            # not show up in CT depending on contact-artifact intensity).
-            mf_res = matched_filter_pick(
-                mf_arcs, mf_sig, candidate_models,
-                bolt_end_arc=mf_anchor,
-                profile_end_arc=mf_length,
-                max_extend_tip_mm=2.0,
-                max_tip_short_mm=2.5,
+            # Shared model pick (rosa_core.model_pick) — the single source of
+            # truth used by both the CLI and the Slicer-side placement, so the
+            # matcher can't diverge between them. Symmetric ±~2 mm tip search
+            # (max_extend_tip_mm / max_tip_short_mm) absorbs the snap-tip vs
+            # physical-tip offset; the call runs matched_filter -> extent-aware
+            # -> no_metal_rerank -> covering-floor.
+            predicted_id, branch, mf_res, pick_diag = pick_electrode_model(
+                mf_arcs, mf_sig, candidate_models, models_dict,
+                bolt_end_arc=mf_anchor, profile_end_arc=mf_length, chain=chain,
             )
-            pred_ea = extent_aware_pick(mf_res)
-            # Family routing: cluster (CM) trusts extent-aware; AM/MM
-            # go through the dead-slot verifier. CM templates have
-            # legitimate inter-cluster gaps where the verifier would
-            # wrongly flag a real CM model.
-            ea_model = models_dict.get(pred_ea) if pred_ea else None
-            family = _model_family(ea_model)
-            if family == "cluster":
-                predicted_id = pred_ea
-                branch = "matched_filter_cluster"
-            elif pred_ea is None:
-                predicted_id = None
-                branch = "no_pick"
-            else:
-                predicted_id = no_metal_rerank(
-                    mf_res, mf_arcs, mf_sig, anchor_arc=mf_anchor,
-                )
-                branch = ("matched_filter_verified"
-                          if predicted_id == pred_ea
-                          else "matched_filter_downgraded")
-            picker_diag["matched_filter_corr"] = (
-                float(mf_res.corr) if mf_res.best_model_id else None)
-            picker_diag["matched_filter_best"] = mf_res.best_model_id
-            picker_diag["extent_aware_pick"] = pred_ea
-
-            # Covering-floor. The matched filter scores by correlation, so when
-            # the proximal contacts are dim (merged toward the bolt, as on o-arm
-            # intraoperative CT) it can pick a model one or more sizes too SHORT
-            # — orphaning a clearly-resolved proximal contact. A model cannot
-            # have fewer contacts than the shank visibly resolves: count the
-            # resolved peaks (contiguous array run distal of the bolt anchor with
-            # real local modulation — see _count_resolved_proximal) and, if the
-            # pick under-covers that count, bump UP to the smallest same-family
-            # model that covers it. Over-extension into the bolt is acceptable
-            # (the extra contact is inferred, unresolvable); orphaning a resolved
-            # contact is not.
-            #
-            # Applies to uniform-pitch count-ladder families (DIXI AM, PMT). The
-            # contiguity walk in the resolved count is what makes PMT safe: the
-            # earlier prominence-only count over-bumped AMC PMT shanks because an
-            # isolated bright lead peak sat in the gap between a too-proximal
-            # anchor and the first real contact; requiring contiguity with the
-            # tip excludes it. CM/BM (clustered) and MM (single-count) families
-            # are never resized, so the electrode family is never crossed.
-            # Validated: DIXI T1-T25 89.5->89.8% (prec 97.6%, CM 59/60), o-arm JR
-            # 10->14/15, AMC PMT no over-bump; zero regressions.
-            if predicted_id is not None and _model_family(
-                    models_dict[predicted_id]) == "uniform":
-                n_resolved = _count_resolved_proximal(
-                    chain, mf_arcs, mf_sig, mf_anchor)
-                if int(models_dict[predicted_id].get("contact_count") or 0) < n_resolved:
-                    bumped = _smallest_covering(
-                        predicted_id, n_resolved, models_dict, mf_res)
-                    if bumped != predicted_id:
-                        picker_diag["covering_floor_from"] = predicted_id
-                        picker_diag["covering_floor_n_resolved"] = int(n_resolved)
-                        predicted_id = bumped
-                        branch = "matched_filter_covering_floor"
+            picker_diag.update(pick_diag)
 
         # Place contacts at the picked model's offsets from the fitted tip.
         contacts_ras: list[list[float]] = []
@@ -1152,112 +1087,6 @@ def _intra_mask_anchor(intracranial_mask, ras_to_ijk, entry_ras, axis_unit,
         inb[i] = float(v[0]) if v.size and np.isfinite(v[0]) else 0.0
     inside = np.where(inb > 0.5)[0]
     return float(ts[inside[0]]) if inside.size else 0.0
-
-
-_AM_FLOOR_PROMINENCE = 0.15   # min (peak-valley)/peak for a "resolved" bump
-_AM_FLOOR_JUMP_PITCH = 1.3    # gap (in pitch units) that breaks array contiguity
-
-
-def _count_resolved_proximal(chain, mf_arcs, mf_sig, anchor,
-                             prom_thr: float = _AM_FLOOR_PROMINENCE,
-                             jump_pitch: float = _AM_FLOOR_JUMP_PITCH):
-    """Number of *resolved* contacts in the contiguous array — snap peaks that
-    (a) lie distal of the bolt anchor, (b) show real local modulation (a bump
-    with prominence >= ``prom_thr`` on ``mf_sig``, not flat bolt), and (c) are
-    contiguous with the deep tip (no gap > ``jump_pitch`` x pitch).
-
-    The contiguity walk (from the deepest peak proximally, stopping at the first
-    jump) is essential: the bolt anchor is sometimes a few mm proximal of the
-    first real contact, leaving a gap in which an isolated bright lead/bolt peak
-    can sit. That peak passes (a) and (b) but is separated from the array body by
-    a jump, so without (c) it would inflate the count and over-bump the model
-    (observed on AMC PMT shanks). Counting only the contiguous run from the tip
-    credits exactly the contacts the shank resolves as a coherent array."""
-    import numpy as np
-    from rosa_core.centerline import unit
-    pts = np.asarray(chain.get("kept_pts", []), dtype=float)
-    if len(pts) < 2:
-        return int(len(pts))
-    entry = np.asarray(chain["entry_ras"], dtype=float)
-    axis = unit(np.asarray(chain["axis"], dtype=float))
-    snap_arcs = np.sort((pts - entry) @ axis)
-    pitch = float(np.median(np.diff(snap_arcs)))
-    if not np.isfinite(pitch) or pitch <= 0:
-        return int(len(pts))
-    arcs = np.asarray(mf_arcs, dtype=float)
-    sig = np.asarray(mf_sig, dtype=float)
-    half = max(1, int(round(pitch / _MF_STEP_MM)))
-
-    def _prominent(a: float) -> bool:
-        i = int(np.argmin(np.abs(arcs - a)))
-        lo, hi = max(0, i - half), min(len(sig), i + half + 1)
-        if hi - lo < 3:
-            return True
-        pk = float(sig[i])
-        valley = max(float(sig[lo:i + 1].min()), float(sig[i:hi].min()))
-        return pk > 0 and (pk - valley) / pk >= prom_thr
-
-    # Prominent peaks distal of the anchor, sorted shallow -> deep.
-    resolved = [a for a in snap_arcs if a >= float(anchor) and _prominent(a)]
-    if not resolved:
-        return 0
-    # Contiguous run anchored at the deep tip: walk proximally while the gap to
-    # the next-shallower resolved peak stays within the jump gate.
-    run = 1
-    for j in range(len(resolved) - 1, 0, -1):
-        if resolved[j] - resolved[j - 1] <= jump_pitch * pitch:
-            run += 1
-        else:
-            break
-    return run
-
-
-def _smallest_covering(current_id, n_resolved, models_dict, mf_res=None):
-    """Smallest model of the SAME family (same vendor prefix + ``type`` as
-    ``current_id``) whose contact_count >= ``n_resolved``. Caps at the largest
-    family model when none covers; returns ``current_id`` if no ladder exists.
-
-    When several models share the covering contact count (e.g. PMT-16A/B/C —
-    same 16 contacts, different spacing), prefer the variant the matched filter
-    scored highest (so the floor only fixes the COUNT and defers the spacing
-    choice to the matcher), falling back to the first by id."""
-    vendor = str(current_id).split("-", 1)[0]
-    ctype = models_dict[current_id].get("type")
-    ladder = sorted(
-        ((mid, int(m.get("contact_count") or 0)) for mid, m in models_dict.items()
-         if m.get("type") == ctype and str(mid).split("-", 1)[0] == vendor),
-        key=lambda kv: kv[1],
-    )
-    if not ladder:
-        return current_id
-    covering = [(mid, c) for mid, c in ladder if c >= n_resolved]
-    if not covering:
-        return ladder[-1][0]
-    target_count = covering[0][1]
-    variants = [mid for mid, c in covering if c == target_count]
-    if len(variants) == 1 or mf_res is None or not getattr(mf_res, "per_model", None):
-        return variants[0]
-    corr = {r.best_model_id: r.corr for r in mf_res.per_model if r.best_model_id}
-    return max(variants, key=lambda v: corr.get(v, float("-inf")))
-
-
-def _model_family(model_dict):
-    """Coarse family for routing: 'cluster' (CM-style, non-uniform
-    pitch), 'mm' (DIXI MM family), or 'uniform' (everything else).
-    Used to skip the no_metal_rerank verifier on CM models where
-    inter-cluster wire gaps would trigger false dead-slot flags."""
-    if not model_dict:
-        return "?"
-    import numpy as np
-    m_id = str(model_dict.get("id", ""))
-    if "MM" in m_id:
-        return "mm"
-    offs = sorted(model_dict.get("contact_center_offsets_from_tip_mm") or [])
-    if len(offs) < 3:
-        return "?"
-    diffs = np.diff(offs)
-    cv = float(np.std(diffs) / max(np.mean(diffs), 1e-6))
-    return "cluster" if cv > 0.15 else "uniform"
 
 
 # --------------------------------------------------------------------
