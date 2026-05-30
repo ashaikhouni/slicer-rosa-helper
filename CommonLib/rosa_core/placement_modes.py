@@ -580,6 +580,9 @@ def place_seeg(
     progress_logger=None,
     use_voxel_ownership: bool = False,
     use_snap_flow: bool = False,
+    mask_backend: str = "auto",
+    brain_mask=None,
+    synthstrip_path: str | None = None,
 ) -> PlacementBatch:
     """Single user-facing entry — see module docstring for the 5-mode table.
 
@@ -638,7 +641,10 @@ def place_seeg(
                 "`features` and `bolts` precomputed."
             )
         from .volume_loader import load_features_and_bolts
-        features, bolts = load_features_and_bolts(ct)
+        features, bolts = load_features_and_bolts(
+            ct, mask_backend=mask_backend, brain_mask=brain_mask,
+            synthstrip_path=synthstrip_path,
+        )
 
     if mode == 1:
         pairs = _run_auto(

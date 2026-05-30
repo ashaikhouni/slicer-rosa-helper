@@ -700,53 +700,15 @@ def _compute_brain_mask(
     synthstrip_path: str | None = None,
     log=lambda _m: None,
 ) -> str | None:
-    """Returns the backend name used (``"synthstrip"`` / ``"log-watershed"``)
-    or ``None`` on failure. For ``backend="auto"``, tries SynthStrip first
-    and falls through to LoG-watershed when SynthStrip isn't installed."""
-    from ..services.synthstrip import (
-        SynthStripNotFound, find_synthstrip, run_synthstrip,
+    """Thin delegate to the shared brain-mask selector
+    (``rosa_detect.services.mask_backend.select_brain_mask_to_path``) — the CLI
+    and the Slicer/place_seeg path share ONE mask backend. Returns the backend
+    name used (``"synthstrip"`` / ``"log-watershed"``) or ``None`` on failure."""
+    from rosa_detect.services.mask_backend import select_brain_mask_to_path
+    return select_brain_mask_to_path(
+        ct_path, mask_path, backend=backend,
+        synthstrip_path=synthstrip_path, log=log,
     )
-    from ..services.log_watershed import (
-        LogWatershedFailed, NotACTVolume, run_log_watershed,
-    )
-
-    def _try_synthstrip() -> bool:
-        try:
-            run_synthstrip(
-                input_path=ct_path, mask_path=mask_path,
-                synthstrip_path=synthstrip_path,
-            )
-            return True
-        except SynthStripNotFound:
-            return False
-        except subprocess.CalledProcessError as exc:
-            log(f"[fit-rosa] synthstrip exit {exc.returncode}; "
-                f"stderr: {(exc.stderr or b'').decode('utf-8', errors='replace')[:400]}")
-            return False
-        except Exception as exc:  # noqa: BLE001
-            log(f"[fit-rosa] synthstrip raised: {exc}")
-            return False
-
-    def _try_log_watershed() -> bool:
-        try:
-            run_log_watershed(input_path=ct_path, mask_path=mask_path)
-            return True
-        except (LogWatershedFailed, NotACTVolume) as exc:
-            log(f"[fit-rosa] log-watershed failed: {exc}")
-            return False
-
-    if backend == "synthstrip":
-        return "synthstrip" if _try_synthstrip() else None
-    if backend == "log-watershed":
-        return "log-watershed" if _try_log_watershed() else None
-    # auto
-    if find_synthstrip(synthstrip_path) is not None:
-        if _try_synthstrip():
-            return "synthstrip"
-        log("[fit-rosa] synthstrip available but failed; falling back to log-watershed")
-    else:
-        log("[fit-rosa] synthstrip not found; using log-watershed")
-    return "log-watershed" if _try_log_watershed() else None
 
 
 # ---------------------------------------------------------------------

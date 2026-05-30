@@ -36,12 +36,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..services.synthstrip import (
+from rosa_detect.services.synthstrip import (
     SynthStripNotFound,
     find_synthstrip,
     run_synthstrip,
 )
-from ..services.log_watershed import (
+from rosa_detect.services.log_watershed import (
     LogWatershedFailed,
     NotACTVolume,
     run_log_watershed,
