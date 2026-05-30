@@ -50,6 +50,24 @@ _MF_PAD_MM = 2.0
 _MAX_EXTEND_TIP_MM = 2.0
 _MAX_TIP_SHORT_MM = 2.5
 
+# LoG-neg metal threshold for the snap walker — notebook default (matches
+# fit_rosa's LOG_NEG_THRESHOLD / seeded_fit's _build_starter cell-1).
+_LOG_NEG_THRESHOLD = 300.0
+
+
+def _feat(features: dict, *names: str):
+    """First present, non-None value among ``names`` in ``features``.
+
+    The two feature-dict schemas differ: the staged ``compute_features``
+    uses ``log`` / ``ct_arr_kji`` / ``frangi`` / ``intracranial``; the
+    fit-rosa CLI builder uses ``log_arr`` / ``ct_arr`` / ``frangi_arr`` /
+    ``intracranial_mask``. Look up both so the adapter is schema-agnostic."""
+    for n in names:
+        v = features.get(n)
+        if v is not None:
+            return v
+    return None
+
 
 def _sample_log_neg_tube(log_neg, ras_to_ijk, entry_ras, axis_unit, length_mm):
     """Tube-max LoG-neg profile along ``(entry_ras, axis_unit)`` from ``-pad``
@@ -99,6 +117,7 @@ def snap_chain_to_ctx(
     landmarks: Any = None,
     bolts: list[dict] | None = None,
     forced_model_id: str | None = None,
+    bolt_source: str = "metal",
     seeder_label: str = "",
     seeder_confidence: float = 0.0,
     seeder_model: str | None = None,
@@ -109,8 +128,10 @@ def snap_chain_to_ctx(
         chain: a ``seeded_fit`` chain dict — ``{axis, entry_ras, tip_ras,
             kept_pts, ...}`` (``FittedChain.as_dict()``). ``kept_pts``/
             ``entry_ras``/``axis`` drive the covering-floor in the pick.
-        features: ``compute_features`` dict — needs ``log`` (raw LoG; the tube
-            samples ``clip(-log, 0)``), ``ras_to_ijk_mat``, ``intracranial_mask``.
+        features: ``compute_features`` dict — needs a raw LoG (``log`` / ``log_arr``;
+            the tube samples ``clip(-log, 0)``), ``ras_to_ijk_mat``, and an
+            intracranial mask (``intracranial`` / ``intracranial_mask``). Both
+            feature-dict schemas are accepted (see :func:`_feat`).
         library_models: strategy-filtered candidate models (the same set the
             staged pipeline passes as ``ctx.library_models``).
         landmarks: optional ``TrajectoryLandmarks`` — its ``bone_arc_mm`` joins
@@ -118,10 +139,14 @@ def snap_chain_to_ctx(
         bolts / seeder_*: threaded onto the ctx for the compound score.
         forced_model_id: when set (mode 4 vouched model), score and place exactly
             that model — the covering-floor is skipped (forced means forced).
+        bolt_source: ``"metal"`` (a real snap chain — covering-floor active) or
+            ``"bolt_less"`` (snap failed; the geometry is the raw seed, floor off).
+            Threaded onto the ctx so ``score_compound``'s ``s_walker`` /
+            cropped-bolt logic fires correctly.
 
     Returns a ``PlacementCtx`` with ``centerline`` (2-point straight axis),
     ``walk_arcs``/``walk_signal`` (tube-max profile), ``bolt_end_arc``
-    (``mf_anchor``), ``bolt_source="metal"``, ``match`` (the picked model's
+    (``mf_anchor``), ``bolt_source``, ``match`` (the picked model's
     ``MatchedFilterResult``), and ``placed_ras`` (contacts from the fitted tip).
     Ready for ``score_simple`` -> ``score_cc_overlap`` -> ``score_compound``.
     """
@@ -131,7 +156,7 @@ def snap_chain_to_ctx(
     mf_length = float(np.linalg.norm(tip_ras - entry_ras))
 
     ras_to_ijk = np.asarray(features["ras_to_ijk_mat"], dtype=float)
-    log_neg = np.clip(-np.asarray(features["log"]), 0.0, None)
+    log_neg = np.clip(-np.asarray(_feat(features, "log", "log_arr")), 0.0, None)
     mf_arcs, mf_sig = _sample_log_neg_tube(
         log_neg, ras_to_ijk, entry_ras, axis_unit, mf_length,
     )
@@ -141,7 +166,8 @@ def snap_chain_to_ctx(
     # deeper than the most-superficial real contacts; the bone landmark catches
     # the transition where the mask fails. Take whichever is more proximal.
     mask_anchor = _intra_mask_anchor(
-        features["intracranial_mask"], ras_to_ijk, entry_ras, axis_unit, mf_length,
+        _feat(features, "intracranial", "intracranial_mask"),
+        ras_to_ijk, entry_ras, axis_unit, mf_length,
     )
     bone_anchor = getattr(landmarks, "bone_arc_mm", None) if landmarks is not None else None
     mf_anchor = (float(min(mask_anchor, bone_anchor))
@@ -158,9 +184,12 @@ def snap_chain_to_ctx(
             max_extend_tip_mm=_MAX_EXTEND_TIP_MM, max_tip_short_mm=_MAX_TIP_SHORT_MM,
         )
     else:
+        # Covering-floor only fires on a real metal chain — bolt-less geometry is
+        # the raw seed, which resolves no contacts to count against.
+        floor_chain = chain if bolt_source == "metal" else None
         predicted_id, _branch, mf_res, _diag = pick_electrode_model(
             mf_arcs, mf_sig, library_models, models_dict,
-            bolt_end_arc=mf_anchor, profile_end_arc=mf_length, chain=chain,
+            bolt_end_arc=mf_anchor, profile_end_arc=mf_length, chain=floor_chain,
             max_extend_tip_mm=_MAX_EXTEND_TIP_MM, max_tip_short_mm=_MAX_TIP_SHORT_MM,
         )
 
@@ -183,7 +212,7 @@ def snap_chain_to_ctx(
         seeder_model=seeder_model,
         centerline=np.vstack([entry_ras, tip_ras]),
         bolt_end_arc=mf_anchor,
-        bolt_source="metal",
+        bolt_source=bolt_source,
         walk_arcs=mf_arcs,
         walk_signal=mf_sig,
         signal_kind="neg_log_max",
@@ -192,4 +221,102 @@ def snap_chain_to_ctx(
     )
 
 
-__all__ = ["snap_chain_to_ctx"]
+def snap_fit_to_ctxs(
+    planned_trajectories: list[dict],
+    *,
+    features: dict,
+    library_models: list[dict],
+    bolts: list[dict] | None = None,
+    forced_by_name: dict[str, str] | None = None,
+    seeder_by_name: dict[str, dict] | None = None,
+    log: Any = None,
+) -> list[PlacementCtx]:
+    """Snap a batch of planned trajectories and adapt each to a ``PlacementCtx``.
+
+    The single batch entry point for the snap-flow. Runs the SAME pipeline as
+    the fit-rosa CLI over a list of planned ``{name, start, end}`` dicts:
+
+        run_seeded_fit (snap_via_signal_walk + arbitrate_shared_peaks across ALL
+            shanks -> walk-to-bolt)            # cross-shank handled HERE, in batch
+        -> per chain: estimate_landmarks -> snap_chain_to_ctx                (metal)
+        -> per failed snap: raw-seed bolt-less ctx (never drop a user seed) (bolt_less)
+
+    ``run_seeded_fit``'s batch ``arbitrate_shared_peaks`` is the snap-flow's
+    cross-shank mechanism — it replaces the staged ``two_pass`` voxel-ownership
+    masking (a tail contact wrongly claimed from a neighbour is reassigned by
+    closest-axis attribution), so this orchestrator needs no second pass.
+
+    Args:
+        planned_trajectories: ``[{"name", "start", "end"}]`` — from user seeds
+            (modes 4/5) or ``generate_candidate_seeds`` (modes 1/2/3). Same shape
+            ``run_seeded_fit`` consumes.
+        features: ``compute_features`` dict (either schema — see :func:`_feat`).
+        library_models: strategy-filtered candidate models.
+        bolts: optional subject bolt CCs (confidence-only, for score_cc_overlap).
+        forced_by_name: optional ``{name: model_id}`` (mode-4 vouched models).
+        seeder_by_name: optional ``{name: {confidence, confidence_label,
+            electrode_model}}`` carried onto each ctx for the compound score.
+        log: optional progress callable forwarded to ``run_seeded_fit``.
+
+    Returns a list of fully-built (not yet scored) ``PlacementCtx`` — one per
+    planned trajectory, in input order. Caller runs Stage F + any band filter.
+    """
+    from ..seeded_fit import run_seeded_fit, estimate_landmarks
+
+    forced_by_name = forced_by_name or {}
+    seeder_by_name = seeder_by_name or {}
+
+    ras_to_ijk = np.asarray(features["ras_to_ijk_mat"], dtype=float)
+    log_neg = np.clip(-np.asarray(_feat(features, "log", "log_arr")), 0.0, None).astype(
+        "float32", copy=False,
+    )
+    bolt_signal_vol = _feat(features, "metal_evidence")   # None on staged -> falls back
+    ct_arr = _feat(features, "ct_arr_kji", "ct_arr")
+    frangi_arr = _feat(features, "frangi", "frangi_arr")
+    intracranial = _feat(features, "intracranial", "intracranial_mask")
+
+    chains = run_seeded_fit(
+        planned_trajectories,
+        signal_vol=log_neg, threshold=_LOG_NEG_THRESHOLD,
+        ras_to_ijk=ras_to_ijk, bolt_signal_vol=bolt_signal_vol,
+        log=log,
+    )
+
+    out: list[PlacementCtx] = []
+    for traj, chain in zip(planned_trajectories, chains):
+        name = str(traj.get("name") or "")
+        sm = seeder_by_name.get(name, {})
+        common = dict(
+            features=features, library_models=library_models, bolts=bolts,
+            forced_model_id=forced_by_name.get(name),
+            seeder_label=str(sm.get("confidence_label") or ""),
+            seeder_confidence=float(sm.get("confidence") or 0.0),
+            seeder_model=sm.get("electrode_model"),
+        )
+        if chain is not None:
+            landmarks = estimate_landmarks(
+                chain, name=name, ct_arr=ct_arr, ras_to_ijk=ras_to_ijk,
+                intracranial_mask_arr=intracranial, frangi_arr=frangi_arr,
+            )
+            out.append(snap_chain_to_ctx(
+                chain, landmarks=landmarks, bolt_source="metal", **common,
+            ))
+        else:
+            # Snap failed (<min peaks / off-metal seed) — never drop a user seed.
+            # Build a raw-seed bolt-less ctx: 2-point centerline from the planned
+            # endpoints, empty contact chain (floor off), bolt_source="bolt_less".
+            start = np.asarray(traj["start"], dtype=float)
+            end = np.asarray(traj["end"], dtype=float)
+            raw_chain = {
+                "axis": unit(end - start),
+                "entry_ras": start,
+                "tip_ras": end,
+                "kept_pts": np.zeros((0, 3), dtype=float),
+            }
+            out.append(snap_chain_to_ctx(
+                raw_chain, landmarks=None, bolt_source="bolt_less", **common,
+            ))
+    return out
+
+
+__all__ = ["snap_chain_to_ctx", "snap_fit_to_ctxs"]

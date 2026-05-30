@@ -17,7 +17,8 @@ try:
     from rosa_core.electrode_models import load_electrode_library
     from rosa_core.electrode_classifier import filter_models_for_strategy
     from rosa_core.contact_placement import (
-        score_cc_overlap, score_compound, score_simple, snap_chain_to_ctx,
+        score_cc_overlap, score_compound, score_simple,
+        snap_chain_to_ctx, snap_fit_to_ctxs,
     )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
@@ -41,11 +42,13 @@ def _synthetic_features(n_contacts=_N, vol=60):
         log[k, _Y - 2:_Y + 3, _X - 2:_X + 3] = -1500.0   # metal => negative LoG
         ct[k, _Y - 2:_Y + 3, _X - 2:_X + 3] = 3000.0     # bright metal HU
     mask = np.ones((vol, vol, vol), dtype=np.float32)
+    # Staged compute_features schema: log / ct_arr_kji / frangi / intracranial.
     feats = {
         "log": log,
         "ct_arr_kji": ct,
+        "frangi": np.zeros((vol, vol, vol), dtype=np.float32),
         "ras_to_ijk_mat": np.eye(4),
-        "intracranial_mask": mask,
+        "intracranial": mask,
     }
     return feats, zs
 
@@ -133,6 +136,56 @@ class SnapAdapterTests(unittest.TestCase):
         self.assertEqual(ctx.bolt_source, "metal")
         ctx = score_compound(score_cc_overlap(score_simple(ctx)))
         self.assertIn("compound_score", ctx.score_components)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy / rosa_core unavailable")
+class SnapFitOrchestratorTests(unittest.TestCase):
+    """snap_fit_to_ctxs: batch snap (run_seeded_fit) -> per-chain adapt, with a
+    bolt-less fallback so a planned seed is never dropped."""
+
+    def setUp(self):
+        self.lib = filter_models_for_strategy(
+            load_electrode_library()["models"], "dixi",
+        )
+        self.feats, self.zs = _synthetic_features()
+
+    def test_batch_metal_and_bolt_less(self):
+        planned = [
+            # On the comb (x=25,y=25) -> snaps -> metal.
+            {"name": "S1", "start": [_X, _Y, _Z0], "end": [_X, _Y, self.zs[-1]]},
+            # Empty space (no metal) -> snap fails -> bolt-less fallback.
+            {"name": "S2", "start": [5.0, 5.0, _Z0], "end": [5.0, 5.0, self.zs[-1]]},
+        ]
+        ctxs = snap_fit_to_ctxs(
+            planned, features=self.feats, library_models=self.lib,
+            seeder_by_name={"S1": {"confidence_label": "high", "confidence": 0.9}},
+        )
+        self.assertEqual(len(ctxs), 2)   # one per planned seed, in order
+
+        metal = ctxs[0]
+        self.assertEqual(metal.bolt_source, "metal")
+        self.assertIsNotNone(metal.match)
+        self.assertIsNotNone(metal.match.best_model_id)
+        self.assertGreaterEqual(len(metal.placed_ras), 8)
+        self.assertEqual(metal.seeder_label, "high")
+
+        bolt_less = ctxs[1]
+        self.assertEqual(bolt_less.bolt_source, "bolt_less")
+        self.assertEqual(np.asarray(bolt_less.centerline).shape, (2, 3))
+
+        # Both must be scorable end-to-end.
+        for ctx in ctxs:
+            ctx = score_compound(score_cc_overlap(score_simple(ctx)))
+            self.assertIn("compound_score", ctx.score_components)
+
+    def test_forced_by_name(self):
+        planned = [{"name": "S1", "start": [_X, _Y, _Z0], "end": [_X, _Y, self.zs[-1]]}]
+        ctxs = snap_fit_to_ctxs(
+            planned, features=self.feats, library_models=self.lib,
+            forced_by_name={"S1": "DIXI-15AM"},
+        )
+        self.assertEqual(ctxs[0].match.best_model_id, "DIXI-15AM")
+        self.assertEqual(len(ctxs[0].placed_ras), 15)
 
 
 if __name__ == "__main__":
