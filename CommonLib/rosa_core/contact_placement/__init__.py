@@ -89,7 +89,7 @@ from .stage_f_score import (
 from .compose import place_seed, place_v3
 from .two_pass import run_two_pass
 from .postpass_fft import apply_subject_fft_normalization
-from .snap_adapter import snap_chain_to_ctx
+from .snap_adapter import snap_chain_to_ctx, snap_fit_to_ctxs
 
 __all__ = [
     # Bolt-end / metal-mass landmark estimation (rosa_core.contact_placement.bolt_end).
@@ -164,4 +164,5 @@ __all__ = [
     "run_two_pass",
     "apply_subject_fft_normalization",
     "snap_chain_to_ctx",
+    "snap_fit_to_ctxs",
 ]
