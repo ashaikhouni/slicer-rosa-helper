@@ -76,8 +76,9 @@ def generate_candidate_seeds(
     )
 
     # ``seeder_model`` is left None — the detection stage no longer
-    # classifies an electrode model (canonical picker is the placement
-    # matched filter in ``stage_d_pick.pick_matched_filter``).
+    # classifies an electrode model (canonical picker is the shared
+    # ``rosa_core.model_pick.pick_electrode_model``, reached via
+    # ``stage_d_pick.pick_model`` during placement).
     seeds: list[Seed] = []
     for idx, t in enumerate(trajectories or []):
         seeds.append(Seed(

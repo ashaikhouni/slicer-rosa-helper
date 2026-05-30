@@ -604,8 +604,8 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
         rec["intracranial_length_mm"] = float(np.linalg.norm(end - entry))
 
     # Electrode-model suggestion intentionally NOT computed here. The
-    # canonical picker is the matched filter in
-    # ``rosa_core.contact_placement.stage_d_pick.pick_matched_filter``,
+    # canonical picker is the shared ``rosa_core.model_pick.pick_electrode_model``
+    # (reached via ``rosa_core.contact_placement.stage_d_pick.pick_model``),
     # which runs as part of ``place_seeg`` whenever contacts are placed.
     # The detection-time per-trajectory classifier (formerly invoked here
     # via ``rosa_core.electrode_classifier.classify_electrode_model``)
