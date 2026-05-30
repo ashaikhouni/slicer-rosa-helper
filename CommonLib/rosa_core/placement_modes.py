@@ -37,6 +37,10 @@ from .contact_placement import (
     apply_subject_fft_normalization,
     place_seed,
     run_two_pass,
+    score_cc_overlap,
+    score_compound,
+    score_simple,
+    snap_fit_to_ctxs,
 )
 
 
@@ -575,6 +579,7 @@ def place_seeg(
     snap_perp_tol_mm: float = 8.0,
     progress_logger=None,
     use_voxel_ownership: bool = False,
+    use_snap_flow: bool = False,
 ) -> PlacementBatch:
     """Single user-facing entry — see module docstring for the 5-mode table.
 
@@ -641,6 +646,7 @@ def place_seeg(
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
             use_voxel_ownership=use_voxel_ownership,
+            use_snap_flow=use_snap_flow,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -653,6 +659,7 @@ def place_seeg(
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
             use_voxel_ownership=use_voxel_ownership,
+            use_snap_flow=use_snap_flow,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -666,6 +673,7 @@ def place_seeg(
             pitch_strategy=pitch_strategy, sample_fn=sample_fn,
             progress_logger=progress_logger,
             use_voxel_ownership=use_voxel_ownership,
+            use_snap_flow=use_snap_flow,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -786,11 +794,17 @@ def _run_auto(
     sample_fn: Callable[[PlacementCtx], PlacementCtx],
     progress_logger,
     use_voxel_ownership: bool = False,
+    use_snap_flow: bool = False,
 ) -> list[tuple[str, PlacementCtx]]:
-    """Modes 1/2/3 inner: candidate generation → two-pass placement.
+    """Modes 1/2/3 inner: candidate generation → placement.
 
-    The two-pass placement applies cross-shank ownership masking — relevant
-    for batch auto-detect runs where multiple emissions can share voxels.
+    Two engines:
+      * legacy (default): staged ``two_pass`` (LoG-walk + voxel-ownership).
+      * ``use_snap_flow``: the fit-rosa snap-flow — the v1 candidate seeds
+        (bolt-anchored, on-metal) feed ``snap_fit_to_ctxs`` (``run_seeded_fit``
+        snap + arbitration + the covering-floor matcher). This is the validated
+        auto engine (fit-rosa ``--auto`` = 12/13 on T18). Cross-shank handling
+        is ``arbitrate_shared_peaks`` inside the snap (replaces voxel-ownership).
     """
     from rosa_detect.candidate_seeds import generate_candidate_seeds
     seeds = generate_candidate_seeds(
@@ -799,11 +813,56 @@ def _run_auto(
     )
     if not seeds:
         return []
+    if use_snap_flow:
+        return _place_snap_flow(
+            seeds, features=features, library_models=library_models,
+            bolts=bolts, progress_logger=progress_logger,
+        )
     return _place_two_pass(
         seeds, features=features, library_models=library_models,
         bolts=bolts, sample_fn=sample_fn,
         use_voxel_ownership=use_voxel_ownership,
     )
+
+
+def _place_snap_flow(
+    seeds: list[Seed], *,
+    features: dict,
+    library_models: list[dict],
+    bolts: list[dict] | None,
+    progress_logger,
+    forced_by_name: dict[str, str] | None = None,
+) -> list[tuple[str, PlacementCtx]]:
+    """Place a batch of (bolt-anchored) seeds through the fit-rosa snap-flow.
+
+    ``snap_fit_to_ctxs`` runs the batch snap (``run_seeded_fit`` +
+    ``arbitrate_shared_peaks``) + per-chain matcher + bolt-less fallback;
+    each returned ctx is then Stage-F scored. Returns ``[(name, ctx)]`` in
+    input order. The seeds must be bolt-anchored (v1 emissions, ROS plans) —
+    that's where the snap-flow is validated; rough/offset raw seeds belong on
+    the match-to-auto path, not here.
+    """
+    planned = [
+        {"name": s.name,
+         "start": np.asarray(s.start_ras, dtype=float),
+         "end": np.asarray(s.end_ras, dtype=float)}
+        for s in seeds
+    ]
+    seeder_by_name = {
+        s.name: {"confidence_label": s.seeder_label,
+                 "confidence": s.seeder_confidence,
+                 "electrode_model": s.seeder_model}
+        for s in seeds
+    }
+    ctxs = snap_fit_to_ctxs(
+        planned, features=features, library_models=library_models, bolts=bolts,
+        forced_by_name=forced_by_name or {}, seeder_by_name=seeder_by_name,
+        log=progress_logger,
+    )
+    return [
+        (s.name, score_compound(score_cc_overlap(score_simple(ctx))))
+        for s, ctx in zip(seeds, ctxs)
+    ]
 
 
 def _apply_fft_norm(

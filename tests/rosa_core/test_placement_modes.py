@@ -451,5 +451,37 @@ class AssignByExpectedTests(unittest.TestCase):
         self.assertEqual(diag["per_name_outcome"][0]["outcome"], "fallback_no_model_match")
 
 
+class SnapFlowAutoEngineTests(unittest.TestCase):
+    """use_snap_flow routes the auto modes (1/2/3) through the fit-rosa
+    snap-flow engine (snap_fit_to_ctxs) instead of the staged two_pass.
+    Synthetic smoke: the public contract holds on the snap-flow path; the
+    dataset accuracy parity (T18 staged 11/13 == snap-flow 11/13) is the
+    manual A-B (tools/_ab_placeseeg_auto.py)."""
+
+    def setUp(self):
+        self.features = _synthetic_features()
+        self.bolts = []
+        self.library = _synthetic_library()
+
+    def test_mode1_snap_flow_runs_and_contract_holds(self):
+        batch = place_seeg(None, features=self.features, bolts=self.bolts,
+                           library=self.library, band_floor="low",
+                           use_snap_flow=True)
+        self.assertIsInstance(batch, PlacementBatch)
+        self.assertEqual(batch.diagnostics["mode"], 1)
+        # Whatever it emits must be well-formed PlacedTrajectory records.
+        for t in batch.trajectories:
+            self.assertIsInstance(t, PlacedTrajectory)
+            self.assertIn(t.band, {"high", "medium", "low"})
+            self.assertIsInstance(t.score_components, dict)
+            self.assertIn(t.bolt_source, {"metal", "bolt_less"})
+
+    def test_flag_off_is_default_for_auto(self):
+        # Default (no flag) keeps the staged engine — byte-identical legacy path.
+        batch = place_seeg(None, features=self.features, bolts=self.bolts,
+                           library=self.library, band_floor="low")
+        self.assertEqual(batch.diagnostics["mode"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

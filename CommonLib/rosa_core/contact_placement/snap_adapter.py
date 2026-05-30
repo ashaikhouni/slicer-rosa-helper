@@ -165,9 +165,10 @@ def snap_chain_to_ctx(
     # The CT brain mask under-segments at the skull base, so its entry can sit
     # deeper than the most-superficial real contacts; the bone landmark catches
     # the transition where the mask fails. Take whichever is more proximal.
-    mask_anchor = _intra_mask_anchor(
-        _feat(features, "intracranial", "intracranial_mask"),
-        ras_to_ijk, entry_ras, axis_unit, mf_length,
+    mask = _feat(features, "intracranial", "intracranial_mask")
+    mask_anchor = (
+        _intra_mask_anchor(mask, ras_to_ijk, entry_ras, axis_unit, mf_length)
+        if mask is not None else 0.0   # no mask → treat entry as in-brain
     )
     bone_anchor = getattr(landmarks, "bone_arc_mm", None) if landmarks is not None else None
     mf_anchor = (float(min(mask_anchor, bone_anchor))
