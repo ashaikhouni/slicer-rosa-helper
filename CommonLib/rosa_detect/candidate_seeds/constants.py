@@ -250,38 +250,6 @@ EXTEND_MAX_OUTER_ITER: int = 4      # outer-loop refit iterations.
                                      # clean cases; 4 is a safety cap.
 
 
-# ---------------------------------------------------------------------
-# 16. Axis-profile peak signature refinement
-#     (`refine_signature_via_axis_peaks`)
-# ---------------------------------------------------------------------
-#
-# After bolt anchor, re-derive (n_inliers, median_pitch, contact_span)
-# from a 1-D LoG profile sampled along the FIT axis with sub-voxel
-# (0.25 mm) steps + trilinear interpolation. Recovers the true contact
-# pitch on anisotropic CTs where the walker's NN-spacing is biased
-# (S56 case: walker locked to 3.14 mm instead of 3.5 mm).
-
-AXIS_PEAK_STEP_MM: float = 0.25         # sub-voxel sampling step.
-AXIS_PEAK_DISK_RADIUS_MM: float = 2.0   # off-axis disk radius;
-                                         # contacts saturate to ~2 mm
-                                         # on most scanners.
-AXIS_PEAK_N_RADII: int = 4
-AXIS_PEAK_N_ANGLES: int = 8
-AXIS_PEAK_MIN_AMPLITUDE: float = 200.0  # |LoG| floor for a peak.
-                                         # Below the contact LoG floor
-                                         # (LOG_BLOB_THRESHOLD=500) so
-                                         # weak-but-real contacts on
-                                         # the tip count.
-AXIS_PEAK_MIN_SEPARATION_MM: float = 2.0
-AXIS_PEAK_MIN_PEAKS_REQUIRED: int = 4   # below this, the picker
-                                         # returns None and the
-                                         # caller keeps walker stats.
-AXIS_PEAK_SHALLOW_PAD_MM: float = 1.5   # extend sampling past skull
-                                         # entry / deep tip in case the
-                                         # bolt anchor or deep-end
-                                         # refine clipped a contact.
-AXIS_PEAK_DEEP_PAD_MM: float = 3.0
-
 
 # ---------------------------------------------------------------------
 # 17. Along-axis sampling step (Frangi / metal-evidence / refine)
