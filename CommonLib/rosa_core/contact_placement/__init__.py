@@ -77,8 +77,6 @@ from .stage_c_sample import (
 )
 from .stage_d_pick import (
     per_model_corrs,
-    pick_extent_aware,
-    pick_matched_filter,
     pick_model,
 )
 from .stage_e_place import place_at_match
@@ -153,8 +151,6 @@ __all__ = [
     "sample_neg_log_max",
     "walk_centerline",
     "per_model_corrs",
-    "pick_extent_aware",
-    "pick_matched_filter",
     "pick_model",
     "place_at_match",
     "score_cc_overlap",

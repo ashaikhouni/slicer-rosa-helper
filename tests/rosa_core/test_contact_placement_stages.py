@@ -23,7 +23,6 @@ from rosa_core.contact_placement import (
     PlacementCtx,
     aggregate_disk,
     anchor_bolt_less,
-    pick_matched_filter,
     place_at_match,
     place_seed,
     refine_log_snap,

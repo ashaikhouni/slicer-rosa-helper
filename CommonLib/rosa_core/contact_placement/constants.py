@@ -85,13 +85,11 @@ LOG_TOTAL_THRESHOLD: float = 100.0
 
 
 # ---------------------------------------------------------------------
-# Stage D — pick (matched filter + extent-aware re-pick)
+# Stage D — pick: the extent-aware re-rank margin now lives in the shared
+# matcher as ``rosa_core.matched_filter.EXTENT_AWARE_MARGIN`` (stage_d routes
+# through ``pick_model`` -> ``pick_electrode_model``). The old stage-local
+# ``PICK_OVERRIDE_MARGIN`` was retired 2026-05-30 with ``pick_extent_aware``.
 # ---------------------------------------------------------------------
-
-# Margin defer threshold for pick_extent_aware: when the matched-filter
-# raw corr top1 - top2 > this, trust the matched filter pick — only
-# re-rank ties.
-PICK_OVERRIDE_MARGIN: float = 0.05
 
 
 # ---------------------------------------------------------------------
@@ -172,7 +170,6 @@ __all__ = [
     "MAX_SLOT_CC_VOLUME_P90_MM3",
     "MIN_CORR_FOR_REAL_SHANK",
     "MIN_SLOT_HU_MEAN",
-    "PICK_OVERRIDE_MARGIN",
     "SEEDER_LABEL_TO_SCORE",
     "OWN_CONTEST_MARGIN_MM",
     "OWN_MIN_VOXELS_PER_ARC",

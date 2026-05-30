@@ -109,8 +109,8 @@ class MatchedFilterResult:
 
     ``per_model`` carries the per-model best (one entry per library
     model that passed the geometric gates and produced a finite
-    correlation). Sorted by corr descending. Stage-D's
-    ``pick_extent_aware`` re-rank reads from here instead of re-calling
+    correlation). Sorted by corr descending. The ``extent_aware_pick``
+    re-rank + ``per_model_corrs`` read from here instead of re-calling
     ``matched_filter_pick`` per model — same data, single pass over the
     tip grid. Each entry includes the model's own ``tip_arc`` and
     ``slot_arcs`` so a preferred-model switch can use them directly
