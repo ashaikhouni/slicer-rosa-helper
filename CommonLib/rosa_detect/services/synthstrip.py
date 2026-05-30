@@ -24,7 +24,7 @@ Detection priority (highest first):
 
 A caller that wants to fail quietly:
 
-    >>> from rosa_agent.services.synthstrip import find_synthstrip
+    >>> from rosa_detect.services.synthstrip import find_synthstrip
     >>> binary = find_synthstrip()
     >>> if binary is None:
     ...     # SynthStrip not installed; skip
@@ -32,7 +32,7 @@ A caller that wants to fail quietly:
 
 A caller that wants to error out:
 
-    >>> from rosa_agent.services.synthstrip import run_synthstrip, SynthStripNotFound
+    >>> from rosa_detect.services.synthstrip import run_synthstrip, SynthStripNotFound
     >>> try:
     ...     mask_path = run_synthstrip("ct.nii.gz", "out_mask.nii.gz")
     ... except SynthStripNotFound:

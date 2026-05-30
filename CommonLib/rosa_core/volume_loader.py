@@ -23,27 +23,34 @@ from typing import Any
 import numpy as np
 
 
-def load_features_and_bolts(ct):
+def load_features_and_bolts(ct, *, mask_backend="auto", brain_mask=None,
+                            synthstrip_path=None):
     """Load CT (path / SITK image) and compute features + bolt candidates.
 
     Args:
         ct: ``str | Path | sitk.Image``. Anything ``SimpleITK.ReadImage``
             accepts — usually a NIfTI or NRRD path; SITK images pass through.
+        mask_backend: brain-mask backend — ``"auto"`` (SynthStrip-if-available →
+            LoG-watershed) / ``"synthstrip"`` / ``"log-watershed"``. The mask
+            drives the snap's bolt-end anchoring; ``"auto"`` matches the
+            headless fit-rosa default (CLI<->Slicer parity).
+        brain_mask: optional explicit intracranial mask (numpy array or SITK
+            image) — overrides the backend.
+        synthstrip_path: optional explicit path to ``mri_synthstrip``.
 
     Returns:
-        ``(features, bolts)``:
-          * ``features`` — dict from ``guided_fit_engine.compute_features``
-            with keys ``ct_arr_kji``, ``log``, ``frangi``, ``head_distance``,
-            ``ras_to_ijk_mat``, ``ijk_to_ras_mat``, ``img``.
-          * ``bolts`` — list of bolt-CC dicts from ``extract_bolt_candidates``
-            (centroid, voxel-count, hull-proximity).
+        ``(features, bolts)`` — see ``guided_fit_engine.compute_features`` +
+        ``extract_bolt_candidates``.
 
     Raises:
         FileNotFoundError: when ``ct`` is a path that doesn't exist.
         RuntimeError: when feature computation fails.
     """
     img = _to_sitk_image(ct)
-    return _compute_features_and_bolts(img)
+    return _compute_features_and_bolts(
+        img, mask_backend=mask_backend, brain_mask=brain_mask,
+        synthstrip_path=synthstrip_path,
+    )
 
 
 def _to_sitk_image(ct):
@@ -61,7 +68,9 @@ def _to_sitk_image(ct):
     )
 
 
-def _compute_features_and_bolts(img) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def _compute_features_and_bolts(
+    img, *, mask_backend="auto", brain_mask=None, synthstrip_path=None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Compute the features dict + bolt CCs from a SITK image.
 
     Mirrors the notebook's exact compute-features + extract-bolts cell so
@@ -78,7 +87,11 @@ def _compute_features_and_bolts(img) -> tuple[dict[str, Any], list[dict[str, Any
     )
 
     i2r_in, r2i_in = image_ijk_ras_matrices(img)
-    features = gfe.compute_features(img, np.asarray(i2r_in), np.asarray(r2i_in))
+    features = gfe.compute_features(
+        img, np.asarray(i2r_in), np.asarray(r2i_in),
+        mask_backend=mask_backend, brain_mask=brain_mask,
+        synthstrip_path=synthstrip_path,
+    )
     i2r = np.asarray(features["ijk_to_ras_mat"])
     r2i = np.asarray(features["ras_to_ijk_mat"])
 

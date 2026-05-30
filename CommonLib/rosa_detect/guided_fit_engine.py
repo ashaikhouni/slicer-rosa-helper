@@ -89,7 +89,9 @@ def _unit(v):
     return v / n if n > 1e-9 else np.array([0.0, 0.0, 1.0])
 
 
-def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None):
+def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
+                     *, mask_backend="auto", brain_mask=None, synthstrip_path=None,
+                     log=None):
     """One-time preprocessing per volume. Runs the SAME pipeline-entry
     canonicalization (resample-to-1mm + anisotropic anti-alias +
     HU clamp) Auto Fit uses, then computes the same feature set —
@@ -106,12 +108,24 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None)
     canonical grid is consistent with the feature kernels — passing
     the original (pre-resample) matrices would compute trajectories
     on a grid that doesn't match where the LoG / Frangi peaks live.
+
+    Brain mask: the ``intracranial`` mask (which drives the snap's bolt-end
+    anchoring) comes from the shared backend selector — ``mask_backend="auto"``
+    = SynthStrip-if-available → LoG-watershed; ``brain_mask`` (array/SITK image)
+    overrides. This matches the headless ``fit-rosa`` mask so the Slicer /
+    place_seeg snap anchors identically (CLI<->Slicer parity). ``build_masks``
+    still provides the hull + head-distance arrays (skull-synth / bolt extent).
     """
     import SimpleITK as sitk
+    from .services.mask_backend import compute_intracranial_mask
     img, ijk_to_ras_mat, ras_to_ijk_mat = prepare_volume(
         img, ijk_to_ras_mat, ras_to_ijk_mat,
     )
-    hull_arr, intracranial, dist_arr = build_masks(img)
+    hull_arr, _intracranial_legacy, dist_arr = build_masks(img)
+    intracranial, _mask_backend_used = compute_intracranial_mask(
+        img, backend=mask_backend, brain_mask=brain_mask,
+        synthstrip_path=synthstrip_path, log=log,
+    )
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
     frangi_s1 = frangi_single(img, sigma=FRANGI_STAGE1_SIGMA)
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
