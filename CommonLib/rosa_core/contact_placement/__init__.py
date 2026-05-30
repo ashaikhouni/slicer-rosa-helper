@@ -79,6 +79,7 @@ from .stage_d_pick import (
     per_model_corrs,
     pick_extent_aware,
     pick_matched_filter,
+    pick_model,
 )
 from .stage_e_place import place_at_match
 from .stage_f_score import (
@@ -154,6 +155,7 @@ __all__ = [
     "per_model_corrs",
     "pick_extent_aware",
     "pick_matched_filter",
+    "pick_model",
     "place_at_match",
     "score_cc_overlap",
     "score_compound",

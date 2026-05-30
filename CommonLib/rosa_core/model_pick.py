@@ -147,7 +147,9 @@ def pick_electrode_model(
         bolt_end_arc: bolt->contact transition arc (matcher proximal anchor).
         profile_end_arc: centerline tip arc (matcher distal reference).
         chain: the snapped chain dict (kept_pts/entry_ras/axis) — drives the
-            covering-floor resolved-contact count.
+            covering-floor resolved-contact count. Pass ``None`` to disable the
+            covering-floor (e.g. callers that have no detected-peak chain at
+            pick time); the rest of the pick is unaffected.
         max_extend_tip_mm / max_tip_short_mm: matcher tip-search slack.
 
     Returns ``(predicted_id, branch, mf_res, diag)``. ``predicted_id`` is None on
@@ -190,7 +192,8 @@ def pick_electrode_model(
     # resolves. If an AM/PMT pick under-covers the resolved count, bump UP to the
     # smallest same-family model that covers it (over-extension into the bolt is
     # acceptable; orphaning a resolved contact is not). CM/BM/MM never resized.
-    if predicted_id is not None and model_family(models_dict[predicted_id]) == "uniform":
+    if (chain is not None and predicted_id is not None
+            and model_family(models_dict[predicted_id]) == "uniform"):
         n_resolved = _count_resolved_proximal(chain, mf_arcs, mf_sig, bolt_end_arc)
         if int(models_dict[predicted_id].get("contact_count") or 0) < n_resolved:
             bumped = _smallest_covering(predicted_id, n_resolved, models_dict, mf_res)

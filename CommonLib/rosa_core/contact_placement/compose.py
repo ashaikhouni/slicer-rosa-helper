@@ -17,7 +17,7 @@ from .context import PlacementCtx
 from .stage_a_anchor import stage_anchor
 from .stage_b_refine import refine_log_snap
 from .stage_c_sample import sample_hu_max
-from .stage_d_pick import pick_extent_aware, pick_matched_filter
+from .stage_d_pick import pick_model
 from .stage_e_place import place_at_match
 from .stage_f_score import score_cc_overlap, score_compound, score_simple
 
@@ -58,8 +58,7 @@ def place_seed(
     ctx = stage_anchor(ctx)
     ctx = refine_fn(ctx)
     ctx = sample_fn(ctx)
-    ctx = pick_matched_filter(ctx)
-    ctx = pick_extent_aware(ctx)
+    ctx = pick_model(ctx)
     ctx = place_at_match(ctx)
     ctx = score_simple(ctx)
     ctx = score_cc_overlap(ctx)
