@@ -579,7 +579,7 @@ def place_seeg(
     snap_perp_tol_mm: float = 8.0,
     progress_logger=None,
     use_voxel_ownership: bool = False,
-    use_snap_flow: bool = False,
+    use_snap_flow: bool = True,
     mask_backend: str = "auto",
     brain_mask=None,
     synthstrip_path: str | None = None,
@@ -615,6 +615,17 @@ def place_seeg(
             everything by default).
         progress_logger: callable forwarded to the candidate-seed generator
             in modes 1/2/3.
+        use_snap_flow: auto modes (1/2/3) run the fit-rosa snap-flow engine
+            (v1 detect -> seeded_fit snap + covering-floor matcher) — **default
+            ON** as of the placement consolidation (it's the canonical engine
+            shared with the CLI, reliable-metric-better than the legacy staged
+            two_pass: T25 15/15 vs 13/15, T18 tie, with the synthstrip-anchored
+            mask). Pass ``False`` to fall back to the legacy staged engine.
+            (Seeded modes 4/5 still use the staged path until they move to
+            match-against-auto.)
+        mask_backend / brain_mask / synthstrip_path: brain-mask backend for the
+            feature build (default ``"auto"`` = SynthStrip-if-available ->
+            LoG-watershed); ``brain_mask`` overrides. Drives the snap anchoring.
 
     Raises:
         ValueError: incompatible mode dispatch (e.g. ``seeds=`` + ``expected=``).
@@ -724,6 +735,10 @@ def place_seeg(
         "subject_fft_normalized": apply_subject_fft_norm,
         "band_floor": band_floor,
     }
+    if mode in (1, 2, 3):
+        # Which auto engine placed the batch — useful for CLI/Slicer
+        # introspection and telemetry (the snap-flow is the default).
+        diagnostics["auto_engine"] = "snap_flow" if use_snap_flow else "staged"
     if mode == 3:
         diagnostics["mode3"] = mode3_diag
     elif mode == 4:
