@@ -14,8 +14,8 @@ Two modes:
 * **Forced** (``--electrodes electrode_models.tsv``): use the
   user-supplied electrode model per trajectory. TSV columns:
   ``name``, ``electrode_model``.
-* **Auto** (no ``--electrodes``): library-driven pitch-match decision-
-  tree picker (``rosa_core.electrode_classifier.classify_by_pitch_decision_tree``).
+* **Auto** (no ``--electrodes``): matched-filter library picker
+  (``rosa_core.model_pick.pick_electrode_model``).
 
 Mask backends:
 
@@ -335,8 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
         # ---- Picker: matched_filter + extent-aware + no_metal_rerank.
-        # Replaces the decision-tree picker (still exported from
-        # rosa_core.electrode_classifier as classify_by_pitch_decision_tree).
+        # Replaced the old decision-tree picker (retired 2026-05-30).
         # Benchmarked on SEEG T1-T25 (308 traj): 84% all-exact / 81%
         # AM / 98% CM / 100% MM, vs decision-tree 9% all-exact /
         # 4% AM / 30% CM / 0% MM. Also AMC PMT 19/20 (was 16/20).
