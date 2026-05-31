@@ -494,5 +494,48 @@ class SnapFlowAutoEngineTests(unittest.TestCase):
         self.assertEqual(batch.diagnostics["auto_engine"], "staged")
 
 
+class ForceModelOnSnappedCtxTests(unittest.TestCase):
+    """Mode-4's snap-flow forced re-place (_force_model_on_snapped_ctx) must
+    INHERIT the matched emission's bolt_source, not hard-code 'metal'. A user
+    seed can match an auto emission that is itself a bolt_less fallback (snap
+    failed on the v1 candidate → raw-seed geometry); labeling that 'metal'
+    would falsely set s_walker / the cropped-bolt s_cc_overlap and inflate the
+    band, and report bolt_source='metal' for geometry with no metal anchor."""
+
+    def setUp(self):
+        self.features = _synthetic_features()
+        self.library = _synthetic_library()
+        self.seed = _synthetic_seed()
+
+    def _cand(self, bolt_source):
+        # _force_model_on_snapped_ctx only reads seed_start/seed_end/bolt_source.
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            seed_start=self.seed.start_ras,
+            seed_end=self.seed.end_ras,
+            bolt_source=bolt_source,
+        )
+
+    def test_metal_emission_stays_metal_and_places(self):
+        from rosa_core.placement_modes import _force_model_on_snapped_ctx
+        ctx = _force_model_on_snapped_ctx(
+            self._cand("metal"), "SYNTH-10",
+            features=self.features, library_models=self.library,
+            bolts=[], seed=self.seed)
+        self.assertEqual(ctx.bolt_source, "metal")
+        self.assertGreater(len(ctx.placed_ras), 0)  # vouched model forced+placed
+
+    def test_bolt_less_emission_stays_bolt_less(self):
+        from rosa_core.placement_modes import _force_model_on_snapped_ctx
+        ctx = _force_model_on_snapped_ctx(
+            self._cand("bolt_less"), "SYNTH-10",
+            features=self.features, library_models=self.library,
+            bolts=[], seed=self.seed)
+        # The fix: bolt_source is propagated, NOT forced to 'metal'.
+        self.assertEqual(ctx.bolt_source, "bolt_less")
+        # Still forces + places the vouched model (never drop the seed).
+        self.assertGreater(len(ctx.placed_ras), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
