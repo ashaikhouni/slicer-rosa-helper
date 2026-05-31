@@ -73,6 +73,11 @@ def generate_candidate_seeds(
         return_features=True,
         progress_logger=progress_logger,
         pitch_strategy=pitch_strategy,
+        # Reuse the caller's already-computed shared-selector intracranial
+        # (gfe.compute_features) so the full detect→place pipeline builds the
+        # mask once — no redundant SynthStrip pass. Detection ignores it
+        # (head-distance/hull drive emission); it rides along for parity.
+        brain_mask=features.get("intracranial"),
     )
 
     # ``seeder_model`` is left None — the detection stage no longer

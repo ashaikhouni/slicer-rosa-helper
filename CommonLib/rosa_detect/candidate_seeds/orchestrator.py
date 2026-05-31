@@ -83,7 +83,9 @@ from .synth_anchor import axis_to_skull_synth
 def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
                             return_features=False, progress_logger=None,
                             pitch_strategy=None,
-                            pitches_mm=None):
+                            pitches_mm=None,
+                            mask_backend=None, brain_mask=None,
+                            synthstrip_path=None):
     """Run the full SEEG shank detector on a SITK image.
 
     Args:
@@ -97,6 +99,19 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
             major checkpoint. The Slicer widget passes a callback that
             updates the status panel and runs `app.processEvents()` so
             the UI doesn't appear hung during the ~10–20 s detection.
+        mask_backend / brain_mask / synthstrip_path: opt-in routing for the
+            ``intracranial`` feature through the shared selector (the SAME one
+            ``guided_fit_engine.compute_features`` / ``place_seeg`` use:
+            SynthStrip-if-available → LoG-watershed). Both default to ``None`` →
+            the cheap ``build_masks`` intracranial (unchanged legacy behavior).
+            Pass a precomputed ``brain_mask`` (a KJI mask, e.g. the caller's
+            already-built feature mask) to REUSE it — the full detect→place
+            pipeline thus computes the mask once, no redundant SynthStrip — or a
+            named ``mask_backend`` to compute via the selector (e.g. the Slicer
+            Auto-Fit overlay wanting selector parity, accepting the SynthStrip
+            cost). The intracranial is NOT used by detection emission (which
+            keys off head-distance + hull) — it's viz-only here — so this never
+            changes the trajectory set.
 
     Returns:
         list[dict] or (list[dict], dict): trajectories list (always) and
@@ -144,6 +159,22 @@ def run_two_stage_detection(img, ijk_to_ras_mat, ras_to_ijk_mat,
     except Exception:
         pass
     hull, intracranial, dist_arr = build_masks(img)
+    # The intracranial mask is viz-only here — detection emission keys off
+    # head-distance + hull, never this — and in the full detect→place pipeline
+    # placement uses its OWN shared-selector mask (gfe.compute_features /
+    # _load_or_compute_features), so the orchestrator's copy is consumed only by
+    # the Slicer Auto-Fit debug overlay. Default to the cheap build_masks mask;
+    # route through the shared selector ONLY on opt-in — a precomputed
+    # ``brain_mask`` short-circuits the backend (reuse, zero cost), or a named
+    # ``mask_backend`` asks for selector parity (e.g. the Slicer overlay,
+    # accepting the SynthStrip cost). This keeps standalone detection fast and
+    # never forces SynthStrip for a discarded/viz-only mask.
+    if brain_mask is not None or mask_backend is not None:
+        from ..services.mask_backend import compute_intracranial_mask
+        intracranial, _mask_backend_used = compute_intracranial_mask(
+            img, backend=(mask_backend or "auto"), brain_mask=brain_mask,
+            synthstrip_path=synthstrip_path, log=progress_logger,
+        )
     _log("preprocessing: LoG σ=1…")
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
     _log("preprocessing: Frangi σ=1…")
