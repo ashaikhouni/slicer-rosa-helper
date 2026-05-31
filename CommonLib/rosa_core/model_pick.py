@@ -176,8 +176,13 @@ def pick_electrode_model(
         predicted_id = None
         branch = "no_pick"
     else:
+        # Verify the EXTENT-AWARE pick (coverage-weighted, promotes the fuller
+        # longer model) and downgrade only if it has in-brain dead slots — do
+        # NOT re-substitute the raw corr winner, which would discard pred_ea
+        # (T18/X03: extent-aware 18AM vs corr-best sub-segment 12AM).
         predicted_id = no_metal_rerank(
             mf_res, mf_arcs, mf_sig, anchor_arc=bolt_end_arc,
+            current_id=pred_ea,
         )
         branch = ("matched_filter_verified"
                   if predicted_id == pred_ea
