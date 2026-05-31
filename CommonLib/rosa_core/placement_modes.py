@@ -40,6 +40,7 @@ from .contact_placement import (
     score_cc_overlap,
     score_compound,
     score_simple,
+    snap_chain_to_ctx,
     snap_fit_to_ctxs,
 )
 
@@ -192,6 +193,56 @@ def _filter_library_to_model(library_models: list[dict], model_id: str | None) -
     return out
 
 
+def _force_model_on_snapped_ctx(
+    cand_ctx: PlacementCtx,
+    model_id: str | None,
+    *,
+    features: dict,
+    library_models: list[dict],
+    bolts: list[dict] | None,
+    seed: Seed,
+) -> PlacementCtx:
+    """Re-place the vouched ``model_id`` on a matched emission's geometry.
+
+    The snap-flow analogue of mode 4's legacy ``place_seed`` re-placement: the
+    matched candidate's ``seed_start``/``seed_end`` are the geometry the auto
+    engine resolved for that emission — the snapped (bolt-anchored, on-metal)
+    entry/tip for a real metal chain, or the raw planned seed when the snap
+    failed (``bolt_source == "bolt_less"``). We reuse that geometry verbatim and
+    let ``snap_chain_to_ctx``'s ``forced_model_id`` path score+place exactly the
+    vouched template (covering-floor skipped — forced means forced). No re-walk,
+    so no drift onto neighbouring shanks. ``kept_pts`` is empty because the
+    forced path never consults the floor.
+
+    The emission's ``bolt_source`` is propagated (NOT hard-coded ``"metal"``):
+    forcing a "metal" label on a bolt_less-matched emission would falsely set
+    ``s_walker``/cropped-bolt ``s_cc_overlap`` and inflate the band, and report
+    ``bolt_source="metal"`` for geometry with no metal anchor. This mirrors the
+    legacy ``place_seed`` re-place, which re-derives ``bolt_source`` honestly.
+    """
+    entry = np.asarray(cand_ctx.seed_start, dtype=float)
+    tip = np.asarray(cand_ctx.seed_end, dtype=float)
+    chain = {
+        "axis": _unit_axis(tip - entry),
+        "entry_ras": entry,
+        "tip_ras": tip,
+        "kept_pts": np.zeros((0, 3), dtype=float),
+    }
+    bolt_source = "bolt_less" if cand_ctx.bolt_source == "bolt_less" else "metal"
+    ctx = snap_chain_to_ctx(
+        chain,
+        features=features,
+        library_models=_filter_library_to_model(library_models, model_id),
+        bolts=bolts,
+        forced_model_id=model_id,
+        bolt_source=bolt_source,
+        seeder_label=seed.seeder_label,
+        seeder_confidence=seed.seeder_confidence,
+        seeder_model=seed.seeder_model,
+    )
+    return score_compound(score_cc_overlap(score_simple(ctx)))
+
+
 def _place_mode_4(
     seeds: list[Seed], *,
     features: dict,
@@ -203,38 +254,43 @@ def _place_mode_4(
     angle_tol_deg: float,
     perp_tol_mm: float,
     use_voxel_ownership: bool = False,
+    use_snap_flow: bool = False,
 ) -> tuple[list[tuple[str, PlacementCtx]], dict]:
-    """Mode 4 inner: snap to v1 emissions then force the user's model.
+    """Mode 4 inner: match to auto emissions then force the user's model.
 
     Per user feedback (2026-05-09): a user-clicked seed in mode 4 might
     be reversed, off-axis, or shorter than the bolt-to-tip span — but
-    the user has additionally vouched for the electrode model. The snap
-    inherits v1's bolt-anchored geometry (canonical direction, full
-    contact zone), then we re-place with the library filtered to the
-    vouched model.
+    the user has additionally vouched for the electrode model. We match
+    the seed to the nearest auto emission to inherit its bolt-anchored,
+    on-metal geometry (canonical direction, full contact zone), then
+    place the vouched model on that geometry.
 
     Algorithm:
-      1. Run candidate generation + two-pass placement (same as mode 5).
-      2. Snap each user seed to its closest v1 candidate (axis tolerance).
-      3. For each snapped pair: if the candidate's matched-filter pick
-         already equals the vouched model_id, return that ctx as-is
-         (already correctly scored). Otherwise re-run ``place_seed`` on
-         the candidate's bolt-anchored geometry (``ctx.seed_start``,
-         ``ctx.seed_end``) with library filtered to ``seed.model_id`` —
-         constraints the matched filter to the vouched template.
-      4. For seeds with no snap (v1 missed): fall back to per-seed
+      1. Run the auto engine (``use_snap_flow`` → the canonical fit-rosa
+         snap-flow; else the legacy staged two_pass).
+      2. Match each user seed to its closest auto emission (axis + perp
+         tolerance) via ``_greedy_axis_match``.
+      3. For each matched pair: if the emission's pick already equals the
+         vouched model_id, return that ctx as-is (already correctly
+         scored). Otherwise re-place the vouched model on the emission's
+         snapped geometry — via ``snap_chain_to_ctx`` (forced path, no
+         re-walk) under the snap-flow, or legacy ``place_seed`` otherwise.
+      4. For seeds with no match (auto missed): fall back to per-seed
          ``place_seed`` on the user's raw seed with library filtered.
-         The seed may still place even if v1 missed — caller said "this
-         is where the shank is".
+         The seed may still place even if auto missed — caller said "this
+         is where the shank is". (Kept on the staged single-seed path even
+         under the snap-flow: re-walking a raw/offset user line drifts onto
+         neighbours — match-to-auto is the validated path, raw-snap is not.)
 
-    Diagnostics surface match counts + per-seed mode (snap vs fallback)
-    so callers see when the snap path triggered.
+    Diagnostics surface match counts + per-seed mode (match vs fallback)
+    so callers see when the match path triggered.
     """
     auto_pairs = _run_auto(
         features=features, bolts=bolts, library_models=library_models,
         pitch_strategy=pitch_strategy, sample_fn=sample_fn,
         progress_logger=progress_logger,
         use_voxel_ownership=use_voxel_ownership,
+        use_snap_flow=use_snap_flow,
     )
     matches = _greedy_axis_match(
         seeds, auto_pairs,
@@ -256,8 +312,17 @@ def _place_mode_4(
                 ctx = cand_ctx
                 outcome = "snap_passthrough"
                 n_snapped_passthrough += 1
+            elif use_snap_flow:
+                # Force the vouched model on the snapped emission geometry.
+                ctx = _force_model_on_snapped_ctx(
+                    cand_ctx, s.model_id,
+                    features=features, library_models=library_models,
+                    bolts=bolts, seed=s,
+                )
+                outcome = "snap_re_placed"
+                n_snapped_re_placed += 1
             else:
-                # Re-run with library filtered to vouched model.
+                # Legacy: re-run staged placement with library filtered.
                 ctx = place_seed(
                     cand_ctx.seed_start, cand_ctx.seed_end,
                     features=features,
@@ -289,6 +354,7 @@ def _place_mode_4(
     diag = {
         "n_input_seeds": len(seeds),
         "n_candidates_generated": len(auto_pairs),
+        "auto_engine": "snap_flow" if use_snap_flow else "staged",
         "n_snapped_passthrough": n_snapped_passthrough,
         "n_snapped_re_placed": n_snapped_re_placed,
         "n_fallback_per_seed": n_fallback,
@@ -310,24 +376,29 @@ def _place_mode_5(
     angle_tol_deg: float,
     perp_tol_mm: float,
     use_voxel_ownership: bool = False,
+    use_snap_flow: bool = False,
 ) -> tuple[list[tuple[str, PlacementCtx]], dict]:
-    """Mode 5 inner: snap user seeds to mode-1 candidate emissions.
+    """Mode 5 inner: match user seeds to auto candidate emissions.
 
     Algorithm (per user 2026-05-09 + 2026-05-10 follow-up):
-      1. Run candidate generation + two-pass placement.
-      2. Snap each user seed to its closest v1 candidate within tolerance.
-      3. Per snapped pair → use the candidate's already-placed ctx as-is.
-      4. Per unsnapped seed (no v1 candidate within tolerance) → fall
+      1. Run the auto engine (``use_snap_flow`` → the canonical fit-rosa
+         snap-flow; else the legacy staged two_pass).
+      2. Match each user seed to its closest auto emission within tolerance.
+      3. Per matched pair → use the emission's already-placed ctx as-is
+         (inheriting its bolt-anchored, on-metal snapped geometry + pick).
+      4. Per unmatched seed (no auto emission within tolerance) → fall
          back to per-seed ``place_seed`` on the user's raw seed with the
          full library. The user said "place contacts on these seeds";
-         if v1 missed (planned-vs-actual drift on imported ROSA, etc.),
-         we still try.
+         if auto missed (planned-vs-actual drift on imported ROSA, etc.),
+         we still try. (Kept on the staged single-seed path even under the
+         snap-flow — re-walking a raw/offset user line drifts; match-to-auto
+         is the validated path, raw-snap is not.)
 
-    Inheriting v1's bolt-anchored geometry on the snap path matches
-    notebook parity (T18 13/13 picks). The fallback path matches mode 4's
-    behavior — never silently drop a user seed.
+    Inheriting the auto-emission's bolt-anchored geometry on the match path
+    is the validated route (notebook parity). The fallback path matches
+    mode 4's behavior — never silently drop a user seed.
 
-    Returns ``([(name, ctx)], diag_dict)``. The diag reports the snap
+    Returns ``([(name, ctx)], diag_dict)``. The diag reports the match
     counts + the fallback count so callers can see the breakdown.
     """
     auto_pairs = _run_auto(
@@ -335,6 +406,7 @@ def _place_mode_5(
         pitch_strategy=pitch_strategy, sample_fn=sample_fn,
         progress_logger=progress_logger,
         use_voxel_ownership=use_voxel_ownership,
+        use_snap_flow=use_snap_flow,
     )
     n_candidates = len(auto_pairs)
     matches = _greedy_axis_match(
@@ -373,6 +445,7 @@ def _place_mode_5(
     diag = {
         "n_input_seeds": len(seeds),
         "n_candidates_generated": n_candidates,
+        "auto_engine": "snap_flow" if use_snap_flow else "staged",
         "n_seeds_snapped": n_snapped,
         "n_seeds_fallback": n_fallback,
         "n_candidates_dropped": n_candidates - len(matched_cand_indices),
@@ -615,14 +688,19 @@ def place_seeg(
             everything by default).
         progress_logger: callable forwarded to the candidate-seed generator
             in modes 1/2/3.
-        use_snap_flow: auto modes (1/2/3) run the fit-rosa snap-flow engine
-            (v1 detect -> seeded_fit snap + covering-floor matcher) — **default
-            ON** as of the placement consolidation (it's the canonical engine
-            shared with the CLI, reliable-metric-better than the legacy staged
-            two_pass: T25 15/15 vs 13/15, T18 tie, with the synthstrip-anchored
-            mask). Pass ``False`` to fall back to the legacy staged engine.
-            (Seeded modes 4/5 still use the staged path until they move to
-            match-against-auto.)
+        use_snap_flow: run the fit-rosa snap-flow engine (v1 detect ->
+            seeded_fit snap + covering-floor matcher) as the auto engine for
+            ALL modes — **default ON** as of the placement consolidation (it's
+            the canonical engine shared with the CLI, reliable-metric-better
+            than the legacy staged two_pass: T25 15/15 vs 13/15, T18 tie, with
+            the synthstrip-anchored mask). Auto modes (1/2/3) place against the
+            snap-flow emissions directly; seeded modes (4/5) match each user
+            seed to the nearest snap-flow emission and inherit its bolt-anchored,
+            on-metal snapped geometry (mode 4 then forces the vouched model on
+            that geometry). The rare auto-missed seed falls back to the staged
+            single-seed placement on the raw seed (re-walking an offset user
+            line drifts — match-to-auto is the validated path). Pass ``False``
+            to fall back to the legacy staged engine everywhere.
         mask_backend / brain_mask / synthstrip_path: brain-mask backend for the
             feature build (default ``"auto"`` = SynthStrip-if-available ->
             LoG-watershed); ``brain_mask`` overrides. Drives the snap anchoring.
@@ -705,13 +783,14 @@ def place_seeg(
             angle_tol_deg=snap_angle_tol_deg,
             perp_tol_mm=snap_perp_tol_mm,
             use_voxel_ownership=use_voxel_ownership,
+            use_snap_flow=use_snap_flow,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
     else:  # mode == 5
         # Run candidates first (apply_subject_fft_norm applies internally),
-        # then snap user seeds to closest mode-1 emission. Drop on both sides
-        # of the snap (unmatched seeds + unmatched candidates).
+        # then match user seeds to closest auto emission. Drop on both sides
+        # of the match (unmatched seeds + unmatched candidates).
         pairs, mode5_diag = _place_mode_5(
             list(seeds),
             features=features, bolts=bolts,
@@ -721,6 +800,7 @@ def place_seeg(
             angle_tol_deg=snap_angle_tol_deg,
             perp_tol_mm=snap_perp_tol_mm,
             use_voxel_ownership=use_voxel_ownership,
+            use_snap_flow=use_snap_flow,
         )
         if apply_subject_fft_norm:
             pairs = _apply_fft_norm(pairs)
@@ -735,10 +815,10 @@ def place_seeg(
         "subject_fft_normalized": apply_subject_fft_norm,
         "band_floor": band_floor,
     }
-    if mode in (1, 2, 3):
-        # Which auto engine placed the batch — useful for CLI/Slicer
-        # introspection and telemetry (the snap-flow is the default).
-        diagnostics["auto_engine"] = "snap_flow" if use_snap_flow else "staged"
+    # Which auto engine ran — all five modes run an auto pass now (1/2/3 place
+    # against it directly; 4/5 match user seeds to its emissions). Useful for
+    # CLI/Slicer introspection and telemetry (the snap-flow is the default).
+    diagnostics["auto_engine"] = "snap_flow" if use_snap_flow else "staged"
     if mode == 3:
         diagnostics["mode3"] = mode3_diag
     elif mode == 4:
