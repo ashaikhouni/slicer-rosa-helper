@@ -10,8 +10,10 @@ Two variants:
 
 * ``snap_centerline_owned`` — same logic, but at each arc step discards disk
   voxels closer to a neighbor's centerline than ours. Prevents drift toward
-  passing shanks (the T18/X03 motivating case in the notebook). Used by the
-  two-pass runner (``run_two_pass``).
+  passing shanks (the T18/X03 motivating case in the notebook). Was the
+  cross-shank ownership pass for ``run_two_pass`` (retired with the placement
+  consolidation — the snap-flow's ``arbitrate_shared_peaks`` subsumed it); now
+  unexercised legacy plumbing pending a dead-code sweep.
 """
 from __future__ import annotations
 
