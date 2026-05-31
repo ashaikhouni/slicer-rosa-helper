@@ -30,7 +30,7 @@ class PlacementCtxFieldsTests(unittest.TestCase):
         names = {f.name for f in fields(self.ctx)}
         required = {
             "seed_start", "seed_end", "features", "library_models",
-            "bolts", "other_centerlines",
+            "bolts",
             "seeder_confidence", "seeder_label", "seeder_model",
             "centerline", "bolt_end_arc", "bolt_source",
             "walk_arcs", "walk_signal", "signal_kind",
@@ -48,7 +48,6 @@ class PlacementCtxFieldsTests(unittest.TestCase):
         self.assertEqual(self.ctx.seeder_label, "")
         self.assertEqual(self.ctx.seeder_confidence, 0.0)
         self.assertIsNone(self.ctx.bolts)
-        self.assertIsNone(self.ctx.other_centerlines)
         self.assertIsNone(self.ctx.centerline)
         self.assertIsNone(self.ctx.walk_arcs)
         self.assertIsNone(self.ctx.walk_signal)

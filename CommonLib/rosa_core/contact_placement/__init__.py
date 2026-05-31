@@ -65,7 +65,7 @@ from .polyline import (
     project_to_polyline_arc,
     straight_centerline,
 )
-from .snap import snap_centerline_owned, snap_centerline_to_centroid
+from .snap import snap_centerline_to_centroid
 from .cc_volume import slot_cc_volume_mm3
 from .stage_a_anchor import anchor_bolt_less, anchor_metal, stage_anchor
 from .stage_b_refine import refine_log_snap, refine_noop
@@ -137,7 +137,6 @@ __all__ = [
     "project_to_polyline",
     "project_to_polyline_arc",
     "straight_centerline",
-    "snap_centerline_owned",
     "snap_centerline_to_centroid",
     "slot_cc_volume_mm3",
     # Stages.
