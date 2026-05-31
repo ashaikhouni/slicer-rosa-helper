@@ -8,7 +8,8 @@ candidate."
 This package owns that responsibility. ``generate_candidate_seeds`` runs the
 v1 stage1 walker + bolt anchoring (orchestrated by
 ``orchestrator.run_two_stage_detection``) and returns a list of ``Seed``
-objects ready to feed into ``rosa_core.contact_placement.run_two_pass``.
+objects ready to feed into the snap-flow placement engine
+(``rosa_core.placement_modes.place_seeg`` → ``snap_fit_to_ctxs``).
 
 Importantly, the seeds carry forward v1's seeder_label — that's what the
 compound score's ``s_seeder`` term reads — so notebook parity is preserved.

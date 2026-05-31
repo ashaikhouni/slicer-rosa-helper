@@ -1,5 +1,8 @@
-"""Tests for ``two_pass`` (cross-shank ownership orchestrator) and
-``postpass_fft`` (per-subject FFT normalization)."""
+"""Tests for ``postpass_fft`` (per-subject FFT normalization).
+
+(The ``two_pass`` cross-shank orchestrator was retired with the placement
+consolidation — the snap-flow's ``arbitrate_shared_peaks`` subsumed it.)
+"""
 from __future__ import annotations
 
 import unittest
@@ -10,77 +13,7 @@ import numpy as np
 from rosa_core.contact_placement import (
     PlacementCtx,
     apply_subject_fft_normalization,
-    run_two_pass,
 )
-
-
-def _two_seed_synthetic_features():
-    """Two parallel bright tubes 10 mm apart in a 64×32×32 volume."""
-    K, J, I = 64, 32, 32
-    arr = np.zeros((K, J, I), dtype=np.float32)
-    for x in (10, 22):  # two tubes
-        for n in range(8):
-            z = 5 + int(round(n * 3.5))
-            for dz in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        zi, yi, xi = z + dz, 16 + dy, x + dx
-                        if 0 <= zi < K and 0 <= yi < J and 0 <= xi < I:
-                            arr[zi, yi, xi] = 2500.0
-    log = np.where(arr > 1000.0, -arr, np.zeros_like(arr)).astype(np.float32)
-    return {
-        "ct_arr_kji":     arr,
-        "log":            log,
-        "ras_to_ijk_mat": np.eye(4),
-        "ijk_to_ras_mat": np.eye(4),
-    }
-
-
-def _seeds_for_two_tubes():
-    return [
-        {"start_ras": np.array([10, 16, 0],  dtype=float),
-         "end_ras":   np.array([10, 16, 40], dtype=float)},
-        {"start_ras": np.array([22, 16, 0],  dtype=float),
-         "end_ras":   np.array([22, 16, 40], dtype=float)},
-    ]
-
-
-def _trivial_library():
-    pitch = 3.5
-    n = 8
-    return [{
-        "id": "SYNTH-8",
-        "vendor": "test",
-        "n_contacts": n,
-        "pitch_mm": pitch,
-        "contact_center_offsets_from_tip_mm": [k * pitch for k in range(n)],
-        "active_length_mm": (n - 1) * pitch + pitch,
-        "diameter_mm": 1.3,
-    }]
-
-
-class TwoPassTests(unittest.TestCase):
-    def test_returns_one_ctx_per_seed(self):
-        out = run_two_pass(
-            _seeds_for_two_tubes(),
-            features=_two_seed_synthetic_features(),
-            library_models=_trivial_library(),
-        )
-        self.assertEqual(len(out), 2)
-        for c in out:
-            self.assertIn("compound_score", c.score_components)
-            self.assertIn(c.score_components["band"], {"high", "medium", "low"})
-
-    def test_other_centerlines_excludes_self(self):
-        # Pass 2 should set ``other_centerlines`` to all OTHER pass-1
-        # centerlines. We can't observe this directly through the public
-        # API, but we can verify it doesn't crash with a single seed.
-        out = run_two_pass(
-            _seeds_for_two_tubes()[:1],
-            features=_two_seed_synthetic_features(),
-            library_models=_trivial_library(),
-        )
-        self.assertEqual(len(out), 1)
 
 
 class ApplySubjectFftNormalizationTests(unittest.TestCase):

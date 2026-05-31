@@ -1,8 +1,10 @@
 """Single-seed staged placement composer.
 
-``place_seed`` runs Stages A → F.3 once for one seed pair. For multi-seed
-two-pass cross-shank-aware placement, use ``run_two_pass``. For the user-facing
-mode dispatcher (CT-only, count-only, etc.), use ``rosa_core.placement_modes``.
+``place_seed`` runs Stages A → F.3 once for one seed pair. It's the staged
+single-seed fallback for an auto-missed user seed in modes 4/5; the canonical
+auto/seeded placement engine is the snap-flow (``snap_fit_to_ctxs``). For the
+user-facing mode dispatcher (CT-only, count-only, etc.), use
+``rosa_core.placement_modes``.
 
 ``place_v3`` is a deprecated alias kept until Slicer Auto-Fit migrates in
 Session 4.

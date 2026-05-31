@@ -69,7 +69,6 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     # See handoff_v3_production_lift_2026-05-09.md.
     "PlacementCtx":                                       ("contact_placement", "PlacementCtx"),
     "place_seed":                                         ("contact_placement", "place_seed"),
-    "run_two_pass":                                       ("contact_placement", "run_two_pass"),
     "apply_subject_fft_normalization":                    ("contact_placement", "apply_subject_fft_normalization"),
     # placement_modes — 5-mode user-facing API.
     "PlacedTrajectory":                                   ("placement_modes", "PlacedTrajectory"),

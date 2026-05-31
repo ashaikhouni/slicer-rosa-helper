@@ -9,7 +9,7 @@ Encapsulates the boilerplate currently duplicated across the QC notebook,
   3. Run ``primitives.bolt_anchor.extract_bolt_candidates`` → bolt CC list.
 
 Returned tuple ``(features, bolts)`` is exactly what
-``rosa_core.contact_placement.run_two_pass`` consumes.
+``rosa_core.placement_modes.place_seeg`` consumes.
 
 Slicer paths (vtkMRMLScalarVolumeNode → SITK) keep using
 ``rosa_scene.sitk_volume_adapter.prepare_detection_context``; this module
