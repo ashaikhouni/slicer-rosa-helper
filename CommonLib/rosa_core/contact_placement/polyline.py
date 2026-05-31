@@ -156,9 +156,9 @@ def extend_centerline_tail(centerline: np.ndarray, extra_mm: float) -> np.ndarra
 def min_dist_pts_to_polyline(pts: np.ndarray, polyline: np.ndarray) -> np.ndarray:
     """Min distance from each point in ``pts`` ``(n, 3)`` to any polyline segment.
 
-    Vectorized closed-form. Used by the cross-shank ownership mask in the
-    walker (``stage_c_sample``) and the LoG snap (``snap_centerline_owned``).
-    Returns ``(n,)`` array of distances; ``inf`` when polyline has < 2 points.
+    Vectorized closed-form. Returns ``(n,)`` array of distances; ``inf`` when
+    the polyline has < 2 points. (General polyline primitive — was the
+    cross-shank ownership mask's distance test before that path was retired.)
     """
     if len(polyline) < 2:
         return np.full(pts.shape[0], np.inf, dtype=float)

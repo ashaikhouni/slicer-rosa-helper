@@ -46,10 +46,10 @@ def refine_deep_end_via_axis_log(rec, log_arr, ras_to_ijk_mat,
 
     When ``others`` is provided (a list of other trajectory records),
     the disk sampler skips voxels that sit closer to any neighbour's
-    axis than to ours — same ownership pattern as
-    ``snap_centerline_owned``. This prevents the disk-sampling at
-    radii 1.5/2.5 mm from leaking into a kissing-partner's contacts
-    and driving spurious extension into a gap (T1/6,3 + T1/7,4).
+    axis than to ours (a local closest-axis ownership test). This
+    prevents the disk-sampling at radii 1.5/2.5 mm from leaking into a
+    kissing-partner's contacts and driving spurious extension into a
+    gap (T1/6,3 + T1/7,4).
 
     Returns a new ``end_ras`` point or ``None`` when neither direction
     finds a contact peak (end is far from any contact signal).
