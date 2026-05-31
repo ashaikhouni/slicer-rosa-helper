@@ -445,26 +445,19 @@ class T18LogTests(unittest.TestCase):
         )
         self.sample_fn = sample_neg_log_max
 
-    # TRACKED RED (detection-parity gap, PR-B): place_seeg's snap-flow lands
-    # 11/13 model picks on T18 vs the >=12 aspiration (fit-rosa CLI --auto = 12/13;
-    # the gap is generate_candidate_seeds vs run_contact_pitch_v1). Runs only on a
-    # box with the T18 dataset + eval_seeg_localization (skips in CI). Marked
-    # expectedFailure so the dataset box reports XFAIL (honest signal) and flips to
-    # an alerting "unexpected success" when PR-B closes the gap — remove the marker
-    # then. (Mode 5 now provably inherits mode 1's picks, so this tracks mode 1.)
-    @unittest.expectedFailure
     def test_t18_mode5_matches_mode1_picks(self):
         """Mode 5 (match-to-auto): T18 GT seeds match the auto emissions, then
         each matched emission's pick is compared against GT model_id.
 
         Match-to-auto inherits the matched emission's pick, so mode 5's picks
-        now provably EQUAL mode 1's picks (same canonical snap-flow engine —
-        the placement consolidation). The shared target therefore tracks the
-        mode-1 test: >= n-1 of n. place_seeg's snap-flow currently lands 11/13
-        on T18 (X03 under-picks 18AM->12AM, X07 over-picks 15AM->18AM) — the
-        same place_seeg-vs-fit-rosa **detection front-end parity** gap mode 1
-        has (fit-rosa CLI --auto = 12/13); closing it is PR-B (route the v1
-        detector mask through the shared selector), not this change.
+        provably EQUAL mode 1's picks (same canonical snap-flow engine). Now
+        passes the >= n-1 (12/13) target: the no_metal_rerank extent-aware-verify
+        fix recovered X03 (was under-picking 18AM->12AM because the verifier
+        re-substituted the corr-best sub-segment 12AM instead of verifying the
+        extent-aware 18AM). The lone remaining miss is X07 (over-picks
+        15AM->18AM) — an acceptable over-pick (the extra contacts fall in the
+        bolt, out of brain), so 12/13 clears the >= n-1 bar. Mode 1's stricter
+        ==13 stays xfail on that X07 over-pick.
 
         Without match-to-auto (per-seed placement on raw GT axes), mode 5 gets
         ~9/13 — see Session 2 commit message.
@@ -509,9 +502,12 @@ class T18LogTests(unittest.TestCase):
             f"{[(t.name, t.model_id, gt_model_by_name.get(t.name)) for t in batch.trajectories]}",
         )
 
-    # TRACKED RED (detection-parity gap, PR-B): same 11/13 snap-flow picks as
-    # mode 5 above; dataset+eval-gated (skips in CI). expectedFailure → XFAIL on
-    # the dataset box, "unexpected success" alert when PR-B reaches 13/13.
+    # TRACKED RED: this asserts a STRICT 13/13 (despite the name). The picker
+    # lands 12/13 on T18 — X03 is now correct (no_metal_rerank extent-aware-verify
+    # fix), leaving only X07, which over-picks 15AM->18AM. That over-pick is
+    # acceptable (extra contacts fall in the bolt, out of brain), so the strict
+    # 13/13 stays an expected failure while mode 5's >= n-1 passes. Dataset+eval-
+    # gated (skips in CI). Drop the marker only if X07 is reclassified as correct.
     @unittest.expectedFailure
     def test_t18_mode1_model_picks_at_least_12_of_13(self):
         """Mode 1 (full auto via candidate-seeds + two-pass): notebook 13/13.
@@ -601,11 +597,11 @@ class T18LogTests(unittest.TestCase):
             f"got {len(e_to_g)}/{n_gt} matched.",
         )
 
-    # TRACKED RED (detection-parity gap, PR-B + duplicate-model arbitrariness):
-    # named assignment of the snap-flow emissions lands <12/13 on T18 (the same
-    # parity gap as mode 1, compounded by arbitrary correspondence among the 4
-    # duplicate models). Dataset+eval-gated (skips in CI). expectedFailure → XFAIL
-    # on the dataset box; revisit when PR-B closes the parity gap.
+    # TRACKED RED (duplicate-model arbitrariness + X07 over-pick): named
+    # assignment of the snap-flow emissions lands <12/13 on T18 — the X07
+    # 15AM->18AM over-pick (acceptable, bolt-region) plus arbitrary
+    # correspondence among the 4 duplicate models (per-name swaps are
+    # CT-unresolvable). Dataset+eval-gated (skips in CI). expectedFailure → XFAIL.
     @unittest.expectedFailure
     def test_t18_mode3_named_assignment_matches_gt_models(self):
         """Mode 3: ``expected = [(name, model_id)]`` from curated GT →

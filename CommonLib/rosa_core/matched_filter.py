@@ -464,9 +464,21 @@ def no_metal_rerank(
     signal: np.ndarray,
     anchor_arc: float = 0.0,
     frac: float = 0.30,
+    current_id: str | None = None,
 ) -> str | None:
     """Downgrade-only verifier: swap to a shorter model when the
     picked model places interior contacts on no-metal in-brain.
+
+    ``current_id`` is the pick being verified — the model the verifier
+    starts from and downgrades only if it has in-brain dead slots. It
+    defaults to ``res.best_model_id`` (the raw matched-filter corr winner),
+    but callers that have already chosen a different pick should pass it:
+    in particular the AM/MM family routes through ``extent_aware_pick``
+    first (coverage-weighted, promotes the fuller longer model), and the
+    verifier must downgrade THAT pick — not silently re-substitute the
+    raw corr winner, which would discard the extent-aware decision (e.g.
+    T18/X03: extent-aware picks 18AM, raw corr-best is the sub-segment
+    12AM; verifying 18AM keeps it since it has 0 dead slots).
 
     A slot is "in-brain dead" when ``arc >= anchor_arc`` AND
     ``signal[at slot] < frac * max(signal[arc >= anchor_arc])``.
@@ -491,15 +503,16 @@ def no_metal_rerank(
     upgrade conservative. A width-profile-based discriminator is the
     likely path forward; left for follow-up.
     """
+    anchor_id = current_id if current_id is not None else res.best_model_id
     pm = res.per_model
     if not pm:
-        return res.best_model_id
+        return anchor_id
     intra = arcs >= anchor_arc
     if not intra.any():
-        return res.best_model_id
+        return anchor_id
     smax = float(np.nanmax(signal[intra]))
     if smax <= 0:
-        return res.best_model_id
+        return anchor_id
     thr = frac * smax
 
     def in_brain_dead(r: MatchedFilterResult) -> int:
@@ -518,13 +531,13 @@ def no_metal_rerank(
                 n_dead += 1
         return n_dead
 
-    cur = next((r for r in pm if r.best_model_id == res.best_model_id),
+    cur = next((r for r in pm if r.best_model_id == anchor_id),
                None)
     if cur is None:
-        return res.best_model_id
+        return anchor_id
     cur_dead = in_brain_dead(cur)
     if cur_dead == 0:
-        return res.best_model_id
+        return anchor_id
 
     ranked = [(in_brain_dead(r), -float(r.corr), r.best_model_id)
               for r in pm]
@@ -532,7 +545,7 @@ def no_metal_rerank(
     best_dead, _, best_id = ranked[0]
     if best_dead < cur_dead:
         return best_id
-    return res.best_model_id
+    return anchor_id
 
 
 __all__ = [
