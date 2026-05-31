@@ -302,6 +302,13 @@ def run_contact_pitch_v1_with_features(
                 return_features=True,
                 progress_logger=logger,
                 pitch_strategy=pitch_strategy,
+                # Standalone detect: the intracranial mask is viz-only (the
+                # Slicer Auto-Fit overlay). Default cheap (build_masks) — a
+                # caller opts into shared-selector parity by setting
+                # ctx["mask_backend"] (e.g. "auto"), accepting the SynthStrip
+                # cost on the detect button.
+                mask_backend=ctx.get("mask_backend"),
+                synthstrip_path=ctx.get("synthstrip_path"),
             )
 
         trajectories, features = diag.run_stage("detect", _run_detect)
