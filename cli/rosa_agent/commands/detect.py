@@ -65,10 +65,10 @@ def run_guided_detect(
 
     When ``match_against_auto`` is True (default), runs Auto Fit
     internally once and matches each seed against the resulting
-    trajectories before falling back to PCA. This eliminates the failure
-    class where a planned seed is laterally offset from the imaged shank
-    by more than the PCA ROI radius (e.g. T22/LMFG: planned-vs-imaged
-    drift drops to "too few LoG blobs in ROI" without auto-match).
+    trajectories before falling back to the canonical snap. Matching to a
+    walker-validated auto emission recovers seeds that are laterally
+    offset from the imaged shank far enough that the per-seed snap could
+    drift or miss (e.g. T22/LMFG planned-vs-imaged drift).
 
     Returns a list of trajectory dicts shaped like ``DetectedTrajectory``.
     """
@@ -123,7 +123,7 @@ def run_guided_detect(
             "confidence_label": str(fit.get("confidence_label") or ""),
             "electrode_model": seed.get("electrode_model") or "",
             "bolt": {"source": str(fit.get("bolt_source") or "none")},
-            "matched_path": fit.get("matched_path", "pca"),
+            "matched_path": fit.get("matched_path", "snap"),
         }
         if fit.get("skull_entry_ras"):
             traj["skull_entry_ras"] = list(fit["skull_entry_ras"])
@@ -150,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         default=True,
         help="Skip the Auto Fit pass that --seeds normally runs to match "
-             "seeds against; falls back to pure PCA fit_trajectory.",
+             "seeds against; each seed is snapped with the per-seed "
+             "canonical snap (fit_trajectory) only.",
     )
     args = parser.parse_args(argv)
 

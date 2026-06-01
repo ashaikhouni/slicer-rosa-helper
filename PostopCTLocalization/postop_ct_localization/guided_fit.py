@@ -43,14 +43,14 @@ class GuidedFitWidgetMixin:
         layout = qt.QVBoxLayout(tab)
 
         info = qt.QLabel(
-            "Snap seeded trajectories to the actual imaged shank. The "
-            "engine collects LoG \u03c3=1 blobs inside a cylindrical ROI "
-            "around each seed axis, fits the main line via "
-            "amplitude-weighted PCA (wide \u2192 tight re-fit), then "
-            "anchors the shallow end to the bolt CC and refines the "
-            "deep end via axis-LoG. Same scanner-agnostic signal as "
-            "Auto Fit; output shape is the same too (bolt tip + skull "
-            "entry + deep tip)."
+            "Snap seeded trajectories to the actual imaged shank using the "
+            "same engine as Auto Fit and the CLI (the canonical snap-flow): "
+            "an on-axis contact-peak walk along each seed. The snapped "
+            "trajectory runs from the shallowest detected contact to the "
+            "deepest. If a seed lands near an existing Auto Fit trajectory "
+            "it inherits that walker-validated result instead. Review the "
+            "snapped lines here, then place contacts in Contacts & "
+            "Trajectory View."
         )
         info.wordWrap = True
         info.setMinimumWidth(0)
@@ -121,11 +121,11 @@ class GuidedFitWidgetMixin:
         self.guidedRoiRadiusSpin.setValue(float(gfe.DEFAULT_ROI_RADIUS_MM))
         self.guidedRoiRadiusSpin.setSuffix(" mm")
         self.guidedRoiRadiusSpin.setToolTip(
-            "Perpendicular distance from the seed axis within which "
-            "LoG blobs are accepted for the initial PCA. After the "
-            "rough axis is found, a tight 1.5 mm cylinder around "
-            "that axis drops cross-shank contamination before the "
-            "final fit."
+            "Legacy knob — no longer used by the snap. The canonical "
+            "snap-flow walks the on-axis contact-peak profile rather than "
+            "collecting a perpendicular cylinder of blobs, so this radius "
+            "has no effect. The Max angle / Max lateral shift knobs still "
+            "gate the snap."
         )
         self.guidedRoiRadiusSpin.setMinimumWidth(0)
         self.guidedRoiRadiusSpin.setSizePolicy(
@@ -730,7 +730,7 @@ class GuidedFitWidgetMixin:
         # trajectories in the workflow, prefer matching seeds to those —
         # the user gets walker-validated, post-anchor-Frangi-gated,
         # wire-class-aware results inherited verbatim. Falls back to the
-        # PCA fit (Phase 1) when no auto trajectory falls within the
+        # canonical snap (Phase 1) when no auto trajectory falls within the
         # seed's tolerance window, or when Auto Fit hasn't been run yet.
         try:
             auto_trajs = self.logic.collect_trajectories_by_source(
@@ -746,7 +746,7 @@ class GuidedFitWidgetMixin:
         else:
             self.log(
                 "[guided] no Auto Fit trajectories in workflow; "
-                "running PCA fit only (tip: run Auto Fit first to "
+                "running snap fit only (tip: run Auto Fit first to "
                 "inherit walker + score)"
             )
 
@@ -927,7 +927,7 @@ class GuidedFitWidgetMixin:
             applied_nodes.append(node)
             self._set_seed_status(row, True)
             anchored = "bolt" if fit.get("bolt_anchored") else "no-bolt"
-            source_tag = "auto-match" if fit.get("matched_auto_source") else "pca-fit"
+            source_tag = "auto-match" if fit.get("matched_auto_source") else "snap-fit"
             self.log(
                 "[guided] {n}: {src}  angle={a:.2f}°  lat={l:.2f} mm  "
                 "n={ni}  len={L:.1f} mm  {anc}".format(
