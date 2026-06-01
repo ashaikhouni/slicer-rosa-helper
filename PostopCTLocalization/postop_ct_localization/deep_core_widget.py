@@ -118,17 +118,17 @@ class ContactPitchV1WidgetMixin:
         button_row.addStretch(1)
         form.addRow(button_row)
 
-        # Pitch strategy controls both the walker's candidate pitches
-        # and the manufacturer filter for the electrode-type suggestion.
-        # "Dixi AM" runs the legacy single 3.5 mm walker. "PMT 2102-XX-091"
-        # is the same 3.5 mm walker but with PMT vendor suggestions —
-        # the 2102-08/10/12/14/16-091 family all share Dixi's 3.5 mm
-        # pitch. "PMT (all)" adds PMT-16B (3.97 mm) / 16C (4.43 mm).
-        # "Dixi MM hybrid" covers the 9-contact MM08-09A33/40/51
-        # (3.9 / 4.8 / 6.1 mm pitches). "Dixi all" unions AM + MM so
-        # a subject with mixed families is handled in one pass.
-        # "Auto-detect" estimates pitch from the intracranial blob
-        # cloud's mutual-NN histogram.
+        # Pitch strategy controls the walker's candidate pitches (and, via
+        # _StrategyBoundsScope, the chain-geometry gates). "Dixi AM" runs the
+        # legacy single 3.5 mm walker. "PMT 2102-XX-091" is the same 3.5 mm
+        # walker (the 2102-08/10/12/14/16-091 family all share Dixi's 3.5 mm
+        # pitch). "PMT (all)" adds PMT-16B (3.97 mm) / 16C (4.43 mm). "Dixi MM
+        # hybrid" covers the 9-contact MM08-09A33/40/51 (3.9 / 4.8 / 6.1 mm
+        # pitches). "Dixi all" unions AM + MM so a subject with mixed families
+        # is handled in one pass. "Auto-detect" estimates pitch from the
+        # intracranial blob cloud's mutual-NN histogram. (The electrode MODEL
+        # is picked downstream during placement — detection only emits
+        # trajectories; the detection-time vendor classifier was removed.)
         from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.contactPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
@@ -144,10 +144,9 @@ class ContactPitchV1WidgetMixin:
         _auto_idx = self.contactPitchStrategyCombo.findData("auto")
         self.contactPitchStrategyCombo.setCurrentIndex(_auto_idx if _auto_idx >= 0 else 0)
         self.contactPitchStrategyCombo.setToolTip(
-            "Walker pitch set + suggestion vendor filter. Detection "
-            "results are identical across strategies that share the "
-            "same pitch set; only the suggested electrode model id "
-            "differs."
+            "Walker pitch set (+ chain-geometry gates). Detection results "
+            "are identical across strategies that share the same pitch set; "
+            "the electrode model is picked downstream during placement."
         )
         # Shrinkable: combos with long entries pin the form's minimum
         # width unless we cap the contents length and let the widget
@@ -175,29 +174,9 @@ class ContactPitchV1WidgetMixin:
         )
         form.addRow("Status:", self.contactPitchStatusLabel)
 
-    # Vendor sets implied by each strategy. Mirrors
-    # ``PITCH_STRATEGY_VENDORS`` in ``rosa_core.electrode_classifier`` —
-    # duplicated here so the widget can log sensible messages without
-    # importing the classifier module just for a string lookup.
-    _CONTACT_PITCH_STRATEGY_VENDORS = {
-        "dixi":     ("Dixi",),
-        "dixi_mm":  ("Dixi",),
-        "dixi_all": ("Dixi",),
-        "pmt_35":   ("PMT",),
-        "pmt":      ("PMT",),
-        "mixed":    ("Dixi", "PMT"),
-        "medtronic": ("Medtronic",),
-        "auto":     ("Dixi", "PMT", "AdTech"),
-    }
-
     def _selected_contact_pitch_strategy(self):
         data = self.contactPitchStrategyCombo.currentData
         return str(data or "dixi")
-
-    def _selected_contact_pitch_vendors(self):
-        return self._CONTACT_PITCH_STRATEGY_VENDORS.get(
-            self._selected_contact_pitch_strategy(), ("Dixi",),
-        )
 
     def onRunContactPitchV1Clicked(self):
         volume_node = self.ctSelector.currentNode()
@@ -216,9 +195,6 @@ class ContactPitchV1WidgetMixin:
             ctx = self.logic.build_detection_context(volume_node)
             strategy_key = self._selected_contact_pitch_strategy()
             ctx["contact_pitch_v1_pitch_strategy"] = strategy_key
-            ctx["contact_pitch_v1_vendors"] = list(
-                self._selected_contact_pitch_vendors()
-            )
 
             def _progress(msg):
                 self.contactPitchStatusLabel.setText(str(msg))

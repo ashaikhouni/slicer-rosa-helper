@@ -1226,10 +1226,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
           * At least one row has model_id="" → mode 5
             (library matching via snap-to-v1).
 
-        Both modes snap the user-supplied seed to its closest v1 candidate
-        emission (inheriting bolt-anchored geometry) before running the
-        placer's stages A→F. Falls back to per-seed placement when no
-        v1 candidate is within tolerance.
+        Both modes match the user-supplied seed to its closest auto (v1)
+        emission and inherit that emission's snap-flow geometry + pick
+        (mode 4 then forces the vouched model on that geometry). Falls back
+        to a staged per-seed placement when no auto emission is within
+        tolerance.
 
         Same code path as the CLI's ``rosa-agent place`` — keeps Slicer
         and CLI bit-identical on the algorithm side.
