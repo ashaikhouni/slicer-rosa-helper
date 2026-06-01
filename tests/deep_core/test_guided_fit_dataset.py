@@ -122,16 +122,19 @@ class GuidedFitDatasetRegressionTests(unittest.TestCase):
     def test_each_gt_shank_recoverable_from_self_seed(self):
         """Seeding fit_trajectory with the GT axis must recover the shank.
 
-        This is the strongest pin against silent geometry drift: if the
-        canonical-grid IJK<->RAS matrices were broken, the wide-cylinder
-        ROI would land on the wrong voxels and zero shanks would
-        recover.
+        ``fit_trajectory`` now runs the CANONICAL snap-flow
+        (``run_seeded_fit`` -> ``snap_via_signal_walk``) — the same engine
+        the ``fit-rosa`` CLI and ``place_seeg`` use. The entry is the
+        shallowest detected contact (no bolt walk), so the old
+        ``bolt_anchored`` assertion is gone; this pins recovery + that the
+        snapped geometry stays near the seed (the strongest check against
+        silent IJK<->RAS drift — a broken matrix would snap onto the wrong
+        voxels and recover nothing).
         """
         import numpy as np
         from rosa_detect import guided_fit_engine as gfe
 
         n_success = 0
-        n_bolt_anchored = 0
         worst_lateral_mm = 0.0
         worst_angle_deg = 0.0
 
@@ -145,10 +148,17 @@ class GuidedFitDatasetRegressionTests(unittest.TestCase):
             if not fit.get("success"):
                 continue
             n_success += 1
-            if bool(fit.get("bolt_anchored")):
-                n_bolt_anchored += 1
+            # The snapped trajectory must NOT bolt-anchor (snap-flow
+            # convention: entry = shallowest contact). skull_entry_ras /
+            # bolt_tip_ras are no longer emitted.
+            self.assertFalse(
+                bool(fit.get("bolt_anchored")),
+                "guided fit must not bolt-anchor under the snap-flow",
+            )
+            self.assertNotIn("skull_entry_ras", fit)
+            self.assertNotIn("bolt_tip_ras", fit)
             # Endpoint geometry should stay near the seed (axis prior is
-            # strong; the fit should snap to nearby contacts, not jump).
+            # strong; the snap should lock onto nearby contacts, not jump).
             fit_start = np.asarray(fit["start_ras"], dtype=float)
             fit_end = np.asarray(fit["end_ras"], dtype=float)
             fit_axis = (fit_end - fit_start)
@@ -165,25 +175,19 @@ class GuidedFitDatasetRegressionTests(unittest.TestCase):
             worst_lateral_mm = max(worst_lateral_mm, lateral_mm)
             worst_angle_deg = max(worst_angle_deg, angle_deg)
 
-        # Recovery budget: 8/9 on T22 today. The miss is LMFG, whose
-        # manually-snapped GT axis is offset > 2 mm from the real shank
-        # (see project_gt_snapping_probe.md) so the wide-cylinder ROI
-        # doesn't pick up enough blobs. A regression below 8 means the
-        # geometry path is broken, not the GT.
+        # Recovery budget: the canonical snap recovers all 9 on T22 (the
+        # contact-peak walk picks up LMFG, whose offset manually-snapped GT
+        # the old wide-cylinder PCA missed — see project_gt_snapping_probe).
+        # Keep the floor at 8 so a single GT-snap edge case can't flake the
+        # gate; a drop below 8 means the IJK<->RAS geometry path is broken.
         self.assertGreaterEqual(
             n_success, 8,
             f"guided fit self-seed regressed: {n_success}/9 succeeded",
         )
-        self.assertGreaterEqual(
-            n_bolt_anchored, 7,
-            f"guided-fit bolt anchor regressed: {n_bolt_anchored}/9 anchored",
-        )
-        # Geometry budget: self-seed fit must stay close to the seed.
-        # Today's worst on T22: lateral 5.11 mm (LIFG), angle 5.10° (RCMN).
-        # Both numbers reflect contact-cloud PCA drift, not bugs. The
-        # threshold has to absorb that drift but stay tight enough that
-        # an LPS<->RAS sign flip — which would put the fit on the
-        # opposite hemisphere (60+ mm shift) — explodes the test.
+        # Geometry budget: the snapped fit must stay close to the seed.
+        # The snap axis is sub-2 deg vs the GT here; the threshold absorbs
+        # contact-cloud drift but stays tight enough that an LPS<->RAS sign
+        # flip (opposite hemisphere, 60+ mm) explodes the test.
         self.assertLess(
             worst_lateral_mm, 6.0,
             f"guided-fit lateral midpoint shift regressed: {worst_lateral_mm:.2f} mm",

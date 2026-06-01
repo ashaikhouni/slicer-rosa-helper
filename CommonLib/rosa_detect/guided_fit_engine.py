@@ -1,34 +1,29 @@
-"""LoG-based guided-fit engine.
+"""Guided-fit engine — snap seeded trajectories to metal.
 
-Given a planned/seeded trajectory (entry → target, RAS), snap it to
-the actual imaged shank using the same scanner-agnostic LoG σ=1 signal
-and bolt-anchor machinery that powers Auto Fit (``contact_pitch_v1``).
+Given planned/seeded trajectories (entry → target, RAS), snap each to the
+actual imaged shank. Used by the Slicer Guided Fit module and the CLI
+``rosa-agent detect --seeds``.
 
-The aim is to produce the same output shape as Auto Fit — bolt tip,
-skull entry, deep tip — so downstream modules can't tell whether a
-trajectory came from Auto Fit or Guided Fit.
+The snap itself (``fit_trajectory``) runs the CANONICAL snap-flow —
+``run_seeded_fit`` (``snap_via_signal_walk`` on-axis contact-peak walk +
+``arbitrate_shared_peaks``) — the SAME engine the ``fit-rosa`` CLI and
+``place_seeg`` use, so a seed snaps identically in Guided Fit, the CLI, and
+contact placement (one snapper everywhere). Entry = shallowest detected
+contact, tip = deepest; NO bolt walk (matching ``fit-rosa`` — a start beyond
+the bolt overshoots, and the downstream model fit owns contact placement).
+This replaced the old PCA-of-blobs-in-a-cylinder fit + bolt anchor, which
+had diverged from the snap-flow.
 
-Per trajectory:
-  1. Wide cylinder around the seed axis collects LoG regional-minima
-     blobs (``roi_radius_mm`` perp, ``along`` within the seed segment
-     ± end-pad).
-  2. Amplitude-weighted PCA on the wide set → rough axis.
-  3. Tight cylinder (``TIGHT_PERP_TOL_MM``) around the rough axis
-     rejects cross-shank contamination; re-fit PCA on the survivors
-     → final axis. This mirrors the "wide-then-refine" pattern that
-     contact_pitch_v1's arbitrator uses.
-  4. Gate on axis tilt + midpoint lateral shift.
-  5. Bolt anchor (``anchor_trajectory_to_bolt``): finds a hull-touching
-     LoG-bright CC along the fitted axis and produces both
-     ``bolt_tip_ras`` (outermost bolt voxel, shallow-side) and
-     ``skull_entry_ras`` (innermost bolt voxel in the skull/dura band).
-  6. Endpoints: shallowest/deepest inlier projections on the fit
-     axis, then the deep tip is refined via axis-directed LoG sampling
-     (bounded to ``DEEP_REFINE_MAX_EXTEND_MM`` — we have a strong
-     axis prior).
+``fit_seeds_against_auto`` is the per-seed entry point: it first tries to
+match each seed to an existing Auto Fit emission (``match_seed_to_auto_traj``;
+inherits the detector's walker-validated geometry) and otherwise snaps the
+seed with ``fit_trajectory``. ``compute_features`` does the one-time
+per-volume preprocessing (canonicalize + LoG/Frangi + blob cloud + bolts +
+shared-selector intracranial mask) both paths share.
 
-Fails gracefully: if no bolt anchors within tolerances, returns the
-PCA-based endpoints only and flags ``bolt_anchored=False``.
+Results carry Auto-Fit-equivalent score fields (confidence / label /
+bolt_source) via ``compute_trajectory_score`` so downstream UI treats Guided
+Fit and Auto Fit trajectories interchangeably.
 """
 from __future__ import annotations
 
@@ -38,7 +33,6 @@ import numpy as np
 
 from .candidate_seeds.blob_extraction import extract_blob_cloud_ras
 from .candidate_seeds.confidence_score import compute_trajectory_score
-from .candidate_seeds.deep_end_refine import refine_deep_end_via_axis_log
 from .candidate_seeds.frangi_sampling import frangi_along_line_stats
 from .candidate_seeds.metal_evidence import (
     compute_metal_evidence_volume,
@@ -47,7 +41,6 @@ from .candidate_seeds.metal_evidence import (
 from .primitives.bolt_anchor import (
     BOLT_HULL_PROXIMITY_MM,
     METAL_BOLT_THRESHOLD,
-    anchor_trajectory_to_bolt,
     extract_bolt_candidates,
 )
 from .primitives.geometry import sample_dist_at_ras
@@ -81,6 +74,11 @@ TIGHT_PERP_TOL_MM = 1.5
 # rescues merged-contact shafts (T2 RAI-style) without letting the
 # walker thread into brain-tissue LoG peaks 30+ mm past the real tip.
 DEEP_REFINE_MAX_EXTEND_MM = 5.0
+
+# LoG-neg metal threshold for the canonical snap walker (run_seeded_fit) —
+# notebook default; matches fit-rosa's LOG_NEG_THRESHOLD and seeded_fit's
+# _build_starter cell-1, so the guided snap behaves identically to the CLI.
+LOG_NEG_THRESHOLD = 300.0
 
 
 def _unit(v):
@@ -191,7 +189,7 @@ def match_seed_to_auto_traj(planned_start_ras, planned_end_ras, auto_trajs,
     For Phase 2 of Guided Fit ↔ Auto Fit unification: if Auto Fit has
     already detected a shank near the seed, Guided Fit should inherit
     that result (full walker validation + post-anchor scoring) rather
-    than re-derive a parallel PCA fit. Selection is closest by
+    than re-snap it independently. Selection is closest by
     ``angle + perpendicular-midpoint distance``, with auto-fit
     ``confidence`` as tie-break.
 
@@ -294,12 +292,25 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
                     max_angle_deg=DEFAULT_MAX_ANGLE_DEG,
                     max_lateral_shift_mm=DEFAULT_MAX_LATERAL_SHIFT_MM,
                     min_inliers=DEFAULT_MIN_INLIERS):
-    """Snap one seeded trajectory to the imaged shank.
+    """Snap one seeded trajectory to the imaged shank via the CANONICAL
+    snap-flow (``run_seeded_fit`` -> ``snap_via_signal_walk``).
 
-    Returns a dict with ``success`` and — on success — ``start_ras``
-    (bolt tip / outer end; falls back to the PCA shallow endpoint if
-    no bolt is found), ``end_ras`` (deep tip, refined), optionally
-    ``skull_entry_ras``, ``bolt_tip_ras``, plus per-fit diagnostics.
+    This is the SAME engine the ``fit-rosa`` CLI and ``place_seeg`` use, so
+    a seed snaps identically in Guided Fit, the CLI, and contact placement
+    (one snapper everywhere). The on-axis contact-peak walk replaces the
+    old PCA-of-blobs-in-a-cylinder fit.
+
+    Returns a dict with ``success`` and — on success — ``start_ras`` (the
+    shallowest detected contact), ``end_ras`` (the deepest detected
+    contact), ``axis_ras``, plus the Auto-Fit-equivalent score fields.
+
+    ``run_seeded_fit`` deliberately stops at the shallowest contact rather
+    than walking out to the bolt edge (a start *beyond* the bolt overshoots;
+    near-bolt contacts are unresolvable and the downstream model fit owns
+    contact placement). So Guided Fit no longer emits ``skull_entry_ras`` /
+    ``bolt_tip_ras`` and ``bolt_anchored`` is always False — matching
+    ``fit-rosa``. ``roi_radius_mm`` is accepted for API stability but unused
+    (the snap walks the on-axis profile, not a cylinder of blobs).
     """
     planned_start = np.asarray(planned_start_ras, dtype=float).reshape(3)
     planned_end = np.asarray(planned_end_ras, dtype=float).reshape(3)
@@ -307,87 +318,70 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
     planned_length = float(np.linalg.norm(planned_vec))
     if planned_length < 1e-3:
         return {"success": False, "reason": "planned trajectory has zero length"}
-    # Structured warnings: any score-affecting fallback (failed deep-end
-    # refinement, bolt anchor, dist sampling, Frangi, frac-strong-metal)
-    # appends a one-line reason here. The caller surfaces these via
-    # ``self.log`` so a silent fallback can never mask a regression.
+    # Structured warnings: any score-affecting fallback (amp / dist
+    # sampling, Frangi, frac-strong-metal) appends a one-line reason here.
+    # The caller surfaces these via ``self.log`` so a silent fallback can
+    # never mask a regression.
     warnings: list[str] = []
     planned_axis = planned_vec / planned_length
 
-    pts_ras = features.get("blob_pts_ras")
-    amps = features.get("blob_amps")
-    if pts_ras is None or amps is None:
-        # Lazy extraction if compute_features was skipped
-        pts_ras, amps = extract_blob_cloud_ras(
-            features["log"], np.asarray(ijk_to_ras_mat, dtype=float),
-        )
-    if pts_ras.shape[0] == 0:
-        return {"success": False, "reason": "no LoG blobs in volume"}
+    log_arr = features.get("log")
+    if log_arr is None:
+        return {"success": False, "reason": "features missing 'log' volume"}
+    ras_to_ijk = np.asarray(ras_to_ijk_mat, dtype=float)
+    log_neg = np.clip(-np.asarray(log_arr), 0.0, None).astype("float32", copy=False)
 
-    # ---- Pass 1: wide cylinder around the seed axis ------------------
-    diffs = pts_ras - planned_start
-    along = diffs @ planned_axis
-    perp = diffs - np.outer(along, planned_axis)
-    perp_d = np.linalg.norm(perp, axis=1)
-    in_roi = (
-        (perp_d <= float(roi_radius_mm))
-        & (along >= -AXIS_END_PAD_MM)
-        & (along <= planned_length + AXIS_END_PAD_MM)
+    # ---- Canonical snap (run_seeded_fit): on-axis contact-peak walk -----
+    # Single source of truth for "snap a seed to metal" — the SAME engine
+    # the fit-rosa CLI and place_seeg use. Entry = shallowest detected
+    # contact, tip = deepest. No bolt walk. Lazy import avoids a load-time
+    # rosa_core <-> rosa_detect cycle.
+    from rosa_core.seeded_fit import run_seeded_fit
+    chains = run_seeded_fit(
+        [{"name": "seed", "start": planned_start, "end": planned_end}],
+        signal_vol=log_neg, threshold=LOG_NEG_THRESHOLD,
+        ras_to_ijk=ras_to_ijk, bolt_signal_vol=features.get("metal_evidence"),
     )
-    wide_pts = pts_ras[in_roi]
-    wide_amps = amps[in_roi]
-    n_wide = int(wide_pts.shape[0])
-    if n_wide < int(min_inliers):
+    chain = chains[0] if chains else None
+    if chain is None:
         return {
             "success": False,
-            "reason": f"too few LoG blobs in ROI ({n_wide} < {int(min_inliers)})",
-            "n_inliers": n_wide,
+            "reason": "snap found no contact chain (off-metal seed / too few peaks)",
+            "n_inliers": 0,
         }
 
-    centroid_rough, axis_rough = _pca_axis(wide_pts, wide_amps)
-    if float(np.dot(axis_rough, planned_axis)) < 0:
-        axis_rough = -axis_rough
-
-    # ---- Pass 2: tight cylinder around the rough axis ----------------
-    # This drops cross-shank contacts that drifted into the wide ROI
-    # and locks PCA onto the MAIN LINE of contacts belonging to the
-    # seeded shank.
-    diffs_rough = wide_pts - centroid_rough
-    along_rough = diffs_rough @ axis_rough
-    perp_rough = diffs_rough - np.outer(along_rough, axis_rough)
-    perp_rough_d = np.linalg.norm(perp_rough, axis=1)
-    tight_mask = perp_rough_d <= TIGHT_PERP_TOL_MM
-    tight_pts = wide_pts[tight_mask]
-    tight_amps = wide_amps[tight_mask]
-    n_tight = int(tight_pts.shape[0])
-    if n_tight < int(min_inliers):
-        # Not enough contacts sit on the main line; fall back to the
-        # wide set but flag that the refit was degraded.
-        tight_pts = wide_pts
-        tight_amps = wide_amps
-        n_tight = n_wide
-        tight_pass = False
-    else:
-        tight_pass = True
-
-    centroid, fit_axis = _pca_axis(tight_pts, tight_amps)
+    fit_axis = _unit(chain["axis"])
     if float(np.dot(fit_axis, planned_axis)) < 0:
         fit_axis = -fit_axis
+    shallow_ras = np.asarray(chain["entry_ras"], dtype=float)
+    deep_ras = np.asarray(chain["tip_ras"], dtype=float)
+    tight_pts = np.asarray(chain.get("kept_pts"), dtype=float).reshape(-1, 3)
+    n_tight = int(tight_pts.shape[0])
+    n_wide = n_tight
+    tight_pass = True
+    if n_tight < int(min_inliers):
+        return {
+            "success": False,
+            "reason": f"snap chain too short ({n_tight} < {int(min_inliers)} contacts)",
+            "n_inliers": n_tight,
+        }
+    centroid = tight_pts.mean(axis=0)
 
+    # ---- Sanity gates vs the seed (flag a snap that drifted off-shank) --
     cos = float(np.clip(abs(np.dot(fit_axis, planned_axis)), 0.0, 1.0))
     angle_deg = float(np.degrees(np.arccos(cos)))
     if angle_deg > float(max_angle_deg):
         return {
             "success": False,
-            "reason": f"axis tilt {angle_deg:.1f}° > {float(max_angle_deg):.1f}°",
+            "reason": f"axis tilt {angle_deg:.1f} deg > {float(max_angle_deg):.1f} deg",
             "n_inliers": n_tight,
             "angle_deg": angle_deg,
         }
 
     planned_mid = 0.5 * (planned_start + planned_end)
     mid_offset = centroid - planned_mid
-    along_mid = float(np.dot(mid_offset, planned_axis))
-    lat_offset = mid_offset - along_mid * planned_axis
+    along_mid = float(np.dot(mid_offset, fit_axis))
+    lat_offset = mid_offset - along_mid * fit_axis
     lateral_shift_mm = float(np.linalg.norm(lat_offset))
     if lateral_shift_mm > float(max_lateral_shift_mm):
         return {
@@ -401,81 +395,37 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
             "lateral_shift_mm": lateral_shift_mm,
         }
 
-    # ---- Endpoints from inlier projections + axis-LoG refinement ----
-    proj_fit = (tight_pts - centroid) @ fit_axis
-    shallow_along = float(proj_fit.min())
-    deep_along = float(proj_fit.max())
-    shallow_ras = centroid + shallow_along * fit_axis
-    deep_ras = centroid + deep_along * fit_axis
-
-    # Orient shallow → deep based on proximity to the planned start.
-    if (np.linalg.norm(shallow_ras - planned_start)
-            > np.linalg.norm(deep_ras - planned_start)):
-        shallow_ras, deep_ras = deep_ras, shallow_ras
-        fit_axis = -fit_axis
-
-    rec = {"start_ras": shallow_ras, "end_ras": deep_ras}
+    # ---- Amplitudes at the snapped contacts (for the score's amp term):
+    # sample the LoG-neg metal signal directly at each kept contact.
+    from rosa_core.volume_sampling import sample_trilinear_batch
     try:
-        refined_end = refine_deep_end_via_axis_log(
-            rec, features["log"], np.asarray(ras_to_ijk_mat, dtype=float),
-            max_extend_mm=DEEP_REFINE_MAX_EXTEND_MM,
+        tight_amps = np.nan_to_num(
+            np.asarray(sample_trilinear_batch(log_neg, ras_to_ijk, tight_pts),
+                       dtype=float),
+            nan=0.0,
         )
-        if refined_end is not None:
-            deep_ras = np.asarray(refined_end, dtype=float)
     except Exception as exc:
-        warnings.append(f"deep-end LoG refinement skipped: {exc}")
+        warnings.append(f"amp sampling failed, using zeros: {exc}")
+        tight_amps = np.zeros(n_tight, dtype=float)
 
-    # ---- Bolt anchor: produces bolt_tip_ras + skull_entry_ras -------
-    # Try both orientations (shallow→deep and deep→shallow) and keep
-    # whichever has more bolt-tube voxels — mirrors the auto-fit
-    # ``_anchor_or_reject`` strategy. Necessary because seed sources
-    # don't all use the same start=bolt convention; an upstream-flipped
-    # seed would otherwise force the anchor to look for the bolt at
-    # the deep-tip end and silently miss it.
-    bolt_tip_ras = None
+    # Entry = shallowest contact; NO bolt anchor. run_seeded_fit stops at
+    # the shallowest contact and never walks out to the bolt edge, so
+    # Guided Fit no longer emits skull_entry_ras / bolt_tip_ras and
+    # bolt_anchored is always False — identical to fit-rosa / place_seeg.
     skull_entry_ras = None
+    bolt_tip_ras = None
     bolt_n_vox = 0
-    bolts = features.get("bolts") or []
-    if bolts:
-        try:
-            fwd = anchor_trajectory_to_bolt(shallow_ras, deep_ras, bolts)
-            bwd = anchor_trajectory_to_bolt(deep_ras, shallow_ras, bolts)
-            fwd_n = int(fwd[2].get("tube_n_vox", 0)) if fwd[2] is not None else 0
-            bwd_n = int(bwd[2].get("tube_n_vox", 0)) if bwd[2] is not None else 0
-            if bwd_n > fwd_n:
-                # The fit's PCA orientation was inverted relative to the
-                # imaged shank's bolt→tip direction. Swap before storing
-                # the result so start_ras / end_ras carry the right
-                # bolt-side / deep-tip semantics.
-                shallow_ras, deep_ras = deep_ras, shallow_ras
-                fit_axis = -fit_axis
-                new_start, skull_entry, bolt = bwd
-            else:
-                new_start, skull_entry, bolt = fwd
-            if new_start is not None:
-                bolt_tip_ras = np.asarray(new_start, dtype=float)
-                if skull_entry is not None:
-                    skull_entry_ras = np.asarray(skull_entry, dtype=float)
-                bolt_n_vox = int(bolt.get("n_vox", 0))
-        except Exception as exc:
-            warnings.append(f"bolt anchor skipped: {exc}")
-
-    # Prefer the bolt_tip as the outer endpoint when available — that
-    # matches Auto Fit's convention and lets downstream code compute
-    # intracranial length as |skull_entry → deep|.
-    start_out = bolt_tip_ras if bolt_tip_ras is not None else shallow_ras
-
+    start_out = shallow_ras
     fit_length = float(np.linalg.norm(deep_ras - start_out))
 
     # Score the guided-fit result with the same rubric Auto Fit uses
     # so downstream UI (confidence filter, mark/remove, Trajectory
-    # Set table) treats the two sources interchangeably.
-    bolt_source = "metal" if bolt_tip_ras is not None else "none"
-    intracranial_endpoint = (
-        skull_entry_ras if skull_entry_ras is not None else start_out
-    )
+    # Set table) treats the two sources interchangeably. A successful
+    # snap chain sits on metal -> bolt_source "metal".
+    bolt_source = "metal"
+    intracranial_endpoint = start_out
     intra_length = float(np.linalg.norm(deep_ras - np.asarray(intracranial_endpoint, dtype=float)))
-    # Pre-anchor span and amp_sum: derived from the tight-refit inlier set.
+    # Contact span and amp_sum: derived from the snapped contact set.
     proj_centered = (tight_pts - centroid) @ fit_axis
     contact_span_mm = float(proj_centered.max() - proj_centered.min())
     amp_sum = float(np.sum(tight_amps))
@@ -494,7 +444,7 @@ def fit_trajectory(planned_start_ras, planned_end_ras, features,
             dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
     else:
         dist_min_mm = dist_max_mm = dist_mean_mm = float("nan")
-    # Frangi tubularity along the post-anchor axis.
+    # Frangi tubularity along the snapped axis.
     frangi_arr = features.get("frangi")
     frangi_mean_mm = frangi_median_mm = 0.0
     if frangi_arr is not None:
@@ -603,13 +553,14 @@ def fit_seeds_against_auto(
     min_inliers=DEFAULT_MIN_INLIERS,
     progress_log=None,
 ):
-    """Per-seed guided fit, match-against-auto then PCA fallback.
+    """Per-seed guided fit, match-against-auto then canonical-snap fallback.
 
     For each seed:
       1. If an auto trajectory is in tolerance (`max_angle_deg` /
          `max_lateral_shift_mm`), inherit its fit verbatim. Each auto
          trajectory can be claimed by at most one seed.
-      2. Otherwise, run ``fit_trajectory`` (PCA-based walker fit).
+      2. Otherwise, snap the seed with ``fit_trajectory`` (the canonical
+         snap-flow — ``run_seeded_fit`` / ``snap_via_signal_walk``).
 
     The auto trajectory pool comes from:
       * ``auto_trajs`` if explicitly supplied (Slicer passes its scene
@@ -643,7 +594,7 @@ def fit_seeds_against_auto(
         or ``fit_trajectory`` (``success``, ``start_ras`` / ``end_ras``
         on success, ``reason`` on failure), plus:
           * ``name``: the seed's name
-          * ``matched_path``: ``'auto'`` / ``'pca'`` / ``'failed'``
+          * ``matched_path``: ``'auto'`` / ``'snap'`` / ``'failed'``
     """
     log = progress_log if callable(progress_log) else (lambda _msg: None)
 
@@ -662,7 +613,7 @@ def fit_seeds_against_auto(
                 auto_trajs = list(auto_result.get("trajectories") or [])
                 log(f"[guided] auto fit produced {len(auto_trajs)} trajectories")
             except Exception as exc:
-                log(f"[guided] auto fit failed ({exc}); falling back to PCA-only")
+                log(f"[guided] auto fit failed ({exc}); falling back to snap-only")
                 auto_trajs = []
         else:
             auto_trajs = []
@@ -719,7 +670,7 @@ def fit_seeds_against_auto(
                     min_inliers=min_inliers,
                 )
                 fit = dict(fit)
-                fit["matched_path"] = "pca" if fit.get("success") else "failed"
+                fit["matched_path"] = "snap" if fit.get("success") else "failed"
             except Exception as exc:
                 log(f"[guided] {name}: fit_trajectory crashed ({exc})")
                 fit = {"success": False, "reason": f"crash: {exc}", "matched_path": "failed"}
