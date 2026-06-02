@@ -89,7 +89,7 @@ def _unit(v):
 
 def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
                      *, mask_backend="auto", brain_mask=None, synthstrip_path=None,
-                     log=None):
+                     compute_intracranial=True, log=None):
     """One-time preprocessing per volume. Runs the SAME pipeline-entry
     canonicalization (resample-to-1mm + anisotropic anti-alias +
     HU clamp) Auto Fit uses, then computes the same feature set —
@@ -107,12 +107,16 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
     the original (pre-resample) matrices would compute trajectories
     on a grid that doesn't match where the LoG / Frangi peaks live.
 
-    Brain mask: the ``intracranial`` mask (which drives the snap's bolt-end
-    anchoring) comes from the shared backend selector — ``mask_backend="auto"``
-    = SynthStrip-if-available → LoG-watershed; ``brain_mask`` (array/SITK image)
-    overrides. This matches the headless ``fit-rosa`` mask so the Slicer /
-    place_seeg snap anchors identically (CLI<->Slicer parity). ``build_masks``
-    still provides the hull + head-distance arrays (skull-synth / bolt extent).
+    Brain mask: the ``intracranial`` mask comes from the shared backend
+    selector — ``mask_backend="auto"`` = SynthStrip-if-available →
+    LoG-watershed; ``brain_mask`` (array/SITK image) overrides. It is the
+    expensive part of this function. It is consumed ONLY by the matched-filter
+    PICK (``place_seeg`` / ``fit-rosa`` proximal ``mf_anchor``), NOT by the snap
+    or by guided-fit scoring (which use the cheap ``build_masks`` head-distance).
+    So snap-only callers — Guided Fit and ``detect --seeds`` — pass
+    ``compute_intracranial=False`` to skip the SynthStrip/watershed build
+    entirely; ``intracranial`` is then ``None``. ``build_masks`` always provides
+    the hull + head-distance arrays (skull-synth / bolt extent / scoring depth).
     """
     import SimpleITK as sitk
     from .services.mask_backend import compute_intracranial_mask
@@ -120,10 +124,16 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
         img, ijk_to_ras_mat, ras_to_ijk_mat,
     )
     hull_arr, _intracranial_legacy, dist_arr = build_masks(img)
-    intracranial, _mask_backend_used = compute_intracranial_mask(
-        img, backend=mask_backend, brain_mask=brain_mask,
-        synthstrip_path=synthstrip_path, log=log,
-    )
+    if compute_intracranial:
+        intracranial, _mask_backend_used = compute_intracranial_mask(
+            img, backend=mask_backend, brain_mask=brain_mask,
+            synthstrip_path=synthstrip_path, log=log,
+        )
+    else:
+        # Snap-only caller: the intracranial mask is never read (the snap is
+        # mask-free; scoring uses the cheap build_masks head-distance), so we
+        # skip the expensive SynthStrip/watershed build.
+        intracranial = None
     log1 = log_sigma(img, sigma_mm=LOG_SIGMA_MM)
     frangi_s1 = frangi_single(img, sigma=FRANGI_STAGE1_SIGMA)
     ct_arr_kji = sitk.GetArrayFromImage(img).astype(np.float32)
