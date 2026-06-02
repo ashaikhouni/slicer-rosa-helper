@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROSA / SEEG browser tools</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 720px; margin: 2.5rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.5rem; margin-bottom: .2rem; }
+  .priv { background: #0a7d3322; border: 1px solid #0a7d3366; padding: .6rem .8rem; border-radius: 6px; }
+  ul.tools { list-style: none; padding: 0; }
+  ul.tools li { border: 1px solid #8884; border-radius: 8px; padding: .8rem 1rem; margin: .7rem 0; }
+  ul.tools a { font-size: 1.1rem; font-weight: 600; }
+  .muted { opacity: .7; font-size: .9rem; }
+  code { background: #8882; padding: 0 .25rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>ROSA / SEEG browser tools</h1>
+<p class="priv"><b>Everything runs in your browser.</b> These are static pages — nothing
+is uploaded, no server is involved, so they're safe to use on identifiable data.</p>
+
+<ul class="tools">
+  <li>
+    <a href="deidentify-ros/">ROSA <code>.ros</code> de-identifier</a>
+    <div class="muted">Strip PHI (name / birthday / acquisition date) from a ROSA case and
+    pseudonymise its DICOM Series UIDs while keeping the display↔series linkage. Pick the
+    case folder → download a clean <code>.zip</code> (renamed image dirs, no raw-DICOM zips,
+    no screenshots) + the planned-trajectory CSV, plus a private re-link key.</div>
+  </li>
+  <!-- Add more tools here as <li> entries; each lives in its own web/<tool>/ folder. -->
+</ul>
+
+<p class="muted">Source:
+<a href="https://github.com/ashaikhouni/slicer-rosa-helper/tree/main/web">github.com/ashaikhouni/slicer-rosa-helper/tree/main/web</a></p>
+</body>
+</html>

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROSA .ros de-identifier (runs in your browser)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: .2rem; }
+  .priv { background: #0a7d3322; border: 1px solid #0a7d3366; padding: .6rem .8rem; border-radius: 6px; }
+  .warn { background: #b4540022; border: 1px solid #b4540066; padding: .6rem .8rem; border-radius: 6px; }
+  fieldset { border: 1px solid #8884; border-radius: 6px; margin: 1rem 0; }
+  label { display: inline-block; }
+  input[type=text] { padding: .3rem .4rem; }
+  button { padding: .5rem .9rem; font-size: 1rem; border-radius: 6px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #log { white-space: pre-wrap; background: #8881; padding: .6rem .8rem; border-radius: 6px; min-height: 2rem; }
+  .dl { display: inline-block; margin: .3rem .5rem .3rem 0; }
+  code { background: #8882; padding: 0 .25rem; border-radius: 3px; }
+  .muted { opacity: .7; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>ROSA <code>.ros</code> case de-identifier</h1>
+<p class="priv"><b>Runs entirely in your browser.</b> Nothing is uploaded — your files
+never leave this computer. (This page is just static HTML/JS served by GitHub Pages;
+there is no server.)</p>
+
+<p>It removes the patient <b>name</b>, <b>birthday</b>, and <b>acquisition date</b>,
+and replaces every DICOM <b>Series UID</b> with a consistent token (so a display's
+<code>SERIE_UID</code> still matches its <code>VOLUME</code> path). It copies the
+image volumes (<code>.img</code>/<code>.hdr</code>/…) with each <code>DICOM/&lt;uid&gt;/</code>
+folder renamed to its token, <b>drops every <code>DICOMFiles.zip</code></b> (raw DICOM = full PHI),
+and excludes screenshots / <code>qc</code>. You get a clean <code>.zip</code> to share
+plus a <b>private key file</b> (keep it, never share) for re-linking to your own DICOM.</p>
+
+<fieldset>
+  <legend>1. Pick the case folder</legend>
+  <p><input type="file" id="folder" webkitdirectory directory multiple></p>
+  <p class="muted">Select the whole case folder (the one containing the <code>.ros</code> and <code>DICOM/</code>).
+  Or pick a single <code>.ros</code> file with the field below.</p>
+  <p><label>…or one <code>.ros</code> file: <input type="file" id="rosfile" accept=".ros"></label></p>
+</fieldset>
+
+<fieldset>
+  <legend>2. Subject ID</legend>
+  <label>Replace the patient name with: <input type="text" id="sid" placeholder="(defaults to the folder name)"></label>
+</fieldset>
+
+<p><button id="go" disabled>De-identify</button></p>
+
+<div id="log">Pick a case folder or a .ros file to begin.</div>
+<div id="downloads"></div>
+
+<p class="warn" id="keywarn" style="display:none"><b>The key file is PHI.</b>
+It maps the real name / UIDs back to the tokens — keep it private (do not put it in the shared zip).</p>
+
+<script>
+"use strict";
+// ----------------------------- core (DOM-free) -----------------------------
+const UID_RE = /\d+(?:\.\d+){4,}/g;            // DICOM UID: >=5 dot-separated integer groups
+const REDACT = { PATIENT_BIRTHDAY: "***", SERIE_DATE: "***" };
+const IMAGE_SUFFIXES = [".img", ".hdr", ".nii", ".nii.gz", ".nrrd", ".mgz", ".mha"];
+const isImage = (n) => IMAGE_SUFFIXES.some(s => n.toLowerCase().endsWith(s));
+
+async function sha1hex(str) {
+  const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+async function tokenFor(uid) { return "UID-" + (await sha1hex(uid)).slice(0, 12); }
+
+function splitKeepEnds(text) {           // lines WITH their \r\n / \n / \r terminators
+  const out = []; let i = 0;
+  while (i < text.length) {
+    let j = i;
+    while (j < text.length && text[j] !== "\n" && text[j] !== "\r") j++;
+    let end = j;
+    if (text[j] === "\r" && text[j + 1] === "\n") end = j + 2;
+    else if (text[j] === "\r" || text[j] === "\n") end = j + 1;
+    out.push(text.slice(i, end)); i = end;
+  }
+  return out;
+}
+const stripTerm = (line) => { const c = line.replace(/[\r\n]+$/, ""); return [c, line.slice(c.length)]; };
+
+// Mirrors rosa_core.ros_deidentify.deidentify_ros_text. Two passes: collect the
+// UIDs (SHA-1 is async), then rewrite synchronously.
+async function deidentifyRosText(text, subjectId, pseudonymize = true) {
+  const lines = splitKeepEnds(text);
+  const isTag = (s) => s.startsWith("[") && s.endsWith("]");
+  const tagOf = (line) => { const s = line.trim(); return isTag(s) ? s.slice(1, -1) : null; };
+
+  // pass A: gather distinct UIDs to tokenize
+  const uids = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    const tag = tagOf(lines[i]); const nxt = lines[i + 1];
+    if (nxt === undefined || nxt.trim().startsWith("[")) continue;
+    const val = stripTerm(nxt)[0].trim();
+    if (tag === "SERIE_UID" && val) uids.add(val);
+    if (tag === "VOLUME") for (const m of val.matchAll(UID_RE)) uids.add(m[0]);
+  }
+  const tok = {};
+  for (const u of uids) tok[u] = pseudonymize ? await tokenFor(u) : "***";
+  const subUids = (s) => s.replace(UID_RE, (m) => tok[m] || "***");
+
+  const mapping = { names: {}, uids: { ...tok }, dates: [] };
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]; out.push(line);
+    const tag = tagOf(line); const nxt = lines[i + 1];
+    const nxtTag = nxt !== undefined && nxt.trim().startsWith("[");
+    if (tag && nxt !== undefined && !nxtTag &&
+        (tag === "PATIENT_NAME" || tag === "SERIE_UID" || tag in REDACT)) {
+      const [content, term] = stripTerm(nxt); const val = content.trim();
+      let repl;
+      if (tag === "PATIENT_NAME") { if (val) mapping.names[val] = subjectId; repl = subjectId; }
+      else if (tag === "SERIE_UID") { repl = pseudonymize ? (tok[val] || "***") : "***"; }
+      else { if (val) mapping.dates.push([tag, val]); repl = REDACT[tag]; }
+      out.push(repl + term); i++;
+    } else if (tag === "VOLUME" && nxt !== undefined && !nxtTag) {
+      const [content, term] = stripTerm(nxt); out.push(subUids(content) + term); i++;
+    }
+  }
+  return { clean: out.join(""), mapping, tokenOf: tok };
+}
+
+// Mirrors the parser's TRAJECTORY/ELLIPS extraction.
+function extractTrajectories(text) {
+  const matches = [...text.matchAll(/\[(.*?)\]/g)]; const rows = [];
+  for (let k = 0; k < matches.length - 1; k++) {
+    const tag = matches[k][1].trim();
+    if (tag !== "TRAJECTORY" && tag !== "ELLIPS") continue;
+    const block = text.slice(matches[k].index + matches[k][0].length, matches[k + 1].index);
+    const ls = block.split(/\r\n|\r|\n/).map(s => s.trim()).filter(Boolean);
+    if (ls.length < 2) continue;
+    const f = ls[1].split(/\s+/).filter(Boolean);
+    if (f.length < 11) continue;
+    const v = [f[4], f[5], f[6], f[8], f[9], f[10]].map(Number);
+    if (v.some(Number.isNaN)) continue;
+    rows.push({ name: f[0], ex: v[0], ey: v[1], ez: v[2], tx: v[3], ty: v[4], tz: v[5] });
+  }
+  return rows;
+}
+function trajectoriesCsv(rows) {
+  const f = (x) => x.toFixed(4);
+  const head = "name,entry_x,entry_y,entry_z,target_x,target_y,target_z,length_mm";
+  const body = rows.map(r => {
+    const L = Math.hypot(r.tx - r.ex, r.ty - r.ey, r.tz - r.ez);
+    return [r.name, f(r.ex), f(r.ey), f(r.ez), f(r.tx), f(r.ty), f(r.tz), f(L)].join(",");
+  });
+  return [head, ...body].join("\n") + "\n";
+}
+
+// minimal STORED-only zip writer (no compression lib needed)
+const CRC = (() => { const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(buf) { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = CRC[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function buildZip(files) {                       // files: [{path, data:Uint8Array}]
+  const enc = new TextEncoder(); const chunks = []; let off = 0; const central = [];
+  const u16 = n => new Uint8Array([n & 255, (n >>> 8) & 255]);
+  const u32 = n => new Uint8Array([n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255]);
+  const put = a => { chunks.push(a); off += a.length; };
+  for (const f of files) {
+    const name = enc.encode(f.path), data = f.data, crc = crc32(data), local = off;
+    put(u32(0x04034b50)); put(u16(20)); put(u16(0x0800)); put(u16(0)); put(u16(0)); put(u16(0));
+    put(u32(crc)); put(u32(data.length)); put(u32(data.length)); put(u16(name.length)); put(u16(0));
+    put(name); put(data);
+    central.push({ name, crc, size: data.length, local });
+  }
+  const cdStart = off;
+  for (const c of central) {
+    put(u32(0x02014b50)); put(u16(20)); put(u16(20)); put(u16(0x0800)); put(u16(0)); put(u16(0)); put(u16(0));
+    put(u32(c.crc)); put(u32(c.size)); put(u32(c.size)); put(u16(c.name.length)); put(u16(0)); put(u16(0));
+    put(u16(0)); put(u16(0)); put(u32(0)); put(u32(c.local)); put(c.name);
+  }
+  const cdSize = off - cdStart;   // capture BEFORE the EOCD puts advance `off`
+  put(u32(0x06054b50)); put(u16(0)); put(u16(0)); put(u16(central.length)); put(u16(central.length));
+  put(u32(cdSize)); put(u32(cdStart)); put(u16(0));
+  let total = 0; for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total); let p = 0; for (const c of chunks) { out.set(c, p); p += c.length; }
+  return out;
+}
+
+// ----------------------------- UI -----------------------------
+const $ = (id) => document.getElementById(id);
+const log = (m) => { $("log").textContent = m; };
+let picked = null;   // {files:[File], rootName, mode}
+
+function onFolder(files) {
+  if (!files.length) return;
+  const rootName = files[0].webkitRelativePath.split("/")[0] || "case";
+  picked = { files: [...files], rootName, mode: "folder" };
+  log(`${files.length} files selected from "${rootName}".`);
+  $("go").disabled = false;
+}
+function onRos(file) {
+  picked = { files: [file], rootName: (file.name.replace(/\.ros$/i, "")), mode: "file" };
+  log(`Single .ros: ${file.name}`);
+  $("go").disabled = false;
+}
+$("folder").addEventListener("change", e => onFolder(e.target.files));
+$("rosfile").addEventListener("change", e => { if (e.target.files[0]) onRos(e.target.files[0]); });
+
+function download(name, data, type) {
+  const blob = data instanceof Uint8Array ? new Blob([data], { type }) : new Blob([data], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.textContent = "⬇ " + name; a.download = name;
+  a.className = "dl"; $("downloads").appendChild(a); a.appendChild(document.createTextNode(" "));
+}
+
+$("go").addEventListener("click", async () => {
+  if (!picked) return;
+  $("go").disabled = true; $("downloads").innerHTML = ""; $("keywarn").style.display = "none";
+  try {
+    const subjectId = ($("sid").value.trim()) || (/^[A-Za-z0-9_-]{1,32}$/.test(picked.rootName) ? picked.rootName : "ANON");
+    const relOf = (f) => (f.webkitRelativePath || f.name).split("/").slice(picked.mode === "folder" ? 1 : 0).join("/") || f.name;
+    const rosFile = picked.files.find(f => relOf(f).toLowerCase().endsWith(".ros") && !relOf(f).includes("_clean"))
+                 || picked.files.find(f => relOf(f).toLowerCase().endsWith(".ros"));
+    if (!rosFile) { log("No .ros file found in the selection."); $("go").disabled = false; return; }
+
+    const rosText = await rosFile.text();
+    const { clean, mapping, tokenOf } = await deidentifyRosText(rosText, subjectId);
+
+    // keymap (PHI) — separate download, never inside the zip
+    download(`${subjectId}_deid_keymap.json`, JSON.stringify(mapping, null, 2), "application/json");
+    $("keywarn").style.display = "";
+
+    if (picked.mode === "file") {
+      download(`${subjectId}.ros`, clean, "text/plain");
+      download(`${subjectId}_trajectories.csv`, trajectoriesCsv(extractTrajectories(rosText)), "text/csv");
+      log(`Done. Removed ${Object.keys(mapping.names).length} name(s), ${mapping.dates.length} date(s); ` +
+          `pseudonymised ${Object.keys(mapping.uids).length} UID(s). Downloads ready below.`);
+      $("go").disabled = false; return;
+    }
+
+    // folder mode: assemble clean files
+    const out = [];
+    out.push({ path: `${subjectId}/${subjectId}.ros`, data: new TextEncoder().encode(clean) });
+    out.push({ path: `${subjectId}/${subjectId}_trajectories.csv`,
+               data: new TextEncoder().encode(trajectoriesCsv(extractTrajectories(rosText))) });
+    let renamed = new Set(), images = 0, zipsDropped = 0, shots = 0;
+    for (const f of picked.files) {
+      const rel = relOf(f);
+      if (f === rosFile) continue;
+      const low = rel.toLowerCase();
+      if (low.endsWith(".png") || low.endsWith(".jpg") || low.endsWith(".jpeg")) { shots++; continue; }
+      if (low.endsWith(".zip")) { zipsDropped++; continue; }
+      const parts = rel.split("/");
+      const di = parts.indexOf("DICOM");
+      if (di !== -1 && parts.length > di + 1) {
+        const seg = parts[di + 1];
+        const t = tokenOf[seg] || (UID_RE.test(seg) ? "UID-" + (await sha1hex(seg)).slice(0, 12) : seg);
+        UID_RE.lastIndex = 0;
+        if (t !== seg) renamed.add(seg);
+        if (!isImage(rel)) continue;     // only carry image volumes from DICOM/
+        parts[di + 1] = t;
+        out.push({ path: `${subjectId}/${parts.join("/")}`, data: new Uint8Array(await f.arrayBuffer()) });
+        images++;
+        continue;
+      }
+      if (rel.startsWith("qc/") || rel.startsWith("qc\\")) continue;   // skip QC outputs
+      // anything else outside DICOM/ is skipped (defensive — don't carry unknowns)
+    }
+    download(`${subjectId}_clean.zip`, buildZip(out), "application/zip");
+    log(`Done. ${renamed.size} UID folder(s) renamed, ${images} image file(s) kept, ` +
+        `${zipsDropped} DICOM zip(s) dropped, ${shots} screenshot(s) excluded. ` +
+        `Removed ${Object.keys(mapping.names).length} name(s), pseudonymised ${Object.keys(mapping.uids).length} UID(s). ` +
+        `Download the clean .zip below (and keep the key file private).`);
+  } catch (err) {
+    log("Error: " + (err && err.message ? err.message : err));
+  }
+  $("go").disabled = false;
+});
+</script>
+</body>
+</html>
