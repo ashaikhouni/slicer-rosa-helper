@@ -30,9 +30,35 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+import shutil
 from pathlib import Path
 
 from .ros_parser import parse_ros_file
+
+# Image volumes we carry into a de-identified folder. Analyze/NIfTI/NRRD headers
+# have no patient-demographics fields (verified empty on real cases), so these
+# are safe to copy as-is. `DICOMFiles.zip` (raw DICOM = full PHI) is NOT here.
+_IMAGE_SUFFIXES = (".img", ".hdr", ".nii", ".nii.gz", ".nrrd", ".mgz", ".mha")
+
+
+def _is_image_file(name: str) -> bool:
+    low = name.lower()
+    return any(low.endswith(s) for s in _IMAGE_SUFFIXES)
+
+
+def _read_ros_text(path) -> str:
+    """Read .ros text WITHOUT universal-newline translation, so the original
+    CRLF line endings (the ROSA convention) survive into the de-identified file.
+    ``Path.read_text`` would collapse ``\\r\\n`` -> ``\\n`` on read."""
+    with open(path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+        return f.read()
+
+
+def _write_ros_text(path, text: str) -> None:
+    """Write .ros text verbatim (``newline=""`` so the kept CRLF isn't
+    re-translated — on Windows the default would turn ``\\r\\n`` into ``\\r\\r\\n``)."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
 
 # Tags whose VALUE line is redacted outright (no linkage value).
 _REDACT_TO = {
@@ -161,11 +187,11 @@ def deidentify_ros_file(
         out_path = in_path.parent / f"{subject_id}.ros"
     out_path = Path(out_path)
 
-    text = in_path.read_text(encoding="utf-8", errors="ignore")
+    text = _read_ros_text(in_path)
     clean, mapping = deidentify_ros_text(
         text, subject_id=subject_id, pseudonymize_uids=pseudonymize_uids,
     )
-    out_path.write_text(clean, encoding="utf-8")
+    _write_ros_text(out_path, clean)
 
     if keymap_path is not False:
         if keymap_path is None:
@@ -212,3 +238,111 @@ def write_trajectories_csv(ros_path: str | Path, out_csv: str | Path | None = No
                 "length_mm": f"{length:.4f}",
             })
     return out_csv
+
+
+def _find_ros(case_dir: Path) -> Path:
+    cands = sorted(case_dir.glob("*.ros"))
+    # Prefer an un-deidentified original over any prior *_clean / <id>.ros output.
+    originals = [p for p in cands if "_clean" not in p.stem]
+    chosen = (originals or cands)
+    if not chosen:
+        raise FileNotFoundError(f"no .ros file in {case_dir}")
+    return chosen[0]
+
+
+def deidentify_ros_folder(
+    case_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    subject_id: str | None = None,
+    keymap_path: str | Path | None = None,
+    pseudonymize_uids: bool = True,
+    trajectories_csv: bool = True,
+    log=None,
+) -> tuple[Path, dict, dict]:
+    """De-identify a whole ROSA case folder into a fresh, shareable ``out_dir``.
+
+    - De-identifies the ``.ros`` → ``out_dir/<subject_id>.ros``.
+    - Copies the image volumes (``.img``/``.hdr``/…) with each ``DICOM/<uid>/``
+      subfolder RENAMED to the same UID token the ``.ros`` now uses — so the
+      de-identified ``.ros`` still loads them (display↔series linkage intact).
+    - DROPS ``DICOMFiles.zip`` (raw DICOM = full PHI) and does not copy
+      screenshots / ``qc`` outputs (only the whitelisted image files + the .ros
+      are emitted).
+    - Writes the planned-trajectory CSV (PHI-free) into ``out_dir`` by default.
+    - NEVER mutates the original. The PRIVATE keymap is written OUTSIDE
+      ``out_dir`` (it is PHI — keep it, never share).
+
+    Returns ``(out_dir, mapping, summary)`` where ``summary`` counts dirs
+    renamed / images copied / zips dropped / screenshots skipped.
+    """
+    import json
+
+    _log = log if callable(log) else (lambda _m: None)
+    case_dir = Path(case_dir).expanduser()
+    out_dir = Path(out_dir).expanduser()
+    ros = _find_ros(case_dir)
+
+    if subject_id is None:
+        subject_id = case_dir.name if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", case_dir.name or "") else "ANON"
+
+    clean, mapping = deidentify_ros_text(
+        _read_ros_text(ros),
+        subject_id=subject_id, pseudonymize_uids=pseudonymize_uids,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_ros_text(out_dir / f"{subject_id}.ros", clean)
+
+    uid_to_token = dict(mapping["uids"])
+
+    def token_for(uid: str) -> str:
+        if uid not in uid_to_token:
+            tok = "UID-" + hashlib.sha1(uid.encode("utf-8")).hexdigest()[:12]
+            uid_to_token[uid] = tok
+            mapping["uids"][uid] = tok
+        return uid_to_token[uid]
+
+    summary = {"dirs_renamed": 0, "images_copied": 0, "zips_dropped": 0, "screenshots_skipped": 0}
+
+    src_dicom = case_dir / "DICOM"
+    if src_dicom.is_dir():
+        for sub in sorted(p for p in src_dicom.iterdir() if p.is_dir()):
+            name = sub.name
+            if name in uid_to_token:
+                token = uid_to_token[name]
+            elif _UID_RE.fullmatch(name):
+                token = token_for(name)        # UID present on disk but not in the .ros
+            else:
+                token = name                   # not a UID dir — keep its name
+            if token != name:
+                summary["dirs_renamed"] += 1
+            dst = out_dir / "DICOM" / token
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in sorted(p for p in sub.iterdir() if p.is_file()):
+                if f.name.startswith("."):
+                    continue
+                if f.suffix.lower() == ".zip":
+                    summary["zips_dropped"] += 1
+                    continue
+                if _is_image_file(f.name):
+                    shutil.copy2(f, dst / f.name)
+                    summary["images_copied"] += 1
+                # any other loose file is skipped (defensive — don't carry unknowns)
+
+    # Deliberately not copied: screenshots / QC. Count them for the report.
+    for pat in ("*.png", "*.jpg", "*.jpeg"):
+        summary["screenshots_skipped"] += len(list(case_dir.rglob(pat)))
+
+    if trajectories_csv:
+        write_trajectories_csv(ros, out_csv=out_dir / f"{subject_id}_trajectories.csv")
+
+    if keymap_path is not False:
+        if keymap_path is None:
+            # PHI key — write OUTSIDE the shareable out_dir (as a sibling).
+            keymap_path = out_dir.with_name(f"{out_dir.name}_deid_keymap.json")
+        Path(keymap_path).write_text(json.dumps(mapping, indent=2), encoding="utf-8")
+
+    _log(f"[deidentify-ros] folder -> {out_dir}: {summary['dirs_renamed']} UID dirs renamed, "
+         f"{summary['images_copied']} image file(s) copied, {summary['zips_dropped']} DICOM zip(s) dropped, "
+         f"{summary['screenshots_skipped']} screenshot(s) excluded")
+    return out_dir, mapping, summary
