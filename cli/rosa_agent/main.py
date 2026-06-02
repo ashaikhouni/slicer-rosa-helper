@@ -25,6 +25,7 @@ Subcommands::
     rosa-agent match-ros     (--rosa-folder DIR | --ros-file FILE) --ct ct.nii --output DIR
     rosa-agent export-view   <ros_folder|subj_id> --freesurfer-dir DIR --out-dir DIR
     rosa-agent view          <export-view-out-dir> [--port N] [--no-open]
+    rosa-agent deidentify-ros <ros_file> [--subject-id ID] [--trajectories-csv [path]]
 """
 
 from __future__ import annotations
@@ -72,6 +73,7 @@ SUBCOMMANDS = {
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
     "brain-extract": "rosa_agent.commands.brain_extract",
+    "deidentify-ros": "rosa_agent.commands.deidentify_ros",
 }
 
 
