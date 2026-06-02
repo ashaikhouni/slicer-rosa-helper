@@ -693,29 +693,10 @@ class GuidedFitWidgetMixin:
         if seed_source_key:
             self._guidedSeedStatusBySource.pop(seed_source_key, None)
 
-        # Phase 2 (match-against-auto): if Auto Fit has already published
-        # trajectories in the workflow, prefer matching seeds to those —
-        # the user gets walker-validated, post-anchor-Frangi-gated,
-        # wire-class-aware results inherited verbatim. Falls back to the
-        # canonical snap (Phase 1) when no auto trajectory falls within the
-        # seed's tolerance window, or when Auto Fit hasn't been run yet.
-        try:
-            auto_trajs = self.logic.collect_trajectories_by_source(
-                "auto_fit", workflow_node=self.workflowNode,
-            )
-        except Exception:
-            auto_trajs = []
-        if auto_trajs:
-            self.log(
-                f"[guided] match-against-auto enabled — {len(auto_trajs)} "
-                "Auto Fit trajectories available"
-            )
-        else:
-            self.log(
-                "[guided] no Auto Fit trajectories in workflow; "
-                "running snap fit only (tip: run Auto Fit first to "
-                "inherit walker + score)"
-            )
+        # Guided Fit snaps the user's seeds directly via the canonical
+        # snap-flow (run_seeded_fit) — no auto-detection / match-against-auto
+        # detour. The provided seed IS the candidate; the batch snap arbitrates
+        # cross-shank conflicts between the seeds.
 
         # Diagnostic: log the seed-cloud RAS bbox so a frame mismatch
         # vs. the blob cloud's bbox is immediately visible. If seeds
@@ -755,18 +736,13 @@ class GuidedFitWidgetMixin:
                 "_row": row,
             })
 
-        # Pass `auto_trajs` from the workflow if available; otherwise
-        # `fit_seeds_against_auto` will run Auto Fit internally so a
-        # fresh "Fit All" produces auto-aware results without the user
-        # needing to remember to run Auto Fit first. Same default the
-        # CLI uses.
+        # Batch-snap all seeds in one run_seeded_fit call (cross-shank
+        # arbitration between them) — the shared engine the CLI uses too.
         fits = gfe.fit_seeds_against_auto(
             seeds=seed_specs,
             features=features,
             ijk_to_ras_mat=ijk_to_ras,
             ras_to_ijk_mat=ras_to_ijk,
-            auto_trajs=auto_trajs if auto_trajs else None,
-            auto_run_if_missing=True,
             max_angle_deg=max_angle,
             max_lateral_shift_mm=max_lat,
             progress_log=self.log,
@@ -872,15 +848,6 @@ class GuidedFitWidgetMixin:
                 bolt_src = fit.get("bolt_source")
                 if bolt_src:
                     node.SetAttribute("Rosa.BoltSource", str(bolt_src))
-                # Phase 2 audit trail: when a guided line was inherited
-                # from an auto-fit detection, record which auto traj it
-                # came from. Useful when the user sees identical
-                # AutoFit_X and Guided_X lines and wonders why.
-                if bool(fit.get("matched_auto_source")):
-                    node.SetAttribute("Rosa.MatchedAutoSource", "1")
-                    matched_name = str(fit.get("matched_auto_name") or "")
-                    if matched_name:
-                        node.SetAttribute("Rosa.MatchedAutoName", matched_name)
             except Exception:
                 pass
             # Electrode-model pick intentionally NOT computed here.
@@ -892,18 +859,14 @@ class GuidedFitWidgetMixin:
             # 2026-05-11.
             applied_nodes.append(node)
             self._set_seed_status(row, True)
-            anchored = "bolt" if fit.get("bolt_anchored") else "no-bolt"
-            source_tag = "auto-match" if fit.get("matched_auto_source") else "snap-fit"
             self.log(
-                "[guided] {n}: {src}  angle={a:.2f}°  lat={l:.2f} mm  "
-                "n={ni}  len={L:.1f} mm  {anc}".format(
+                "[guided] {n}: snap  angle={a:.2f}°  lat={l:.2f} mm  "
+                "n={ni}  len={L:.1f} mm".format(
                     n=name,
-                    src=source_tag,
                     a=float(fit.get("angle_deg", 0.0)),
                     l=float(fit.get("lateral_shift_mm", 0.0)),
                     ni=int(fit.get("n_inliers", 0)),
                     L=float(np.linalg.norm(line_end - line_start)),
-                    anc=anchored,
                 )
             )
 

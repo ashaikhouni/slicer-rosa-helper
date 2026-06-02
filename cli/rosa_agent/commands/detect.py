@@ -54,21 +54,16 @@ def run_guided_detect(
     seeds: list[dict[str, Any]],
     *,
     run_id: str = "rosa_agent_guided",
-    roi_radius_mm: float = 5.0,
     max_angle_deg: float = 12.0,
     max_lateral_shift_mm: float = 6.0,
-    match_against_auto: bool = True,
 ) -> list[dict[str, Any]]:
-    """Per-seed guided fit. Thin wrapper over
+    """Batch-snap the seeds to metal. Thin wrapper over
     ``rosa_detect.guided_fit_engine.fit_seeds_against_auto`` so the CLI
-    and the Slicer Guided Fit module share a single canonical fit path.
+    and the Slicer Guided Fit module share a single canonical snap path.
 
-    When ``match_against_auto`` is True (default), runs Auto Fit
-    internally once and matches each seed against the resulting
-    trajectories before falling back to the canonical snap. Matching to a
-    walker-validated auto emission recovers seeds that are laterally
-    offset from the imaged shank far enough that the per-seed snap could
-    drift or miss (e.g. T22/LMFG planned-vs-imaged drift).
+    All seeds are snapped in one ``run_seeded_fit`` call (cross-shank
+    arbitration between them) via the same engine ``fit-rosa`` / ``place_seeg``
+    use; entry = shallowest detected contact, no bolt walk.
 
     Returns a list of trajectory dicts shaped like ``DetectedTrajectory``.
     """
@@ -92,9 +87,6 @@ def run_guided_detect(
         features=features,
         ijk_to_ras_mat=ijk_to_ras,
         ras_to_ijk_mat=ras_to_ijk,
-        auto_trajs=None if match_against_auto else [],
-        auto_run_if_missing=match_against_auto,
-        roi_radius_mm=roi_radius_mm,
         max_angle_deg=max_angle_deg,
         max_lateral_shift_mm=max_lateral_shift_mm,
         progress_log=_stderr,
@@ -144,18 +136,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("ct_path", help="Path to the CT NIfTI/NRRD")
     parser.add_argument("--seeds", default="", help="Optional seed TSV → guided fit")
     parser.add_argument("--out", "-o", required=True, help="Output trajectory TSV")
-    parser.add_argument("--roi-radius-mm", type=float, default=5.0)
-    parser.add_argument("--max-angle-deg", type=float, default=12.0)
-    parser.add_argument("--max-lateral-shift-mm", type=float, default=6.0)
-    parser.add_argument(
-        "--no-match-against-auto",
-        dest="match_against_auto",
-        action="store_false",
-        default=True,
-        help="Skip the Auto Fit pass that --seeds normally runs to match "
-             "seeds against; each seed is snapped with the per-seed "
-             "canonical snap (fit_trajectory) only.",
-    )
+    parser.add_argument("--max-angle-deg", type=float, default=12.0,
+                        help="Reject a snap whose axis tilts more than this from the seed.")
+    parser.add_argument("--max-lateral-shift-mm", type=float, default=6.0,
+                        help="Reject a snap whose midpoint drifts more than this from the seed.")
     args = parser.parse_args(argv)
 
     if args.seeds:
@@ -163,10 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         _stderr(f"[detect] {len(seeds)} seed(s) loaded from {args.seeds}")
         trajs = run_guided_detect(
             args.ct_path, seeds,
-            roi_radius_mm=args.roi_radius_mm,
             max_angle_deg=args.max_angle_deg,
             max_lateral_shift_mm=args.max_lateral_shift_mm,
-            match_against_auto=args.match_against_auto,
         )
     else:
         result = run_auto_detect(args.ct_path)
