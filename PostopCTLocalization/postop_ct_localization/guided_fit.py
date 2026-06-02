@@ -113,26 +113,12 @@ class GuidedFitWidgetMixin:
         )
         layout.addWidget(self.guidedSeedTable)
 
-        # Fit knobs.
-        self.guidedRoiRadiusSpin = qt.QDoubleSpinBox()
-        self.guidedRoiRadiusSpin.setRange(1.0, 10.0)
-        self.guidedRoiRadiusSpin.setDecimals(2)
-        self.guidedRoiRadiusSpin.setSingleStep(0.25)
-        self.guidedRoiRadiusSpin.setValue(float(gfe.DEFAULT_ROI_RADIUS_MM))
-        self.guidedRoiRadiusSpin.setSuffix(" mm")
-        self.guidedRoiRadiusSpin.setToolTip(
-            "Legacy knob — no longer used by the snap. The canonical "
-            "snap-flow walks the on-axis contact-peak profile rather than "
-            "collecting a perpendicular cylinder of blobs, so this radius "
-            "has no effect. The Max angle / Max lateral shift knobs still "
-            "gate the snap."
-        )
-        self.guidedRoiRadiusSpin.setMinimumWidth(0)
-        self.guidedRoiRadiusSpin.setSizePolicy(
-            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
-        )
-        form.addRow("ROI radius:", self.guidedRoiRadiusSpin)
-
+        # Fit knobs. Only two matter now that Guided Fit IS the canonical
+        # snap-flow: Max axis tilt + Max lateral shift each (a) set the
+        # match-to-auto tolerance and (b) gate the snap vs the seed. The old
+        # ROI-radius (PCA cylinder) and pitch-strategy (picker library) knobs
+        # were removed — the snap walks the on-axis profile and does not pick
+        # a model here (the pick is in Contacts & Trajectory View).
         self.guidedMaxAngleSpin = qt.QDoubleSpinBox()
         self.guidedMaxAngleSpin.setRange(1.0, 30.0)
         self.guidedMaxAngleSpin.setDecimals(1)
@@ -162,27 +148,6 @@ class GuidedFitWidgetMixin:
             qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
         )
         form.addRow("Max lateral shift:", self.guidedMaxLateralShiftSpin)
-
-        # Local pitch-strategy combo so the user can restrict the
-        # picker library directly from Guided Fit (used to require
-        # flipping to the Auto Fit tab to change it).
-        from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
-        self.guidedPitchStrategyCombo = qt.QComboBox()
-        for label, key in PITCH_STRATEGY_OPTIONS:
-            self.guidedPitchStrategyCombo.addItem(label, key)
-        self.guidedPitchStrategyCombo.setCurrentIndex(0)  # default: Dixi AM
-        self.guidedPitchStrategyCombo.setToolTip(
-            "Restrict the model library used by the per-trajectory "
-            "PaCER picker on Fit. Vendor + pitch-set filter."
-        )
-        self.guidedPitchStrategyCombo.setMinimumContentsLength(8)
-        self.guidedPitchStrategyCombo.setSizeAdjustPolicy(
-            qt.QComboBox.AdjustToMinimumContentsLengthWithIcon,
-        )
-        self.guidedPitchStrategyCombo.setSizePolicy(
-            qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed,
-        )
-        form.addRow("Pitch strategy:", self.guidedPitchStrategyCombo)
 
         fitRow = qt.QHBoxLayout()
         self.fitSelectedButton = qt.QPushButton("Fit Checked")
@@ -668,7 +633,10 @@ class GuidedFitWidgetMixin:
 
         try:
             img, ijk_to_ras, ras_to_ijk = self._guided_fit_volume_matrices(volume_node)
-            features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk)
+            # Snap-only: the guided snap + scoring never read the intracranial
+            # mask, so skip the expensive SynthStrip/watershed build.
+            features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk,
+                                            compute_intracranial=False)
             # ``compute_features`` may have resampled the volume to the
             # canonical grid; pull the canonical img + matrices back so
             # subsequent ``fit_trajectory`` calls operate on the same
@@ -714,7 +682,6 @@ class GuidedFitWidgetMixin:
         except Exception as exc:
             self.log(f"[guided] blob-cloud diagnostic failed: {exc}")
 
-        roi_mm = float(self.guidedRoiRadiusSpin.value)
         max_angle = float(self.guidedMaxAngleSpin.value)
         max_lat = float(self.guidedMaxLateralShiftSpin.value)
 
@@ -800,7 +767,6 @@ class GuidedFitWidgetMixin:
             ras_to_ijk_mat=ras_to_ijk,
             auto_trajs=auto_trajs if auto_trajs else None,
             auto_run_if_missing=True,
-            roi_radius_mm=roi_mm,
             max_angle_deg=max_angle,
             max_lateral_shift_mm=max_lat,
             progress_log=self.log,

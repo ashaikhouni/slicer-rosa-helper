@@ -80,7 +80,10 @@ def run_guided_detect(
     img = sitk.ReadImage(str(p))
     ijk_to_ras, ras_to_ijk = image_ijk_ras_matrices(img)
     _stderr(f"[detect] computing guided-fit features on {p.name}…")
-    features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk)
+    # Snap-only: the guided snap + scoring never read the intracranial mask,
+    # so skip the expensive SynthStrip/watershed build.
+    features = gfe.compute_features(img, ijk_to_ras, ras_to_ijk,
+                                    compute_intracranial=False)
     ijk_to_ras = features["ijk_to_ras_mat"]
     ras_to_ijk = features["ras_to_ijk_mat"]
 
