@@ -25,13 +25,13 @@ _ROS_LINES = [
     "[BEGIN]",
     "[APPLICATION]", "BRAIN",
     "[IMAGERY_NAME]", "T1",
-    "[PATIENT_NAME]", "DOE^JOHN^EZEKIEL",
+    "[PATIENT_NAME]", "DOE^JANE^Q",
     "[PATIENT_BIRTHDAY]", "19700101",
     "[SERIE_UID]", _UID1,
     "[SERIE_DATE]", "20260101",
     "[VOLUME]", rf"\DICOM\{_UID1}\T1",
     "[IMAGERY_NAME]", "post",
-    "[PATIENT_NAME]", "DOE^JOHN^EZEKIEL",
+    "[PATIENT_NAME]", "DOE^JANE^Q",
     "[SERIE_UID]", _UID2,
     "[VOLUME]", rf"\DICOM\{_UID2}\post",
     "[TRAJECTORY]", "2",
@@ -51,7 +51,7 @@ class DeidentifyTextTests(unittest.TestCase):
         self.clean, self.mapping = rd.deidentify_ros_text(_ROS_TEXT, subject_id="SUBJ")
 
     def test_phi_removed(self):
-        self.assertNotIn("DOE^JOHN^EZEKIEL", self.clean)
+        self.assertNotIn("DOE^JANE^Q", self.clean)
         self.assertNotIn("19700101", self.clean)   # birthday
         self.assertNotIn("20260101", self.clean)   # serie date
         self.assertNotIn(_UID1, self.clean)
@@ -59,7 +59,7 @@ class DeidentifyTextTests(unittest.TestCase):
 
     def test_subject_id_substituted(self):
         self.assertIn("SUBJ", self.clean)
-        self.assertEqual(self.mapping["names"], {"DOE^JOHN^EZEKIEL": "SUBJ"})
+        self.assertEqual(self.mapping["names"], {"DOE^JANE^Q": "SUBJ"})
 
     def test_uid_pseudonymised_consistently_preserves_linkage(self):
         # Each distinct UID -> one token; SAME token in SERIE_UID value AND its
@@ -118,20 +118,77 @@ class DeidentifyFileTests(unittest.TestCase):
         import json
         with tempfile.TemporaryDirectory() as tmp:
             # Parent folder name becomes the default subject id.
-            sub = Path(tmp) / "JK"
+            sub = Path(tmp) / "S99"
             sub.mkdir()
-            ros = sub / "DOE JOHN 20260101.ros"   # identifying filename
+            ros = sub / "TEST CASE 20260101.ros"   # identifying-style filename
             ros.write_text(_ROS_TEXT, encoding="utf-8")
             out, mapping = rd.deidentify_ros_file(ros)
-            self.assertEqual(out.name, "JK.ros")    # output name has no PHI
+            self.assertEqual(out.name, "S99.ros")   # output name has no PHI
+            self.assertIn(b"\r\n", out.read_bytes())  # CRLF preserved, not collapsed to LF
             clean = out.read_text(encoding="utf-8")
-            self.assertNotIn("DOE^JOHN^EZEKIEL", clean)
-            self.assertIn("JK", clean)              # subject id from folder
-            keymap = out.with_name("JK_deid_keymap.json")
+            self.assertNotIn("DOE^JANE^Q", clean)
+            self.assertIn("S99", clean)             # subject id from folder
+            keymap = out.with_name("S99_deid_keymap.json")
             self.assertTrue(keymap.is_file())
             km = json.loads(keymap.read_text())
-            self.assertEqual(km["names"], {"DOE^JOHN^EZEKIEL": "JK"})
+            self.assertEqual(km["names"], {"DOE^JANE^Q": "S99"})
             self.assertEqual(len(km["uids"]), 2)
+
+
+@unittest.skipUnless(IMPORTABLE, "rosa_core not importable")
+class DeidentifyFolderTests(unittest.TestCase):
+    def _make_case(self, root: Path) -> Path:
+        case = root / "S07"
+        (case / "DICOM" / _UID1).mkdir(parents=True)
+        (case / "DICOM" / _UID2).mkdir(parents=True)
+        (case / "ORIGINAL.ros").write_text(_ROS_TEXT, encoding="utf-8")
+        # images (clean) + a raw-DICOM zip (PHI) + a screenshot (PHI risk)
+        for uid, nm in ((_UID1, "T1"), (_UID2, "post")):
+            d = case / "DICOM" / uid
+            (d / f"{nm}.img").write_bytes(b"\x00" * 16)
+            (d / f"{nm}.hdr").write_bytes(b"\x00" * 348)
+            (d / "DICOMFiles.zip").write_bytes(b"PK\x03\x04rawdicom")
+        (case / "screenshot.png").write_bytes(b"\x89PNG")
+        (case / "qc").mkdir()
+        (case / "qc" / "fig.jpg").write_bytes(b"\xff\xd8")
+        return case
+
+    def test_folder_deid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            case = self._make_case(tmp)
+            out = tmp / "S07_clean"
+            out_dir, mapping, summary = rd.deidentify_ros_folder(case, out)
+
+            # clean .ros present + PHI-free + still parses
+            ros_out = out_dir / "S07.ros"
+            self.assertTrue(ros_out.is_file())
+            self.assertIn(b"\r\n", ros_out.read_bytes())   # CRLF preserved
+            clean = ros_out.read_text()
+            self.assertNotIn("DOE^JANE^Q", clean)
+            self.assertNotIn(_UID1, clean)
+
+            # DICOM dirs renamed to the .ros's UID tokens; linkage holds
+            tok1, tok2 = mapping["uids"][_UID1], mapping["uids"][_UID2]
+            self.assertTrue((out_dir / "DICOM" / tok1 / "T1.img").is_file())
+            self.assertTrue((out_dir / "DICOM" / tok2 / "post.hdr").is_file())
+            self.assertIn(rf"\DICOM\{tok2}\post", clean)
+            self.assertFalse((out_dir / "DICOM" / _UID1).exists())  # original UID name gone
+
+            # zips dropped, screenshots not copied
+            self.assertEqual(list(out_dir.rglob("*.zip")), [])
+            self.assertEqual(list(out_dir.rglob("*.png")), [])
+            self.assertEqual(list(out_dir.rglob("*.jpg")), [])
+            self.assertEqual(summary["zips_dropped"], 2)
+            self.assertGreaterEqual(summary["dirs_renamed"], 2)
+
+            # trajectory CSV inside the shareable dir; keymap OUTSIDE it
+            self.assertTrue((out_dir / "S07_trajectories.csv").is_file())
+            self.assertEqual(list(out_dir.rglob("*keymap*")), [])
+            self.assertTrue((out_dir.with_name(out_dir.name + "_deid_keymap.json")).is_file())
+
+            # original untouched
+            self.assertTrue((case / "DICOM" / _UID1 / "DICOMFiles.zip").is_file())
 
 
 if __name__ == "__main__":
