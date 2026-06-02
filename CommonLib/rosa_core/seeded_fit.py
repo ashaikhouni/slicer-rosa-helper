@@ -91,6 +91,15 @@ METAL_SNAP_CONTACT_GRADE_FRAC = 0.5
 # and may be peeled; within it the contact is the shank's own contiguous
 # tip and is protected. Stable plateau 1.15-1.30 on the SEEG dataset.
 METAL_SNAP_JUMP_GATE_PITCH  = 1.3
+# Seed-driven neighbour ownership (run_seeded_fit): a neighbouring planned
+# segment constrains a shank's perp-disk localisation ONLY when it passes
+# within this distance — i.e. inside ~half the tube radius, where its metal
+# genuinely dominates part of the disk and the walk would drift onto it
+# (e.g. JK RSPL↔RCUN 1.8 mm, T18 RIF↔RAF 1.3 mm). Beyond it the ownership
+# boundary only clips the disk edge and needlessly perturbs the axis refit
+# (T6 LPMC 4.9 mm, T11 LAMC 3.2 mm regressed when ownership engaged there), so
+# moderately-near shanks are left exactly as the un-owned snap.
+NEIGHBOR_OWNERSHIP_MAX_MM   = 2.5
 
 FRANGI_WALK_SMOOTH_MM       = 3.0
 FRANGI_WALK_MAX_MM          = 30.0
@@ -249,6 +258,35 @@ def _fit_chain_from_peaks(peak_positions, oriented_along) -> dict[str, Any] | No
 # ---------------------------------------------------------------------
 
 
+def _point_segment_dist_batch(pts: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Perpendicular distance from each point (N,3) to the segment a-b (clamped
+    to the endpoints). Used by the seed-driven neighbour-ownership filter."""
+    ab = b - a
+    ab2 = float(ab @ ab)
+    if ab2 < 1e-12:
+        return np.linalg.norm(pts - a[None, :], axis=1)
+    t = np.clip((pts - a[None, :]) @ ab / ab2, 0.0, 1.0)
+    proj = a[None, :] + t[:, None] * ab[None, :]
+    return np.linalg.norm(pts - proj, axis=1)
+
+
+def _owned_mask(pts: np.ndarray, own_seg, neighbor_segs) -> np.ndarray:
+    """True where a point is closer to ``own_seg`` than to EVERY neighbour seg.
+
+    The seeds give us a free ownership partition: a metal voxel belongs to the
+    planned trajectory whose segment it sits nearest. Restricting a shank's
+    perp-disk localisation to its owned voxels stops the walk drifting onto a
+    close neighbour's metal (e.g. JK RSPL passing 1.8 mm from RCUN). ``own_seg``
+    / each ``neighbor_segs`` entry is an ``(start_ras, end_ras)`` pair."""
+    if not neighbor_segs:
+        return np.ones(len(pts), dtype=bool)
+    d_own = _point_segment_dist_batch(pts, own_seg[0], own_seg[1])
+    keep = np.ones(len(pts), dtype=bool)
+    for seg in neighbor_segs:
+        keep &= d_own <= _point_segment_dist_batch(pts, seg[0], seg[1])
+    return keep
+
+
 def _centerline_profile(signal_f32, ras_to_ijk, origin, axis, t_arr):
     """LoG-neg sampled ON the axis (a single ray, perp=0) at each arc.
 
@@ -264,7 +302,8 @@ def _centerline_profile(signal_f32, ras_to_ijk, origin, axis, t_arr):
 
 
 def _tube_max_profile(signal_f32, ras_to_ijk, origin, axis, t_arr,
-                      disk_u, disk_v, perp1, perp2):
+                      disk_u, disk_v, perp1, perp2,
+                      own_seg=None, neighbor_segs=None):
     """LoG-neg sampled as the MAX over a perpendicular disk at each arc (vs the
     single-ray :func:`_centerline_profile`).
 
@@ -272,14 +311,19 @@ def _tube_max_profile(signal_f32, ras_to_ijk, origin, axis, t_arr,
     a contact even when the seed axis misses it laterally, at the cost of the
     cross-shank specificity the centerline profile gives — which is why it is a
     fallback that bootstraps the axis re-centering rather than the primary
-    detector."""
+    detector. When ``neighbor_segs`` is given, the max is taken only over disk
+    voxels owned by ``own_seg`` (closer to it than any neighbour), so the rescue
+    can't bootstrap onto a close neighbour's metal."""
     centers = origin[None, :] + t_arr[:, None] * axis[None, :]
     out = np.empty(len(t_arr), dtype=float)
     for j, c in enumerate(centers):
         pts = (c[None, :] + disk_u[:, None] * perp1[None, :]
                + disk_v[:, None] * perp2[None, :])
         vals = sample_trilinear_batch(signal_f32, ras_to_ijk, pts)
-        out[j] = float(np.nanmax(vals)) if np.isfinite(vals).any() else 0.0
+        keep = np.isfinite(vals)
+        if neighbor_segs:
+            keep &= _owned_mask(pts, own_seg, neighbor_segs)
+        out[j] = float(vals[keep].max()) if keep.any() else 0.0
     return out
 
 
@@ -295,6 +339,7 @@ def snap_via_signal_walk(
     extend_past_end_mm: float = SNAP_EXTEND_PAST_END_MM,
     extend_before_start_mm: float = SNAP_EXTEND_BEFORE_START_MM,
     max_axis_refits: int = METAL_SNAP_MAX_AXIS_REFITS,
+    neighbor_segments: "list[tuple[np.ndarray, np.ndarray]] | None" = None,
 ) -> dict[str, Any] | None:
     """Snap a planned (start, end) RAS segment onto contact peaks.
 
@@ -331,6 +376,10 @@ def snap_via_signal_walk(
     if L < 5.0:
         return None
     signal_f32 = signal_vol.astype(np.float32, copy=False)
+    # Seed-driven neighbour ownership: when other planned segments are supplied,
+    # every perp-disk localisation below keeps only voxels nearer THIS seed than
+    # any neighbour, so the walk can't drift onto a close neighbour's metal.
+    own_seg = (s, e)
 
     n_d = int(2 * tube_radius_mm / 0.5) + 1
     u_arr = np.linspace(-tube_radius_mm, tube_radius_mm, n_d)
@@ -367,7 +416,8 @@ def snap_via_signal_walk(
             # (on-axis seeds) it never runs, so on-axis behaviour is unchanged.
             profile = _tube_max_profile(
                 signal_f32, ras_to_ijk, origin, axis, t_arr,
-                disk_u, disk_v, perp1, perp2)
+                disk_u, disk_v, perp1, perp2,
+                own_seg=own_seg, neighbor_segs=neighbor_segments)
             peaks, _ = find_peaks(profile, height=threshold, distance=dist)
             if len(peaks) < min_n_peaks:
                 return None
@@ -403,6 +453,8 @@ def snap_via_signal_walk(
                    + disk_v[:, None] * perp2[None, :])
             vals = sample_trilinear_batch(signal_f32, ras_to_ijk, pts)
             strong = np.isfinite(vals) & (vals >= threshold)
+            if neighbor_segments:
+                strong &= _owned_mask(pts, own_seg, neighbor_segments)
             if int(strong.sum()) > 0:
                 w = vals[strong].astype(float)
                 c_u = float((w * disk_u[strong]).sum() / w.sum())
@@ -438,6 +490,8 @@ def snap_via_signal_walk(
                + disk_v[:, None] * perp2[None, :])
         vals = sample_trilinear_batch(signal_f32, ras_to_ijk, pts)
         strong = np.isfinite(vals) & (vals >= localize_level)
+        if neighbor_segments:
+            strong &= _owned_mask(pts, own_seg, neighbor_segments)
         if int(strong.sum()) > 0:
             w = vals[strong].astype(float)
             c_u = float((w * disk_u[strong]).sum() / w.sum())
@@ -893,6 +947,7 @@ def run_seeded_fit(
     ras_to_ijk: np.ndarray,
     bolt_signal_vol: np.ndarray | None = None,
     bolt_signal_floor: float = 0.4,
+    neighbor_aware: bool = True,
     log: Callable[[str], None] | None = None,
     label: str = "fit",
 ) -> list[dict[str, Any] | None]:
@@ -921,15 +976,36 @@ def run_seeded_fit(
     Returns the list of chain dicts (or None for failed shanks).
     """
     log_fn = log if log is not None else (lambda _m: None)
+    # Seed-driven neighbour ownership: each shank's snap is restricted to metal
+    # nearer its own planned segment than any other shank's, so the walk can't
+    # drift onto a close neighbour (crossing / parallel pairs). The planned list
+    # is itself the ownership partition; this is a no-op for a single trajectory
+    # and for well-separated shanks (the boundary is far from any real contact).
+    segs = [(np.asarray(t["start"], dtype=float), np.asarray(t["end"], dtype=float))
+            for t in planned_trajectories]
+
+    def _close_neighbors(i):
+        """Planned segments passing within NEIGHBOR_OWNERSHIP_MAX_MM of shank i
+        (None when none / disabled — ownership then a no-op)."""
+        if not neighbor_aware or len(segs) <= 1:
+            return None
+        ai, bi = segs[i]
+        ts = np.linspace(0.0, 1.0, 16)
+        pts_i = ai[None, :] + ts[:, None] * (bi - ai)[None, :]
+        nbrs = [segs[j] for j in range(len(segs)) if j != i
+                and float(_point_segment_dist_batch(pts_i, segs[j][0], segs[j][1]).min())
+                < NEIGHBOR_OWNERSHIP_MAX_MM]
+        return nbrs or None
+
     # Pass 1: per-shank on-axis detection + drag-free localization + refit.
     chains_p1: list[dict[str, Any] | None] = [
         snap_via_signal_walk(
-            np.asarray(traj["start"], dtype=float),
-            np.asarray(traj["end"], dtype=float),
+            segs[i][0], segs[i][1],
             signal_vol=signal_vol, threshold=threshold,
             ras_to_ijk=ras_to_ijk,
+            neighbor_segments=_close_neighbors(i),
         )
-        for traj in planned_trajectories
+        for i in range(len(segs))
     ]
     n_p1 = sum(1 for c in chains_p1 if c is not None)
     # Pass 2: leave-one-out + jump-gate arbitration on the detected axes.
