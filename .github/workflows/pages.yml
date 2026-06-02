@@ -1,0 +1,31 @@
+name: Deploy browser tools to GitHub Pages
+
+# Publishes the static client-side tools in web/ to the gh-pages branch on every
+# push to main that touches web/. The tools run entirely in the visitor's
+# browser; GitHub Pages only serves the static files (no server, no uploads).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write          # peaceiris pushes the built site to the gh-pages branch
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish web/ to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./web
+          publish_branch: gh-pages
