@@ -37,6 +37,9 @@ def place_contacts(
     trajectories: list[dict[str, Any]],
     *,
     pitch_strategy: str | None = None,
+    mask_backend: str = "auto",
+    brain_mask: Any = None,
+    synthstrip_path: str | None = None,
 ):
     """Run the staged placement pipeline for each trajectory.
 
@@ -93,6 +96,9 @@ def place_contacts(
         seeds=seeds,
         library=pitch_strategy,
         sample_fn=sample_neg_log_max,
+        mask_backend=mask_backend,
+        brain_mask=brain_mask,
+        synthstrip_path=synthstrip_path,
         progress_logger=_stderr,
     )
 
@@ -130,11 +136,40 @@ def main(argv: list[str] | None = None) -> int:
         help="Pitch-strategy / library subset key (e.g. 'dixi', 'pmt_35'). "
              "Default: full library.",
     )
+    parser.add_argument(
+        "--mask-backend", choices=("auto", "hull", "log-watershed", "synthstrip"),
+        default="auto",
+        help="intracranial brain-mask backend for the placement anchor. 'auto' "
+             "(default) = SynthStrip-if-available → LoG-watershed; 'hull' = fast "
+             "head-distance approximation; 'log-watershed' = CT watershed; "
+             "'synthstrip' = force FreeSurfer SynthStrip.")
+    parser.add_argument(
+        "--synthstrip", default=None,
+        help="explicit path to the mri_synthstrip binary (else probed via "
+             "$ROSA_SYNTHSTRIP / $FREESURFER_HOME/bin / PATH)")
+    parser.add_argument(
+        "--brain-mask", default=None,
+        help="path to a user-supplied intracranial mask volume "
+             "(overrides --mask-backend; resampled to the CT grid)")
     args = parser.parse_args(argv)
+
+    brain_mask_img = None
+    if args.brain_mask:
+        bm_path = Path(args.brain_mask)
+        if not bm_path.exists():
+            _stderr(f"error: brain mask not found: {bm_path}")
+            return 2
+        import SimpleITK as sitk
+        brain_mask_img = sitk.ReadImage(str(bm_path))
+        _stderr(f"[contacts] using user brain mask {bm_path} (overrides --mask-backend)")
 
     trajs = read_seeds_tsv(args.trajectories_tsv)
     _stderr(f"[contacts] {len(trajs)} trajectories from {args.trajectories_tsv}")
-    groups, _batch = place_contacts(args.ct_path, trajs, pitch_strategy=args.library)
+    groups, _batch = place_contacts(
+        args.ct_path, trajs, pitch_strategy=args.library,
+        mask_backend=args.mask_backend, brain_mask=brain_mask_img,
+        synthstrip_path=args.synthstrip,
+    )
     n = write_contacts_tsv(args.out, groups)
     _stderr(f"[contacts] wrote {args.out} ({n} contacts)")
     return 0
