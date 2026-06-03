@@ -70,6 +70,24 @@ def select_brain_mask_to_path(
             log(f"[mask] log-watershed failed: {exc}")
             return False
 
+    def _try_hull() -> bool:
+        # Poor-man's intracranial mask: cheap build_masks (head-distance ≥ 10 mm),
+        # no external binary, never artifacts on metal. Coarse boundary.
+        try:
+            import SimpleITK as sitk
+            from ..primitives.preprocessing import build_masks
+            img = sitk.ReadImage(str(ct_path))
+            _hull, intra, _dist = build_masks(img)
+            mask_img = sitk.GetImageFromArray(intra.astype("uint8"))
+            mask_img.CopyInformation(img)
+            sitk.WriteImage(mask_img, str(mask_path))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log(f"[mask] hull backend failed: {exc}")
+            return False
+
+    if backend == "hull":
+        return "hull" if _try_hull() else None
     if backend == "synthstrip":
         return "synthstrip" if _try_synthstrip() else None
     if backend == "log-watershed":
@@ -98,9 +116,12 @@ def compute_intracranial_mask(
     bool array in SimpleITK [k, j, i] order, aligned to ``img``'s grid.
 
     ``brain_mask`` (numpy array or SimpleITK image) short-circuits the backends —
-    the caller-provided override. Otherwise runs :func:`select_brain_mask_to_path`
-    over a temp CT (so SynthStrip's binary, which is file-based, works) and reads
-    the mask back; resamples to ``img`` if the backend changed the grid.
+    the caller-provided override. ``backend="hull"`` returns the cheap
+    ``build_masks`` intracranial (head-distance ≥ 10 mm) — a fast, dependency-free
+    approximation, no temp file or external binary. Otherwise runs
+    :func:`select_brain_mask_to_path` over a temp CT (so SynthStrip's binary,
+    which is file-based, works) and reads the mask back; resamples to ``img`` if
+    the backend changed the grid.
 
     Raises ``RuntimeError`` when every backend fails (degenerate FOV / non-CT).
     """
@@ -117,6 +138,15 @@ def compute_intracranial_mask(
                 )
             return sitk.GetArrayFromImage(brain_mask).astype(bool), "provided"
         return np.asarray(brain_mask).astype(bool), "provided"
+
+    if backend == "hull":
+        # Poor-man's intracranial: the same array detection uses by default.
+        # Cheap (threshold + close + fillhole + distance), never artifacts on
+        # metal, no FreeSurfer dependency — at the cost of a coarse boundary
+        # (head silhouette − 10 mm includes skull/dura). Already KJI-order.
+        from ..primitives.preprocessing import build_masks
+        _hull, intra, _dist = build_masks(img)
+        return intra.astype(bool), "hull"
 
     with tempfile.TemporaryDirectory(prefix="rosa_mask_") as td:
         ct_p = Path(td) / "ct.nii.gz"

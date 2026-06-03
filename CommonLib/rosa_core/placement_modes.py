@@ -639,7 +639,10 @@ def place_seeg(
 
         mask_backend / brain_mask / synthstrip_path: brain-mask backend for the
             feature build (default ``"auto"`` = SynthStrip-if-available ->
-            LoG-watershed); ``brain_mask`` overrides. Drives the snap anchoring.
+            LoG-watershed; ``"hull"`` = fast head-distance approximation;
+            ``"synthstrip"`` / ``"log-watershed"`` force one); ``brain_mask``
+            (path-loaded volume / array / SITK image) overrides. Drives the
+            matched-filter PICK's proximal (brain-entry) anchor.
 
     Raises:
         ValueError: incompatible mode dispatch (e.g. ``seeds=`` + ``expected=``).

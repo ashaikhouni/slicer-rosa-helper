@@ -111,7 +111,10 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
 
     Brain mask: the ``intracranial`` mask comes from the shared backend
     selector — ``mask_backend="auto"`` = SynthStrip-if-available →
-    LoG-watershed; ``brain_mask`` (array/SITK image) overrides. It is the
+    LoG-watershed; ``"hull"`` = the cheap build_masks head-distance
+    approximation (reused from the pass above, no extra cost);
+    ``"synthstrip"`` / ``"log-watershed"`` force one; ``brain_mask``
+    (array/SITK image) overrides. Apart from ``"hull"`` / override it is the
     expensive part of this function. It is consumed ONLY by the matched-filter
     PICK (``place_seeg`` / ``fit-rosa`` proximal ``mf_anchor``), NOT by the snap
     or by guided-fit scoring (which use the cheap ``build_masks`` head-distance).
@@ -127,10 +130,17 @@ def compute_features(img, ijk_to_ras_mat, ras_to_ijk_mat=None, spacing_xyz=None,
     )
     hull_arr, _intracranial_legacy, dist_arr = build_masks(img)
     if compute_intracranial:
-        intracranial, _mask_backend_used = compute_intracranial_mask(
-            img, backend=mask_backend, brain_mask=brain_mask,
-            synthstrip_path=synthstrip_path, log=log,
-        )
+        if mask_backend == "hull" and brain_mask is None:
+            # "hull" backend IS the cheap build_masks intracranial — reuse the
+            # array we just computed instead of a redundant build_masks pass
+            # through the selector. (Selector still knows "hull" for standalone
+            # callers; this is just the hot-path shortcut.)
+            intracranial = _intracranial_legacy
+        else:
+            intracranial, _mask_backend_used = compute_intracranial_mask(
+                img, backend=mask_backend, brain_mask=brain_mask,
+                synthstrip_path=synthstrip_path, log=log,
+            )
     else:
         # Snap-only caller: the intracranial mask is never read (the snap is
         # mask-free; scoring uses the cheap build_masks head-distance), so we
