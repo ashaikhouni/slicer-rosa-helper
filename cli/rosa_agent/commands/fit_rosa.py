@@ -115,8 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--mask-backend", default="auto",
-        choices=("auto", "synthstrip", "log-watershed"),
-        help="brain-mask backend; 'auto' = SynthStrip → LoG-watershed fallback",
+        choices=("auto", "hull", "synthstrip", "log-watershed"),
+        help="brain-mask backend; 'auto' = SynthStrip → LoG-watershed fallback; "
+             "'hull' = fast head-distance approximation (no deps, coarse)",
     )
     parser.add_argument(
         "--synthstrip", default=None,

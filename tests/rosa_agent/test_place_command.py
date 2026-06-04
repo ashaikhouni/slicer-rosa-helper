@@ -190,6 +190,48 @@ class PlaceCommandShapeTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn("error:", err.lower())
 
+    def test_mask_backend_hull_runs(self):
+        """--mask-backend hull exercises the dependency-free hull path end to
+        end (no SynthStrip/watershed) and is recorded in the manifest."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "qc"
+            rc = place_main([
+                "--ct", str(self.ct_path),
+                "--output", str(out_dir),
+                "--mask-backend", "hull",
+                "--no-figures", "--quiet",
+            ])
+            self.assertEqual(rc, 0)
+            data = json.loads((out_dir / "manifest.json").read_text())
+            self.assertEqual(data["mode_args"]["mask_backend"], "hull")
+
+    def test_invalid_mask_backend_rejected(self):
+        """argparse rejects an unknown --mask-backend choice (exit 2)."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit):
+                place_main([
+                    "--ct", str(self.ct_path),
+                    "--output", str(Path(tmp) / "qc"),
+                    "--mask-backend", "not-a-backend",
+                    "--no-figures", "--quiet",
+                ])
+
+    def test_missing_brain_mask_polite_failure(self):
+        """--brain-mask pointing at a nonexistent file ⇒ clean exit 2."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--brain-mask", str(Path(tmp) / "nope.nii.gz"),
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("brain mask", err.lower())
+
     def test_unknown_model_id_polite_failure(self):
         """Mode 4 vouched-model lookup misses ⇒ CLI exits 2 with a
         clear stderr message naming the missing model id."""

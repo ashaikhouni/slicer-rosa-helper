@@ -85,6 +85,24 @@ def main(argv: list[str] | None = None) -> int:
                         help="mode 4/5 snap-to-v1 angle tolerance (default 12)")
     parser.add_argument("--snap-perp-mm", type=float, default=8.0,
                         help="mode 4/5 snap-to-v1 perp tolerance (default 8)")
+    parser.add_argument(
+        "--mask-backend", choices=("auto", "hull", "log-watershed", "synthstrip"),
+        default="auto",
+        help="intracranial brain-mask backend for the contact-placement anchor. "
+             "'auto' (default) = SynthStrip-if-available → LoG-watershed; "
+             "'hull' = fast head-distance approximation (no deps, never artifacts "
+             "on metal, coarse); 'log-watershed' = CT watershed; 'synthstrip' = "
+             "force FreeSurfer SynthStrip (most accurate, can streak on metal CT)")
+    parser.add_argument(
+        "--synthstrip", default=None,
+        help="explicit path to the mri_synthstrip binary (else probed via "
+             "$ROSA_SYNTHSTRIP / $FREESURFER_HOME/bin / PATH)")
+    parser.add_argument(
+        "--brain-mask", default=None,
+        help="path to a user-supplied intracranial mask volume "
+             "(overrides --mask-backend; resampled to the CT grid). This is also "
+             "the manual MRI-derived route: brain-extract a preop MRI, register "
+             "it to the CT, and pass the result here.")
     parser.add_argument("--quiet", action="store_true",
                         help="suppress progress prints")
     args = parser.parse_args(argv)
@@ -105,6 +123,18 @@ def main(argv: list[str] | None = None) -> int:
     if not ct_path.exists():
         _stderr(f"error: CT not found: {ct_path}")
         return 2
+
+    # User-supplied mask volume (overrides --mask-backend). Loaded as a SITK
+    # image; compute_intracranial_mask resamples it to the CT grid.
+    brain_mask_img = None
+    if args.brain_mask:
+        bm_path = Path(args.brain_mask)
+        if not bm_path.exists():
+            _stderr(f"error: brain mask not found: {bm_path}")
+            return 2
+        import SimpleITK as sitk
+        brain_mask_img = sitk.ReadImage(str(bm_path))
+        log(f"[place] using user brain mask {bm_path} (overrides --mask-backend)")
 
     # --------------------------------------------------------------
     # Read seeds / expected when supplied.
@@ -152,6 +182,9 @@ def main(argv: list[str] | None = None) -> int:
             band_floor=args.band_floor,
             snap_angle_tol_deg=args.snap_angle_deg,
             snap_perp_tol_mm=args.snap_perp_mm,
+            mask_backend=args.mask_backend,
+            brain_mask=brain_mask_img,
+            synthstrip_path=args.synthstrip,
             progress_logger=log,
         )
     except ValueError as exc:
@@ -184,7 +217,10 @@ def main(argv: list[str] | None = None) -> int:
         log("[place] features not on batch; loading fresh for figure rendering")
         try:
             from rosa_core.volume_loader import load_features_and_bolts
-            features, bolts = load_features_and_bolts(str(ct_path))
+            features, bolts = load_features_and_bolts(
+                str(ct_path), mask_backend=args.mask_backend,
+                brain_mask=brain_mask_img, synthstrip_path=args.synthstrip,
+            )
         except Exception as exc:  # noqa: BLE001
             _stderr(f"warning: failed to load features for figures ({exc}); "
                     f"writing TSVs only")
@@ -205,6 +241,9 @@ def main(argv: list[str] | None = None) -> int:
             "band_floor": args.band_floor,
             "snap_angle_tol_deg": args.snap_angle_deg,
             "snap_perp_tol_mm": args.snap_perp_mm,
+            "mask_backend": args.mask_backend,
+            "brain_mask": args.brain_mask,
+            "synthstrip": args.synthstrip,
         },
         runtime_seconds=runtime_sec,
         write_figures=not args.no_figures,

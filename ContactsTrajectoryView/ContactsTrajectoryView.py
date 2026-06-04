@@ -458,6 +458,75 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.detectionModeCombo.addItem("Model-driven (nominal)", "model_driven")
         form.addRow("Detection mode", self.detectionModeCombo)
 
+        # ---- Brain mask source (the staged placement anchor) -----------
+        # The intracranial mask sets where the matched-filter contact band
+        # starts (brain entry). 'Auto' = SynthStrip-if-available → watershed
+        # (matches the CLI default); 'Hull' = the fast head-distance
+        # approximation detection uses (no deps, never artifacts on metal,
+        # coarse boundary); 'Watershed'/'SynthStrip' force a CT backend;
+        # 'User mask volume' takes a node the user supplies (e.g. a registered
+        # preop-MRI-derived mask). Default 'Auto' → no behavior change unless
+        # the user picks otherwise. Only affects the Staged detection mode.
+        self.maskBackendCombo = qt.QComboBox()
+        self.maskBackendCombo.addItem("Auto (SynthStrip → watershed)", "auto")
+        self.maskBackendCombo.addItem("Hull (fast, no deps)", "hull")
+        self.maskBackendCombo.addItem("Watershed (CT)", "log-watershed")
+        self.maskBackendCombo.addItem("SynthStrip (CT)", "synthstrip")
+        self.maskBackendCombo.addItem("User mask volume…", "__user__")
+        self.maskBackendCombo.setToolTip(
+            "Intracranial mask backend for staged contact placement. It sets "
+            "where the contact band starts (brain entry).\n"
+            "• Auto — SynthStrip if its binary is set below, else CT watershed.\n"
+            "• Hull — fast head-distance approximation (no dependency, coarse).\n"
+            "• Watershed (CT) — pure-Python CT brain extraction.\n"
+            "• SynthStrip (CT) — FreeSurfer deep-learning strip (most accurate; "
+            "can streak on metal-heavy CT).\n"
+            "• User mask volume — a binary mask you supply (e.g. a preop MRI "
+            "skull-strip registered to the CT)."
+        )
+        self.maskBackendCombo.currentIndexChanged.connect(self._onMaskBackendChanged)
+        form.addRow("Brain mask source", self.maskBackendCombo)
+
+        # SynthStrip binary / FreeSurfer path. Slicer's bundled Python can't
+        # see your shell PATH, so the user points at the mri_synthstrip binary
+        # (or the FreeSurfer install dir). Persisted in QSettings → entered
+        # once. Shown only for backends that can run SynthStrip (auto/synthstrip).
+        self.synthstripPathEdit = ctk.ctkPathLineEdit()
+        self.synthstripPathEdit.filters = (
+            ctk.ctkPathLineEdit.Files | ctk.ctkPathLineEdit.Readable
+        )
+        self.synthstripPathEdit.setToolTip(
+            "Path to the mri_synthstrip binary (FreeSurfer 7.3+) or your "
+            "FreeSurfer install directory. Needed only for the Auto / SynthStrip "
+            "backends — Slicer's Python can't see your shell PATH. Saved between "
+            "sessions."
+        )
+        _saved_synth = qt.QSettings().value("ROSA/synthstripPath", "")
+        if _saved_synth:
+            self.synthstripPathEdit.currentPath = _saved_synth
+        self.synthstripPathEdit.currentPathChanged.connect(self._onSynthstripPathChanged)
+        self._synthstripPathLabel = qt.QLabel("SynthStrip binary")
+        form.addRow(self._synthstripPathLabel, self.synthstripPathEdit)
+
+        # User-supplied mask volume node. Shown only for 'User mask volume'.
+        self.brainMaskSelector = slicer.qMRMLNodeComboBox()
+        self.brainMaskSelector.nodeTypes = [
+            "vtkMRMLScalarVolumeNode", "vtkMRMLLabelMapVolumeNode",
+        ]
+        self.brainMaskSelector.selectNodeUponCreation = False
+        self.brainMaskSelector.addEnabled = False
+        self.brainMaskSelector.removeEnabled = False
+        self.brainMaskSelector.noneEnabled = True
+        self.brainMaskSelector.setMRMLScene(slicer.mrmlScene)
+        self.brainMaskSelector.setToolTip(
+            "A binary intracranial mask volume in (or resampled into) the postop "
+            "CT space — e.g. brain-extract a preop MRI and register it to the CT. "
+            "Resampled to the CT grid automatically."
+        )
+        self._brainMaskLabel = qt.QLabel("Mask volume")
+        form.addRow(self._brainMaskLabel, self.brainMaskSelector)
+        self._onMaskBackendChanged()  # set initial row visibility
+
         self.contactsNodeNameEdit = qt.QLineEdit("ROSA_Contacts")
         form.addRow("Output node prefix", self.contactsNodeNameEdit)
 
@@ -1183,27 +1252,87 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         return nodes[0] if nodes else None
 
+    def _onMaskBackendChanged(self, *_):
+        """Show only the inputs relevant to the chosen brain-mask backend."""
+        backend = self.maskBackendCombo.currentData or "auto"
+        is_synth = backend in ("auto", "synthstrip")
+        is_user = backend == "__user__"
+        self._synthstripPathLabel.setVisible(is_synth)
+        self.synthstripPathEdit.setVisible(is_synth)
+        self._brainMaskLabel.setVisible(is_user)
+        self.brainMaskSelector.setVisible(is_user)
+
+    def _onSynthstripPathChanged(self, *_):
+        """Persist the SynthStrip binary path so it survives sessions."""
+        qt.QSettings().setValue(
+            "ROSA/synthstripPath", self.synthstripPathEdit.currentPath,
+        )
+
+    @staticmethod
+    def _resolve_synthstrip_path(path):
+        """Accept either the mri_synthstrip binary or a FreeSurfer dir."""
+        if not path:
+            return None
+        import os
+        if os.path.isdir(path):
+            for cand in (os.path.join(path, "bin", "mri_synthstrip"),
+                         os.path.join(path, "mri_synthstrip")):
+                if os.path.exists(cand):
+                    return cand
+        return path
+
+    def _current_mask_kwargs(self):
+        """Read the 'Brain mask source' UI → (kwargs, cache_key_fragment).
+
+        ``kwargs`` feeds ``load_features_and_bolts`` (mask_backend / brain_mask /
+        synthstrip_path). For 'User mask volume', the selected node is converted
+        to a SITK image and passed as ``brain_mask`` (which overrides the
+        backend). The cache-key fragment makes a backend switch invalidate the
+        per-CT features cache.
+        """
+        backend = self.maskBackendCombo.currentData or "auto"
+        synth = self._resolve_synthstrip_path(
+            (self.synthstripPathEdit.currentPath or "").strip() or None
+        )
+        if backend == "__user__":
+            node = self.brainMaskSelector.currentNode()
+            if node is None:
+                raise ValueError(
+                    "Brain mask source is 'User mask volume' but no mask node is "
+                    "selected. Pick a mask volume or choose another backend."
+                )
+            from rosa_scene.sitk_volume_adapter import image_from_volume_node
+            brain_mask, _i2r, _r2i = image_from_volume_node(node)
+            key = ("__user__", node.GetID(), int(node.GetMTime() or 0))
+            # backend is ignored when brain_mask is provided
+            return ({"mask_backend": "auto", "brain_mask": brain_mask,
+                     "synthstrip_path": synth}, key)
+        return ({"mask_backend": backend, "brain_mask": None,
+                 "synthstrip_path": synth}, (backend, synth or ""))
+
     def _features_and_bolts_for(self, ct_node):
         """Return ``(features, bolts)`` for ``ct_node``, cached per
-        (node id, mtime) so successive placement passes on the same
-        CT skip the (~5-10 s) LoG / Frangi / hull-distance / bolt
-        extraction. Cache is invalidated automatically when the
-        volume's MTime changes (re-load, pixel edit, etc.).
+        (node id, mtime, mask-source) so successive placement passes on the
+        same CT + mask choice skip the (~5-10 s) LoG / Frangi / hull-distance /
+        bolt extraction. Cache is invalidated automatically when the volume's
+        MTime changes (re-load, pixel edit, etc.) or the brain-mask source
+        changes.
         """
         from rosa_core.volume_loader import load_features_and_bolts
         from rosa_scene.sitk_volume_adapter import image_from_volume_node
 
+        mask_kwargs, mask_key = self._current_mask_kwargs()
         try:
             mtime = int(ct_node.GetMTime())
         except Exception:
             mtime = 0
-        key = (ct_node.GetID(), mtime)
+        key = (ct_node.GetID(), mtime, mask_key)
         cached = self._featuresCache.get(key)
         if cached is not None:
             return cached
 
         sitk_img, _i2r, _r2i = image_from_volume_node(ct_node)
-        features, bolts = load_features_and_bolts(sitk_img)
+        features, bolts = load_features_and_bolts(sitk_img, **mask_kwargs)
 
         # One-entry cache: drop any stale entries for the same node id
         # (covers the "user re-loaded the volume" case where mtime
@@ -1248,15 +1377,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
 
         # `_features_and_bolts_for` caches (features, bolts) per CT
-        # (node id, mtime) so back-to-back passes (Suggest models →
+        # (node id, mtime, mask-source) so back-to-back passes (Suggest models →
         # Generate contacts → Update contacts) skip the ~5-10 s
         # LoG / Frangi / hull-distance / bolt-extraction recomputation.
         # The adapter still preserves the Slicer node's IJK→RAS geometry
-        # (no temp-NIfTI round trip) on the cache miss path.
-        cached = (ct_node.GetID(), int(ct_node.GetMTime() or 0)) in self._featuresCache
+        # (no temp-NIfTI round trip) on the cache miss path. Switching the
+        # Brain-mask-source combo invalidates the cache (new key fragment).
+        mask_label = self.maskBackendCombo.currentText
         self.log(
             f"[contacts:{log_context}] features/bolts for "
-            f"{ct_node.GetName()}: {'cache hit' if cached else 'computing…'}"
+            f"{ct_node.GetName()} (mask: {mask_label})"
         )
         features, bolts = self._features_and_bolts_for(ct_node)
 
