@@ -49,6 +49,7 @@ TRAJECTORY_SOURCE_OPTIONS = [
     ("manual", "Manual (scene)"),
     ("guided_fit", "Guided Fit"),
     ("auto_fit", "Auto Fit"),
+    ("contact_fit", "Contact Fit (generated)"),
     ("planned_rosa", "Planned ROSA"),
 ]
 
@@ -108,11 +109,15 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # rebuild.
         self._userModelOverrides: dict[str, str] = {}
         # Per-CT cache of (features, bolts) so back-to-back placement
-        # passes (Suggest models -> Generate contacts -> Update
-        # contacts) don't recompute LoG / Frangi / hull-distance / bolt
+        # passes (Generate contacts -> Update contacts) don't recompute
+        # LoG / Frangi / hull-distance / bolt
         # extraction. Keyed by (volume_node_id, mtime); auto-invalidates
         # when the user re-loads the CT or its data changes.
         self._featuresCache: dict[tuple, tuple] = {}
+        # name -> PlacedTrajectory for the current contact generation; the
+        # fitted centerline that OWNS each shank's contacts (drives display +
+        # focus). Reset on every regeneration (one set, period).
+        self._fittedByName: dict = {}
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -124,6 +129,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._workflowObserverNode = None
         self._workflowRefreshPending = False
         self._workflowRefreshInFlight = False
+        # Set while CTV is generating contacts: the publish step modifies the
+        # workflow node, which would otherwise re-trigger our own workflow-
+        # modified refresh and wipe the freshly-built contact/fitted display.
+        self._suppressWorkflowRefresh = False
 
         top_form = qt.QFormLayout()
         top_form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
@@ -226,6 +235,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._workflowObserverTag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_workflow_node_modified)
 
     def _on_workflow_node_modified(self, caller=None, event=None):
+        if getattr(self, "_suppressWorkflowRefresh", False):
+            # CTV's own generate is publishing — don't self-refresh and wipe
+            # the display it's building. External changes refresh as normal.
+            return
         if self._workflowRefreshPending or self._workflowRefreshInFlight:
             return
         self._workflowRefreshPending = True
@@ -406,27 +419,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.applyModelAllButton = qt.QPushButton("Apply model to all")
         self.applyModelAllButton.clicked.connect(self.onApplyModelAllClicked)
         defaults_row.addWidget(self.applyModelAllButton)
-        # "Suggest models" — opt-in CT-aware classification for empty rows.
-        # The library subset used for the suggestion comes from the pitch-
-        # strategy combo below ("dixi" / "pmt_35" / "auto" / etc.).
-        # Per user feedback (2026-05-10): the on-load auto-classify was
-        # guessing every row from the entire library — wrong default.
-        # User now opts in by clicking this button.
-        self.suggestModelsButton = qt.QPushButton("Suggest models")
-        self.suggestModelsButton.setToolTip(
-            "Run the CT-aware electrode classifier to fill in model_id "
-            "for any row whose model is empty. Library subset comes from "
-            "the 'Pitch strategy' combo below."
-        )
-        self.suggestModelsButton.clicked.connect(self.onSuggestModelsClicked)
-        self.suggestModelsButton.setEnabled(False)
-        defaults_row.addWidget(self.suggestModelsButton)
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
 
-        # Restrict the model library used by "Suggest models" /
-        # "Generate contacts". Auto / Guided / Manual Fit each have their
-        # own copy of this combo, so restrictions apply per-module.
+        # Restrict the model library the staged picker may choose from when
+        # "Generate contacts" fills an unstamped row. Auto / Guided / Manual Fit
+        # each have their own copy of this combo, so restrictions apply per-module.
         from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.contactsPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
@@ -840,12 +838,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         """Populate the per-row table.
 
         Per user feedback (2026-05-10): default the model combo to empty
-        regardless of trajectory source. The user must explicitly opt in
-        to populate models via the "Suggest models" button (runs the
-        matched-filter picker via ``place_seeg``) or pick manually per
-        row. Only the user's manual override (from a prior CTV
+        for seed sources. The user picks per row (or "Apply model to all"),
+        or just clicks Generate and the staged placer classifies each shank
+        from the CT. Only the user's manual override (from a prior CTV
         interaction) persists across re-populate — that's what
-        ``_record_user_model_override`` is for.
+        ``_record_user_model_override`` is for. The Contact Fit source
+        pre-fills the model the contacts were placed with (Rosa.BestModelId).
 
         Note: the detection/fit-time PaCER classifier that stamped
         ``Rosa.BestModelId`` was removed 2026-05-11; the row builder
@@ -861,9 +859,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            # Default empty. Only the user's manual override (sticky across
-            # re-populate) pre-fills.
+            # Default empty for seed sources. The user's manual override (sticky
+            # across re-populate) pre-fills; and for the Contact Fit result the
+            # model the contacts were placed with (stamped on the fitted line)
+            # pre-fills, so the model belongs to the result, not the seed.
             override = self._userModelOverrides.get(traj["name"], "")
+            if not override and self._selected_source_key() == "contact_fit":
+                override = (traj.get("best_model_id") or "").strip()
             if override:
                 idx = model_combo.findText(override)
                 if idx >= 0:
@@ -882,8 +884,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.generateContactsButton.setEnabled(enabled)
         self.updateContactsButton.setEnabled(enabled)
         self.applyModelAllButton.setEnabled(enabled)
-        if hasattr(self, "suggestModelsButton"):
-            self.suggestModelsButton.setEnabled(enabled)
         if trajectories:
             n_user_pre_assigned = sum(
                 1 for traj in trajectories
@@ -892,8 +892,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             note = (
                 f"({n_user_pre_assigned} restored from prior session)"
                 if n_user_pre_assigned else
-                "(all empty — use 'Suggest models' to classify from CT, "
-                "or pick per row)"
+                "(all empty — pick a model per row, or just Generate and the "
+                "placer classifies from CT)"
             )
             self.log(
                 f"[contacts] ready for {len(trajectories)} trajectories {note}"
@@ -1084,6 +1084,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             "manual": ["manual"],
             "guided_fit": ["guided_fit"],
             "auto_fit": ["auto_fit"],
+            "contact_fit": ["contact_fit"],
             "planned_rosa": ["planned_rosa"],
         }
         groups = group_map.get(key, group_map["working"])
@@ -1110,6 +1111,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        # Switching source / refreshing drops the prior generation's display:
+        # those contacts + fitted lines belong to a different trajectory set, so
+        # they must not linger over the newly loaded source. (show_only_groups
+        # below hides the fitted lines by group; contacts are fiducials, so hide
+        # them explicitly.)
+        self._fittedByName = {}
+        try:
+            self.logic.electrode_scene.apply_contact_selection_visibility("")
+        except Exception:
+            pass
         self._populate_contact_table(self.loadedTrajectories)
         self._apply_source_visibility(source_key)
         self._refresh_qc_metrics()
@@ -1130,104 +1141,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             return
         self._set_workflow_active_source(self._selected_source_key())
         self.onRefreshClicked()
-
-    def onSuggestModelsClicked(self):
-        """Run the staged ``place_seeg`` pipeline to suggest models for
-        rows with empty model_id.
-
-        This uses the SAME engine ``Generate Contacts`` will use when the
-        user clicks it next — so the suggested picks match what the
-        eventual placement will pick. The canonical picker is the matched
-        filter in ``rosa_core.contact_placement.stage_d_pick``.
-
-        The button only fills rows whose model_id is currently empty.
-        Rows with a user override are left alone — clear them manually to
-        re-suggest. Library subset comes from the pitch-strategy combo.
-
-        This is expensive (full v1 detection + per-seed snap + scoring,
-        same cost as Generate Contacts) — wrapped in a progress dialog.
-        """
-        # Collect rows to suggest for (currently-empty ones only).
-        empty_rows = []
-        for row in range(self.contactTable.rowCount):
-            traj_item = self.contactTable.item(row, 1)
-            if traj_item is None:
-                continue
-            model_combo = self.contactTable.cellWidget(row, 3)
-            if model_combo is None:
-                continue
-            if widget_current_text(model_combo).strip():
-                continue
-            traj_name = traj_item.text()
-            traj = next(
-                (t for t in self.loadedTrajectories if t.get("name") == traj_name),
-                None,
-            )
-            if traj is None:
-                continue
-            empty_rows.append((row, traj_name, traj))
-
-        if not empty_rows:
-            self.log("[contacts:suggest] no empty rows to suggest for")
-            return
-
-        self.log(
-            f"[contacts:suggest] running place_seeg on {len(empty_rows)} "
-            f"empty rows (mode 5: snap + library matching)"
-        )
-
-        # Build a fake "assignments" dict so _generate_contacts_staged routes
-        # via mode 5 (no model_ids vouched). Then read back the placer's
-        # picked model_id per row.
-        trajectories = [traj for _row, _name, traj in empty_rows]
-        empty_assignments = {
-            "schema_version": "1.0",
-            "assignments": [
-                {
-                    "trajectory": name, "model_id": "",
-                    "tip_at": "target", "tip_shift_mm": 0.0,
-                    "xyz_offset_mm": [0.0, 0.0, 0.0],
-                }
-                for _row, name, _traj in empty_rows
-            ],
-        }
-        try:
-            _contacts, updated_assignments, _placed = self._generate_contacts_staged(
-                trajectories=trajectories,
-                assignments=empty_assignments,
-                log_context="suggest",
-            )
-        except Exception as exc:
-            self.log(f"[contacts:suggest] place_seeg failed: {exc}")
-            return
-
-        # Push picks back into the row combos.
-        picked_by_name = {
-            row.get("trajectory", ""): row.get("model_id", "")
-            for row in updated_assignments.get("assignments", [])
-        }
-        n_filled = 0
-        n_failed = 0
-        for row, name, _traj in empty_rows:
-            picked = picked_by_name.get(name, "")
-            if not picked:
-                n_failed += 1
-                continue
-            combo = self.contactTable.cellWidget(row, 3)
-            if combo is None:
-                n_failed += 1
-                continue
-            idx = combo.findText(picked)
-            if idx < 0:
-                n_failed += 1
-                continue
-            combo.setCurrentIndex(idx)
-            self._record_user_model_override(row)
-            n_filled += 1
-        self.log(
-            f"[contacts:suggest] filled {n_filled}/{len(empty_rows)} from "
-            f"staged-pipeline picks; failed {n_failed}"
-        )
 
     def onApplyModelAllClicked(self):
         model_id = widget_current_text(self.defaultModelCombo).strip()
@@ -1377,8 +1290,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
 
         # `_features_and_bolts_for` caches (features, bolts) per CT
-        # (node id, mtime, mask-source) so back-to-back passes (Suggest models →
-        # Generate contacts → Update contacts) skip the ~5-10 s
+        # (node id, mtime, mask-source) so back-to-back passes (Generate
+        # contacts → Update contacts) skip the ~5-10 s
         # LoG / Frangi / hull-distance / bolt-extraction recomputation.
         # The adapter still preserves the Slicer node's IJK→RAS geometry
         # (no temp-NIfTI round trip) on the cache miss path. Switching the
@@ -1572,24 +1485,35 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _sync_model_combos_from_assignments(self, assignments):
         """Push assignment model_id back into the row model combos so
         the user sees which model the engine picked in peak-driven mode.
+
+        Guarded with ``_updatingContactTable`` so these PLACER picks are NOT
+        recorded as user overrides. The model belongs to the Contact Fit result
+        (stamped on the fitted line as ``Rosa.BestModelId``), not to the seed
+        source — without the guard the picks bleed onto planned/imported rows
+        that share shank names.
         """
         by_name = {
             row.get("trajectory", ""): row.get("model_id", "")
             for row in assignments.get("assignments", [])
         }
-        for row_index in range(self.contactTable.rowCount):
-            traj_item = self.contactTable.item(row_index, 1)
-            if traj_item is None:
-                continue
-            model_id = by_name.get(traj_item.text(), "")
-            if not model_id:
-                continue
-            combo = self.contactTable.cellWidget(row_index, 3)
-            if combo is None:
-                continue
-            idx = combo.findText(model_id)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
+        prev_updating = self._updatingContactTable
+        self._updatingContactTable = True
+        try:
+            for row_index in range(self.contactTable.rowCount):
+                traj_item = self.contactTable.item(row_index, 1)
+                if traj_item is None:
+                    continue
+                model_id = by_name.get(traj_item.text(), "")
+                if not model_id:
+                    continue
+                combo = self.contactTable.cellWidget(row_index, 3)
+                if combo is None:
+                    continue
+                idx = combo.findText(model_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            self._updatingContactTable = prev_updating
 
     def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
         selected_rows = [row for row in range(self.contactTable.rowCount) if self._row_is_selected(row)]
@@ -1615,8 +1539,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
 
         mode = self._selected_detection_mode()
+        placed_by_traj = {}
         if mode == "staged":
-            contacts, assignments, _placed_by_traj = self._generate_contacts_staged(
+            contacts, assignments, placed_by_traj = self._generate_contacts_staged(
                 trajectories=selected_trajectories,
                 assignments=assignments,
                 log_context=log_context,
@@ -1643,13 +1568,20 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     f"Model-driven generation requires a model per row, "
                     f"but {len(missing)} selected trajectories have no "
                     f"model assigned: {preview}{more}. Pick a model for "
-                    f"each row, click 'Suggest models' to fill them, or "
-                    f"switch to Staged mode (which can pick the model "
-                    f"from CT)."
+                    f"each row, or switch to Staged mode (which picks the "
+                    f"model from CT)."
                 )
             contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
+        fitted_prefix = "ROSA_ContactFit"
+        # One set of contacts, period: wipe the entire prior generation
+        # (contacts + electrode models + fitted lines) before publishing the new
+        # one, so regeneration overwrites rather than piling up stale nodes.
+        self.logic.electrode_scene.clear_contact_outputs(
+            node_prefixes=[node_prefix, fitted_prefix],
+            workflow_node=self.workflowNode,
+        )
         contact_nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(
             contacts,
             node_prefix=node_prefix,
@@ -1662,6 +1594,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 models_by_id=self.modelsById,
                 node_prefix=node_prefix,
             )
+        # The fitted trajectory (the centerline the contacts were placed on)
+        # becomes the displayed geometry, distinct from the preserved source
+        # seed line. Built from placed_by_traj (staged mode); empty for
+        # model-driven, whose contacts already sit on the source line.
+        fitted_nodes = self.logic.electrode_scene.create_fitted_trajectory_lines_by_trajectory(
+            placed_by_traj, source_by_name=traj_map, node_prefix=fitted_prefix,
+        )
+        self._fittedByName = placed_by_traj
 
         self.lastGeneratedContacts = contacts
         # GT-export becomes available once we have something to save.
@@ -1696,6 +1636,27 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             qc_rows=qc_rows_for_publish,
             workflow_node=self.workflowNode,
         )
+        if fitted_nodes:
+            self.logic.workflow_publish.publish_nodes(
+                role="ContactFitTrajectoryLines",
+                nodes=list(fitted_nodes.values()),
+                source="contact_fit",
+                workflow_node=self.workflowNode,
+            )
+        # The fitted line is now the displayed trajectory: hide the source seed
+        # lines that have a fitted counterpart (Show planned resurfaces them),
+        # and scope contacts to the selected shank.
+        self._apply_source_line_visibility()
+        # The generated result becomes the active "Contact Fit" view so it
+        # persists when the user leaves and re-enters the module (re-enter would
+        # otherwise reload the seed source and hide the result). The combo is
+        # synced without triggering a reload (guarded by _syncingSourceCombo).
+        if fitted_nodes:
+            self._set_workflow_active_source("contact_fit")
+            self._sync_source_combo_from_workflow()
+        # Now that the active view is Contact Fit, show the selected shank's
+        # contacts (gated on the source, so seed views never show stray contacts).
+        self._apply_contact_visibility_for_selection()
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(contact_nodes)} electrode nodes"
         )
@@ -1727,11 +1688,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "No trajectories are available in workflow/scene.",
             )
             return
+        self._suppressWorkflowRefresh = True
         try:
             self._run_contact_generation(log_context="generate")
         except Exception as exc:
             self.log(f"[contacts] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
+        finally:
+            self._suppressWorkflowRefresh = False
 
     def onUpdateContactsClicked(self):
         if not self.loadedTrajectories:
@@ -1748,11 +1712,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "Generate contacts once first, then use update.",
             )
             return
+        self._suppressWorkflowRefresh = True
         try:
             self._run_contact_generation(log_context="update")
         except Exception as exc:
             self.log(f"[contacts:update] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
+        finally:
+            self._suppressWorkflowRefresh = False
 
     # ---- GT-export ----------------------------------------------------
 
@@ -1954,11 +1921,61 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         traj_name = self._selected_trajectory_name_from_table()
         if not traj_name:
             return None
+        # Prefer the fitted trajectory (the centerline the contacts were placed
+        # on) so the highlight + blue reformat follow the contacts, not the
+        # source seed. Falls back to the source line when nothing is placed.
+        if traj_name in getattr(self, "_fittedByName", {}):
+            node = self.logic.electrode_scene.find_node_by_name(
+                f"ROSA_ContactFit_{traj_name}", "vtkMRMLMarkupsLineNode",
+            )
+            fitted = self.logic.trajectory_scene.trajectory_from_line_node(traj_name, node)
+            if fitted is not None:
+                return fitted
         traj_map = self._build_trajectory_map_with_scene_overrides()
         return traj_map.get(traj_name)
 
+    def _apply_source_line_visibility(self):
+        """Hide the source seed lines that now have a fitted counterpart, so the
+        fitted trajectory is the one displayed. 'Show planned' resurfaces them
+        as an overlay. Source lines without a fitted line (not yet placed) are
+        left untouched."""
+        show = bool(self.showPlannedCheck.checked)
+        fitted = set(getattr(self, "_fittedByName", {}).keys())
+        for traj in self.loadedTrajectories:
+            name = traj.get("name", "")
+            if name not in fitted:
+                continue
+            node = slicer.mrmlScene.GetNodeByID(traj.get("node_id", ""))
+            if node is None:
+                continue
+            disp = node.GetDisplayNode()
+            if disp is not None:
+                disp.SetVisibility(show)
+
+    def _display_node_id_for(self, name):
+        """The line node id that represents ``name`` on screen — the fitted
+        ContactFit line when contacts have been placed, else the source line."""
+        if name in getattr(self, "_fittedByName", {}):
+            node = self.logic.electrode_scene.find_node_by_name(
+                f"ROSA_ContactFit_{name}", "vtkMRMLMarkupsLineNode",
+            )
+            if node is not None:
+                return node.GetID()
+        return ""
+
+    def _display_scope_node_ids(self):
+        """Scope for highlight/focus: the fitted line for placed shanks, the
+        source line otherwise. Using the fitted ids keeps the source seed line
+        out of scope so the highlight doesn't re-show it."""
+        ids = []
+        for traj in self.loadedTrajectories:
+            nid = self._display_node_id_for(traj.get("name", "")) or traj.get("node_id", "")
+            if nid:
+                ids.append(nid)
+        return ids
+
     def _highlight_selected_trajectory(self):
-        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        scope_ids = self._display_scope_node_ids()
         selected = self._selected_trajectory()
         self.logic.focus_controller.focus_selected(
             trajectory=selected,
@@ -2001,7 +2018,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _align_focus_views_for_selected(self, align_trajectory_views=True):
         trajectory = self._selected_trajectory()
-        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        scope_ids = self._display_scope_node_ids()
         # When contacts have been placed for this trajectory, hand them
         # to focus_selected so the slice axis is refit through the actual
         # contacts (mitigates centerline drift / slight electrode bend).
@@ -2046,9 +2063,22 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             out.append(lps_to_ras_point(list(lps)))
         return out or None
 
+    def _apply_contact_visibility_for_selection(self):
+        """Contacts belong to the generated 'Contact Fit' result, shown one
+        shank at a time. They're only visible while that source is the active
+        view; in any seed source (Imported/Planned/Auto/Guided) they stay hidden
+        even if a same-named shank is selected — those contacts aren't part of
+        the seed."""
+        name = ""
+        if self._selected_source_key() == "contact_fit":
+            name = self._selected_trajectory_name_from_table()
+        self.logic.electrode_scene.apply_contact_selection_visibility(name)
+
     def _follow_selected_trajectory_if_enabled(self):
         if self._syncingFocusControls:
             return
+        # Contacts follow the selection, but only in the Contact Fit view.
+        self._apply_contact_visibility_for_selection()
         self._highlight_selected_trajectory()
         if not bool(self.autoFollowTrajectoryCheck.checked):
             return
@@ -2085,9 +2115,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onIsolateSelectedToggled(self, checked):
         if not bool(checked):
-            # Restore everything — empty target set means show-all.
+            # Restore lines/models to show-all, but keep contacts scoped to the
+            # selected shank (one set of contacts displayed at a time, always).
             try:
                 self.logic.electrode_scene.apply_trajectory_isolation(set())
+                self._apply_contact_visibility_for_selection()
             except Exception:
                 pass
             return
@@ -2175,6 +2207,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onShowPlannedToggled(self, checked):
         self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
+        # Also (re)show or hide the source seed lines that were superseded by a
+        # fitted trajectory, so this checkbox is the single "see the original
+        # line" control once contacts are placed.
+        self._apply_source_line_visibility()
 
     def onShowModelsToggled(self, checked):
         """Toggle visibility of every published electrode-model node
@@ -2257,6 +2293,10 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
         if source == "auto_fit":
             return self._collect_trajectories_from_role("AutoFitTrajectoryLines", workflow_node=wf)
+        if source == "contact_fit":
+            # The fitted trajectories the contacts were placed on (the
+            # generated result), so it can be re-viewed after leaving the module.
+            return self._collect_trajectories_from_role("ContactFitTrajectoryLines", workflow_node=wf)
         if source == "imported_external":
             return self._collect_trajectories_from_role("ImportedExternalTrajectoryLines", workflow_node=wf)
         if source == "planned_rosa":

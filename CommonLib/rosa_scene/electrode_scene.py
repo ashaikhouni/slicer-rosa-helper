@@ -578,6 +578,138 @@ class ElectrodeSceneService:
             if display:
                 display.SetVisibility(bool(visible))
 
+    def clear_contact_outputs(
+        self,
+        node_prefixes=("ROSA_Contacts", "ROSA_ContactFit"),
+        workflow_node=None,
+    ):
+        """Delete the entire prior contact-generation output so each
+        regeneration yields exactly ONE set.
+
+        Removes every contact-fiducial, electrode-model, and fitted-trajectory
+        line node whose name starts with one of ``node_prefixes`` (the contact
+        node prefix + the fitted-line prefix), then clears the workflow roles so
+        no stale references dangle. Source seed lines (Auto/Guided/Manual/
+        Imported/Planned) are NOT touched — only the generated output.
+        """
+        prefixes = tuple(p for p in (node_prefixes or ()) if p)
+        removed = 0
+        if prefixes:
+            for cls in (
+                "vtkMRMLMarkupsFiducialNode",
+                "vtkMRMLModelNode",
+                "vtkMRMLMarkupsLineNode",
+            ):
+                for node in list(slicer.util.getNodesByClass(cls)):
+                    name = node.GetName() or ""
+                    if any(name.startswith(p) for p in prefixes):
+                        slicer.mrmlScene.RemoveNode(node)
+                        removed += 1
+        try:
+            wf = workflow_node or self.workflow_state.resolve_or_create_workflow_node()
+            for role in (
+                "ContactFiducials",
+                "ElectrodeShaftModelNodes",
+                "ElectrodeContactModelNodes",
+                "ContactFitTrajectoryLines",
+            ):
+                self.workflow_state.clear_role(role, workflow_node=wf)
+        except Exception:  # noqa: BLE001 - role cleanup is best-effort
+            pass
+        return removed
+
+    def create_fitted_trajectory_lines_by_trajectory(
+        self,
+        placed_by_traj,
+        source_by_name=None,
+        node_prefix="ROSA_ContactFit",
+    ):
+        """Create one *fitted* trajectory line per placed shank — the centerline
+        the contacts were actually placed on (``PlacedTrajectory.centerline_ras``).
+
+        This is the trajectory that OWNS the contacts and becomes the displayed
+        geometry, distinct from the (preserved) source seed line. Each line is
+        tagged ``Rosa.TrajectoryName`` (so isolation/focus pick it up) and
+        ``Rosa.Role="ContactFit"``. Falls back to the placed contacts, then the
+        seed endpoints, when the centerline is unavailable. Returns
+        ``{traj_name: lineNode}``.
+        """
+        out = {}
+        for name in sorted((placed_by_traj or {}).keys()):
+            placed = placed_by_traj[name]
+            pts = getattr(placed, "centerline_ras", None)
+            if pts is None or len(pts) < 2:
+                pts = getattr(placed, "contacts_ras", None)
+            if pts is None or len(pts) < 2:
+                s = getattr(placed, "start_ras", None)
+                e = getattr(placed, "end_ras", None)
+                pts = [s, e] if s is not None and e is not None else None
+            if pts is None or len(pts) < 2:
+                continue
+            entry = [float(v) for v in pts[0]]
+            tip = [float(v) for v in pts[-1]]
+
+            # Orient so control point 0 (the "Sh"allow / entry end) matches the
+            # source seed's entry — keeps focus(focus="entry") + labels sane.
+            src = (source_by_name or {}).get(name)
+            if src is not None and src.get("start") is not None:
+                src_entry_ras = lps_to_ras_point(list(src["start"]))
+                d_entry = sum((entry[i] - src_entry_ras[i]) ** 2 for i in range(3))
+                d_tip = sum((tip[i] - src_entry_ras[i]) ** 2 for i in range(3))
+                if d_tip < d_entry:
+                    entry, tip = tip, entry
+
+            node_name = f"{node_prefix}_{name}"
+            node = self.find_node_by_name(node_name, "vtkMRMLMarkupsLineNode")
+            if node is None:
+                node = slicer.mrmlScene.AddNewNodeByClass(
+                    "vtkMRMLMarkupsLineNode", node_name,
+                )
+            node.RemoveAllControlPoints()
+            node.AddControlPoint(entry)
+            node.AddControlPoint(tip)
+            node.SetAttribute("Rosa.Managed", "1")
+            node.SetAttribute("Rosa.TrajectoryName", str(name))
+            node.SetAttribute("Rosa.Role", "ContactFit")
+            node.SetAttribute("Rosa.TrajectoryGroup", "contact_fit")
+            # The model the contacts were placed with belongs to this fitted
+            # trajectory — stamp it so the table can restore it when the Contact
+            # Fit source is reloaded (read back via trajectory_from_line_node's
+            # ``best_model_id``).
+            node.SetAttribute("Rosa.BestModelId", str(getattr(placed, "model_id", "") or ""))
+            if node.GetNumberOfControlPoints() >= 2:
+                node.SetNthControlPointLabel(0, f"{name} Sh")
+                node.SetNthControlPointLabel(1, f"{name} Dp")
+            node.CreateDefaultDisplayNodes()
+            disp = node.GetDisplayNode()
+            if disp is not None:
+                disp.SetColor(0.25, 0.90, 0.45)          # green = contact_fit group
+                disp.SetSelectedColor(0.45, 1.0, 0.6)
+                if hasattr(disp, "SetLineThickness"):
+                    disp.SetLineThickness(0.3)
+                if hasattr(disp, "SetPropertiesLabelVisibility"):
+                    disp.SetPropertiesLabelVisibility(False)
+            out[name] = node
+        return out
+
+    def apply_contact_selection_visibility(self, selected_name):
+        """Show contact fiducials ONLY for ``selected_name``; hide every other
+        shank's contacts. The contacts belong to one trajectory at a time, so
+        selecting a different trajectory hides the previous one's contacts.
+
+        Touches only contact-fiducial nodes (``Rosa.TrajectoryName`` tagged);
+        trajectory-line visibility stays governed by isolation, and electrode
+        models by the Show-models toggle. Pass a falsy name to hide all.
+        """
+        sel = str(selected_name or "").strip()
+        for node in slicer.util.getNodesByClass("vtkMRMLMarkupsFiducialNode"):
+            attr = (node.GetAttribute("Rosa.TrajectoryName") or "").strip()
+            if not attr:
+                continue
+            display = node.GetDisplayNode()
+            if display is not None:
+                display.SetVisibility(bool(sel) and attr == sel)
+
     def apply_trajectory_isolation(self, isolated_names):
         """Show only nodes belonging to `isolated_names`; hide all
         others. Pass an empty / None set to restore everything.
