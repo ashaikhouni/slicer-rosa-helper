@@ -1600,24 +1600,35 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _sync_model_combos_from_assignments(self, assignments):
         """Push assignment model_id back into the row model combos so
         the user sees which model the engine picked in peak-driven mode.
+
+        Guarded with ``_updatingContactTable`` so these PLACER picks are NOT
+        recorded as user overrides. The model belongs to the Contact Fit result
+        (stamped on the fitted line as ``Rosa.BestModelId``), not to the seed
+        source — without the guard the picks bleed onto planned/imported rows
+        that share shank names.
         """
         by_name = {
             row.get("trajectory", ""): row.get("model_id", "")
             for row in assignments.get("assignments", [])
         }
-        for row_index in range(self.contactTable.rowCount):
-            traj_item = self.contactTable.item(row_index, 1)
-            if traj_item is None:
-                continue
-            model_id = by_name.get(traj_item.text(), "")
-            if not model_id:
-                continue
-            combo = self.contactTable.cellWidget(row_index, 3)
-            if combo is None:
-                continue
-            idx = combo.findText(model_id)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
+        prev_updating = self._updatingContactTable
+        self._updatingContactTable = True
+        try:
+            for row_index in range(self.contactTable.rowCount):
+                traj_item = self.contactTable.item(row_index, 1)
+                if traj_item is None:
+                    continue
+                model_id = by_name.get(traj_item.text(), "")
+                if not model_id:
+                    continue
+                combo = self.contactTable.cellWidget(row_index, 3)
+                if combo is None:
+                    continue
+                idx = combo.findText(model_id)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            self._updatingContactTable = prev_updating
 
     def _run_contact_generation(self, log_context="generate", allow_last_assignments=False):
         selected_rows = [row for row in range(self.contactTable.rowCount) if self._row_is_selected(row)]
