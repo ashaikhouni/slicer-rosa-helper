@@ -109,8 +109,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # rebuild.
         self._userModelOverrides: dict[str, str] = {}
         # Per-CT cache of (features, bolts) so back-to-back placement
-        # passes (Suggest models -> Generate contacts -> Update
-        # contacts) don't recompute LoG / Frangi / hull-distance / bolt
+        # passes (Generate contacts -> Update contacts) don't recompute
+        # LoG / Frangi / hull-distance / bolt
         # extraction. Keyed by (volume_node_id, mtime); auto-invalidates
         # when the user re-loads the CT or its data changes.
         self._featuresCache: dict[tuple, tuple] = {}
@@ -419,27 +419,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.applyModelAllButton = qt.QPushButton("Apply model to all")
         self.applyModelAllButton.clicked.connect(self.onApplyModelAllClicked)
         defaults_row.addWidget(self.applyModelAllButton)
-        # "Suggest models" — opt-in CT-aware classification for empty rows.
-        # The library subset used for the suggestion comes from the pitch-
-        # strategy combo below ("dixi" / "pmt_35" / "auto" / etc.).
-        # Per user feedback (2026-05-10): the on-load auto-classify was
-        # guessing every row from the entire library — wrong default.
-        # User now opts in by clicking this button.
-        self.suggestModelsButton = qt.QPushButton("Suggest models")
-        self.suggestModelsButton.setToolTip(
-            "Run the CT-aware electrode classifier to fill in model_id "
-            "for any row whose model is empty. Library subset comes from "
-            "the 'Pitch strategy' combo below."
-        )
-        self.suggestModelsButton.clicked.connect(self.onSuggestModelsClicked)
-        self.suggestModelsButton.setEnabled(False)
-        defaults_row.addWidget(self.suggestModelsButton)
         defaults_row.addStretch(1)
         form.addRow("Default model", defaults_row)
 
-        # Restrict the model library used by "Suggest models" /
-        # "Generate contacts". Auto / Guided / Manual Fit each have their
-        # own copy of this combo, so restrictions apply per-module.
+        # Restrict the model library the staged picker may choose from when
+        # "Generate contacts" fills an unstamped row. Auto / Guided / Manual Fit
+        # each have their own copy of this combo, so restrictions apply per-module.
         from rosa_core.electrode_classifier import PITCH_STRATEGY_OPTIONS
         self.contactsPitchStrategyCombo = qt.QComboBox()
         for label, key in PITCH_STRATEGY_OPTIONS:
@@ -853,12 +838,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         """Populate the per-row table.
 
         Per user feedback (2026-05-10): default the model combo to empty
-        regardless of trajectory source. The user must explicitly opt in
-        to populate models via the "Suggest models" button (runs the
-        matched-filter picker via ``place_seeg``) or pick manually per
-        row. Only the user's manual override (from a prior CTV
+        for seed sources. The user picks per row (or "Apply model to all"),
+        or just clicks Generate and the staged placer classifies each shank
+        from the CT. Only the user's manual override (from a prior CTV
         interaction) persists across re-populate — that's what
-        ``_record_user_model_override`` is for.
+        ``_record_user_model_override`` is for. The Contact Fit source
+        pre-fills the model the contacts were placed with (Rosa.BestModelId).
 
         Note: the detection/fit-time PaCER classifier that stamped
         ``Rosa.BestModelId`` was removed 2026-05-11; the row builder
@@ -899,8 +884,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.generateContactsButton.setEnabled(enabled)
         self.updateContactsButton.setEnabled(enabled)
         self.applyModelAllButton.setEnabled(enabled)
-        if hasattr(self, "suggestModelsButton"):
-            self.suggestModelsButton.setEnabled(enabled)
         if trajectories:
             n_user_pre_assigned = sum(
                 1 for traj in trajectories
@@ -909,8 +892,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             note = (
                 f"({n_user_pre_assigned} restored from prior session)"
                 if n_user_pre_assigned else
-                "(all empty — use 'Suggest models' to classify from CT, "
-                "or pick per row)"
+                "(all empty — pick a model per row, or just Generate and the "
+                "placer classifies from CT)"
             )
             self.log(
                 f"[contacts] ready for {len(trajectories)} trajectories {note}"
@@ -1159,104 +1142,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._set_workflow_active_source(self._selected_source_key())
         self.onRefreshClicked()
 
-    def onSuggestModelsClicked(self):
-        """Run the staged ``place_seeg`` pipeline to suggest models for
-        rows with empty model_id.
-
-        This uses the SAME engine ``Generate Contacts`` will use when the
-        user clicks it next — so the suggested picks match what the
-        eventual placement will pick. The canonical picker is the matched
-        filter in ``rosa_core.contact_placement.stage_d_pick``.
-
-        The button only fills rows whose model_id is currently empty.
-        Rows with a user override are left alone — clear them manually to
-        re-suggest. Library subset comes from the pitch-strategy combo.
-
-        This is expensive (full v1 detection + per-seed snap + scoring,
-        same cost as Generate Contacts) — wrapped in a progress dialog.
-        """
-        # Collect rows to suggest for (currently-empty ones only).
-        empty_rows = []
-        for row in range(self.contactTable.rowCount):
-            traj_item = self.contactTable.item(row, 1)
-            if traj_item is None:
-                continue
-            model_combo = self.contactTable.cellWidget(row, 3)
-            if model_combo is None:
-                continue
-            if widget_current_text(model_combo).strip():
-                continue
-            traj_name = traj_item.text()
-            traj = next(
-                (t for t in self.loadedTrajectories if t.get("name") == traj_name),
-                None,
-            )
-            if traj is None:
-                continue
-            empty_rows.append((row, traj_name, traj))
-
-        if not empty_rows:
-            self.log("[contacts:suggest] no empty rows to suggest for")
-            return
-
-        self.log(
-            f"[contacts:suggest] running place_seeg on {len(empty_rows)} "
-            f"empty rows (mode 5: snap + library matching)"
-        )
-
-        # Build a fake "assignments" dict so _generate_contacts_staged routes
-        # via mode 5 (no model_ids vouched). Then read back the placer's
-        # picked model_id per row.
-        trajectories = [traj for _row, _name, traj in empty_rows]
-        empty_assignments = {
-            "schema_version": "1.0",
-            "assignments": [
-                {
-                    "trajectory": name, "model_id": "",
-                    "tip_at": "target", "tip_shift_mm": 0.0,
-                    "xyz_offset_mm": [0.0, 0.0, 0.0],
-                }
-                for _row, name, _traj in empty_rows
-            ],
-        }
-        try:
-            _contacts, updated_assignments, _placed = self._generate_contacts_staged(
-                trajectories=trajectories,
-                assignments=empty_assignments,
-                log_context="suggest",
-            )
-        except Exception as exc:
-            self.log(f"[contacts:suggest] place_seeg failed: {exc}")
-            return
-
-        # Push picks back into the row combos.
-        picked_by_name = {
-            row.get("trajectory", ""): row.get("model_id", "")
-            for row in updated_assignments.get("assignments", [])
-        }
-        n_filled = 0
-        n_failed = 0
-        for row, name, _traj in empty_rows:
-            picked = picked_by_name.get(name, "")
-            if not picked:
-                n_failed += 1
-                continue
-            combo = self.contactTable.cellWidget(row, 3)
-            if combo is None:
-                n_failed += 1
-                continue
-            idx = combo.findText(picked)
-            if idx < 0:
-                n_failed += 1
-                continue
-            combo.setCurrentIndex(idx)
-            self._record_user_model_override(row)
-            n_filled += 1
-        self.log(
-            f"[contacts:suggest] filled {n_filled}/{len(empty_rows)} from "
-            f"staged-pipeline picks; failed {n_failed}"
-        )
-
     def onApplyModelAllClicked(self):
         model_id = widget_current_text(self.defaultModelCombo).strip()
         if not model_id:
@@ -1405,8 +1290,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             )
 
         # `_features_and_bolts_for` caches (features, bolts) per CT
-        # (node id, mtime, mask-source) so back-to-back passes (Suggest models →
-        # Generate contacts → Update contacts) skip the ~5-10 s
+        # (node id, mtime, mask-source) so back-to-back passes (Generate
+        # contacts → Update contacts) skip the ~5-10 s
         # LoG / Frangi / hull-distance / bolt-extraction recomputation.
         # The adapter still preserves the Slicer node's IJK→RAS geometry
         # (no temp-NIfTI round trip) on the cache miss path. Switching the
@@ -1683,9 +1568,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                     f"Model-driven generation requires a model per row, "
                     f"but {len(missing)} selected trajectories have no "
                     f"model assigned: {preview}{more}. Pick a model for "
-                    f"each row, click 'Suggest models' to fill them, or "
-                    f"switch to Staged mode (which can pick the model "
-                    f"from CT)."
+                    f"each row, or switch to Staged mode (which picks the "
+                    f"model from CT)."
                 )
             contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
 
