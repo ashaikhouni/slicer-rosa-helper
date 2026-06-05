@@ -128,6 +128,8 @@ _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     "build_markups_document":                             ("exporters", "build_markups_document"),
     # qc — numpy.
     "compute_qc_metrics":                                 ("qc", "compute_qc_metrics"),
+    "compute_plan_vs_placement_qc":                       ("qc", "compute_plan_vs_placement_qc"),
+    "summarize_plan_vs_placement_qc":                     ("qc", "summarize_plan_vs_placement_qc"),
     # types — pure Python.
     "AssignmentRow":                                      ("types", "AssignmentRow"),
     "AssignmentTemplate":                                 ("types", "AssignmentTemplate"),
