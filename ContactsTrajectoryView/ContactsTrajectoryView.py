@@ -113,6 +113,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # extraction. Keyed by (volume_node_id, mtime); auto-invalidates
         # when the user re-loads the CT or its data changes.
         self._featuresCache: dict[tuple, tuple] = {}
+        # name -> PlacedTrajectory for the current contact generation; the
+        # fitted centerline that OWNS each shank's contacts (drives display +
+        # focus). Reset on every regeneration (one set, period).
+        self._fittedByName: dict = {}
         self._syncingSourceCombo = False
         self._syncingFocusControls = False
         self._syncingVolumeSelectors = False
@@ -1615,8 +1619,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         selected_trajectories = [traj_map[name] for name in ordered_names if name in traj_map]
 
         mode = self._selected_detection_mode()
+        placed_by_traj = {}
         if mode == "staged":
-            contacts, assignments, _placed_by_traj = self._generate_contacts_staged(
+            contacts, assignments, placed_by_traj = self._generate_contacts_staged(
                 trajectories=selected_trajectories,
                 assignments=assignments,
                 log_context=log_context,
@@ -1650,6 +1655,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             contacts = generate_contacts(selected_trajectories, self.modelsById, assignments)
 
         node_prefix = self.contactsNodeNameEdit.text.strip() or "ROSA_Contacts"
+        fitted_prefix = "ROSA_ContactFit"
+        # One set of contacts, period: wipe the entire prior generation
+        # (contacts + electrode models + fitted lines) before publishing the new
+        # one, so regeneration overwrites rather than piling up stale nodes.
+        self.logic.electrode_scene.clear_contact_outputs(
+            node_prefixes=[node_prefix, fitted_prefix],
+            workflow_node=self.workflowNode,
+        )
         contact_nodes = self.logic.electrode_scene.create_contacts_fiducials_nodes_by_trajectory(
             contacts,
             node_prefix=node_prefix,
@@ -1662,6 +1675,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 models_by_id=self.modelsById,
                 node_prefix=node_prefix,
             )
+        # The fitted trajectory (the centerline the contacts were placed on)
+        # becomes the displayed geometry, distinct from the preserved source
+        # seed line. Built from placed_by_traj (staged mode); empty for
+        # model-driven, whose contacts already sit on the source line.
+        fitted_nodes = self.logic.electrode_scene.create_fitted_trajectory_lines_by_trajectory(
+            placed_by_traj, source_by_name=traj_map, node_prefix=fitted_prefix,
+        )
+        self._fittedByName = placed_by_traj
 
         self.lastGeneratedContacts = contacts
         # GT-export becomes available once we have something to save.
@@ -1695,6 +1716,20 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             assignment_rows=assignment_rows,
             qc_rows=qc_rows_for_publish,
             workflow_node=self.workflowNode,
+        )
+        if fitted_nodes:
+            self.logic.workflow_publish.publish_nodes(
+                role="ContactFitTrajectoryLines",
+                nodes=list(fitted_nodes.values()),
+                source="contact_fit",
+                workflow_node=self.workflowNode,
+            )
+        # The fitted line is now the displayed trajectory: hide the source seed
+        # lines that have a fitted counterpart (Show planned resurfaces them),
+        # and scope contacts to the selected shank.
+        self._apply_source_line_visibility()
+        self.logic.electrode_scene.apply_contact_selection_visibility(
+            self._selected_trajectory_name_from_table()
         )
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(contact_nodes)} electrode nodes"
@@ -1954,8 +1989,36 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         traj_name = self._selected_trajectory_name_from_table()
         if not traj_name:
             return None
+        # Prefer the fitted trajectory (the centerline the contacts were placed
+        # on) so the highlight + blue reformat follow the contacts, not the
+        # source seed. Falls back to the source line when nothing is placed.
+        if traj_name in getattr(self, "_fittedByName", {}):
+            node = self.logic.electrode_scene.find_node_by_name(
+                f"ROSA_ContactFit_{traj_name}", "vtkMRMLMarkupsLineNode",
+            )
+            fitted = self.logic.trajectory_scene.trajectory_from_line_node(traj_name, node)
+            if fitted is not None:
+                return fitted
         traj_map = self._build_trajectory_map_with_scene_overrides()
         return traj_map.get(traj_name)
+
+    def _apply_source_line_visibility(self):
+        """Hide the source seed lines that now have a fitted counterpart, so the
+        fitted trajectory is the one displayed. 'Show planned' resurfaces them
+        as an overlay. Source lines without a fitted line (not yet placed) are
+        left untouched."""
+        show = bool(self.showPlannedCheck.checked)
+        fitted = set(getattr(self, "_fittedByName", {}).keys())
+        for traj in self.loadedTrajectories:
+            name = traj.get("name", "")
+            if name not in fitted:
+                continue
+            node = slicer.mrmlScene.GetNodeByID(traj.get("node_id", ""))
+            if node is None:
+                continue
+            disp = node.GetDisplayNode()
+            if disp is not None:
+                disp.SetVisibility(show)
 
     def _highlight_selected_trajectory(self):
         scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
@@ -2049,6 +2112,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def _follow_selected_trajectory_if_enabled(self):
         if self._syncingFocusControls:
             return
+        # Contacts belong to one trajectory at a time: show only the selected
+        # shank's contacts and hide the rest (independent of the isolate toggle).
+        self.logic.electrode_scene.apply_contact_selection_visibility(
+            self._selected_trajectory_name_from_table()
+        )
         self._highlight_selected_trajectory()
         if not bool(self.autoFollowTrajectoryCheck.checked):
             return
@@ -2085,9 +2153,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onIsolateSelectedToggled(self, checked):
         if not bool(checked):
-            # Restore everything — empty target set means show-all.
+            # Restore lines/models to show-all, but keep contacts scoped to the
+            # selected shank (one set of contacts displayed at a time, always).
             try:
                 self.logic.electrode_scene.apply_trajectory_isolation(set())
+                self.logic.electrode_scene.apply_contact_selection_visibility(
+                    self._selected_trajectory_name_from_table()
+                )
             except Exception:
                 pass
             return
@@ -2175,6 +2247,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onShowPlannedToggled(self, checked):
         self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
+        # Also (re)show or hide the source seed lines that were superseded by a
+        # fitted trajectory, so this checkbox is the single "see the original
+        # line" control once contacts are placed.
+        self._apply_source_line_visibility()
 
     def onShowModelsToggled(self, checked):
         """Toggle visibility of every published electrode-model node
