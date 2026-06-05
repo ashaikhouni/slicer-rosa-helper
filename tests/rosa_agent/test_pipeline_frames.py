@@ -295,5 +295,29 @@ class PipelineRosaFolderTests(unittest.TestCase):
         self.assertEqual(summary["n_trajectories"], 9)
 
 
+@unittest.skipUnless(DEPS_AVAILABLE, "numpy/rosa_agent not importable.")
+class LabelRowFrameTransformTests(unittest.TestCase):
+    def test_apply_4x4_to_label_rows_transforms_coords_only(self):
+        """--output-frame must move label coords with the contacts, but the
+        atlas LABEL + distances are frame-invariant and must stay put."""
+        import numpy as np
+        from rosa_agent.commands.pipeline import _apply_4x4_to_label_rows
+
+        m = np.eye(4)
+        m[0, 3] = 10.0  # +10 mm in x
+        rows = [{
+            "trajectory": "L", "contact_index": "1",
+            "contact_x": 1.0, "contact_y": 2.0, "contact_z": 3.0,
+            "freesurfer_label": "Left-Hippocampus",
+            "freesurfer_distance_to_voxel_mm": 0.5,
+        }]
+        out = _apply_4x4_to_label_rows(rows, m)
+        self.assertAlmostEqual(float(out[0]["contact_x"]), 11.0)
+        self.assertAlmostEqual(float(out[0]["contact_y"]), 2.0)
+        self.assertAlmostEqual(float(out[0]["contact_z"]), 3.0)
+        self.assertEqual(out[0]["freesurfer_label"], "Left-Hippocampus")
+        self.assertEqual(out[0]["freesurfer_distance_to_voxel_mm"], 0.5)
+
+
 if __name__ == "__main__":
     unittest.main()
