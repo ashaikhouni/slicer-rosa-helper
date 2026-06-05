@@ -3,8 +3,6 @@
 Last updated: 2026-03-01
 """
 
-import datetime
-import math
 import os
 import sys
 
@@ -25,7 +23,6 @@ for path in PATH_CANDIDATES:
         sys.path.insert(0, path)
 
 from rosa_core import (
-    compute_qc_metrics,
     electrode_length_mm,
     generate_contacts,
     load_electrode_library,
@@ -102,7 +99,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.loadedTrajectories = []
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
-        self.lastQCMetricsRows = []
         # User-chosen model per trajectory name. Persists across
         # `_populate_contact_table` rebuilds (Refresh, source change,
         # rename) so the manual choice doesn't get reset to empty on each
@@ -142,22 +138,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.refreshButton = qt.QPushButton("Refresh")
         self.refreshButton.clicked.connect(self.onRefreshClicked)
         refresh_row.addWidget(self.refreshButton)
-        self.showPlannedCheck = qt.QCheckBox("Show planned")
-        self.showPlannedCheck.setChecked(False)
-        self.showPlannedCheck.toggled.connect(self.onShowPlannedToggled)
-        refresh_row.addWidget(self.showPlannedCheck)
-        # Reduce 3D-scene clutter — selected row's trajectory + contacts
-        # only, hide the rest. Default OFF so existing
-        # multi-shank-overview workflows are preserved.
-        self.isolateSelectedCheck = qt.QCheckBox("Isolate selected")
-        self.isolateSelectedCheck.setToolTip(
-            "When checked, only the selected row's trajectory + "
-            "contacts + electrode model are shown in the 3D scene; "
-            "all other shanks are hidden."
-        )
-        self.isolateSelectedCheck.setChecked(False)
-        self.isolateSelectedCheck.toggled.connect(self.onIsolateSelectedToggled)
-        refresh_row.addWidget(self.isolateSelectedCheck)
         # TL ↔ TD slice intersections are auto-enabled by the layout
         # service when the trajectory-focus 2×3 layout is applied
         # (and auto-disabled on layout restore). No per-module
@@ -187,7 +167,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         top_form.addRow("Trajectory source", self.trajectorySourceCombo)
 
         self._build_contact_ui()
-        self._build_qc_ui()
         self._build_slice_view_ui()
 
         self.statusText = qt.QPlainTextEdit()
@@ -528,10 +507,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.contactsNodeNameEdit = qt.QLineEdit("ROSA_Contacts")
         form.addRow("Output node prefix", self.contactsNodeNameEdit)
 
-        self.createModelsCheck = qt.QCheckBox("Create electrode models")
-        self.createModelsCheck.setChecked(True)
-        form.addRow("Model option", self.createModelsCheck)
-
         # When the cylinders are visible they obscure the contact
         # fiducial glyphs in slice viewers, making click-to-drag
         # painful for GT correction. Toggle hides every published
@@ -558,92 +533,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.updateContactsButton.setEnabled(False)
         button_row.addWidget(self.updateContactsButton)
         form.addRow(button_row)
-
-        # GT-export row. The auto-snap dataset *_contacts.tsv files are
-        # NOT human-curated (every row reads coord_source=World,
-        # snap_status=unchanged, move_mm=0); the placement test gate's
-        # 1.5 / 1.25 mm error budget tells us nothing real. This button
-        # writes the user's hand-corrected fiducial positions to a
-        # parallel labels_gt/<sid>_contacts_gt.tsv that the test
-        # framework can prefer over the auto-snap. See
-        # ``project_contact_gt_annotation_workflow.md`` for the full
-        # plan.
-        gt_row = qt.QHBoxLayout()
-        self.saveContactsAsGtButton = qt.QPushButton("Save Contacts as GT")
-        self.saveContactsAsGtButton.setToolTip(
-            "Write the current contact-fiducial positions to "
-            "labels_gt/<subject>_contacts_gt.tsv. Run Generate "
-            "Contacts first, hand-correct any wrong fiducials in the "
-            "slice viewers, then click here. The TSV reuses the "
-            "labels/ schema with coord_source=manual + a verified-at "
-            "timestamp; move_mm is the delta from the auto-generated "
-            "position."
-        )
-        self.saveContactsAsGtButton.setEnabled(False)
-        self.saveContactsAsGtButton.clicked.connect(self.onSaveContactsAsGtClicked)
-        gt_row.addWidget(self.saveContactsAsGtButton)
-        gt_row.addStretch(1)
-
-        # Curry .pom export lives in the dedicated Export Center
-        # module — a single home for all bundle-style outputs keeps
-        # the CTV contact panel focused on contact generation.
-        form.addRow(gt_row)
-
-    def _build_qc_ui(self):
-        """Create QC metric table."""
-        self.qcSection = ctk.ctkCollapsibleButton()
-        self.qcSection.text = "Trajectory QC Metrics"
-        self.qcSection.collapsed = True
-        self.layout.addWidget(self.qcSection)
-        qf = qt.QFormLayout(self.qcSection)
-        qf.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
-
-        self.qcStatusLabel = qt.QLabel("QC disabled: generate contacts first.")
-        self.qcStatusLabel.wordWrap = True
-        qf.addRow(self.qcStatusLabel)
-
-        self.qcTable = qt.QTableWidget()
-        self.qcTable.setColumnCount(8)
-        _qc_headers = [
-            ("Traj",      "Trajectory name"),
-            ("Entry RE",  "Entry residual error in mm"),
-            ("Target RE", "Target residual error in mm"),
-            ("Mean RE",   "Mean residual error in mm across all contacts"),
-            ("Max RE",    "Max residual error in mm"),
-            ("RMS RE",    "Root-mean-square residual error in mm"),
-            ("Angle°",    "Angle deviation from the planned trajectory in degrees"),
-            ("N",         "Number of contacts"),
-        ]
-        self.qcTable.setHorizontalHeaderLabels(
-            [label for label, _ in _qc_headers]
-        )
-        for col, (_label, tip) in enumerate(_qc_headers):
-            item = self.qcTable.horizontalHeaderItem(col)
-            if item is not None:
-                item.setToolTip(tip)
-        # Interactive columns + scrollable + shrinkable size policy so
-        # the QC table doesn't pin the panel to its full content width.
-        qc_header = self.qcTable.horizontalHeader()
-        for col in range(self.qcTable.columnCount):
-            qc_header.setSectionResizeMode(col, qt.QHeaderView.Interactive)
-        for col, width in (
-            (0, 100),   # Trajectory
-            (1, 80),    # Entry RE
-            (2, 80),    # Target RE
-            (3, 80),    # Mean RE
-            (4, 70),    # Max RE
-            (5, 70),    # RMS RE
-            (6, 70),    # Angle
-            (7, 40),    # N
-        ):
-            self.qcTable.setColumnWidth(col, width)
-        qc_header.setStretchLastSection(False)
-        self.qcTable.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAsNeeded)
-        self.qcTable.setMinimumWidth(120)
-        self.qcTable.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Preferred)
-        self.qcTable.setSelectionMode(qt.QAbstractItemView.NoSelection)
-        qf.addRow(self.qcTable)
-        self._set_qc_enabled(False, "QC disabled: generate contacts first.")
 
     def _build_slice_view_ui(self):
         """Create trajectory-focus layout controls."""
@@ -706,17 +595,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         item.setFlags(item.flags() | qt.Qt.ItemIsEditable)
         item.setData(qt.Qt.UserRole, str(text))
         self.contactTable.setItem(row, 1, item)
-
-    def _set_qc_enabled(self, enabled, message=""):
-        self.qcSection.setEnabled(bool(enabled))
-        self.qcTable.setEnabled(bool(enabled))
-        if message:
-            self.qcStatusLabel.setText(message)
-
-    def _set_qc_table_item(self, row, column, text):
-        item = qt.QTableWidgetItem(str(text))
-        item.setFlags(item.flags() & ~qt.Qt.ItemIsEditable)
-        self.qcTable.setItem(row, column, item)
 
     def _build_model_combo(self):
         combo = qt.QComboBox()
@@ -1006,63 +884,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             out[traj["name"]] = scene_traj if scene_traj is not None else traj
         return out
 
-    def _compute_qc_rows(self):
-        if not self.lastGeneratedContacts:
-            return [], "QC disabled: generate contacts first."
-        planned_map = self.logic.collect_planned_trajectory_map(workflow_node=self.workflowNode)
-        if not planned_map:
-            return [], "QC disabled: no planned trajectories (Plan_*) found."
-        if not self.lastAssignments.get("assignments"):
-            return [], "QC disabled: no electrode assignments available."
-
-        final_map = self._build_trajectory_map_with_scene_overrides()
-        try:
-            planned_contacts = generate_contacts(
-                list(planned_map.values()),
-                self.modelsById,
-                self.lastAssignments,
-            )
-        except Exception as exc:
-            return [], f"QC disabled: failed to generate planned contacts ({exc})."
-
-        rows = compute_qc_metrics(
-            planned_trajectories_by_name=planned_map,
-            final_trajectories_by_name=final_map,
-            planned_contacts=planned_contacts,
-            final_contacts=self.lastGeneratedContacts,
-            include_unmatched_planned=True,
-        )
-        if not rows:
-            return [], "QC disabled: no planned trajectories available for comparison."
-        return rows, f"QC metrics computed for {len(rows)} planned trajectories."
-
-    def _fmt_qc_metric(self, value):
-        if value is None:
-            return "NA"
-        try:
-            return f"{float(value):.2f}"
-        except Exception:
-            return "NA"
-
-    def _refresh_qc_metrics(self):
-        rows, status = self._compute_qc_rows()
-        self.lastQCMetricsRows = rows
-        self.qcTable.setRowCount(0)
-        if not rows:
-            self._set_qc_enabled(False, status)
-            return
-        self._set_qc_enabled(True, status)
-        self.qcTable.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            self._set_qc_table_item(r, 0, row["trajectory"])
-            self._set_qc_table_item(r, 1, self._fmt_qc_metric(row.get("entry_radial_mm")))
-            self._set_qc_table_item(r, 2, self._fmt_qc_metric(row.get("target_radial_mm")))
-            self._set_qc_table_item(r, 3, self._fmt_qc_metric(row.get("mean_contact_radial_mm")))
-            self._set_qc_table_item(r, 4, self._fmt_qc_metric(row.get("max_contact_radial_mm")))
-            self._set_qc_table_item(r, 5, self._fmt_qc_metric(row.get("rms_contact_radial_mm")))
-            self._set_qc_table_item(r, 6, self._fmt_qc_metric(row.get("angle_deg")))
-            self._set_qc_table_item(r, 7, str(row["matched_contacts"]))
-
     def _refresh_summary(self):
         planned = self.logic.collect_planned_trajectory_map(workflow_node=self.workflowNode)
         source_key = self.trajectorySourceCombo.currentData
@@ -1089,11 +910,8 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         }
         groups = group_map.get(key, group_map["working"])
         self.logic.trajectory_scene.show_only_groups(groups)
-        # Planned visibility remains user-controlled except when planned source is selected directly.
-        if key == "planned_rosa":
-            self.logic.electrode_scene.set_planned_trajectory_visibility(True)
-        else:
-            self.logic.electrode_scene.set_planned_trajectory_visibility(bool(self.showPlannedCheck.checked))
+        # Planned overlay shows only when the planned source is selected directly.
+        self.logic.electrode_scene.set_planned_trajectory_visibility(key == "planned_rosa")
 
     def onRefreshClicked(self):
         self.workflowNode = self.workflowState.resolve_or_create_workflow_node()
@@ -1110,7 +928,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
-        self.lastQCMetricsRows = []
         # Switching source / refreshing drops the prior generation's display:
         # those contacts + fitted lines belong to a different trajectory set, so
         # they must not linger over the newly loaded source. (show_only_groups
@@ -1123,7 +940,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             pass
         self._populate_contact_table(self.loadedTrajectories)
         self._apply_source_visibility(source_key)
-        self._refresh_qc_metrics()
         self._refresh_summary()
         self.log(f"[refresh] source={source_key} trajectories={len(self.loadedTrajectories)}")
         if not self.logic.layout_service.has_focus_slice_views():
@@ -1586,14 +1402,12 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             contacts,
             node_prefix=node_prefix,
         )
-        model_nodes = {}
-        if self.createModelsCheck.checked:
-            model_nodes = self.logic.electrode_scene.create_electrode_models_by_trajectory(
-                contacts=contacts,
-                trajectories_by_name=traj_map,
-                models_by_id=self.modelsById,
-                node_prefix=node_prefix,
-            )
+        model_nodes = self.logic.electrode_scene.create_electrode_models_by_trajectory(
+            contacts=contacts,
+            trajectories_by_name=traj_map,
+            models_by_id=self.modelsById,
+            node_prefix=node_prefix,
+        )
         # The fitted trajectory (the centerline the contacts were placed on)
         # becomes the displayed geometry, distinct from the preserved source
         # seed line. Built from placed_by_traj (staged mode); empty for
@@ -1604,8 +1418,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._fittedByName = placed_by_traj
 
         self.lastGeneratedContacts = contacts
-        # GT-export becomes available once we have something to save.
-        self.saveContactsAsGtButton.setEnabled(bool(contacts))
         assignment_rows = list(assignments.get("assignments", []))
         for row in assignment_rows:
             traj_name = row.get("trajectory", "")
@@ -1614,26 +1426,11 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             row["electrode_length_mm"] = electrode_length_mm(self.modelsById.get(row.get("model_id", ""), {}))
             row["source"] = "contacts"
 
-        self._refresh_qc_metrics()
-        qc_rows_for_publish = []
-        for row in self.lastQCMetricsRows:
-            out = dict(row)
-            for key in (
-                "entry_radial_mm",
-                "target_radial_mm",
-                "mean_contact_radial_mm",
-                "max_contact_radial_mm",
-                "rms_contact_radial_mm",
-                "angle_deg",
-            ):
-                if out.get(key) is None:
-                    out[key] = "NA"
-            qc_rows_for_publish.append(out)
         self.logic.electrode_scene.publish_contacts_outputs(
             contact_nodes_by_traj=contact_nodes,
             model_nodes_by_traj=model_nodes,
             assignment_rows=assignment_rows,
-            qc_rows=qc_rows_for_publish,
+            qc_rows=[],
             workflow_node=self.workflowNode,
         )
         if fitted_nodes:
@@ -1662,8 +1459,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         )
         if model_nodes:
             self.log(f"[models:{log_context}] updated {len(model_nodes)} electrode model pairs")
-        if self.lastQCMetricsRows:
-            self.log(f"[qc:{log_context}] computed metrics for {len(self.lastQCMetricsRows)} trajectories")
         self._refresh_summary()
         # Auto-apply the trajectory-aligned dual-view layout if the
         # user hasn't already done so. Editing contacts requires both
@@ -1721,188 +1516,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         finally:
             self._suppressWorkflowRefresh = False
 
-    # ---- GT-export ----------------------------------------------------
-
-    _GT_TSV_COLUMNS = (
-        "subject_id", "channel", "shank", "contact_index",
-        "x", "y", "z",
-        "coord_source", "snap_status", "move_mm", "peak_value",
-        "ct_path", "source_contacts_file", "verified_at_iso",
-    )
-
-    def _suggest_subject_id(self):
-        """Best-effort subject-ID guess from the loaded postop CT name.
-
-        Dataset CT volumes are named ``<sid>_ct.nii.gz`` so the volume
-        node name typically ends in ``_ct``. Strip the suffix; otherwise
-        return the volume name verbatim.
-        """
-        ct_node = self._resolve_postop_ct_node()
-        if ct_node is None:
-            return ""
-        name = (ct_node.GetName() or "").strip()
-        if name.endswith("_ct"):
-            name = name[:-3]
-        return name
-
-    def _resolve_subject_id(self):
-        """Prompt the user for a subject ID, pre-filled with the best
-        guess from the postop CT name. Returns ``""`` on cancel.
-        """
-        suggested = self._suggest_subject_id()
-        text, ok = qt.QInputDialog.getText(
-            slicer.util.mainWindow(),
-            "Save Contacts as GT",
-            "Subject ID (used as labels_gt/<sid>_contacts_gt.tsv):",
-            qt.QLineEdit.Normal,
-            suggested,
-        )
-        if not ok:
-            return ""
-        return str(text or "").strip()
-
-    def _gt_output_path(self, subject_id):
-        """Resolve labels_gt directory under $ROSA_SEEG_DATASET (or the
-        configured fallback). Creates the directory on first call.
-        """
-        dataset_root = os.environ.get(
-            "ROSA_SEEG_DATASET",
-            "/Users/ammar/Dropbox/thalamus_subjects/seeg_localization",
-        )
-        gt_dir = os.path.join(dataset_root, "contact_label_dataset", "labels_gt")
-        os.makedirs(gt_dir, exist_ok=True)
-        return os.path.join(gt_dir, f"{subject_id}_contacts_gt.tsv")
-
-    def _ct_path_for_gt(self):
-        ct_node = self._resolve_postop_ct_node()
-        if ct_node is None:
-            return ""
-        storage = ct_node.GetStorageNode()
-        if storage is None:
-            return ""
-        return str(storage.GetFileName() or "")
-
-    def _build_gt_rows(self, subject_id):
-        """Walk the current ContactFiducials nodes, pair each control
-        point with its auto-generated nominal position from
-        ``self.lastGeneratedContacts``, and produce one TSV row per
-        contact. ``move_mm`` is the RAS distance from the auto position
-        to the user-edited position; the user implicitly verifies every
-        contact by clicking save.
-        """
-        nominal_by_key = {}
-        for c in self.lastGeneratedContacts or []:
-            traj_name = str(c.get("trajectory") or "")
-            try:
-                idx = int(c.get("index", 0))
-            except (TypeError, ValueError):
-                continue
-            pos_lps = c.get("position_lps")
-            if pos_lps is None:
-                continue
-            nominal_ras = lps_to_ras_point([float(v) for v in list(pos_lps)])
-            nominal_by_key[(traj_name, idx)] = nominal_ras
-
-        ct_path = self._ct_path_for_gt()
-        timestamp_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        contact_nodes = self.workflowState.role_nodes(
-            "ContactFiducials", workflow_node=self.workflowNode,
-        )
-        rows = []
-        for node in contact_nodes:
-            traj_name = str(node.GetAttribute("Rosa.TrajectoryName") or "").strip()
-            if not traj_name:
-                # Fall back to derived shank from node name; if that's
-                # not available either, skip — we can't write a row
-                # without a shank.
-                node_name = str(node.GetName() or "")
-                if node_name.startswith("ROSA_Contacts_"):
-                    traj_name = node_name[len("ROSA_Contacts_"):]
-            if not traj_name:
-                continue
-            n_pts = node.GetNumberOfControlPoints()
-            for i in range(n_pts):
-                pos = [0.0, 0.0, 0.0]
-                node.GetNthControlPointPositionWorld(i, pos)
-                label = node.GetNthControlPointLabel(i) or f"{traj_name}{i + 1}"
-                idx = i + 1
-                nominal = nominal_by_key.get((traj_name, idx))
-                if nominal is None:
-                    move_mm = 0.0
-                else:
-                    move_mm = math.sqrt(
-                        sum((pos[j] - nominal[j]) ** 2 for j in range(3))
-                    )
-                rows.append({
-                    "subject_id": subject_id,
-                    "channel": label,
-                    "shank": traj_name,
-                    "contact_index": idx,
-                    "x": f"{pos[0]:.6f}",
-                    "y": f"{pos[1]:.6f}",
-                    "z": f"{pos[2]:.6f}",
-                    "coord_source": "manual",
-                    "snap_status": "verified",
-                    "move_mm": f"{move_mm:.6f}",
-                    "peak_value": "",
-                    "ct_path": ct_path,
-                    "source_contacts_file": "",
-                    "verified_at_iso": timestamp_iso,
-                })
-        return rows
-
-    @classmethod
-    def _write_gt_tsv(cls, path, rows):
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\t".join(cls._GT_TSV_COLUMNS) + "\n")
-            for row in rows:
-                f.write(
-                    "\t".join(str(row.get(col, "")) for col in cls._GT_TSV_COLUMNS) + "\n"
-                )
-
-    def onSaveContactsAsGtClicked(self):
-        if not self.lastGeneratedContacts:
-            qt.QMessageBox.warning(
-                slicer.util.mainWindow(),
-                "Contacts & Trajectory View",
-                "Generate contacts first, hand-correct the fiducials in "
-                "the slice viewers, then click Save Contacts as GT.",
-            )
-            return
-        subject_id = self._resolve_subject_id()
-        if not subject_id:
-            return
-        try:
-            rows = self._build_gt_rows(subject_id)
-            if not rows:
-                qt.QMessageBox.warning(
-                    slicer.util.mainWindow(),
-                    "Contacts & Trajectory View",
-                    "No ContactFiducials nodes found in the workflow. "
-                    "Generate contacts first.",
-                )
-                return
-            out_path = self._gt_output_path(subject_id)
-            existed = os.path.exists(out_path)
-            self._write_gt_tsv(out_path, rows)
-        except Exception as exc:
-            self.log(f"[contacts:save_gt] error: {exc}")
-            qt.QMessageBox.critical(
-                slicer.util.mainWindow(),
-                "Contacts & Trajectory View",
-                f"Could not write GT TSV: {exc}",
-            )
-            return
-        verb = "Overwrote" if existed else "Wrote"
-        self.log(
-            f"[contacts:save_gt] {verb.lower()} {len(rows)} contacts → {out_path}"
-        )
-        qt.QMessageBox.information(
-            slicer.util.mainWindow(),
-            "Contacts & Trajectory View",
-            f"{verb} {len(rows)} contacts to {out_path}",
-        )
 
     def _selected_trajectory_name_from_table(self):
         row = self.contactTable.currentRow()
@@ -1936,10 +1549,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _apply_source_line_visibility(self):
         """Hide the source seed lines that now have a fitted counterpart, so the
-        fitted trajectory is the one displayed. 'Show planned' resurfaces them
-        as an overlay. Source lines without a fitted line (not yet placed) are
-        left untouched."""
-        show = bool(self.showPlannedCheck.checked)
+        fitted trajectory is the one displayed. The source line stays in the
+        scene — selecting its seed source in the Trajectory-source combo
+        re-shows it."""
         fitted = set(getattr(self, "_fittedByName", {}).keys())
         for traj in self.loadedTrajectories:
             name = traj.get("name", "")
@@ -1950,7 +1562,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 continue
             disp = node.GetDisplayNode()
             if disp is not None:
-                disp.SetVisibility(show)
+                disp.SetVisibility(False)
 
     def _display_node_id_for(self, name):
         """The line node id that represents ``name`` on screen — the fitted
@@ -2107,63 +1719,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def onContactTableCellClicked(self, _row, _col):
         self._schedule_follow_selected_trajectory()
-        self._apply_isolation_if_enabled()
 
     def onContactTableCurrentCellChanged(self, _currentRow, _currentColumn, _previousRow, _previousColumn):
         self._schedule_follow_selected_trajectory()
-        self._apply_isolation_if_enabled()
-
-    def onIsolateSelectedToggled(self, checked):
-        if not bool(checked):
-            # Restore lines/models to show-all, but keep contacts scoped to the
-            # selected shank (one set of contacts displayed at a time, always).
-            try:
-                self.logic.electrode_scene.apply_trajectory_isolation(set())
-                self._apply_contact_visibility_for_selection()
-            except Exception:
-                pass
-            return
-        self._apply_isolation_if_enabled()
-
-
-
-    def _apply_isolation_if_enabled(self):
-        if not getattr(self, "isolateSelectedCheck", None):
-            return
-        if not bool(self.isolateSelectedCheck.checked):
-            return
-        names = self._selected_trajectory_names_for_isolation()
-        try:
-            self.logic.electrode_scene.apply_trajectory_isolation(names)
-        except Exception:
-            pass
-
-    def _selected_trajectory_names_for_isolation(self):
-        """Return the set of trajectory names currently selected in
-        the contact table. Falls back to the current row when the
-        selection model is in single-selection mode (default).
-        """
-        names = set()
-        try:
-            sel = self.contactTable.selectionModel()
-            for idx in sel.selectedRows() if sel else []:
-                row = idx.row()
-                item = self.contactTable.item(row, 1)
-                if item:
-                    txt = (item.text() or "").strip()
-                    if txt:
-                        names.add(txt)
-            if not names:
-                row = self.contactTable.currentRow()
-                if row >= 0:
-                    item = self.contactTable.item(row, 1)
-                    if item:
-                        txt = (item.text() or "").strip()
-                        if txt:
-                            names.add(txt)
-        except Exception:
-            pass
-        return names
 
     def onAutoFollowToggled(self, checked):
         self._set_workflow_param_bool("TrajectoryFocusAutoFollow", bool(checked))
@@ -2204,13 +1762,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
     def onAlignSliceClicked(self):
         # Deprecated manual align action retained for backward compatibility.
         self._follow_selected_trajectory_if_enabled()
-
-    def onShowPlannedToggled(self, checked):
-        self.logic.electrode_scene.set_planned_trajectory_visibility(bool(checked))
-        # Also (re)show or hide the source seed lines that were superseded by a
-        # fitted trajectory, so this checkbox is the single "see the original
-        # line" control once contacts are placed.
-        self._apply_source_line_visibility()
 
     def onShowModelsToggled(self, checked):
         """Toggle visibility of every published electrode-model node
