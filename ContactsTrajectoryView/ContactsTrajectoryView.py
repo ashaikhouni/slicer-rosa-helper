@@ -1114,6 +1114,16 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.lastGeneratedContacts = []
         self.lastAssignments = {"schema_version": "1.0", "assignments": []}
         self.lastQCMetricsRows = []
+        # Switching source / refreshing drops the prior generation's display:
+        # those contacts + fitted lines belong to a different trajectory set, so
+        # they must not linger over the newly loaded source. (show_only_groups
+        # below hides the fitted lines by group; contacts are fiducials, so hide
+        # them explicitly.)
+        self._fittedByName = {}
+        try:
+            self.logic.electrode_scene.apply_contact_selection_visibility("")
+        except Exception:
+            pass
         self._populate_contact_table(self.loadedTrajectories)
         self._apply_source_visibility(source_key)
         self._refresh_qc_metrics()
@@ -2020,8 +2030,30 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             if disp is not None:
                 disp.SetVisibility(show)
 
+    def _display_node_id_for(self, name):
+        """The line node id that represents ``name`` on screen — the fitted
+        ContactFit line when contacts have been placed, else the source line."""
+        if name in getattr(self, "_fittedByName", {}):
+            node = self.logic.electrode_scene.find_node_by_name(
+                f"ROSA_ContactFit_{name}", "vtkMRMLMarkupsLineNode",
+            )
+            if node is not None:
+                return node.GetID()
+        return ""
+
+    def _display_scope_node_ids(self):
+        """Scope for highlight/focus: the fitted line for placed shanks, the
+        source line otherwise. Using the fitted ids keeps the source seed line
+        out of scope so the highlight doesn't re-show it."""
+        ids = []
+        for traj in self.loadedTrajectories:
+            nid = self._display_node_id_for(traj.get("name", "")) or traj.get("node_id", "")
+            if nid:
+                ids.append(nid)
+        return ids
+
     def _highlight_selected_trajectory(self):
-        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        scope_ids = self._display_scope_node_ids()
         selected = self._selected_trajectory()
         self.logic.focus_controller.focus_selected(
             trajectory=selected,
@@ -2064,7 +2096,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
     def _align_focus_views_for_selected(self, align_trajectory_views=True):
         trajectory = self._selected_trajectory()
-        scope_ids = [traj.get("node_id", "") for traj in self.loadedTrajectories if traj.get("node_id")]
+        scope_ids = self._display_scope_node_ids()
         # When contacts have been placed for this trajectory, hand them
         # to focus_selected so the slice axis is refit through the actual
         # contacts (mitigates centerline drift / slight electrode bend).

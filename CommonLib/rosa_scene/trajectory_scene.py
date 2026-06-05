@@ -66,6 +66,20 @@ TRAJECTORY_GROUP_CONFIG = {
         "locked": False,
         "point_labels": True,
     },
+    # The fitted trajectory the contacts were placed on (Contacts & Trajectory
+    # View). Distinct green so it reads as "the placed shank" vs the source
+    # seed. Not in any "Trajectory source" keep-list, so show_only_groups hides
+    # it on a source switch (its contacts belong to a different generation).
+    "contact_fit": {
+        "role": "ContactFitTrajectoryLines",
+        "folder": "ContactFit",
+        "prefix": "ROSA_ContactFit_",
+        "display_color": (0.25, 0.90, 0.45),
+        "selected_color": (0.45, 1.0, 0.6),
+        "line_thickness": 0.45,
+        "locked": False,
+        "point_labels": False,
+    },
 }
 
 DEFAULT_GROUP = "manual"

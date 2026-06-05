@@ -678,8 +678,8 @@ class ElectrodeSceneService:
             node.CreateDefaultDisplayNodes()
             disp = node.GetDisplayNode()
             if disp is not None:
-                disp.SetColor(0.20, 0.85, 0.85)          # cyan = fitted
-                disp.SetSelectedColor(0.20, 0.85, 0.85)
+                disp.SetColor(0.25, 0.90, 0.45)          # green = contact_fit group
+                disp.SetSelectedColor(0.45, 1.0, 0.6)
                 if hasattr(disp, "SetLineThickness"):
                     disp.SetLineThickness(0.3)
                 if hasattr(disp, "SetPropertiesLabelVisibility"):
