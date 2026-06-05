@@ -78,7 +78,7 @@ TRAJECTORY_GROUP_CONFIG = {
         "selected_color": (0.45, 1.0, 0.6),
         "line_thickness": 0.45,
         "locked": False,
-        "point_labels": False,
+        "point_labels": True,
     },
 }
 
