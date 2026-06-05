@@ -47,11 +47,13 @@ iteration only; production use should `pip install`.
 | `label`         | Assign atlas labels to a contacts TSV                                                |
 | `pipeline`      | Run all four stages end-to-end (load → detect → contacts → label)                    |
 | `place`         | 5-mode staged placer (auto / count / named / seeded / seeded+model) on any CT        |
+| `fit-rosa`      | Fit electrode models per planned `.ros` trajectory → contacts + plan-vs-fit `qc.tsv` |
 | `rosa-to-nifti` | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`          |
 | `match-ros`     | Name detector emissions on any-frame CT from a `.ros` plan via line-geometry RANSAC  |
 | `export-view`   | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB   |
 | `view`          | Serve an `export-view` output dir over HTTP and open it in your browser              |
 | `brain-extract` | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)|
+| `deidentify-ros`| Strip PHI from a `.ros` / case folder (pseudonymise DICOM UIDs, drop raw DICOM/zips) |
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
@@ -290,6 +292,35 @@ output/
 For the constant knobs the placer uses internally (matched-filter
 thresholds, score weights, validators), see
 [`docs/PIPELINE_CONSTANTS.md § B`](../docs/PIPELINE_CONSTANTS.md#b-placer--rosa_corecontact_placementconstants).
+
+---
+
+## `fit-rosa` — fit electrode models per planned ROSA trajectory
+
+```bash
+rosa-agent fit-rosa CASE_DIR/ --postop-ct oarmpost -o out/             # ROS folder
+rosa-agent fit-rosa --seeds plan.tsv --postop-ct-path ct.nii.gz -o out/  # seeds + CT
+rosa-agent fit-rosa --auto --postop-ct-path ct.nii.gz -o out/          # CT-only, no plan
+```
+
+Takes planned trajectories (from a `.ros`, a seed TSV, or inline detection),
+snaps each to the imaged shank in the postop CT, picks the electrode model
+(matched-filter library picker), and places contacts from the fitted tip.
+Exactly one input mode:
+
+- **ROS** — plan = the `.ros` planned trajectories; CT = `--postop-ct <display>` (a display inside the folder).
+- **Seeds** — plan = `--seeds plan.tsv`; CT = `--postop-ct-path ct.nii.gz`.
+- **Auto** — plan = inline detection (`--auto`); CT = `--postop-ct-path ct.nii.gz`.
+
+Output (`-o DIR`): `manifest.json`, `contacts.tsv` (leading `# reference_frame:`
+provenance comment), `trajectories.tsv`, **`qc.tsv`** (plan-vs-fit deviation per
+shank — entry/target 3-D error, contact lateral deviation from the planned line,
+axis angle; cohort summary in `manifest.qc_summary`), and `figures/` (unless
+`--no-figures`).
+
+Useful flags: `--mask-backend {auto,hull,synthstrip,log-watershed}`,
+`--library <strategy>`, `--electrodes models.tsv` (force a model per shank),
+`--reference-image ref.nii.gz` (emit contacts in another volume's RAS frame).
 
 ---
 
@@ -618,6 +649,31 @@ rosa-agent brain-extract --check --backend log-watershed  # always exit 0
 
 ---
 
+## `deidentify-ros` — strip PHI from a ROSA case
+
+```bash
+rosa-agent deidentify-ros CASE_DIR/ --out-dir CLEAN/ --subject-id S01   # whole case folder
+rosa-agent deidentify-ros case.ros --out clean.ros --subject-id S01     # single .ros file
+```
+
+De-identifies a `.ros` (and, in folder mode, the surrounding case) into a
+**fresh** directory — the original is never modified.
+
+- Scrubs `PATIENT_NAME` (→ `--subject-id`), `PATIENT_BIRTHDAY`, `SERIE_DATE`.
+- **Pseudonymises** DICOM Series UIDs to a consistent `UID-<sha1>` token rather
+  than blanking them, so the display↔series linkage in the `.ros` survives.
+- Folder mode also copies the image volumes (renaming each `DICOM/<uid>/` dir to
+  its UID token so the clean `.ros` still loads), **drops** `DICOMFiles.zip` (raw
+  DICOM = full PHI) and screenshots, and writes a PHI-free planned-trajectory CSV.
+- Emits a **private** `<id>_deid_keymap.json` (real name/UID → token) *outside*
+  the clean dir for re-linking to your own DICOM. That keymap IS PHI — keep it,
+  never share it.
+
+A browser-only version (runs entirely client-side, nothing uploaded) is hosted
+at `https://ashaikhouni.github.io/slicer-rosa-helper/deidentify-ros/`.
+
+---
+
 ## `load` / `detect` / `contacts` / `label` — staged building blocks
 
 The four-stage CLI lets you run one stage at a time when you already
@@ -755,7 +811,7 @@ plan = load_ros_planned_trajectories(folder="s57_rosa/")
 print(plan.ros_file, len(plan.trajectories), plan.trajectories[0])
 ```
 
-### Atlas labeling
+### Atlas labeling (Python)
 
 ```python
 from rosa_core.atlas_index import (
