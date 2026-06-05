@@ -232,6 +232,27 @@ class PlaceCommandShapeTests(unittest.TestCase):
             self.assertIn("error:", err.lower())
             self.assertIn("brain mask", err.lower())
 
+    def test_malformed_seeds_polite_failure(self):
+        """A seeds TSV with a missing numeric column (start_y) makes
+        read_seeds_tsv raise ValueError; place must catch it and exit 2 with a
+        clean message, not leak a traceback past the heavy pipeline boundary."""
+        from rosa_agent.commands.place import main as place_main
+        with tempfile.TemporaryDirectory() as tmp:
+            seeds = Path(tmp) / "seeds_bad.tsv"
+            seeds.write_text(
+                "name\tstart_x\tstart_z\tend_x\tend_y\tend_z\n"   # no start_y col
+                "L1\t0\t0\t10\t0\t0\n",
+            )
+            rc, err = self._capture_stderr(place_main, [
+                "--ct", str(self.ct_path),
+                "--output", str(Path(tmp) / "qc"),
+                "--seeds", str(seeds),
+                "--no-figures",
+            ])
+            self.assertEqual(rc, 2)
+            self.assertIn("error:", err.lower())
+            self.assertIn("seeds", err.lower())
+
     def test_unknown_model_id_polite_failure(self):
         """Mode 4 vouched-model lookup misses ⇒ CLI exits 2 with a
         clear stderr message naming the missing model id."""

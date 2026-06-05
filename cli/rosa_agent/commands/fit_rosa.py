@@ -282,12 +282,11 @@ def main(argv: list[str] | None = None) -> int:
         _stderr(f"error: failed to read --electrodes {args.electrodes}")
         return 2
 
-    lib = json.loads(
-        (Path(__file__).resolve().parents[3]
-         / "CommonLib/rosa_core/resources/electrodes/electrode_models.json"
-        ).read_text()
-    )
-    all_lib_models = lib["models"]
+    # Use the packaged loader (resolves the resource via importlib /
+    # default_electrode_library_path) so this works in a wheel / site-packages
+    # install — NOT a repo-relative Path(__file__).parents[...] guess.
+    from rosa_core.electrode_models import load_electrode_library
+    all_lib_models = load_electrode_library()["models"]
     candidate_models = filter_models_for_strategy(all_lib_models, args.library)
     candidate_ids = [m["id"] for m in candidate_models]
     models_dict = {m["id"]: m for m in all_lib_models}

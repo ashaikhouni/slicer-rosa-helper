@@ -214,6 +214,22 @@ def main(argv: list[str] | None = None) -> int:
         target_volume_path=args.target_volume or None,
     )
     if not any(p is not None and p.is_ready() for p in providers.values()):
+        # Distinguish "nothing requested" (fine — empty output) from
+        # "requested but failed to load" (a hard error — silently writing an
+        # empty labels file is dangerous in batch runs, e.g. a missing
+        # FreeSurfer labelmap path).
+        requested = [
+            ("--thomas", args.thomas), ("--freesurfer", args.freesurfer),
+            ("--wm", args.wm),
+        ]
+        named = [flag for flag, val in requested if val]
+        if named:
+            _stderr(
+                f"error: requested atlas provider(s) {', '.join(named)} failed "
+                f"to load (see messages above); refusing to write an empty "
+                f"labels file"
+            )
+            return 2
         _stderr("[label] no atlas providers configured — nothing to label")
         write_tsv_rows(args.out, [], LABEL_COLUMNS)
         return 0

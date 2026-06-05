@@ -148,14 +148,22 @@ def main(argv: list[str] | None = None) -> int:
         if not seed_source_path.exists():
             _stderr(f"error: seeds TSV not found: {seed_source_path}")
             return 2
-        seeds = _load_seeds(seed_source_path)
+        try:
+            seeds = _load_seeds(seed_source_path)
+        except (ValueError, OSError) as exc:
+            _stderr(f"error: could not read seeds {seed_source_path}: {exc}")
+            return 2
         log(f"[place] loaded {len(seeds)} seeds from {seed_source_path}")
     if args.expected:
         expected_source_path = Path(args.expected)
         if not expected_source_path.exists():
             _stderr(f"error: expected TSV not found: {expected_source_path}")
             return 2
-        expected = _load_expected(expected_source_path)
+        try:
+            expected = _load_expected(expected_source_path)
+        except (ValueError, OSError) as exc:
+            _stderr(f"error: could not read expected {expected_source_path}: {exc}")
+            return 2
         log(f"[place] loaded {len(expected)} expected entries from {expected_source_path}")
 
     # --------------------------------------------------------------

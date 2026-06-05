@@ -141,6 +141,28 @@ def _apply_4x4_to_contact_groups(groups, m_4x4):
     return out
 
 
+def _apply_4x4_to_label_rows(rows, m_4x4):
+    """Push each label row's contact_x/y/z through a 4x4 so labels.tsv coords
+    stay consistent with contacts.tsv after an --output-frame transform. The
+    atlas LABEL itself was resolved in the working CT frame and is unchanged;
+    distances (…_mm) are frame-invariant and left alone."""
+    out = []
+    for r in rows:
+        new = dict(r)
+        try:
+            p = _apply_4x4_to_point(
+                [float(r["contact_x"]), float(r["contact_y"]), float(r["contact_z"])],
+                m_4x4,
+            )
+            new["contact_x"], new["contact_y"], new["contact_z"] = (
+                float(p[0]), float(p[1]), float(p[2]),
+            )
+        except (KeyError, ValueError, TypeError):
+            pass
+        out.append(new)
+    return out
+
+
 # ---------------------------------------------------------------------
 # Input resolution
 # ---------------------------------------------------------------------
@@ -349,8 +371,38 @@ def run_pipeline(
         pitch_strategy=library,
     )
 
-    # Output-frame transform. Working frame is the working CT's RAS;
-    # we may want results in the ROSA reference frame instead.
+    # Atlas labeling MUST run in the working CT frame: the atlas labelmaps are
+    # resampled to the working CT (target_volume_path below). If we labelled
+    # AFTER an --output-frame transform, the contacts would be in ROSA space
+    # while the atlas is in CT space — a silent coordinate↔atlas mismatch. So
+    # we label here first, then push trajectories + contacts + label coords
+    # through the output-frame transform together so every output file is in
+    # one consistent frame.
+    contacts_path = out / "contacts.tsv"
+    n_contacts = write_contacts_tsv(contacts_path, contact_groups)  # CT-frame label input
+
+    label_rows = None
+    if any([thomas_dir, freesurfer_path, wm_path]):
+        ct_frame_contacts = read_tsv_rows(contacts_path)  # working CT frame
+        providers = _build_providers(
+            thomas_dir=thomas_dir,
+            freesurfer_path=freesurfer_path,
+            freesurfer_lut=freesurfer_lut,
+            wm_path=wm_path,
+            wm_lut=wm_lut,
+            atlas_base_path=atlas_base_path,
+            target_volume_path=str(ct_path) if atlas_base_path else None,
+        )
+        if any(p is not None and p.is_ready() for p in providers.values()):
+            label_rows = label_contacts(ct_frame_contacts, providers)
+        else:
+            _stderr("[pipeline] no atlas providers became ready, skipping label step")
+    else:
+        _stderr("[pipeline] no --thomas/--freesurfer/--wm passed, skipping label step")
+
+    # Output-frame transform. Working frame is the working CT's RAS; we may want
+    # results in the ROSA reference frame instead. Applied to EVERYTHING that
+    # carries coordinates — trajectories, contacts, and the label rows.
     output_label = "ct"
     if output_frame and output_frame.lower() != "ct":
         if frame.manifest is None:
@@ -370,20 +422,32 @@ def run_pipeline(
             working_to_rosa = np.linalg.inv(frame.rosa_to_working_4x4)
             trajs = _apply_4x4_to_trajectories(trajs, working_to_rosa)
             contact_groups = _apply_4x4_to_contact_groups(contact_groups, working_to_rosa)
+            if label_rows is not None:
+                label_rows = _apply_4x4_to_label_rows(label_rows, working_to_rosa)
             output_label = f"rosa({frame.rosa_reference_volume or 'ref'})"
             _stderr(
                 f"[pipeline] outputs transformed back to ROSA reference frame "
                 f"({frame.rosa_reference_volume!r})"
             )
 
-    # Write outputs.
+    # Write outputs (all in the final output frame).
     traj_path = out / "trajectories.tsv"
     n_traj = write_trajectories_tsv(traj_path, trajs)
     _stderr(f"[pipeline] wrote {traj_path} ({n_traj} trajectories, frame={output_label})")
 
-    contacts_path = out / "contacts.tsv"
-    n_contacts = write_contacts_tsv(contacts_path, contact_groups)
+    if output_label != "ct":
+        # Rewrite contacts.tsv in the output frame (the first write above was the
+        # CT-frame label input).
+        n_contacts = write_contacts_tsv(contacts_path, contact_groups)
     _stderr(f"[pipeline] wrote {contacts_path} ({n_contacts} contacts, frame={output_label})")
+
+    label_summary = {"written": False, "n_contacts": n_contacts}
+    if label_rows is not None:
+        labels_path = out / "labels.tsv"
+        from ..io.trajectory_io import write_tsv_rows as _write
+        _write(labels_path, label_rows, LABEL_COLUMNS)
+        label_summary = {"written": True, "n_contacts": len(label_rows)}
+        _stderr(f"[pipeline] wrote {labels_path} ({len(label_rows)} contacts, frame={output_label})")
 
     # QC figures (per-trajectory PNGs). Skipped on --no-figures or when
     # matplotlib isn't installed. ``placement_batch`` carries the LoG /
@@ -410,33 +474,6 @@ def run_pipeline(
     elif not write_figures:
         figures_summary["skipped_reason"] = "disabled by --no-figures"
         _stderr("[pipeline] figures skipped (--no-figures)")
-
-    # Label (skipped silently when no provider configured).
-    label_summary = {"written": False, "n_contacts": n_contacts}
-    if any([thomas_dir, freesurfer_path, wm_path]):
-        contacts = read_tsv_rows(contacts_path)
-        providers = _build_providers(
-            thomas_dir=thomas_dir,
-            freesurfer_path=freesurfer_path,
-            freesurfer_lut=freesurfer_lut,
-            wm_path=wm_path,
-            wm_lut=wm_lut,
-            atlas_base_path=atlas_base_path,
-            # The working CT is the natural target volume — that's the
-            # frame the contacts (and any --output-frame transform) live in.
-            target_volume_path=str(ct_path) if atlas_base_path else None,
-        )
-        if any(p is not None and p.is_ready() for p in providers.values()):
-            label_rows = label_contacts(contacts, providers)
-            labels_path = out / "labels.tsv"
-            from ..io.trajectory_io import write_tsv_rows as _write
-            _write(labels_path, label_rows, LABEL_COLUMNS)
-            label_summary = {"written": True, "n_contacts": len(label_rows)}
-            _stderr(f"[pipeline] wrote {labels_path} ({len(label_rows)} contacts)")
-        else:
-            _stderr("[pipeline] no atlas providers became ready, skipping label step")
-    else:
-        _stderr("[pipeline] no --thomas/--freesurfer/--wm passed, skipping label step")
 
     return {
         "ct_path": str(ct_path),
