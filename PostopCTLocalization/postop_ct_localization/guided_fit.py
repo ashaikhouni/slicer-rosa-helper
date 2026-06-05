@@ -926,17 +926,57 @@ class GuidedFitWidgetMixin:
             self.log(f"[guided] applied {fitted} trajectories")
             self.onRefreshClicked()
 
+        # Plan-vs-fit QC: how far each snapped line deviated from its seed
+        # (the plan). Trajectory-level only — contacts are placed later in CTV,
+        # so no contact-radial here. Same shared metric as the fit-rosa CLI.
+        qc_note = ""
+        try:
+            from rosa_core.qc import (
+                compute_plan_vs_placement_qc, summarize_plan_vs_placement_qc,
+            )
+            planned_by_name = {
+                s["name"]: {"start": list(s["start_ras"]), "end": list(s["end_ras"])}
+                for s in seed_specs
+            }
+            fitted_by_name = {
+                r["name"]: {
+                    "start": [float(v) for v in r["start_ras"]],
+                    "end": [float(v) for v in r["end_ras"]],
+                    "contacts": [],
+                }
+                for r in fit_records
+            }
+            qc_rows = compute_plan_vs_placement_qc(planned_by_name, fitted_by_name)
+            for q in qc_rows:
+                if q["entry_error_mm"] is None:
+                    continue
+                self.log(
+                    f"[guided] QC {q['trajectory']}: entry "
+                    f"{q['entry_error_mm']:.2f} mm, target "
+                    f"{q['target_error_mm']:.2f} mm, angle {q['angle_deg']:.2f}°"
+                )
+            summary = summarize_plan_vs_placement_qc(qc_rows)
+            em = summary["entry_error_mm"]["median"]
+            if em is not None:
+                qc_note = (
+                    f" · plan dev med: entry {em:.2f}, target "
+                    f"{summary['target_error_mm']['median']:.2f} mm, angle "
+                    f"{summary['angle_deg']['median']:.2f}°"
+                )
+        except Exception as exc:
+            self.log(f"[guided] QC failed: {exc}")
+
         if missed_names:
             preview = ", ".join(missed_names[:6])
             if len(missed_names) > 6:
                 preview += f", …(+{len(missed_names) - 6})"
             self.guidedFitStatusLabel.setText(
-                f"done — fitted {fitted}/{total}; missed: {preview}"
+                f"done — fitted {fitted}/{total}; missed: {preview}{qc_note}"
             )
             self.log(f"[guided] missed {len(missed_names)}/{total}: {preview}")
         else:
             self.guidedFitStatusLabel.setText(
-                f"done — fitted {fitted}/{total} seeds"
+                f"done — fitted {fitted}/{total} seeds{qc_note}"
             )
 
     def onFitSelectedClicked(self):
