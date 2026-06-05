@@ -172,3 +172,95 @@ def compute_qc_metrics(
         )
 
     return rows
+
+
+def compute_plan_vs_placement_qc(
+    planned_by_name: dict[str, TrajectoryRecord],
+    fitted_by_name: dict[str, dict],
+) -> list[dict]:
+    """Per-shank deviation of a fitted placement from its plan.
+
+    This is the well-posed QC: it compares a *fitted result* against the *plan*
+    it was generated from (e.g. the CLI ``fit-rosa`` seed→fit, or the Slicer
+    Guided Fit seed→fit). Unlike the generic CTV table it replaced, it does NOT
+    require synthesising nominal planned contacts — the perpendicular distance of
+    a fitted contact from the planned LINE is the same regardless of which point
+    on the line you reference, so we measure it directly from the planned entry.
+
+    Args:
+        planned_by_name: ``name -> {"start": entry, "end": target}``.
+        fitted_by_name:  ``name -> {"start": fitted_entry, "end": fitted_tip,
+            "contacts": [[x, y, z], ...]}``. MUST be in the SAME coordinate frame
+            as ``planned`` (any consistent orthonormal frame — RAS or LPS; the
+            metrics are radial/angular so they're frame-invariant).
+
+    Returns one row per planned shank:
+        ``trajectory``, ``entry_error_mm`` (3-D), ``target_error_mm`` (3-D),
+        ``mean_contact_radial_mm`` / ``max_contact_radial_mm`` /
+        ``rms_contact_radial_mm`` (perpendicular distance of each fitted contact
+        from the planned line), ``angle_deg`` (axis deviation), ``n_contacts``.
+        A planned shank with no fitted counterpart gets ``None`` metrics.
+    """
+    rows = []
+    for name in sorted(planned_by_name.keys()):
+        planned = planned_by_name[name]
+        fitted = fitted_by_name.get(name)
+        if fitted is None:
+            rows.append({
+                "trajectory": name, "entry_error_mm": None, "target_error_mm": None,
+                "mean_contact_radial_mm": None, "max_contact_radial_mm": None,
+                "rms_contact_radial_mm": None, "angle_deg": None, "n_contacts": 0,
+            })
+            continue
+        try:
+            planned_axis = _vunit(_vsub(planned["end"], planned["start"]))
+        except Exception:
+            continue
+        entry_err = _vnorm(_vsub(fitted["start"], planned["start"]))
+        target_err = _vnorm(_vsub(fitted["end"], planned["end"]))
+        try:
+            angle_deg = _trajectory_axis_angle_deg(planned, fitted)
+        except Exception:
+            angle_deg = None
+        radials = [
+            _radial_error_mm(_vsub(c, planned["start"]), planned_axis)
+            for c in (fitted.get("contacts") or [])
+        ]
+        if radials:
+            mean_rad = sum(radials) / float(len(radials))
+            max_rad = max(radials)
+            rms_rad = math.sqrt(sum(v * v for v in radials) / float(len(radials)))
+        else:
+            mean_rad = max_rad = rms_rad = None
+        rows.append({
+            "trajectory": name,
+            "entry_error_mm": entry_err,
+            "target_error_mm": target_err,
+            "mean_contact_radial_mm": mean_rad,
+            "max_contact_radial_mm": max_rad,
+            "rms_contact_radial_mm": rms_rad,
+            "angle_deg": angle_deg,
+            "n_contacts": len(radials),
+        })
+    return rows
+
+
+def summarize_plan_vs_placement_qc(rows: list[dict]) -> dict:
+    """Cohort summary (median / p95 / max) of :func:`compute_plan_vs_placement_qc`
+    rows, over the shanks with a non-None value for each metric."""
+    def _stat(key):
+        vals = sorted(r[key] for r in rows if r.get(key) is not None)
+        if not vals:
+            return {"median": None, "p95": None, "max": None}
+        n = len(vals)
+        median = vals[n // 2] if n % 2 else 0.5 * (vals[n // 2 - 1] + vals[n // 2])
+        p95 = vals[min(n - 1, int(math.ceil(0.95 * n)) - 1)]
+        return {"median": median, "p95": p95, "max": vals[-1]}
+
+    return {
+        k: _stat(k)
+        for k in (
+            "entry_error_mm", "target_error_mm",
+            "mean_contact_radial_mm", "max_contact_radial_mm", "angle_deg",
+        )
+    }

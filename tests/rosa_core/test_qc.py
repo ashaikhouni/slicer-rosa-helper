@@ -6,7 +6,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "CommonLib"))
 
-from rosa_core.qc import compute_qc_metrics, sorted_contacts_by_trajectory  # noqa: E402
+from rosa_core.qc import (  # noqa: E402
+    compute_plan_vs_placement_qc,
+    compute_qc_metrics,
+    sorted_contacts_by_trajectory,
+    summarize_plan_vs_placement_qc,
+)
 
 
 class QCTests(unittest.TestCase):
@@ -73,6 +78,66 @@ class QCTests(unittest.TestCase):
         self.assertIsNone(by_name["LHH"]["entry_radial_mm"])
         self.assertIsNone(by_name["LHH"]["angle_deg"])
         self.assertEqual(by_name["LHH"]["matched_contacts"], 0)
+
+
+class PlanVsPlacementQCTests(unittest.TestCase):
+    def test_basic_metrics(self):
+        # Planned RHH along +x. Fitted entry off by 1 (y), tip off by 2 (y),
+        # contacts at lateral 3 and 4 from the planned line.
+        planned = {"RHH": {"start": [0, 0, 0], "end": [10, 0, 0]}}
+        fitted = {
+            "RHH": {
+                "start": [0, 1, 0], "end": [10, 2, 0],
+                "contacts": [[2, 3, 0], [5, 4, 0]],
+            }
+        }
+        rows = compute_plan_vs_placement_qc(planned, fitted)
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["trajectory"], "RHH")
+        self.assertAlmostEqual(r["entry_error_mm"], 1.0, places=6)
+        self.assertAlmostEqual(r["target_error_mm"], 2.0, places=6)
+        self.assertAlmostEqual(r["mean_contact_radial_mm"], 3.5, places=6)
+        self.assertAlmostEqual(r["max_contact_radial_mm"], 4.0, places=6)
+        self.assertAlmostEqual(r["rms_contact_radial_mm"], (12.5) ** 0.5, places=6)
+        self.assertEqual(r["n_contacts"], 2)
+        self.assertGreater(r["angle_deg"], 0.0)  # axes differ
+
+    def test_contact_radial_is_distance_from_planned_line(self):
+        # A perfectly on-axis fit (different tip depth) → zero lateral deviation,
+        # confirming we measure distance from the LINE, not nominal contacts.
+        planned = {"L": {"start": [0, 0, 0], "end": [20, 0, 0]}}
+        fitted = {"L": {"start": [0, 0, 0], "end": [20, 0, 0],
+                        "contacts": [[3, 0, 0], [9, 0, 0], [14, 0, 0]]}}
+        r = compute_plan_vs_placement_qc(planned, fitted)[0]
+        self.assertAlmostEqual(r["mean_contact_radial_mm"], 0.0, places=6)
+        self.assertAlmostEqual(r["angle_deg"], 0.0, places=6)
+
+    def test_unmatched_plan_gets_none(self):
+        planned = {"A": {"start": [0, 0, 0], "end": [10, 0, 0]},
+                   "B": {"start": [0, 0, 0], "end": [0, 10, 0]}}
+        fitted = {"A": {"start": [0, 0, 0], "end": [10, 0, 0], "contacts": []}}
+        rows = compute_plan_vs_placement_qc(planned, fitted)
+        by = {r["trajectory"]: r for r in rows}
+        self.assertIsNone(by["B"]["entry_error_mm"])
+        self.assertEqual(by["B"]["n_contacts"], 0)
+        # A has no contacts → contact stats None but entry/target present.
+        self.assertIsNotNone(by["A"]["entry_error_mm"])
+        self.assertIsNone(by["A"]["mean_contact_radial_mm"])
+
+    def test_summary(self):
+        rows = [
+            {"entry_error_mm": 1.0, "target_error_mm": 2.0,
+             "mean_contact_radial_mm": 0.5, "max_contact_radial_mm": 1.0, "angle_deg": 1.0},
+            {"entry_error_mm": 3.0, "target_error_mm": 4.0,
+             "mean_contact_radial_mm": 1.5, "max_contact_radial_mm": 2.0, "angle_deg": 2.0},
+            {"entry_error_mm": None, "target_error_mm": None,
+             "mean_contact_radial_mm": None, "max_contact_radial_mm": None, "angle_deg": None},
+        ]
+        s = summarize_plan_vs_placement_qc(rows)
+        self.assertAlmostEqual(s["entry_error_mm"]["median"], 2.0, places=6)
+        self.assertAlmostEqual(s["entry_error_mm"]["max"], 3.0, places=6)
+        self.assertIsNotNone(s["angle_deg"]["p95"])
 
 
 if __name__ == "__main__":
