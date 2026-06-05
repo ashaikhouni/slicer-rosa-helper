@@ -454,7 +454,7 @@ The command auto-discovers:
 - the FreeSurfer base T1 (`mri/T1.mgz`, falling back to `orig.mgz` /
   `brain.mgz` / `rawavg.mgz`)
 - the LUT (explicit `--lut` → `$FREESURFER_HOME/FreeSurferColorLUT.txt`
-  → bundled copy under `CommonLib/resources/freesurfer/`)
+  → bundled copy packaged in `rosa_core/resources/freesurfer/`)
 - the surface annotation (`--annotation aparc` by default; pass an empty
   string to disable per-vertex coloring)
 

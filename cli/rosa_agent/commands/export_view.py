@@ -94,7 +94,8 @@ def _discover_lut(fs: FSSubject, override: str | None) -> Path | None:
     """Locate a FreeSurferColorLUT.txt.
 
     Preference order: explicit override → ``$FREESURFER_HOME/FreeSurferColorLUT.txt``
-    → bundled copy in ``CommonLib/resources/freesurfer/``.
+    → the LUT packaged inside the ``rosa_core`` package
+    (``rosa_core/resources/freesurfer/``, shipped in the wheel).
     """
     if override:
         p = Path(override).expanduser()
@@ -109,9 +110,11 @@ def _discover_lut(fs: FSSubject, override: str | None) -> Path | None:
         if candidate.is_file():
             return candidate
 
-    # Bundled fallback. Resolves relative to this file's repo location.
-    here = Path(__file__).resolve()
-    bundled = here.parents[3] / "CommonLib" / "resources" / "freesurfer" / "FreeSurferColorLUT20120827.txt"
+    # Bundled fallback — the LUT ships inside the rosa_core package, so this
+    # resolves in a real wheel / site-packages install, not only an editable
+    # checkout (the old Path(__file__).parents[3] guess broke in a wheel).
+    from rosa_core.atlas_index import default_freesurfer_lut_path
+    bundled = default_freesurfer_lut_path()
     if bundled.is_file():
         return bundled
     return None
