@@ -1748,9 +1748,6 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         # lines that have a fitted counterpart (Show planned resurfaces them),
         # and scope contacts to the selected shank.
         self._apply_source_line_visibility()
-        self.logic.electrode_scene.apply_contact_selection_visibility(
-            self._selected_trajectory_name_from_table()
-        )
         # The generated result becomes the active "Contact Fit" view so it
         # persists when the user leaves and re-enters the module (re-enter would
         # otherwise reload the seed source and hide the result). The combo is
@@ -1758,6 +1755,9 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         if fitted_nodes:
             self._set_workflow_active_source("contact_fit")
             self._sync_source_combo_from_workflow()
+        # Now that the active view is Contact Fit, show the selected shank's
+        # contacts (gated on the source, so seed views never show stray contacts).
+        self._apply_contact_visibility_for_selection()
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(contact_nodes)} electrode nodes"
         )
@@ -2164,14 +2164,22 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             out.append(lps_to_ras_point(list(lps)))
         return out or None
 
+    def _apply_contact_visibility_for_selection(self):
+        """Contacts belong to the generated 'Contact Fit' result, shown one
+        shank at a time. They're only visible while that source is the active
+        view; in any seed source (Imported/Planned/Auto/Guided) they stay hidden
+        even if a same-named shank is selected — those contacts aren't part of
+        the seed."""
+        name = ""
+        if self._selected_source_key() == "contact_fit":
+            name = self._selected_trajectory_name_from_table()
+        self.logic.electrode_scene.apply_contact_selection_visibility(name)
+
     def _follow_selected_trajectory_if_enabled(self):
         if self._syncingFocusControls:
             return
-        # Contacts belong to one trajectory at a time: show only the selected
-        # shank's contacts and hide the rest (independent of the isolate toggle).
-        self.logic.electrode_scene.apply_contact_selection_visibility(
-            self._selected_trajectory_name_from_table()
-        )
+        # Contacts follow the selection, but only in the Contact Fit view.
+        self._apply_contact_visibility_for_selection()
         self._highlight_selected_trajectory()
         if not bool(self.autoFollowTrajectoryCheck.checked):
             return
@@ -2212,9 +2220,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             # selected shank (one set of contacts displayed at a time, always).
             try:
                 self.logic.electrode_scene.apply_trajectory_isolation(set())
-                self.logic.electrode_scene.apply_contact_selection_visibility(
-                    self._selected_trajectory_name_from_table()
-                )
+                self._apply_contact_visibility_for_selection()
             except Exception:
                 pass
             return
