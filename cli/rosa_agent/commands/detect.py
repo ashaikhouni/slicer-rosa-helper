@@ -143,7 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.seeds:
-        seeds = read_seeds_tsv(args.seeds)
+        try:
+            seeds = read_seeds_tsv(args.seeds)
+        except (ValueError, OSError) as exc:
+            _stderr(f"error: could not read seeds {args.seeds}: {exc}")
+            return 2
         _stderr(f"[detect] {len(seeds)} seed(s) loaded from {args.seeds}")
         trajs = run_guided_detect(
             args.ct_path, seeds,
