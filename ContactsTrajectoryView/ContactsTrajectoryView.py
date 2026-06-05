@@ -49,6 +49,7 @@ TRAJECTORY_SOURCE_OPTIONS = [
     ("manual", "Manual (scene)"),
     ("guided_fit", "Guided Fit"),
     ("auto_fit", "Auto Fit"),
+    ("contact_fit", "Contact Fit (generated)"),
     ("planned_rosa", "Planned ROSA"),
 ]
 
@@ -1096,6 +1097,7 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
             "manual": ["manual"],
             "guided_fit": ["guided_fit"],
             "auto_fit": ["auto_fit"],
+            "contact_fit": ["contact_fit"],
             "planned_rosa": ["planned_rosa"],
         }
         groups = group_map.get(key, group_map["working"])
@@ -1749,6 +1751,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self.logic.electrode_scene.apply_contact_selection_visibility(
             self._selected_trajectory_name_from_table()
         )
+        # The generated result becomes the active "Contact Fit" view so it
+        # persists when the user leaves and re-enters the module (re-enter would
+        # otherwise reload the seed source and hide the result). The combo is
+        # synced without triggering a reload (guarded by _syncingSourceCombo).
+        if fitted_nodes:
+            self._set_workflow_active_source("contact_fit")
+            self._sync_source_combo_from_workflow()
         self.log(
             f"[contacts:{log_context}] updated {len(contacts)} points across {len(contact_nodes)} electrode nodes"
         )
@@ -2379,6 +2388,10 @@ class ContactsTrajectoryViewLogic(ScriptedLoadableModuleLogic):
             return self._collect_trajectories_from_role("GuidedFitTrajectoryLines", workflow_node=wf)
         if source == "auto_fit":
             return self._collect_trajectories_from_role("AutoFitTrajectoryLines", workflow_node=wf)
+        if source == "contact_fit":
+            # The fitted trajectories the contacts were placed on (the
+            # generated result), so it can be re-viewed after leaving the module.
+            return self._collect_trajectories_from_role("ContactFitTrajectoryLines", workflow_node=wf)
         if source == "imported_external":
             return self._collect_trajectories_from_role("ImportedExternalTrajectoryLines", workflow_node=wf)
         if source == "planned_rosa":
