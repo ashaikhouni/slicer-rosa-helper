@@ -375,11 +375,16 @@ class FreeSurferService:
 
     def _bundled_freesurfer_lut_path(self):
         """Return path to bundled FreeSurfer LUT shipped with the extension."""
+        _commonlib = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         candidates = [
             os.path.join(self.module_dir, "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
             os.path.join(self.module_dir, "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            # Canonical packaged location: the LUT now lives inside the rosa_core
+            # tree so the headless wheel ships it (shared with the CLI).
+            os.path.join(_commonlib, "rosa_core", "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            # Legacy repo layout (kept as a fallback).
+            os.path.join(_commonlib, "Resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
+            os.path.join(_commonlib, "resources", "freesurfer", "FreeSurferColorLUT20120827.txt"),
         ]
         for path in candidates:
             if os.path.isfile(path):

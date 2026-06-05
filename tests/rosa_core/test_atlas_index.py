@@ -112,6 +112,24 @@ class AtlasIndexTests(unittest.TestCase):
         self.assertEqual(out[11], "Left-Caudate")
         self.assertNotIn("garbage", out)
 
+    def test_default_freesurfer_lut_path_is_inside_rosa_core_package(self):
+        """The bundled LUT must live in rosa_core/resources/ so it ships in the
+        wheel (package-data only covers the rosa_core tree). A repo-relative
+        CommonLib/resources/ path would NOT be packaged."""
+        from rosa_core.atlas_index import (
+            default_freesurfer_lut_path, parse_freesurfer_lut,
+        )
+        p = default_freesurfer_lut_path()
+        self.assertTrue(p.is_file(), f"bundled LUT missing: {p}")
+        # Must be under rosa_core/resources/ (the packaged location).
+        self.assertIn(("rosa_core", "resources", "freesurfer"),
+                      [tuple(p.parts[i:i + 3]) for i in range(len(p.parts) - 2)],
+                      f"LUT not in the packaged rosa_core/resources tree: {p}")
+        # And it parses as a real LUT (sanity).
+        lut = parse_freesurfer_lut(p)
+        self.assertGreater(len(lut), 100)
+        self.assertEqual(lut.get(0), "Unknown")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -99,6 +99,29 @@ def format_atlas_sample(
     }
 
 
+_FREESURFER_LUT_FILENAME = "FreeSurferColorLUT20120827.txt"
+
+
+def default_freesurfer_lut_path() -> Path:
+    """Return the canonical bundled FreeSurfer color-LUT path.
+
+    Mirrors :func:`rosa_core.electrode_models.default_electrode_library_path`:
+    checks the packaged ``rosa_core/resources/freesurfer/`` first (ships in the
+    wheel via package-data), then the legacy ``CommonLib/resources/freesurfer/``.
+    Returns the packaged path even when nothing exists, so error messages point
+    at the canonical location.
+    """
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parent / "resources" / "freesurfer" / _FREESURFER_LUT_FILENAME,      # rosa_core/resources/...
+        here.parents[1] / "resources" / "freesurfer" / _FREESURFER_LUT_FILENAME,  # CommonLib/resources/... (legacy)
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
 def parse_freesurfer_lut(path: str | Path) -> dict[int, str]:
     """Parse a FreeSurfer color LUT text file into ``{label_value: name}``.
 

@@ -100,9 +100,10 @@ exclude = [
     "tests*",
 ]
 
-# Non-Python data files that ship inside packages — currently the
-# bundled electrode-model library JSON. ``rosa_core/resources/...``
-# was the canonical path before this pyproject; setuptools will pick
-# it up via package-data because it's inside the rosa_core/ tree.
+# Non-Python data files that ship inside packages: the bundled
+# electrode-model library JSON and the FreeSurfer color LUT. Both must
+# live under ``rosa_core/resources/...`` to ship in the wheel — setuptools
+# only packages data inside the rosa_core/ tree, so a repo-relative
+# ``CommonLib/resources/`` path is NOT included.
 [tool.setuptools.package-data]
-rosa_core = ["resources/**/*.json"]
+rosa_core = ["resources/**/*.json", "resources/**/*.txt"]
