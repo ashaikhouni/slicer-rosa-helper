@@ -672,6 +672,11 @@ class ElectrodeSceneService:
             node.SetAttribute("Rosa.TrajectoryName", str(name))
             node.SetAttribute("Rosa.Role", "ContactFit")
             node.SetAttribute("Rosa.TrajectoryGroup", "contact_fit")
+            # The model the contacts were placed with belongs to this fitted
+            # trajectory — stamp it so the table can restore it when the Contact
+            # Fit source is reloaded (read back via trajectory_from_line_node's
+            # ``best_model_id``).
+            node.SetAttribute("Rosa.BestModelId", str(getattr(placed, "model_id", "") or ""))
             if node.GetNumberOfControlPoints() >= 2:
                 node.SetNthControlPointLabel(0, f"{name} Sh")
                 node.SetNthControlPointLabel(1, f"{name} Dp")

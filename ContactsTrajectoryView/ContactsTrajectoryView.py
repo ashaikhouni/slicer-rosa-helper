@@ -874,9 +874,13 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
 
             model_combo = self._build_model_combo()
             self._bind_model_length_update(model_combo, row)
-            # Default empty. Only the user's manual override (sticky across
-            # re-populate) pre-fills.
+            # Default empty for seed sources. The user's manual override (sticky
+            # across re-populate) pre-fills; and for the Contact Fit result the
+            # model the contacts were placed with (stamped on the fitted line)
+            # pre-fills, so the model belongs to the result, not the seed.
             override = self._userModelOverrides.get(traj["name"], "")
+            if not override and self._selected_source_key() == "contact_fit":
+                override = (traj.get("best_model_id") or "").strip()
             if override:
                 idx = model_combo.findText(override)
                 if idx >= 0:
