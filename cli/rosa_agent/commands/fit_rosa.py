@@ -788,10 +788,10 @@ def _write_contacts_tsv(
     Comment line:
         # reference_frame: <name> sha256:<hex>
 
-    Then the standard contacts.tsv columns. ``csv.DictReader`` skips the
-    comment line by default when the first column is named ``trajectory``;
-    consumers that don't tolerate comments can ``grep -v '^#'`` before
-    reading.
+    Then the standard contacts.tsv columns. The shared reader
+    (``trajectory_io.read_tsv_rows``) skips leading ``#`` comment lines, so
+    ``rosa-agent label`` / ``export-view`` / ``place`` read this file correctly.
+    Other tools that don't tolerate comments can ``grep -v '^#'`` before reading.
     """
     cols = ["trajectory", "label", "contact_index", "x", "y", "z",
             "peak_detected", "electrode_model"]

@@ -68,13 +68,23 @@ def _sniff_delimiter(sample: str) -> str:
 
 
 def read_tsv_rows(path: str | Path) -> list[dict[str, str]]:
-    """Read a (TSV or CSV) file as a list of dicts."""
+    """Read a (TSV or CSV) file as a list of dicts.
+
+    Leading ``#`` comment lines are skipped before parsing — ``fit-rosa``'s
+    ``contacts.tsv`` stamps a ``# reference_frame: <name> sha256:<hex>``
+    provenance line above the header, and ``csv.DictReader`` would otherwise
+    treat that comment as the header (corrupting every row). The delimiter is
+    sniffed from the first non-comment line.
+    """
     p = Path(path)
     text = p.read_text(encoding="utf-8")
     if not text.strip():
         return []
-    delim = _sniff_delimiter(text.splitlines()[0])
-    reader = csv.DictReader(text.splitlines(), delimiter=delim)
+    lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    if not lines:
+        return []
+    delim = _sniff_delimiter(lines[0])
+    reader = csv.DictReader(lines, delimiter=delim)
     return [dict(row) for row in reader]
 
 
