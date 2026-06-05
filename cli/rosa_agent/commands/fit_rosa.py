@@ -33,6 +33,9 @@ Output (``--output DIR``):
                               then standard columns (trajectory, label, contact_index,
                               x, y, z, peak_detected, electrode_model)
         trajectories.tsv    — one row per fitted shank with picked model + landmarks
+        qc.tsv              — plan-vs-placement deviation per shank (entry/target
+                              3-D error, contact lateral deviation from the planned
+                              line, axis angle); cohort summary in manifest.qc_summary
         figures/            — per-trajectory PNG (when matplotlib available)
 """
 from __future__ import annotations
@@ -464,6 +467,27 @@ def main(argv: list[str] | None = None) -> int:
         reference_volume_name = f"ROSA::{postop_name}"
 
     # ---------------------------------------------------------------
+    # 7.5 Plan-vs-placement QC (computed in the postop-CT frame, where
+    # both the imported plan seeds and the fitted result live, so the
+    # comparison is well-posed — entry/target error + contact lateral
+    # deviation from the planned line + axis angle).
+    # ---------------------------------------------------------------
+    from rosa_core.qc import (
+        compute_plan_vs_placement_qc, summarize_plan_vs_placement_qc,
+    )
+    qc_rows = compute_plan_vs_placement_qc(
+        planned_by_name={p["name"]: p for p in planned},
+        fitted_by_name={
+            r["name"]: {
+                "start": r["entry_ras"], "end": r["tip_ras"],
+                "contacts": r.get("contacts_postop_ct_ras") or [],
+            }
+            for r in per_trajectory if r.get("status") == "ok"
+        },
+    )
+    qc_summary = summarize_plan_vs_placement_qc(qc_rows)
+
+    # ---------------------------------------------------------------
     # 8. Write outputs.
     # ---------------------------------------------------------------
     runtime_sec = time.perf_counter() - t0
@@ -490,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         "mask_backend_used": mask_backend_used,
         "n_planned": len(planned),
         "n_fit": sum(1 for r in per_trajectory if r["status"] == "ok"),
+        "qc_summary": qc_summary,
         "trajectories": per_trajectory,
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=float))
@@ -498,6 +523,14 @@ def main(argv: list[str] | None = None) -> int:
                         reference_volume_name=reference_volume_name,
                         ref_hash=ref_hash)
     _write_trajectories_tsv(out_dir / "trajectories.tsv", per_trajectory)
+    _write_qc_tsv(out_dir / "qc.tsv", qc_rows)
+    _em = qc_summary["entry_error_mm"]["median"]
+    _tm = qc_summary["target_error_mm"]["median"]
+    _cm = qc_summary["mean_contact_radial_mm"]["median"]
+    log("[fit-rosa] QC plan-vs-fit (median): "
+        f"entry={'NA' if _em is None else f'{_em:.2f}'} "
+        f"target={'NA' if _tm is None else f'{_tm:.2f}'} "
+        f"contact-radial={'NA' if _cm is None else f'{_cm:.2f}'} mm → qc.tsv")
 
     if not args.no_figures:
         n_fig = _render_figures(
@@ -819,6 +852,30 @@ def _write_trajectories_tsv(path: Path, per_trajectory: list[dict[str, Any]]) ->
                 "tip_y":   f"{float(tip[1]):.4f}",
                 "tip_z":   f"{float(tip[2]):.4f}",
             })
+
+
+def _write_qc_tsv(path: Path, qc_rows: list[dict[str, Any]]) -> None:
+    """Plan-vs-placement QC: one row per planned shank (entry/target 3-D error,
+    contact lateral deviation from the planned line, axis angle). Empty cells for
+    shanks that didn't fit."""
+    cols = [
+        "trajectory", "entry_error_mm", "target_error_mm",
+        "mean_contact_radial_mm", "max_contact_radial_mm", "rms_contact_radial_mm",
+        "angle_deg", "n_contacts",
+    ]
+
+    def _fmt(v):
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return f"{v:.4f}"
+        return str(v)
+
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=cols, delimiter="\t")
+        writer.writeheader()
+        for row in qc_rows:
+            writer.writerow({c: _fmt(row.get(c)) for c in cols})
 
 
 # ---------------------------------------------------------------------
