@@ -71,5 +71,36 @@ class TrajectoryIoTests(unittest.TestCase):
         self.assertAlmostEqual(seeds[1]["end_ras"][1], 11.0)
 
 
+    def test_read_tsv_rows_skips_reference_frame_comment(self):
+        """fit-rosa's contacts.tsv stamps a leading '# reference_frame: ...'
+        line; read_tsv_rows must skip it (else the comment becomes the header
+        and rosa-agent label / export-view read garbage)."""
+        from rosa_agent.io.trajectory_io import read_tsv_rows
+
+        path = self.tmp / "contacts.tsv"
+        path.write_text(
+            "# reference_frame: ROSA::oarmpost sha256:deadbeef\n"
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LANG\tLANG1\t1\t1.0\t2.0\t3.0\t1\tPMT-14\n"
+            "LANG\tLANG2\t2\t1.5\t2.5\t3.5\t1\tPMT-14\n"
+        )
+        rows = read_tsv_rows(path)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["trajectory"], "LANG")
+        self.assertEqual(rows[0]["label"], "LANG1")
+        self.assertEqual(rows[0]["x"], "1.0")
+        self.assertEqual(rows[1]["electrode_model"], "PMT-14")
+        # The comment text must not have leaked in as a column.
+        self.assertNotIn("# reference_frame: ROSA::oarmpost sha256:deadbeef", rows[0])
+
+    def test_read_tsv_rows_no_comment_unaffected(self):
+        from rosa_agent.io.trajectory_io import read_tsv_rows
+
+        path = self.tmp / "plain.tsv"
+        path.write_text("a\tb\n1\t2\n")
+        rows = read_tsv_rows(path)
+        self.assertEqual(rows, [{"a": "1", "b": "2"}])
+
+
 if __name__ == "__main__":
     unittest.main()
