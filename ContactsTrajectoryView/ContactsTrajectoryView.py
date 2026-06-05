@@ -128,6 +128,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._workflowObserverNode = None
         self._workflowRefreshPending = False
         self._workflowRefreshInFlight = False
+        # Set while CTV is generating contacts: the publish step modifies the
+        # workflow node, which would otherwise re-trigger our own workflow-
+        # modified refresh and wipe the freshly-built contact/fitted display.
+        self._suppressWorkflowRefresh = False
 
         top_form = qt.QFormLayout()
         top_form.setFieldGrowthPolicy(qt.QFormLayout.AllNonFixedFieldsGrow)
@@ -230,6 +234,10 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
         self._workflowObserverTag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_workflow_node_modified)
 
     def _on_workflow_node_modified(self, caller=None, event=None):
+        if getattr(self, "_suppressWorkflowRefresh", False):
+            # CTV's own generate is publishing — don't self-refresh and wipe
+            # the display it's building. External changes refresh as normal.
+            return
         if self._workflowRefreshPending or self._workflowRefreshInFlight:
             return
         self._workflowRefreshPending = True
@@ -1772,11 +1780,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "No trajectories are available in workflow/scene.",
             )
             return
+        self._suppressWorkflowRefresh = True
         try:
             self._run_contact_generation(log_context="generate")
         except Exception as exc:
             self.log(f"[contacts] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
+        finally:
+            self._suppressWorkflowRefresh = False
 
     def onUpdateContactsClicked(self):
         if not self.loadedTrajectories:
@@ -1793,11 +1804,14 @@ class ContactsTrajectoryViewWidget(ScriptedLoadableModuleWidget):
                 "Generate contacts once first, then use update.",
             )
             return
+        self._suppressWorkflowRefresh = True
         try:
             self._run_contact_generation(log_context="update")
         except Exception as exc:
             self.log(f"[contacts:update] error: {exc}")
             qt.QMessageBox.critical(slicer.util.mainWindow(), "Contacts & Trajectory View", str(exc))
+        finally:
+            self._suppressWorkflowRefresh = False
 
     # ---- GT-export ----------------------------------------------------
 
