@@ -39,21 +39,22 @@ iteration only; production use should `pip install`.
 
 ## Subcommands at a glance
 
-| Command         | Purpose                                                                              |
-|-----------------|--------------------------------------------------------------------------------------|
-| `load`          | Parse a ROSA case folder into a JSON manifest                                        |
-| `detect`        | Run shank detection on a postop CT volume (auto or guided)                           |
-| `contacts`      | Place contacts along trajectories using LoG-driven peaks                             |
-| `label`         | Assign atlas labels to a contacts TSV                                                |
-| `pipeline`      | Run all four stages end-to-end (load → detect → contacts → label)                    |
-| `place`         | 5-mode staged placer (auto / count / named / seeded / seeded+model) on any CT        |
-| `fit-rosa`      | Fit electrode models per planned `.ros` trajectory → contacts + plan-vs-fit `qc.tsv` |
-| `rosa-to-nifti` | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`          |
-| `match-ros`     | Name detector emissions on any-frame CT from a `.ros` plan via line-geometry RANSAC  |
-| `export-view`   | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB   |
-| `view`          | Serve an `export-view` output dir over HTTP and open it in your browser              |
-| `brain-extract` | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)|
-| `deidentify-ros`| Strip PHI from a `.ros` / case folder (pseudonymise DICOM UIDs, drop raw DICOM/zips) |
+| Command              | Purpose                                                                                 |
+|----------------------|-----------------------------------------------------------------------------------------|
+| `load`               | Parse a ROSA case folder into a JSON manifest                                           |
+| `detect`             | Run shank detection on a postop CT volume (auto or guided)                              |
+| `contacts`           | Place contacts along trajectories using LoG-driven peaks                                |
+| `label`              | Assign atlas labels to a contacts TSV                                                   |
+| `pipeline`           | Run all four stages end-to-end (load → detect → contacts → label)                       |
+| `place`              | 5-mode staged placer (auto / count / named / seeded / seeded+model) on any CT           |
+| `fit-rosa`           | Fit electrode models per planned `.ros` trajectory → contacts + plan-vs-fit `qc.tsv`    |
+| `rosa-to-nifti`      | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`             |
+| `match-trajectories` | Name detector emissions on any-frame CT from a named-trajectory file (line-geom RANSAC) |
+| `match-ros`          | `match-trajectories` with the plan parsed from a `.ros` (no images needed)              |
+| `export-view`        | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB      |
+| `view`               | Serve an `export-view` output dir over HTTP and open it in your browser                 |
+| `brain-extract`      | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)   |
+| `deidentify-ros`     | Strip PHI from a `.ros` / case folder (pseudonymise DICOM UIDs, drop raw DICOM/zips)    |
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
@@ -357,14 +358,82 @@ output/
 
 ---
 
-## `match-ros` — name detector emissions across coordinate frames
+## `match-trajectories` — name detector emissions across coordinate frames
 
-Same patient, two coordinate frames: a `.ros` plan in the ROSA reference
-frame + a CT in some *other* RAS frame (e.g. post-registered to a
-different MRI atlas, or a routine clinical CT in scanner coordinates).
-This command runs the detector on the CT, then matches each emission to
-a planned trajectory using only line geometry — no image-to-image
-registration, no need for the ROSA reference volume.
+You have a CT and a list of **named** planned trajectories whose coordinates
+live in a *different* RAS frame than the CT (a plan exported from another
+station, a registration to a different MRI atlas, a routine clinical CT in
+scanner coordinates) — or you simply never had a usable `.ros`. This command
+runs the detector on the CT, then matches each emission to a planned trajectory
+using only line geometry — no image-to-image registration, no reference
+volume — and propagates the planned names.
+
+```bash
+rosa-agent match-trajectories \
+    --plan planned_trajectories.tsv \
+    --ct  postop_ct.nii.gz \
+    --output match_qc/
+```
+
+The plan file is any TSV/CSV the seed reader understands — a header with
+`name` + `start_x/y/z` + `end_x/y/z` (or the `label, x, y, z` endpoint-pair
+form). Coordinates are RAS, in **any** frame; the matcher recovers the rigid
+transform to the CT. At least 3 named trajectories are required (RANSAC).
+
+The `trajectories.tsv` carries the planned electrode names (LCMN, RAMF, ROPE, …)
+instead of the detector's CAND-NNN labels. Unmatched plans appear in `match.tsv`
+with empty det_name; unmatched detector emissions keep their CAND-NNN names.
+
+How the matcher works (full prose lives in
+[`CommonLib/rosa_core/cross_volume_match.py`](../CommonLib/rosa_core/cross_volume_match.py)):
+
+1. Trajectories are represented as **infinite lines** (midpoint + unit
+   axis). The plan start/end and the detector start/end can drift by
+   several mm at each end, but the underlying line is stable.
+2. RANSAC picks 3 random plan lines + 3 random det lines. For each of
+   3! orderings × 2³ axis-sign combinations, orthogonal Procrustes on
+   the direction triplets gives a rotation `R`; centroid alignment
+   gives a translation `t`.
+3. Inliers are scored by axis angle + perpendicular line-to-line
+   distance — both infinite-line properties, so endpoint drift doesn't
+   enter.
+4. The best-inlier transform is refined on all inlier pairs and used to
+   greedy-match each plan to its closest detector emission.
+
+Validated on s57.ros + T24 CT (same patient, two registrations): 16/17
+named, all matched pairs ≤ 11° axis-angle and ≤ 6 mm perpendicular
+distance.
+
+Tunable flags (defaults validated as above):
+
+- `--angle-tol-deg N` *(default: 15)* — axis-angle tolerance for RANSAC + greedy match.
+- `--ransac-perp-mm N` *(default: 8)* — perp tolerance for RANSAC inliers.
+- `--match-perp-mm N` *(default: 12)* — perp tolerance for the greedy plan↔det assignment (slightly looser; refined transform is generally good).
+- `--ransac-iter N` *(default: 2000)* — RANSAC iteration budget.
+- `--seed N` *(default: 42)* — RANSAC RNG seed.
+
+Output layout:
+
+```text
+output/
+  manifest.json
+  trajectories.tsv             # detector emissions, RENAMED to plan names
+  contacts.tsv
+  figures/                     # filenames use the plan names too
+  diagnostics/cmp.tsv
+  match.tsv                    # per-plan match (plan_name, det_name, angle°, perp_mm)
+  cross_volume_match.json      # recovered transform + RANSAC diagnostics
+```
+
+---
+
+## `match-ros` — `match-trajectories` with a `.ros` plan
+
+A thin wrapper over `match-trajectories` for when the plan is a `.ros`. It
+parses the planned trajectories out of the `.ros` (reading only the planned
+segments + an LPS→RAS flip — **no image volumes needed**, so it works even when
+the ROSA folder is missing its imagery), then runs the identical detect +
+line-match operation.
 
 ```bash
 rosa-agent match-ros \
@@ -376,51 +445,8 @@ rosa-agent match-ros \
 rosa-agent match-ros --ros-file plan.ros --ct ct.nii.gz --output qc/
 ```
 
-The `trajectories.tsv` carries the surgeon's electrode names (LCMN, RAMF,
-ROPE, …) instead of the detector's CAND-NNN labels. Unmatched ROS plans
-appear in `match.tsv` with empty det_name; unmatched detector emissions
-keep their CAND-NNN names.
-
-How the matcher works (full prose lives in
-[`CommonLib/rosa_core/cross_volume_match.py`](../CommonLib/rosa_core/cross_volume_match.py)):
-
-1. Trajectories are represented as **infinite lines** (midpoint + unit
-   axis). The `.ros` start/end and the detector start/end can drift by
-   several mm at each end, but the underlying line is stable.
-2. RANSAC picks 3 random ROS lines + 3 random det lines. For each of
-   3! orderings × 2³ axis-sign combinations, orthogonal Procrustes on
-   the direction triplets gives a rotation `R`; centroid alignment
-   gives a translation `t`.
-3. Inliers are scored by axis angle + perpendicular line-to-line
-   distance — both infinite-line properties, so endpoint drift doesn't
-   enter.
-4. The best-inlier transform is refined on all inlier pairs and used to
-   greedy-match each ROS plan to its closest detector emission.
-
-Validated on s57.ros + T24 CT (same patient, two registrations): 16/17
-ROS named, all matched pairs ≤ 11° axis-angle and ≤ 6 mm perpendicular
-distance.
-
-Tunable flags (defaults validated as above):
-
-- `--angle-tol-deg N` *(default: 15)* — axis-angle tolerance for RANSAC + greedy match.
-- `--ransac-perp-mm N` *(default: 8)* — perp tolerance for RANSAC inliers.
-- `--match-perp-mm N` *(default: 12)* — perp tolerance for the greedy ROS↔det assignment (slightly looser; refined transform is generally good).
-- `--ransac-iter N` *(default: 2000)* — RANSAC iteration budget.
-- `--seed N` *(default: 42)* — RANSAC RNG seed.
-
-Output layout:
-
-```text
-output/
-  manifest.json
-  trajectories.tsv             # detector emissions, RENAMED to ROS plan names
-  contacts.tsv
-  figures/                     # filenames use the ROS plan names too
-  diagnostics/cmp.tsv
-  match.tsv                    # per-ROS-plan match (ros_name, det_name, angle°, perp_mm)
-  cross_volume_match.json      # recovered transform + RANSAC diagnostics
-```
+Everything else — matcher internals, tunable flags, output layout — is identical
+to `match-trajectories` above.
 
 ---
 
