@@ -29,6 +29,13 @@ is uploaded, no server is involved, so they're safe to use on identifiable data.
     case folder → download a clean <code>.zip</code> (renamed image dirs, no raw-DICOM zips,
     no screenshots) + the planned-trajectory CSV, plus a private re-link key.</div>
   </li>
+  <li>
+    <a href="viewer/">SEEG result viewer</a>
+    <div class="muted">Drop a <code>rosa-agent export-view</code> output (<code>scene.glb</code> +
+    <code>scene_meta.json</code> + the <code>.nii.gz</code> volume) and explore the electrodes in 3D
+    with CT / FreeSurfer slice planes that snap to each contact. No FreeSurfer recon required —
+    a windowed CT alone works. Renders entirely in your browser.</div>
+  </li>
   <!-- Add more tools here as <li> entries; each lives in its own web/<tool>/ folder. -->
 </ul>
 

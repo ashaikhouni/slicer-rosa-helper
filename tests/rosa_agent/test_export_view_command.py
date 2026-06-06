@@ -204,6 +204,121 @@ class ExportViewSmokeTests(unittest.TestCase):
         meta = json.loads((self.out_dir / "scene_meta.json").read_text())
         self.assertIn("trajectories", meta)
         self.assertIn("contacts", meta)
+        # The volume list must include the CT (always) and the T1 (FS mode),
+        # with T1 first so the legacy default is preserved.
+        vol_ids = [v["id"] for v in meta.get("volumes", [])]
+        self.assertIn("ct", vol_ids)
+        self.assertIn("t1", vol_ids)
+        self.assertEqual(vol_ids[0], "t1", "FS mode must default to T1 (back-compat)")
+        self.assertEqual(meta["t1_volume"]["id"], "t1")
+
+    def test_ct_only_no_freesurfer(self):
+        """CT-only mode: omit --freesurfer-dir → still assembles a viewer with a
+        windowed CT slice/MIP volume, no brain mesh, no atlas labels. This is
+        the 'see results without Slicer/FreeSurfer' path."""
+        from rosa_agent.commands.export_view import run_export_view
+
+        out = self.tmp / "ct_only_out"
+        try:
+            run_export_view(
+                target=str(self.case_dir),
+                freesurfer_dir="",           # <-- no recon
+                out_dir=out,
+                ref_volume="ref_vol",
+            )
+        except SystemExit:
+            self.fail("CT-only export_view raised SystemExit before assembly")
+        except Exception:
+            pass  # detection on the toy phantom may raise; we pin the IO contract
+
+        self.assertTrue((out / "scene.glb").exists(), "scene.glb must be written")
+        self.assertTrue((out / "index.html").exists())
+        self.assertTrue((out / "ct_in_view.nii.gz").exists(),
+                        "CT-only mode must export the windowed CT slice volume")
+
+        meta = json.loads((out / "scene_meta.json").read_text())
+        vol_ids = [v["id"] for v in meta.get("volumes", [])]
+        self.assertEqual(vol_ids, ["ct"], "CT-only mode has exactly the CT volume")
+        self.assertEqual(meta["t1_volume"]["id"], "ct",
+                         "legacy t1_volume must fall back to the CT")
+        self.assertEqual(meta["freesurfer_subject"], "")
+        # No FreeSurfer surfaces in the GLB.
+        gltf = _validate_glb(out / "scene.glb")
+        node_names = {n["name"] for n in gltf.get("nodes", [])}
+        self.assertFalse(any("pial" in n for n in node_names),
+                         f"CT-only scene must have no surfaces; got {node_names}")
+
+    def test_ct_slice_volume_windows_to_uint8(self):
+        """_write_ct_slice_volume: HU window → uint8, metal saturates bright,
+        and the returned meta carries id/label/affine the viewer needs."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.export_view import _write_ct_slice_volume
+
+        arr = np.full((10, 10, 10), -1000.0, dtype=np.float32)  # air
+        arr[4:6, 4:6, 4:6] = 40.0      # brain
+        arr[5, 5, 5] = 3000.0          # a metal contact
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        ct = self.tmp / "synthetic_ct.nii.gz"
+        sitk.WriteImage(img, str(ct))
+
+        out = self.tmp / "ct_win.nii.gz"
+        m = _write_ct_slice_volume(ct, out, window=(-150.0, 1500.0))
+        self.assertTrue(out.exists())
+        self.assertEqual(m["id"], "ct")
+        self.assertEqual(m["label"], "CT")
+        self.assertEqual(m["dtype"], "uint8")
+        self.assertEqual(len(m["vox_to_ras"]), 4)
+        w = sitk.GetArrayFromImage(sitk.ReadImage(str(out)))
+        self.assertEqual(w.dtype, np.uint8)
+        self.assertEqual(int(w[5, 5, 5]), 255)   # metal saturates
+        self.assertEqual(int(w[0, 0, 0]), 0)     # air floors
+
+
+class WebViewerSyncTests(unittest.TestCase):
+    """The GitHub Pages viewer (web/viewer/index.html) is generated from the
+    same template as the served viewer (picker mode). Pin that it stays in sync
+    so the hosted app never drifts from the engine, and that the two modes are
+    correctly gated."""
+
+    def _import(self):
+        try:
+            from rosa_agent.commands.export_view import render_viewer_html
+            return render_viewer_html
+        except ImportError:
+            self.skipTest("rosa_agent.commands.export_view not importable")
+
+    def test_modes_gated(self):
+        render = self._import()
+        served = render(title="S", mode="served")
+        picker = render(title="P", mode="picker")
+        self.assertIn('const VIEWER_MODE = "served"', served)
+        self.assertIn('const VIEWER_MODE = "picker"', picker)
+        # Served auto-loads; picker waits for a dropped file.
+        self.assertIn('if (VIEWER_MODE !== "picker") loadGlb("scene.glb")', served)
+        self.assertIn('fetch("scene_meta.json").then(r => r.json()).then(onMeta)', served)
+        self.assertIn('id="dropzone"', picker)
+        self.assertIn("function __initPicker", picker)
+
+    def test_committed_pages_viewer_in_sync(self):
+        render = self._import()
+        repo = Path(__file__).resolve().parents[2]
+        committed = repo / "web" / "viewer" / "index.html"
+        if not committed.exists():
+            self.skipTest("web/viewer/index.html not generated")
+        html = render(title="ROSA / SEEG viewer", mode="picker")
+        # The committed file prepends a generated-note banner before <html>;
+        # compare everything from <html> onward (exact).
+        body = committed.read_text(encoding="utf-8")
+
+        def _from_html(s):
+            return s[s.index("<html"):]
+
+        self.assertEqual(
+            _from_html(body), _from_html(html),
+            "web/viewer/index.html is stale — re-run `python tools/build_web_viewer.py`",
+        )
 
 
 if __name__ == "__main__":
