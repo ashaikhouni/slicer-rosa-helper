@@ -73,6 +73,7 @@ SUBCOMMANDS = {
     "match-trajectories": "rosa_agent.commands.match_trajectories",
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
+    "view-results":  "rosa_agent.commands.view_results",
     "brain-extract": "rosa_agent.commands.brain_extract",
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
 }

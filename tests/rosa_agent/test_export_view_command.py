@@ -326,5 +326,87 @@ class WebViewerSyncTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    DEPS_AVAILABLE,
+    "numpy/nibabel/SimpleITK/rosa_agent not importable in this environment.",
+)
+class ViewResultsTests(unittest.TestCase):
+    """`view-results` renders ALREADY-COMPUTED results (no pipeline re-run), and
+    reads fit-rosa's entry_/tip_/predicted_model schema as well as the standard
+    start_/end_/electrode_model contract."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_ct(self, path: Path):
+        import numpy as np
+        import SimpleITK as sitk
+        arr = np.zeros((16, 16, 16), dtype=np.float32)
+        arr[8, 8, 8] = 3000.0  # a bright "contact"
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        sitk.WriteImage(img, str(path))
+
+    def test_schema_tolerant_trajectory_reader(self):
+        from rosa_agent.commands.export_view import _read_pipeline_trajectories
+        std = self.tmp / "std.tsv"
+        std.write_text(
+            "name\tstart_x\tstart_y\tstart_z\tend_x\tend_y\tend_z\telectrode_model\n"
+            "A\t0\t0\t0\t0\t0\t10\tDIXI-8AM\n"
+        )
+        fitrosa = self.tmp / "fr.tsv"
+        fitrosa.write_text(
+            "name\tstatus\tpredicted_model\tentry_x\tentry_y\tentry_z\ttip_x\ttip_y\ttip_z\n"
+            "B\tok\tDIXI-10AM\t1\t0\t0\t1\t0\t12\n"
+        )
+        a = _read_pipeline_trajectories(std)
+        b = _read_pipeline_trajectories(fitrosa)
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0]["electrode_model"], "DIXI-8AM")
+        self.assertEqual(len(b), 1, "fit-rosa entry_/tip_ schema must be read")
+        self.assertEqual(b[0]["start"], (1.0, 0.0, 0.0))
+        self.assertEqual(b[0]["end"], (1.0, 0.0, 12.0))
+        self.assertEqual(b[0]["electrode_model"], "DIXI-10AM")  # from predicted_model
+
+    def test_dir_scan_renders_without_pipeline(self):
+        from rosa_agent.commands.view_results import main as vr_main
+        rd = self.tmp / "fitrosa_qc"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "trajectories.tsv").write_text(
+            "name\tstatus\tpredicted_model\tentry_x\tentry_y\tentry_z\ttip_x\ttip_y\ttip_z\n"
+            "LAM\tok\tDIXI-8AM\t0\t0\t0\t0\t0\t12\n"
+            "RHH\tok\tDIXI-10AM\t5\t0\t0\t5\t0\t12\n"
+        )
+        (rd / "contacts.tsv").write_text(
+            "# reference_frame: ROSA::ct sha256:abc\n"
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+            "RHH\tRHH1\t1\t5\t0\t2\t1\tDIXI-10AM\n"
+        )
+        out = self.tmp / "view"
+        rc = vr_main([str(rd), "-o", str(out)])
+        self.assertEqual(rc, 0)
+        self.assertTrue((out / "scene.glb").exists())
+        self.assertTrue((out / "ct_in_view.nii.gz").exists())
+        self.assertTrue((out / "index.html").exists())
+        meta = json.loads((out / "scene_meta.json").read_text())
+        self.assertEqual(len(meta["trajectories"]), 2)
+        self.assertEqual(len(meta["contacts"]), 2)
+        self.assertEqual([v["id"] for v in meta["volumes"]], ["ct"])
+
+    def test_missing_inputs_exit_2(self):
+        from rosa_agent.commands.view_results import main as vr_main
+        # Empty dir → no contacts → exit 2 (no traceback).
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        rc = vr_main([str(empty), "-o", str(self.tmp / "o1")])
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
