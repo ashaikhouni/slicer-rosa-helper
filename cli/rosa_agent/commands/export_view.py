@@ -615,6 +615,13 @@ _HTML_TEMPLATE = """<!doctype html>
   .contact-row .label {{ font-family: ui-monospace, monospace; }}
   .contact-row .region {{ color: #aaa; }}
   .contact-row.selected .region {{ color: #ffdcdc; }}
+  /* Picker-mode drop zone (GitHub Pages app; hidden in served mode). */
+  #dropzone {{ display: none; position: absolute; inset: 0; z-index: 50; background: rgba(8,8,8,0.92); align-items: center; justify-content: center; }}
+  #dropzone.hover .dz-inner {{ border-color: #4a90d9; background: #15202b; }}
+  .dz-inner {{ border: 2px dashed #555; border-radius: 10px; padding: 36px 48px; max-width: 540px; text-align: center; color: #ccc; }}
+  .dz-title {{ font-size: 18px; margin-bottom: 10px; color: #fff; }}
+  .dz-sub {{ font-size: 13px; color: #9aa; line-height: 1.55; margin-bottom: 18px; }}
+  .dz-inner code {{ color: #cdd; background: #222; padding: 1px 4px; border-radius: 3px; }}
 </style>
 <!-- es-module-shims polyfills <script type="importmap"> on browsers that
      don't support it natively (older Safari/Firefox). Modern Chrome/Safari/
@@ -631,6 +638,15 @@ _HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
 <div id="app">
+  <div id="dropzone">
+    <div class="dz-inner">
+      <div class="dz-title">Drop a rosa-agent viewer export</div>
+      <div class="dz-sub">Select or drop <code>scene.glb</code> + <code>scene_meta.json</code> + the
+        <code>.nii.gz</code> volume(s) from an <code>export-view</code> output dir.
+        Nothing is uploaded — everything renders locally in your browser.</div>
+      <input type="file" id="file-input" multiple accept=".glb,.json,.nii,.gz" />
+    </div>
+  </div>
   <div id="canvas-host">
     <div id="toolbar">
       <button id="btn-reset">Show all</button>
@@ -711,6 +727,13 @@ _HTML_TEMPLATE = """<!doctype html>
 import * as THREE from "three";
 import {{ OrbitControls }} from "three/addons/controls/OrbitControls.js";
 import {{ GLTFLoader }} from "three/addons/loaders/GLTFLoader.js";
+
+// VIEWER_MODE: "served" (auto-fetch scene.glb/scene_meta.json/volumes from this
+// dir — export-view + `rosa-agent view`) or "picker" (the GitHub Pages app:
+// no auto-load, the user drag-and-drops their own files and everything renders
+// client-side — nothing uploaded). The render engine below is identical for
+// both; only how the initial bytes arrive differs.
+const VIEWER_MODE = "{viewer_mode}";
 
 // Width reserved for everything to the right of the 3D canvas:
 // slices column (320px) + sidebar column (320px).
@@ -812,8 +835,9 @@ function _firstMeshChild(obj) {{
 }}
 
 const loader = new GLTFLoader();
-setDbg("glb", "loading…");
-loader.load("scene.glb", gltf => {{
+// The GLB load handler is named so picker mode can re-invoke it on a dropped
+// file (see the VIEWER_MODE bootstrap at the bottom). Served mode auto-loads.
+const onGltf = gltf => {{
   gltfRoot = gltf.scene;
   scene.add(gltfRoot);
   let nContacts = 0, nShafts = 0, nSurf = 0;
@@ -865,11 +889,14 @@ loader.load("scene.glb", gltf => {{
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
   fitToObject(gltfRoot);
-}}, undefined, err => {{
+}};
+const onGltfErr = err => {{
   console.error("GLB load failed", err);
   setDbg("glb", "load failed: " + (err.message || err), "err");
   document.getElementById("subject").textContent = "Failed to load scene.glb: " + err;
-}});
+}};
+function loadGlb(url) {{ setDbg("glb", "loading…"); loader.load(url, onGltf, undefined, onGltfErr); }}
+if (VIEWER_MODE !== "picker") loadGlb("scene.glb");
 
 // ---------- MRI slice viewer --------------------------------------
 //
@@ -1586,8 +1613,9 @@ function _applyInitialBrainAlpha() {{
   }});
 }})();
 
-_initSlicePanels();
-fetch("scene_meta.json").then(r => r.json()).then(meta => {{
+// Metadata handler — named so picker mode can call it with a dropped (and
+// path-rewritten) scene_meta.json. Identical logic for served + picker.
+function onMeta(meta) {{
   renderSidebar(meta);
   // Volume selector (CT / FreeSurfer T1). Additive + back-compat: the backend
   // orders volumes [T1, CT] in FS mode (so T1 stays the default) and [CT] when
@@ -1609,25 +1637,86 @@ fetch("scene_meta.json").then(r => r.json()).then(meta => {{
       if (v) loadMri(v);
     }});
     if (vols.length < 2) volSel.parentElement.style.display = "none";
-    // Kick off the default volume load in the background.
     loadMri(vols[0]);
   }} else {{
     loadMri(meta.t1_volume);
   }}
-}}).catch(err => {{
+}}
+function onMetaErr(err) {{
   console.error(err);
   document.getElementById("subject").textContent = "Failed to load metadata: " + err.message;
-}});
+}}
+
+// Picker mode (GitHub Pages app): no fetch — the user drops their own export
+// (scene.glb + scene_meta.json + the .nii.gz volumes). We map each file to a
+// blob: URL, rewrite the volume paths in the metadata to those blobs, then call
+// the SAME onMeta / loadGlb the served path uses. Nothing is uploaded.
+function __initPicker() {{
+  const dz = document.getElementById("dropzone");
+  const fileInput = document.getElementById("file-input");
+  if (dz) dz.style.display = "flex";
+
+  function handleFiles(fileList) {{
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const blobByName = {{}};
+    let metaFile = null;
+    for (const f of files) {{
+      blobByName[f.name] = URL.createObjectURL(f);
+      if (f.name === "scene_meta.json") metaFile = f;
+    }}
+    if (!metaFile) {{ for (const f of files) if (f.name.endsWith(".json")) {{ metaFile = f; break; }} }}
+    if (!metaFile) {{ setDbg("glb", "drop scene_meta.json too", "err"); return; }}
+    metaFile.text().then(txt => {{
+      let meta;
+      try {{ meta = JSON.parse(txt); }} catch (e) {{ setDbg("glb", "bad scene_meta.json", "err"); return; }}
+      const fix = v => (v && v.path && blobByName[v.path])
+        ? Object.assign({{}}, v, {{ path: blobByName[v.path] }}) : v;
+      if (Array.isArray(meta.volumes)) meta.volumes = meta.volumes.map(fix);
+      if (meta.t1_volume) meta.t1_volume = fix(meta.t1_volume);
+      if (dz) dz.style.display = "none";
+      onMeta(meta);
+      const glbUrl = blobByName["scene.glb"];
+      if (glbUrl) loadGlb(glbUrl);
+      else setDbg("glb", "no scene.glb in the drop", "err");
+    }});
+  }}
+
+  if (fileInput) fileInput.addEventListener("change", e => handleFiles(e.target.files));
+  if (dz) {{
+    dz.addEventListener("dragover", e => {{ e.preventDefault(); dz.classList.add("hover"); }});
+    dz.addEventListener("dragleave", () => dz.classList.remove("hover"));
+    dz.addEventListener("drop", e => {{ e.preventDefault(); dz.classList.remove("hover"); handleFiles(e.dataTransfer.files); }});
+  }}
+}}
+
+_initSlicePanels();
+if (VIEWER_MODE === "picker") {{
+  __initPicker();
+}} else {{
+  fetch("scene_meta.json").then(r => r.json()).then(onMeta).catch(onMetaErr);
+}}
 </script>
 </body>
 </html>
 """
 
 
-def _write_html(out_dir: Path, *, title: str) -> Path:
-    html = _HTML_TEMPLATE.format(title=title)
+def render_viewer_html(*, title: str, mode: str = "served") -> str:
+    """Render the viewer index.html. ``mode`` is the JS VIEWER_MODE:
+
+    * ``served``  — auto-loads scene.glb / scene_meta.json / volumes from the
+      same directory via fetch (what ``export-view`` writes + ``view`` serves).
+    * ``picker``  — no auto-load; shows a drag-and-drop zone and renders the
+      user's own dropped files entirely client-side (the GitHub Pages app —
+      nothing uploaded, no server). Reuses the exact same render engine.
+    """
+    return _HTML_TEMPLATE.format(title=title, viewer_mode=mode)
+
+
+def _write_html(out_dir: Path, *, title: str, mode: str = "served") -> Path:
     p = out_dir / "index.html"
-    p.write_text(html, encoding="utf-8")
+    p.write_text(render_viewer_html(title=title, mode=mode), encoding="utf-8")
     return p
 
 

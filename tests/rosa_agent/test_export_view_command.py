@@ -276,5 +276,50 @@ class ExportViewSmokeTests(unittest.TestCase):
         self.assertEqual(int(w[0, 0, 0]), 0)     # air floors
 
 
+class WebViewerSyncTests(unittest.TestCase):
+    """The GitHub Pages viewer (web/viewer/index.html) is generated from the
+    same template as the served viewer (picker mode). Pin that it stays in sync
+    so the hosted app never drifts from the engine, and that the two modes are
+    correctly gated."""
+
+    def _import(self):
+        try:
+            from rosa_agent.commands.export_view import render_viewer_html
+            return render_viewer_html
+        except ImportError:
+            self.skipTest("rosa_agent.commands.export_view not importable")
+
+    def test_modes_gated(self):
+        render = self._import()
+        served = render(title="S", mode="served")
+        picker = render(title="P", mode="picker")
+        self.assertIn('const VIEWER_MODE = "served"', served)
+        self.assertIn('const VIEWER_MODE = "picker"', picker)
+        # Served auto-loads; picker waits for a dropped file.
+        self.assertIn('if (VIEWER_MODE !== "picker") loadGlb("scene.glb")', served)
+        self.assertIn('fetch("scene_meta.json").then(r => r.json()).then(onMeta)', served)
+        self.assertIn('id="dropzone"', picker)
+        self.assertIn("function __initPicker", picker)
+
+    def test_committed_pages_viewer_in_sync(self):
+        render = self._import()
+        repo = Path(__file__).resolve().parents[2]
+        committed = repo / "web" / "viewer" / "index.html"
+        if not committed.exists():
+            self.skipTest("web/viewer/index.html not generated")
+        html = render(title="ROSA / SEEG viewer", mode="picker")
+        # The committed file prepends a generated-note banner before <html>;
+        # compare everything from <html> onward (exact).
+        body = committed.read_text(encoding="utf-8")
+
+        def _from_html(s):
+            return s[s.index("<html"):]
+
+        self.assertEqual(
+            _from_html(body), _from_html(html),
+            "web/viewer/index.html is stale — re-run `python tools/build_web_viewer.py`",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

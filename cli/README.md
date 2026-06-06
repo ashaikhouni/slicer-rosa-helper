@@ -578,6 +578,21 @@ Flags:
 
 No new dependencies — wraps stdlib `http.server` + `webbrowser`.
 
+### Hosted browser viewer (no server, no install)
+
+The same viewer is published as a static GitHub Pages app at
+**`ashaikhouni.github.io/slicer-rosa-helper/viewer/`** (sibling to the `.ros`
+de-identifier). Instead of `fetch`-ing from a served directory, it shows a
+**drag-and-drop zone**: drop the `scene.glb` + `scene_meta.json` + the
+`.nii.gz` volume(s) from an `export-view` output and it renders them entirely
+in your browser — **nothing is uploaded, no server runs**. Same render engine
+as `export-view`/`view` (it's the one template in "picker" mode); regenerate the
+page with `python tools/build_web_viewer.py` after changing the template.
+
+Because the data stays on your machine, this is safe for identifiable cases —
+but do **not** commit a real case's `scene.glb`/CT into the public `web/` site
+(that would publish PHI). Only synthetic/phantom scenes belong there.
+
 ---
 
 ## `brain-extract` — intracranial brain mask from CT or MRI
