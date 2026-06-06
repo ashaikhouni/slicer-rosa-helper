@@ -180,6 +180,66 @@ def _register_fs_to_ct(t1_path: Path, ct_path: Path):
     return result.moving_to_fixed_ras_4x4, fixed, moving, result.transform
 
 
+def _slice_volume_meta(img, out_path: Path, *, vid: str, label: str) -> dict[str, Any]:
+    """Write a uint8 SITK image as NIfTI and return the slice/MIP-volume meta
+    (id + label + path + vox->RAS affine) the in-browser viewer consumes.
+
+    Shared by the FreeSurfer T1 (resampled onto the CT grid) and the windowed
+    working CT, so both feed the same generic slice/MIP renderer.
+    """
+    import SimpleITK as sitk
+
+    sitk.WriteImage(img, str(out_path))
+    size = list(img.GetSize())
+    spacing = list(img.GetSpacing())
+    origin_lps = list(img.GetOrigin())
+    direction_lps = list(img.GetDirection())
+    # SITK stores origin/direction in LPS; the JS viewer needs vox->RAS.
+    origin_ras = [-origin_lps[0], -origin_lps[1], origin_lps[2]]
+    d = np.asarray(direction_lps, dtype=float).reshape(3, 3)
+    d_ras = d.copy()
+    d_ras[0, :] *= -1.0
+    d_ras[1, :] *= -1.0
+    vox_to_ras = np.eye(4)
+    for k in range(3):
+        vox_to_ras[:3, k] = d_ras[:, k] * spacing[k]
+    vox_to_ras[:3, 3] = origin_ras
+    return {
+        "id": vid,
+        "label": label,
+        "path": out_path.name,
+        "size": [int(s) for s in size],
+        "spacing": [float(s) for s in spacing],
+        "vox_to_ras": [[float(v) for v in row] for row in vox_to_ras.tolist()],
+        "dtype": str(sitk.GetArrayViewFromImage(img).dtype),
+    }
+
+
+def _write_ct_slice_volume(
+    ct_path: Path, out_path: Path, window: tuple[float, float] = (-150.0, 1500.0),
+) -> dict[str, Any]:
+    """Window the working CT to uint8 and write it as a browser slice/MIP volume.
+
+    The CT already lives in the contact/trajectory frame, so there's no
+    resampling — just a HU window (default: brain reads mid-gray, the metal
+    contacts saturate bright). This is what makes a FreeSurfer-free, CT-only
+    view work, and it doubles as the MIP source (metal = brightest voxels).
+    """
+    import SimpleITK as sitk
+
+    img = sitk.Cast(sitk.ReadImage(str(ct_path)), sitk.sitkFloat32)
+    lo, hi = float(window[0]), float(window[1])
+    if hi <= lo:
+        hi = lo + 1.0
+    scaled = sitk.Clamp(
+        (img - lo) * (255.0 / (hi - lo)),
+        lowerBound=0.0, upperBound=255.0,
+    )
+    return _slice_volume_meta(
+        sitk.Cast(scaled, sitk.sitkUInt8), out_path, vid="ct", label="CT",
+    )
+
+
 def _write_t1_resampled_to_ct(
     fixed_ct, moving_t1, sitk_transform, out_path: Path,
 ) -> dict[str, Any]:
@@ -210,32 +270,7 @@ def _write_t1_resampled_to_ct(
             sitk.Clamp(resampled, lowerBound=0.0, upperBound=255.0),
             sitk.sitkUInt8,
         )
-    sitk.WriteImage(resampled, str(out_path))
-
-    size = list(resampled.GetSize())
-    spacing = list(resampled.GetSpacing())
-    origin_lps = list(resampled.GetOrigin())
-    direction_lps = list(resampled.GetDirection())
-    # The viewer needs the vox->RAS affine. SITK stores origin/direction
-    # in LPS; convert to RAS for the JS side.
-    origin_ras = [-origin_lps[0], -origin_lps[1], origin_lps[2]]
-    d = np.asarray(direction_lps, dtype=float).reshape(3, 3)
-    # Flip the first two rows of the direction matrix to convert LPS to RAS.
-    d_ras = d.copy()
-    d_ras[0, :] *= -1.0
-    d_ras[1, :] *= -1.0
-    vox_to_ras = np.eye(4)
-    for k in range(3):
-        vox_to_ras[:3, k] = d_ras[:, k] * spacing[k]
-    vox_to_ras[:3, 3] = origin_ras
-
-    return {
-        "path": out_path.name,
-        "size": [int(s) for s in size],
-        "spacing": [float(s) for s in spacing],
-        "vox_to_ras": [[float(v) for v in row] for row in vox_to_ras.tolist()],
-        "dtype": str(sitk.GetArrayViewFromImage(resampled).dtype),
-    }
+    return _slice_volume_meta(resampled, out_path, vid="t1", label="FreeSurfer T1")
 
 
 # ---------------------------------------------------------------------
@@ -600,6 +635,10 @@ _HTML_TEMPLATE = """<!doctype html>
     <div id="toolbar">
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
+      <label class="plane-ctl" data-control="volume">
+        <span class="axis">Volume</span>
+        <select id="vol-select"></select>
+      </label>
       <label class="plane-ctl" data-control="brain-color">
         <span class="axis">Surface</span>
         <select>
@@ -1550,8 +1589,31 @@ function _applyInitialBrainAlpha() {{
 _initSlicePanels();
 fetch("scene_meta.json").then(r => r.json()).then(meta => {{
   renderSidebar(meta);
-  // Kick off MRI load in the background; doesn't block sidebar / 3D.
-  loadMri(meta.t1_volume);
+  // Volume selector (CT / FreeSurfer T1). Additive + back-compat: the backend
+  // orders volumes [T1, CT] in FS mode (so T1 stays the default) and [CT] when
+  // there's no recon. Falls back to the legacy `t1_volume` field.
+  const volSel = document.getElementById("vol-select");
+  const vols = (meta.volumes && meta.volumes.length)
+    ? meta.volumes
+    : (meta.t1_volume ? [meta.t1_volume] : []);
+  if (volSel && vols.length) {{
+    volSel.innerHTML = "";
+    vols.forEach((v, i) => {{
+      const opt = document.createElement("option");
+      opt.value = String(i);
+      opt.textContent = v.label || v.id || ("Volume " + i);
+      volSel.appendChild(opt);
+    }});
+    volSel.addEventListener("change", () => {{
+      const v = vols[parseInt(volSel.value, 10)];
+      if (v) loadMri(v);
+    }});
+    if (vols.length < 2) volSel.parentElement.style.display = "none";
+    // Kick off the default volume load in the background.
+    loadMri(vols[0]);
+  }} else {{
+    loadMri(meta.t1_volume);
+  }}
 }}).catch(err => {{
   console.error(err);
   document.getElementById("subject").textContent = "Failed to load metadata: " + err.message;
@@ -1594,23 +1656,32 @@ def run_export_view(
     output_frame: str = "ct",
     write_figures: bool = True,
     library: str | None = None,
+    ct_window: tuple[float, float] = (-150.0, 1500.0),
 ) -> dict[str, Any]:
-    """Run the pipeline + assemble the GLB viewer."""
+    """Run the pipeline + assemble the GLB viewer.
+
+    ``freesurfer_dir`` is optional: without it the viewer is CT-only (CT slice
+    volume + 3D electrodes, no brain mesh and no atlas labels).
+    """
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    fs = resolve_fs_subject(freesurfer_dir)
-    _stderr(
-        f"[view] resolved FreeSurfer subject {fs.subject_dir} "
-        f"(surfaces={fs.available_surfaces}, annot={fs.available_annotations})"
-    )
-
-    parcellation = _discover_parcellation(fs, parcellation_path)
-    if parcellation is None:
-        _stderr("[view] no FreeSurfer parcellation found; labels.tsv will be unavailable")
-    lut = _discover_lut(fs, lut_path)
-    if lut is None:
-        _stderr("[view] no FreeSurferColorLUT found; vertex/contact coloring will be flat gray")
+    fs = resolve_fs_subject(freesurfer_dir) if freesurfer_dir else None
+    if fs is not None:
+        _stderr(
+            f"[view] resolved FreeSurfer subject {fs.subject_dir} "
+            f"(surfaces={fs.available_surfaces}, annot={fs.available_annotations})"
+        )
+        parcellation = _discover_parcellation(fs, parcellation_path)
+        if parcellation is None:
+            _stderr("[view] no FreeSurfer parcellation found; labels.tsv will be unavailable")
+        lut = _discover_lut(fs, lut_path)
+        if lut is None:
+            _stderr("[view] no FreeSurferColorLUT found; vertex/contact coloring will be flat gray")
+    else:
+        _stderr("[view] no --freesurfer-dir: CT-only view (no brain mesh, no atlas labels)")
+        parcellation = None
+        lut = None
 
     # 1. Run pipeline -> trajectories.tsv, contacts.tsv, optionally labels.tsv.
     from .pipeline import run_pipeline
@@ -1626,7 +1697,7 @@ def run_export_view(
         thomas_dir=thomas_dir,
         freesurfer_path=str(parcellation) if parcellation else None,
         freesurfer_lut=str(lut) if lut else None,
-        atlas_base_path=str(fs.t1_path),
+        atlas_base_path=str(fs.t1_path) if fs is not None else None,
         write_figures=write_figures,
         library=library,
     )
@@ -1648,7 +1719,7 @@ def run_export_view(
     # planes that line up with the contacts.
     surfaces = []
     t1_slice_meta: dict[str, Any] | None = None
-    if fs.available_surfaces:
+    if fs is not None and fs.available_surfaces:
         fs_to_ct_4x4, fixed_ct_img, moving_t1_img, sitk_transform = _register_fs_to_ct(
             fs.t1_path, ct_path,
         )
@@ -1675,7 +1746,25 @@ def run_export_view(
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
     else:
-        _stderr("[view] no FreeSurfer surfaces under surf/; skipping brain mesh")
+        _stderr("[view] no FreeSurfer surfaces; skipping brain mesh")
+
+    # 3b. Always export the working CT as a windowed uint8 slice/MIP volume so
+    # the viewer has anatomy even without a FreeSurfer recon. The CT already
+    # lives in the contact frame, so no resampling is needed.
+    ct_slice_meta = _write_ct_slice_volume(
+        ct_path, out / "ct_in_view.nii.gz", window=ct_window,
+    )
+    _stderr(
+        f"[view] wrote ct_in_view.nii.gz (windowed CT slice/MIP volume; "
+        f"{ct_slice_meta['size']})"
+    )
+
+    # Volume list for the in-browser selector. T1 first when present (keeps the
+    # existing FS-mode default), CT always available.
+    volumes: list[dict[str, Any]] = []
+    if t1_slice_meta is not None:
+        volumes.append(t1_slice_meta)
+    volumes.append(ct_slice_meta)
 
     # 4. Build the scene.
     scene, contact_meta = _build_scene(
@@ -1696,13 +1785,16 @@ def run_export_view(
     meta = {
         "subject_label": Path(target).name,
         "ct_path": str(ct_path),
-        "freesurfer_subject": str(fs.subject_dir),
+        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
         "parcellation": str(parcellation) if parcellation else "",
         "lut": str(lut) if lut else "",
-        "annotation": annotation,
+        "annotation": annotation if fs is not None else "",
         "trajectories": trajectories,
         "contacts": contact_meta,
-        "t1_volume": t1_slice_meta,
+        "volumes": volumes,
+        # Back-compat: the original viewer reads `t1_volume`. Point it at the
+        # default volume (T1 in FS mode, CT otherwise) so old behavior holds.
+        "t1_volume": volumes[0] if volumes else None,
     }
     (out / "scene_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     html_path = _write_html(out, title=f"rosa-agent export-view — {Path(target).name}")
@@ -1710,16 +1802,29 @@ def run_export_view(
 
     view_manifest = {
         "pipeline": pipeline_summary,
-        "freesurfer_subject": str(fs.subject_dir),
+        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
         "parcellation": str(parcellation) if parcellation else "",
         "lut": str(lut) if lut else "",
-        "annotation": annotation,
+        "annotation": annotation if fs is not None else "",
         "surfaces_loaded": [s.name for s in surfaces],
+        "volumes": [v["id"] for v in volumes],
         "scene_glb": str(glb_path),
         "viewer_html": str(html_path),
     }
     (out / "view_manifest.json").write_text(json.dumps(view_manifest, indent=2), encoding="utf-8")
     return view_manifest
+
+
+def _parse_window(spec: str) -> tuple[float, float]:
+    """Parse a 'lo,hi' HU window string; falls back to the CT default."""
+    default = (-150.0, 1500.0)
+    if not spec:
+        return default
+    try:
+        lo, hi = (float(x) for x in spec.split(","))
+    except (ValueError, TypeError):
+        return default
+    return (lo, hi) if hi > lo else default
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1734,8 +1839,15 @@ def main(argv: list[str] | None = None) -> int:
         help="ROSA case folder, OR dataset subject id (e.g. T22). Same input as 'pipeline'.",
     )
     parser.add_argument(
-        "--freesurfer-dir", required=True,
-        help="FreeSurfer recon-all subject directory (the one with surf/, mri/, label/).",
+        "--freesurfer-dir", default="",
+        help="FreeSurfer recon-all subject directory (surf/, mri/, label/). "
+             "OPTIONAL — omit it for a CT-only view (CT slices + 3D electrodes, "
+             "no brain mesh and no atlas labels).",
+    )
+    parser.add_argument(
+        "--ct-window", default="",
+        help="HU window 'lo,hi' for the CT slice/MIP volume "
+             "(default '-150,1500': brain mid-gray, metal contacts saturate bright).",
     )
     parser.add_argument("--out-dir", "-o", required=True)
     parser.add_argument("--ct", default="", help="External CT (overrides ROSA-folder reference + dataset lookup)")
@@ -1814,6 +1926,7 @@ def main(argv: list[str] | None = None) -> int:
         output_frame=args.output_frame,
         write_figures=not bool(args.no_figures),
         library=args.library or None,
+        ct_window=_parse_window(args.ct_window),
     )
     print(json.dumps(summary, indent=2))
     return 0

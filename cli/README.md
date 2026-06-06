@@ -51,7 +51,7 @@ iteration only; production use should `pip install`.
 | `rosa-to-nifti`      | Bake a ROSA case folder (.ros + Analyze) into NIfTI volumes + a `seeds.tsv`             |
 | `match-trajectories` | Name detector emissions on any-frame CT from a named-trajectory file (line-geom RANSAC) |
 | `match-ros`          | `match-trajectories` with the plan parsed from a `.ros` (no images needed)              |
-| `export-view`        | Pipeline + FreeSurfer brain mesh + atlas labels packed into a browser-loadable GLB      |
+| `export-view`        | Pipeline → browser GLB; FreeSurfer brain + labels optional (CT-only works too)          |
 | `view`               | Serve an `export-view` output dir over HTTP and open it in your browser                 |
 | `brain-extract`      | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)   |
 | `deidentify-ros`     | Strip PHI from a `.ros` / case folder (pseudonymise DICOM UIDs, drop raw DICOM/zips)    |
@@ -461,16 +461,30 @@ per-contact anatomical labeling (same `labels.tsv` the `pipeline` /
 3D brain mesh in the GLB.
 
 ```bash
+# With a recon: brain mesh + atlas labels + a CT/T1 slice toggle
 rosa-agent export-view /path/to/CASE \
     --freesurfer-dir /path/to/Recon \
     --out-dir /tmp/case_view
+
+# CT-only: no recon needed — windowed CT slices + the 3D electrode model
+rosa-agent export-view /path/to/CASE --out-dir /tmp/case_view
 ```
+
+`--freesurfer-dir` is **optional**: omit it for a CT-only view (windowed CT
+slices + the 3D electrode model, but no brain mesh and no atlas labels — the
+point being you no longer need Slicer just to eyeball a result). When a recon
+IS supplied, a **Volume** dropdown in the viewer switches the slice background
+between the FreeSurfer T1 and the CT (T1 stays the default).
 
 Required:
 
 - positional: ROSA case folder (or dataset subject id — same as `pipeline`)
-- `--freesurfer-dir`: recon-all subject directory (contains `surf/`, `mri/`, `label/`)
 - `--out-dir`: output directory
+
+Optional FreeSurfer:
+
+- `--freesurfer-dir`: recon-all subject directory (`surf/`, `mri/`, `label/`) —
+  adds the brain mesh + per-contact `labels.tsv`. Omit for CT-only.
 
 The command auto-discovers:
 
@@ -491,6 +505,8 @@ Useful flags:
 - `--thomas DIR` — adds a THOMAS thalamic provider so the per-contact
   `labels.tsv` also carries thalamic-segment labels.
 - `--contact-radius-mm`, `--trajectory-radius-mm` — geometry sizing.
+- `--ct-window lo,hi` — HU window for the CT slice volume (default
+  `-150,1500`: brain mid-gray, metal contacts saturate bright).
 - All `pipeline` frame flags work too (`--ct`, `--ref-volume`,
   `--seeds`, `--skip-registration`, `--output-frame`).
 
@@ -500,18 +516,20 @@ Output layout:
 out_dir/
   trajectories.tsv      # pipeline output
   contacts.tsv          # pipeline output
-  labels.tsv            # per-contact FS / WM / THOMAS labels
+  labels.tsv            # per-contact FS / WM / THOMAS labels (FS mode only)
   ct.nii.gz             # working CT (only when ROSA-folder mode)
+  ct_in_view.nii.gz     # windowed uint8 CT for the in-browser slice viewer
+  t1_in_ct.nii.gz       # FS T1 resampled onto the CT grid (FS mode only)
   manifest.json         # pipeline manifest
   scene.glb             # the 3D scene (surfaces + trajectories + contacts)
-  scene_meta.json       # contacts/trajectories listings the HTML sidebar consumes
-  index.html            # static viewer (uses model-viewer from CDN)
+  scene_meta.json       # volumes + contacts/trajectories the viewer consumes
+  index.html            # static three.js viewer (volume selector + slice planes)
   view_manifest.json    # what was loaded + counts
 ```
 
 To view: serve the directory over HTTP and open `index.html` in a
-browser (`<model-viewer>` + the `scene_meta.json` fetch both need
-`http://`, not `file://`):
+browser (the three.js ES-module imports + the `scene_meta.json` / volume
+`fetch`es all need `http://`, not `file://`):
 
 ```bash
 cd /tmp/case_view && python -m http.server 8000

@@ -204,6 +204,76 @@ class ExportViewSmokeTests(unittest.TestCase):
         meta = json.loads((self.out_dir / "scene_meta.json").read_text())
         self.assertIn("trajectories", meta)
         self.assertIn("contacts", meta)
+        # The volume list must include the CT (always) and the T1 (FS mode),
+        # with T1 first so the legacy default is preserved.
+        vol_ids = [v["id"] for v in meta.get("volumes", [])]
+        self.assertIn("ct", vol_ids)
+        self.assertIn("t1", vol_ids)
+        self.assertEqual(vol_ids[0], "t1", "FS mode must default to T1 (back-compat)")
+        self.assertEqual(meta["t1_volume"]["id"], "t1")
+
+    def test_ct_only_no_freesurfer(self):
+        """CT-only mode: omit --freesurfer-dir → still assembles a viewer with a
+        windowed CT slice/MIP volume, no brain mesh, no atlas labels. This is
+        the 'see results without Slicer/FreeSurfer' path."""
+        from rosa_agent.commands.export_view import run_export_view
+
+        out = self.tmp / "ct_only_out"
+        try:
+            run_export_view(
+                target=str(self.case_dir),
+                freesurfer_dir="",           # <-- no recon
+                out_dir=out,
+                ref_volume="ref_vol",
+            )
+        except SystemExit:
+            self.fail("CT-only export_view raised SystemExit before assembly")
+        except Exception:
+            pass  # detection on the toy phantom may raise; we pin the IO contract
+
+        self.assertTrue((out / "scene.glb").exists(), "scene.glb must be written")
+        self.assertTrue((out / "index.html").exists())
+        self.assertTrue((out / "ct_in_view.nii.gz").exists(),
+                        "CT-only mode must export the windowed CT slice volume")
+
+        meta = json.loads((out / "scene_meta.json").read_text())
+        vol_ids = [v["id"] for v in meta.get("volumes", [])]
+        self.assertEqual(vol_ids, ["ct"], "CT-only mode has exactly the CT volume")
+        self.assertEqual(meta["t1_volume"]["id"], "ct",
+                         "legacy t1_volume must fall back to the CT")
+        self.assertEqual(meta["freesurfer_subject"], "")
+        # No FreeSurfer surfaces in the GLB.
+        gltf = _validate_glb(out / "scene.glb")
+        node_names = {n["name"] for n in gltf.get("nodes", [])}
+        self.assertFalse(any("pial" in n for n in node_names),
+                         f"CT-only scene must have no surfaces; got {node_names}")
+
+    def test_ct_slice_volume_windows_to_uint8(self):
+        """_write_ct_slice_volume: HU window → uint8, metal saturates bright,
+        and the returned meta carries id/label/affine the viewer needs."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.export_view import _write_ct_slice_volume
+
+        arr = np.full((10, 10, 10), -1000.0, dtype=np.float32)  # air
+        arr[4:6, 4:6, 4:6] = 40.0      # brain
+        arr[5, 5, 5] = 3000.0          # a metal contact
+        img = sitk.GetImageFromArray(arr)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        ct = self.tmp / "synthetic_ct.nii.gz"
+        sitk.WriteImage(img, str(ct))
+
+        out = self.tmp / "ct_win.nii.gz"
+        m = _write_ct_slice_volume(ct, out, window=(-150.0, 1500.0))
+        self.assertTrue(out.exists())
+        self.assertEqual(m["id"], "ct")
+        self.assertEqual(m["label"], "CT")
+        self.assertEqual(m["dtype"], "uint8")
+        self.assertEqual(len(m["vox_to_ras"]), 4)
+        w = sitk.GetArrayFromImage(sitk.ReadImage(str(out)))
+        self.assertEqual(w.dtype, np.uint8)
+        self.assertEqual(int(w[5, 5, 5]), 255)   # metal saturates
+        self.assertEqual(int(w[0, 0, 0]), 0)     # air floors
 
 
 if __name__ == "__main__":
