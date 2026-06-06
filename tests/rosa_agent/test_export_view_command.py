@@ -300,6 +300,11 @@ class WebViewerSyncTests(unittest.TestCase):
         self.assertIn('fetch("scene_meta.json").then(r => r.json()).then(onMeta)', served)
         self.assertIn('id="dropzone"', picker)
         self.assertIn("function __initPicker", picker)
+        # Rotatable CT MIP present (both modes share the engine).
+        for h in (served, picker):
+            self.assertIn("function _makeMipMesh", h)
+            self.assertIn('data-control="mip"', h)
+            self.assertIn("uniform sampler3D uVolume;", h)
 
     def test_committed_pages_viewer_in_sync(self):
         render = self._import()

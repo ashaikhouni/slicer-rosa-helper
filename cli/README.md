@@ -541,6 +541,12 @@ The sidebar lists every detected contact with its closest FreeSurfer
 (e.g. <https://gltf-viewer.donmccurdy.com/> via drag-and-drop) — you
 just lose the sidebar.
 
+The toolbar also has a **CT MIP** toggle — a rotatable maximum-intensity
+projection of the loaded volume (a WebGL raymarch over the same 3D texture the
+slice planes use). On a windowed CT the metal contacts are the brightest
+voxels, so they read as crisp streaks you can spin to verify trajectories at a
+glance; the threshold slider drops soft tissue to isolate bone + electrodes.
+
 How frames line up: contacts and trajectories live in the working CT
 RAS frame the `pipeline` runs in. FreeSurfer surfaces are originally
 in tkrRAS; the loader converts them to scanner RAS using the T1.mgz
