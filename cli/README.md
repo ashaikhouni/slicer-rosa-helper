@@ -53,6 +53,7 @@ iteration only; production use should `pip install`.
 | `match-ros`          | `match-trajectories` with the plan parsed from a `.ros` (no images needed)              |
 | `export-view`        | Pipeline → browser GLB; FreeSurfer brain + labels optional (CT-only works too)          |
 | `view`               | Serve an `export-view` output dir over HTTP and open it in your browser                 |
+| `view-results`       | Render existing contacts/trajectories + a CT into the viewer (no detection re-run)      |
 | `brain-extract`      | Produce an intracranial brain mask via SynthStrip (CT/MRI) or LoG-watershed (CT only)   |
 | `deidentify-ros`     | Strip PHI from a `.ros` / case folder (pseudonymise DICOM UIDs, drop raw DICOM/zips)    |
 
@@ -541,6 +542,12 @@ The sidebar lists every detected contact with its closest FreeSurfer
 (e.g. <https://gltf-viewer.donmccurdy.com/> via drag-and-drop) — you
 just lose the sidebar.
 
+The toolbar also has a **CT MIP** toggle — a rotatable maximum-intensity
+projection of the loaded volume (a WebGL raymarch over the same 3D texture the
+slice planes use). On a windowed CT the metal contacts are the brightest
+voxels, so they read as crisp streaks you can spin to verify trajectories at a
+glance; the threshold slider drops soft tissue to isolate bone + electrodes.
+
 How frames line up: contacts and trajectories live in the working CT
 RAS frame the `pipeline` runs in. FreeSurfer surfaces are originally
 in tkrRAS; the loader converts them to scanner RAS using the T1.mgz
@@ -592,6 +599,41 @@ page with `python tools/build_web_viewer.py` after changing the template.
 Because the data stays on your machine, this is safe for identifiable cases —
 but do **not** commit a real case's `scene.glb`/CT into the public `web/` site
 (that would publish PHI). Only synthetic/phantom scenes belong there.
+
+---
+
+## `view-results` — visualize existing results (no pipeline re-run)
+
+`export-view` *computes* a result (runs detection + placement on a raw case);
+`view-results` *displays* one you already have — `contacts.tsv` (+
+`trajectories.tsv`) from `fit-rosa` / `place` / `pipeline`, or hand-edited
+contacts — plus the CT they live in. No detection re-run, so it's seconds, not
+minutes, and it shows *exactly* what that run produced.
+
+```bash
+# Auto-scan a results dir (finds contacts.tsv, trajectories.tsv,
+# and a CT under work/postop_ct.nii.gz or ct.nii.gz):
+rosa-agent view-results CASE/fitrosa_qc -o /tmp/view
+rosa-agent view /tmp/view            # then open it
+
+# Or give explicit paths:
+rosa-agent view-results \
+    --ct ct.nii.gz --contacts contacts.tsv --trajectories trajectories.tsv \
+    -o /tmp/view
+```
+
+It writes the same `scene.glb` + `scene_meta.json` + `ct_in_view.nii.gz` +
+`index.html` as `export-view` (shares the assembly engine), so the output works
+with `rosa-agent view` **and** the GitHub Pages drag-and-drop viewer.
+
+- `--freesurfer-dir DIR` — optional; adds the brain mesh (registered to the CT).
+- `--labels labels.tsv` — optional; populates the sidebar's atlas labels.
+- `--ct-window lo,hi` — CT display window (default `-150,1500`).
+
+The contacts/trajectories must already be in the CT's RAS frame — `view-results`
+does not register or re-detect; it displays what you give it. The trajectory
+reader accepts both the standard `start_/end_/electrode_model` columns and
+fit-rosa's `entry_/tip_/predicted_model`.
 
 ---
 

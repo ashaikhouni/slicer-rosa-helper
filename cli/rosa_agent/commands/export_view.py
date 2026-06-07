@@ -279,22 +279,38 @@ def _write_t1_resampled_to_ct(
 
 
 def _read_pipeline_trajectories(path: Path) -> list[dict[str, Any]]:
+    """Read a trajectories TSV into ``{name, start, end, electrode_model, ...}``.
+
+    Schema-tolerant: accepts the documented pipeline/place contract
+    (``start_x/y/z`` + ``end_x/y/z`` + ``electrode_model``) AND fit-rosa's
+    diagnostic variant (``entry_x/y/z`` + ``tip_x/y/z`` + ``predicted_model``),
+    so any of the toolkit's trajectory outputs renders without per-tool hacks.
+    """
     rows = read_tsv_rows(path)
     out = []
     for r in rows:
-        try:
-            out.append({
-                "name": r.get("name", ""),
-                "start": (float(r["start_x"]), float(r["start_y"]), float(r["start_z"])),
-                "end": (float(r["end_x"]), float(r["end_y"]), float(r["end_z"])),
-                "confidence": r.get("confidence", ""),
-                "confidence_label": r.get("confidence_label", ""),
-                "electrode_model": r.get("electrode_model", ""),
-                "bolt_source": r.get("bolt_source", ""),
-                "length_mm": r.get("length_mm", ""),
-            })
-        except (KeyError, ValueError):
+        sx, ex = r.get("start_x", r.get("entry_x")), r.get("end_x", r.get("tip_x"))
+        if sx in (None, "") or ex in (None, ""):
             continue
+        try:
+            start = (float(sx),
+                     float(r.get("start_y", r.get("entry_y"))),
+                     float(r.get("start_z", r.get("entry_z"))))
+            end = (float(ex),
+                   float(r.get("end_y", r.get("tip_y"))),
+                   float(r.get("end_z", r.get("tip_z"))))
+        except (TypeError, ValueError):
+            continue
+        out.append({
+            "name": r.get("name", ""),
+            "start": start,
+            "end": end,
+            "confidence": r.get("confidence", ""),
+            "confidence_label": r.get("confidence_label", ""),
+            "electrode_model": r.get("electrode_model", r.get("predicted_model", "")),
+            "bolt_source": r.get("bolt_source", ""),
+            "length_mm": r.get("length_mm", ""),
+        })
     return out
 
 
@@ -672,6 +688,11 @@ _HTML_TEMPLATE = """<!doctype html>
         <span class="axis">Slice α</span>
         <input type="range" min="0" max="1" step="0.05" value="0.95" />
         <span class="coord">0.95</span>
+      </label>
+      <label class="plane-ctl" data-control="mip" title="Rotatable maximum-intensity projection of the volume — metal contacts read as bright streaks">
+        <input type="checkbox" /><span class="axis">CT MIP</span>
+        <input type="range" data-mip="threshold" min="0" max="1" step="0.02" value="0.32" title="MIP threshold (raise to drop soft tissue / isolate bone + metal)" />
+        <input type="range" data-mip="opacity" min="0" max="1" step="0.05" value="0.6" title="MIP opacity" />
       </label>
       <label class="plane-ctl" data-axis="axial">
         <input type="checkbox" /><span class="axis">Axial</span>
@@ -1178,6 +1199,7 @@ async function loadMri(t1Meta) {{
 
 const cutPlanes = {{}};     // axis -> THREE.Mesh
 let cutVolumeBox = null;   // world-RAS bbox of the volume corners
+let mipMesh = null;        // rotatable maximum-intensity-projection of the volume
 
 function _volumeRasBbox(vol) {{
   const [Nx, Ny, Nz] = vol.dim;
@@ -1315,12 +1337,107 @@ function _setCutPlaneValue(axis, value) {{
   }}
 }}
 
+function _makeMipMesh(bbox, volTex, vol) {{
+  // Rotatable maximum-intensity projection. A box spanning the volume's RAS
+  // AABB; the fragment shader marches each view ray through the SAME 3D texture
+  // the cut planes use (world->vox via uRasToVox) and keeps the brightest
+  // sample — so the metal contacts (the brightest voxels on a windowed CT) read
+  // as crisp streaks you can spin. depthTest off + renderOrder -1 makes it a
+  // backdrop the electrode meshes draw over.
+  const w = bbox.xmax - bbox.xmin, h = bbox.ymax - bbox.ymin, d = bbox.zmax - bbox.zmin;
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const inv = vol.affineInv;
+  const rasToVox = new THREE.Matrix4().set(
+    inv[0][0], inv[0][1], inv[0][2], inv[0][3],
+    inv[1][0], inv[1][1], inv[1][2], inv[1][3],
+    inv[2][0], inv[2][1], inv[2][2], inv[2][3],
+    0, 0, 0, 1,
+  );
+  const mat = new THREE.ShaderMaterial({{
+    uniforms: {{
+      uVolume: {{ value: volTex }},
+      uRasToVox: {{ value: rasToVox }},
+      uVolumeSize: {{ value: new THREE.Vector3(vol.dim[0], vol.dim[1], vol.dim[2]) }},
+      uBoxMin: {{ value: new THREE.Vector3(bbox.xmin, bbox.ymin, bbox.zmin) }},
+      uBoxMax: {{ value: new THREE.Vector3(bbox.xmax, bbox.ymax, bbox.zmax) }},
+      uOpacity: {{ value: 0.6 }},
+      uThreshold: {{ value: 0.32 }},
+      uSteps: {{ value: 256.0 }},
+      uColor: {{ value: new THREE.Color(1.0, 0.98, 0.92) }},
+    }},
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {{
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }}
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+      uniform sampler3D uVolume;
+      uniform mat4 uRasToVox;
+      uniform vec3 uVolumeSize;
+      uniform vec3 uBoxMin;
+      uniform vec3 uBoxMax;
+      uniform float uOpacity;
+      uniform float uThreshold;
+      uniform float uSteps;
+      uniform vec3 uColor;
+      varying vec3 vWorldPos;
+      void main() {{
+        vec3 ro = cameraPosition;
+        vec3 rd = normalize(vWorldPos - ro);
+        vec3 ta = (uBoxMin - ro) / rd;
+        vec3 tb = (uBoxMax - ro) / rd;
+        vec3 tlo = min(ta, tb);
+        vec3 thi = max(ta, tb);
+        float tnear = max(max(tlo.x, tlo.y), tlo.z);
+        float tfar = min(min(thi.x, thi.y), thi.z);
+        tnear = max(tnear, 0.0);
+        if (tnear > tfar) discard;
+        int steps = int(uSteps);
+        float dt = (tfar - tnear) / float(steps);
+        float maxv = 0.0;
+        for (int i = 0; i < 1024; i++) {{
+          if (i >= steps) break;
+          float t = tnear + (float(i) + 0.5) * dt;
+          vec3 p = ro + rd * t;
+          vec3 vox = (uRasToVox * vec4(p, 1.0)).xyz;
+          vec3 uvw = (vox + 0.5) / uVolumeSize;
+          if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {{
+            maxv = max(maxv, texture(uVolume, uvw).r);
+          }}
+        }}
+        if (maxv < uThreshold) discard;
+        float v = (maxv - uThreshold) / max(1e-4, 1.0 - uThreshold);
+        gl_FragColor = vec4(uColor * v, uOpacity * v);
+      }}
+    `,
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+  }});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(
+    0.5 * (bbox.xmin + bbox.xmax),
+    0.5 * (bbox.ymin + bbox.ymax),
+    0.5 * (bbox.zmin + bbox.zmax),
+  );
+  mesh.renderOrder = -1;
+  mesh.visible = false;
+  return mesh;
+}}
+
 function initCutPlanes(vol) {{
   // Wipe any previous planes (defensive — loadMri can fire twice).
   for (const axis of Object.keys(cutPlanes)) {{
     scene.remove(cutPlanes[axis]);
     delete cutPlanes[axis];
   }}
+  if (mipMesh) {{ scene.remove(mipMesh); mipMesh = null; }}
   cutVolumeBox = _volumeRasBbox(vol);
   const tex = _buildVolumeTexture(vol);
   for (const axis of ["axial", "coronal", "sagittal"]) {{
@@ -1347,6 +1464,21 @@ function initCutPlanes(vol) {{
       const v = parseFloat(slider.value);
       _setCutPlaneValue(axis, v);
     }});
+  }}
+
+  // Maximum-intensity projection (off by default), built on the same volume +
+  // 3D texture. Toggle + threshold/opacity wired from the toolbar.
+  mipMesh = _makeMipMesh(cutVolumeBox, tex, vol);
+  scene.add(mipMesh);
+  const mipCtl = document.querySelector('.plane-ctl[data-control="mip"]');
+  if (mipCtl) {{
+    const mcb = mipCtl.querySelector('input[type="checkbox"]');
+    const thr = mipCtl.querySelector('input[data-mip="threshold"]');
+    const op = mipCtl.querySelector('input[data-mip="opacity"]');
+    mcb.checked = false;
+    mcb.addEventListener("change", () => {{ if (mipMesh) mipMesh.visible = mcb.checked; }});
+    if (thr) thr.addEventListener("input", () => {{ if (mipMesh) mipMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); }});
+    if (op) op.addEventListener("input", () => {{ if (mipMesh) mipMesh.material.uniforms.uOpacity.value = parseFloat(op.value); }});
   }}
 }}
 
@@ -1721,6 +1853,137 @@ def _write_html(out_dir: Path, *, title: str, mode: str = "served") -> Path:
 
 
 # ---------------------------------------------------------------------
+# Shared scene assembly (export-view AND view-results)
+# ---------------------------------------------------------------------
+
+
+def _assemble_viewer(
+    out: Path,
+    *,
+    ct_path: Path,
+    trajectories: list[dict[str, Any]],
+    contacts: list[dict[str, Any]],
+    contact_labels: dict[str, dict[str, str]],
+    fs,
+    parcellation,
+    lut,
+    annotation: str,
+    surface_kinds: tuple[str, ...],
+    shaft_radius_mm: float,
+    contact_band_radius_mm: float,
+    contact_band_length_mm: float,
+    ct_window: tuple[float, float],
+    subject_label: str,
+    title: str,
+    base_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the GLB scene + windowed CT (+ FS surfaces/T1 when available) +
+    viewer HTML from ALREADY-COMPUTED trajectories/contacts.
+
+    Shared by ``export-view`` (after the pipeline) and ``view-results`` (after
+    reading existing TSVs) — the difference between the two is only how
+    ``trajectories``/``contacts`` are produced.
+    """
+    lut_index = parse_freesurfer_lut(lut) if lut else {}
+
+    # Register FS T1 -> CT (only when surfaces exist). The transform is reused
+    # to push surface vertices into CT RAS AND to resample the T1 onto the CT
+    # grid for the in-browser slice planes.
+    surfaces = []
+    t1_slice_meta: dict[str, Any] | None = None
+    if fs is not None and fs.available_surfaces:
+        fs_to_ct_4x4, fixed_ct_img, moving_t1_img, sitk_transform = _register_fs_to_ct(
+            fs.t1_path, ct_path,
+        )
+        surfaces = load_fs_surfaces(
+            fs,
+            surface_kinds=surface_kinds,
+            annotation=annotation if annotation else None,
+            transform_4x4=fs_to_ct_4x4,
+        )
+        for s in surfaces:
+            _stderr(
+                f"[view] surface {s.name}: {s.vertices_ras.shape[0]} verts / "
+                f"{s.faces.shape[0]} faces"
+                + (f" + {s.annotation_name}" if s.annotation_name else "")
+            )
+        t1_out = out / "t1_in_ct.nii.gz"
+        t1_slice_meta = _write_t1_resampled_to_ct(
+            fixed_ct_img, moving_t1_img, sitk_transform, t1_out,
+        )
+        _stderr(
+            f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
+            f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
+        )
+    else:
+        _stderr("[view] no FreeSurfer surfaces; skipping brain mesh")
+
+    # Always export the working CT as a windowed uint8 slice/MIP volume so the
+    # viewer has anatomy even without a FreeSurfer recon. The CT already lives
+    # in the contact frame, so no resampling is needed.
+    ct_slice_meta = _write_ct_slice_volume(
+        ct_path, out / "ct_in_view.nii.gz", window=ct_window,
+    )
+    _stderr(
+        f"[view] wrote ct_in_view.nii.gz (windowed CT slice/MIP volume; "
+        f"{ct_slice_meta['size']})"
+    )
+
+    # Volume list for the in-browser selector. T1 first when present (keeps the
+    # existing FS-mode default), CT always available.
+    volumes: list[dict[str, Any]] = []
+    if t1_slice_meta is not None:
+        volumes.append(t1_slice_meta)
+    volumes.append(ct_slice_meta)
+
+    scene, contact_meta = _build_scene(
+        surfaces=surfaces,
+        trajectories=trajectories,
+        contacts=contacts,
+        contact_labels=contact_labels,
+        lut_index=lut_index,
+        shaft_radius_mm=shaft_radius_mm,
+        contact_band_radius_mm=contact_band_radius_mm,
+        contact_band_length_mm=contact_band_length_mm,
+    )
+    glb_path = out / "scene.glb"
+    glb_bytes = write_glb(glb_path, scene)
+    _stderr(f"[view] wrote {glb_path} ({glb_bytes / (1024*1024):.1f} MB, {len(scene.nodes)} nodes)")
+
+    meta = {
+        "subject_label": subject_label,
+        "ct_path": str(ct_path),
+        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
+        "parcellation": str(parcellation) if parcellation else "",
+        "lut": str(lut) if lut else "",
+        "annotation": annotation if fs is not None else "",
+        "trajectories": trajectories,
+        "contacts": contact_meta,
+        "volumes": volumes,
+        # Back-compat: the original viewer reads `t1_volume`. Point it at the
+        # default volume (T1 in FS mode, CT otherwise) so old behavior holds.
+        "t1_volume": volumes[0] if volumes else None,
+    }
+    (out / "scene_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    html_path = _write_html(out, title=title)
+    _stderr(f"[view] wrote {html_path}")
+
+    view_manifest = dict(base_manifest or {})
+    view_manifest.update({
+        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
+        "parcellation": str(parcellation) if parcellation else "",
+        "lut": str(lut) if lut else "",
+        "annotation": annotation if fs is not None else "",
+        "surfaces_loaded": [s.name for s in surfaces],
+        "volumes": [v["id"] for v in volumes],
+        "scene_glb": str(glb_path),
+        "viewer_html": str(html_path),
+    })
+    (out / "view_manifest.json").write_text(json.dumps(view_manifest, indent=2), encoding="utf-8")
+    return view_manifest
+
+
+# ---------------------------------------------------------------------
 # Command entry
 # ---------------------------------------------------------------------
 
@@ -1799,109 +2062,102 @@ def run_export_view(
     trajectories = _read_pipeline_trajectories(traj_tsv)
     contacts = _read_pipeline_contacts(contacts_tsv)
     contact_labels = _read_labels_by_contact(labels_tsv if labels_tsv.exists() else None)
-    lut_index = parse_freesurfer_lut(lut) if lut else {}
-
-    # 2. Register FS T1 -> CT. Run only when we have surfaces to push.
-    # The same registration is reused twice: to push surface vertices
-    # into CT RAS, and to resample the T1 onto the CT grid so the
-    # in-browser slice viewer can render axial/coronal/sagittal MRI
-    # planes that line up with the contacts.
-    surfaces = []
-    t1_slice_meta: dict[str, Any] | None = None
-    if fs is not None and fs.available_surfaces:
-        fs_to_ct_4x4, fixed_ct_img, moving_t1_img, sitk_transform = _register_fs_to_ct(
-            fs.t1_path, ct_path,
-        )
-        # 3. Load surfaces (in FS scanner-RAS) and push through FS->CT.
-        surfaces = load_fs_surfaces(
-            fs,
-            surface_kinds=surface_kinds,
-            annotation=annotation if annotation else None,
-            transform_4x4=fs_to_ct_4x4,
-        )
-        for s in surfaces:
-            _stderr(
-                f"[view] surface {s.name}: {s.vertices_ras.shape[0]} verts / "
-                f"{s.faces.shape[0]} faces"
-                + (f" + {s.annotation_name}" if s.annotation_name else "")
-            )
-        # Resample T1 -> CT grid for the in-browser MRI slice viewer.
-        t1_out = out / "t1_in_ct.nii.gz"
-        t1_slice_meta = _write_t1_resampled_to_ct(
-            fixed_ct_img, moving_t1_img, sitk_transform, t1_out,
-        )
-        _stderr(
-            f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
-            f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
-        )
-    else:
-        _stderr("[view] no FreeSurfer surfaces; skipping brain mesh")
-
-    # 3b. Always export the working CT as a windowed uint8 slice/MIP volume so
-    # the viewer has anatomy even without a FreeSurfer recon. The CT already
-    # lives in the contact frame, so no resampling is needed.
-    ct_slice_meta = _write_ct_slice_volume(
-        ct_path, out / "ct_in_view.nii.gz", window=ct_window,
-    )
-    _stderr(
-        f"[view] wrote ct_in_view.nii.gz (windowed CT slice/MIP volume; "
-        f"{ct_slice_meta['size']})"
-    )
-
-    # Volume list for the in-browser selector. T1 first when present (keeps the
-    # existing FS-mode default), CT always available.
-    volumes: list[dict[str, Any]] = []
-    if t1_slice_meta is not None:
-        volumes.append(t1_slice_meta)
-    volumes.append(ct_slice_meta)
-
-    # 4. Build the scene.
-    scene, contact_meta = _build_scene(
-        surfaces=surfaces,
+    # 2-5. Register FS, window the CT, build the scene, write the viewer.
+    # Shared with `view-results` (which feeds it pre-computed trajectories /
+    # contacts instead of pipeline output).
+    return _assemble_viewer(
+        out,
+        ct_path=ct_path,
         trajectories=trajectories,
         contacts=contacts,
         contact_labels=contact_labels,
-        lut_index=lut_index,
+        fs=fs,
+        parcellation=parcellation,
+        lut=lut,
+        annotation=annotation,
+        surface_kinds=surface_kinds,
         shaft_radius_mm=shaft_radius_mm,
         contact_band_radius_mm=contact_band_radius_mm,
         contact_band_length_mm=contact_band_length_mm,
+        ct_window=ct_window,
+        subject_label=Path(target).name,
+        title=f"rosa-agent export-view — {Path(target).name}",
+        base_manifest={"pipeline": pipeline_summary},
     )
-    glb_path = out / "scene.glb"
-    glb_bytes = write_glb(glb_path, scene)
-    _stderr(f"[view] wrote {glb_path} ({glb_bytes / (1024*1024):.1f} MB, {len(scene.nodes)} nodes)")
 
-    # 5. Sidecar metadata for the HTML page.
-    meta = {
-        "subject_label": Path(target).name,
-        "ct_path": str(ct_path),
-        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
-        "parcellation": str(parcellation) if parcellation else "",
-        "lut": str(lut) if lut else "",
-        "annotation": annotation if fs is not None else "",
-        "trajectories": trajectories,
-        "contacts": contact_meta,
-        "volumes": volumes,
-        # Back-compat: the original viewer reads `t1_volume`. Point it at the
-        # default volume (T1 in FS mode, CT otherwise) so old behavior holds.
-        "t1_volume": volumes[0] if volumes else None,
-    }
-    (out / "scene_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    html_path = _write_html(out, title=f"rosa-agent export-view — {Path(target).name}")
-    _stderr(f"[view] wrote {html_path}")
 
-    view_manifest = {
-        "pipeline": pipeline_summary,
-        "freesurfer_subject": str(fs.subject_dir) if fs is not None else "",
-        "parcellation": str(parcellation) if parcellation else "",
-        "lut": str(lut) if lut else "",
-        "annotation": annotation if fs is not None else "",
-        "surfaces_loaded": [s.name for s in surfaces],
-        "volumes": [v["id"] for v in volumes],
-        "scene_glb": str(glb_path),
-        "viewer_html": str(html_path),
-    }
-    (out / "view_manifest.json").write_text(json.dumps(view_manifest, indent=2), encoding="utf-8")
-    return view_manifest
+def run_view_results(
+    out_dir: str | Path,
+    *,
+    ct_path: str | Path,
+    contacts_tsv: str | Path,
+    trajectories_tsv: str | Path | None = None,
+    labels_tsv: str | Path | None = None,
+    freesurfer_dir: str = "",
+    surface_kinds: tuple[str, ...] = ("pial",),
+    annotation: str = "aparc",
+    shaft_radius_mm: float = 0.35,
+    contact_band_radius_mm: float = 0.55,
+    contact_band_length_mm: float = 2.0,
+    ct_window: tuple[float, float] = (-150.0, 1500.0),
+    subject_label: str = "",
+) -> dict[str, Any]:
+    """Assemble the viewer from ALREADY-COMPUTED results — no pipeline re-run.
+
+    Reads ``contacts_tsv`` (+ optional ``trajectories_tsv`` / ``labels_tsv``),
+    which must be in ``ct_path``'s RAS frame, and renders them with the same
+    engine ``export-view`` uses. FreeSurfer is optional (adds the brain mesh).
+    """
+    out = Path(out_dir).expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    ct = Path(ct_path)
+    if not ct.exists():
+        raise FileNotFoundError(f"CT not found: {ct}")
+
+    contacts = _read_pipeline_contacts(Path(contacts_tsv))
+    trajectories = (
+        _read_pipeline_trajectories(Path(trajectories_tsv)) if trajectories_tsv else []
+    )
+    contact_labels = _read_labels_by_contact(
+        Path(labels_tsv) if labels_tsv else None
+    )
+    _stderr(
+        f"[view-results] {len(trajectories)} trajectories, {len(contacts)} contacts "
+        f"from existing TSVs (no detection re-run)"
+    )
+
+    fs = resolve_fs_subject(freesurfer_dir) if freesurfer_dir else None
+    parcellation = _discover_parcellation(fs, None) if fs is not None else None
+    lut = _discover_lut(fs, None) if fs is not None else None
+
+    label = subject_label or ct.stem
+    return _assemble_viewer(
+        out,
+        ct_path=ct,
+        trajectories=trajectories,
+        contacts=contacts,
+        contact_labels=contact_labels,
+        fs=fs,
+        parcellation=parcellation,
+        lut=lut,
+        annotation=annotation,
+        surface_kinds=surface_kinds,
+        shaft_radius_mm=shaft_radius_mm,
+        contact_band_radius_mm=contact_band_radius_mm,
+        contact_band_length_mm=contact_band_length_mm,
+        ct_window=ct_window,
+        subject_label=label,
+        title=f"rosa-agent view-results — {label}",
+        base_manifest={
+            "source": "view-results",
+            "inputs": {
+                "ct": str(ct),
+                "contacts": str(contacts_tsv),
+                "trajectories": str(trajectories_tsv) if trajectories_tsv else "",
+                "labels": str(labels_tsv) if labels_tsv else "",
+            },
+        },
+    )
 
 
 def _parse_window(spec: str) -> tuple[float, float]:
