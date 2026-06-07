@@ -115,6 +115,11 @@
         <input type="range" min="0" max="1" step="0.05" value="0.95" />
         <span class="coord">0.95</span>
       </label>
+      <label class="plane-ctl" data-control="mip" title="Rotatable maximum-intensity projection of the volume — metal contacts read as bright streaks">
+        <input type="checkbox" /><span class="axis">CT MIP</span>
+        <input type="range" data-mip="threshold" min="0" max="1" step="0.02" value="0.32" title="MIP threshold (raise to drop soft tissue / isolate bone + metal)" />
+        <input type="range" data-mip="opacity" min="0" max="1" step="0.05" value="0.6" title="MIP opacity" />
+      </label>
       <label class="plane-ctl" data-axis="axial">
         <input type="checkbox" /><span class="axis">Axial</span>
         <input type="range" min="0" max="1" step="0.5" disabled />
@@ -620,6 +625,7 @@ async function loadMri(t1Meta) {
 
 const cutPlanes = {};     // axis -> THREE.Mesh
 let cutVolumeBox = null;   // world-RAS bbox of the volume corners
+let mipMesh = null;        // rotatable maximum-intensity-projection of the volume
 
 function _volumeRasBbox(vol) {
   const [Nx, Ny, Nz] = vol.dim;
@@ -757,12 +763,107 @@ function _setCutPlaneValue(axis, value) {
   }
 }
 
+function _makeMipMesh(bbox, volTex, vol) {
+  // Rotatable maximum-intensity projection. A box spanning the volume's RAS
+  // AABB; the fragment shader marches each view ray through the SAME 3D texture
+  // the cut planes use (world->vox via uRasToVox) and keeps the brightest
+  // sample — so the metal contacts (the brightest voxels on a windowed CT) read
+  // as crisp streaks you can spin. depthTest off + renderOrder -1 makes it a
+  // backdrop the electrode meshes draw over.
+  const w = bbox.xmax - bbox.xmin, h = bbox.ymax - bbox.ymin, d = bbox.zmax - bbox.zmin;
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const inv = vol.affineInv;
+  const rasToVox = new THREE.Matrix4().set(
+    inv[0][0], inv[0][1], inv[0][2], inv[0][3],
+    inv[1][0], inv[1][1], inv[1][2], inv[1][3],
+    inv[2][0], inv[2][1], inv[2][2], inv[2][3],
+    0, 0, 0, 1,
+  );
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uVolume: { value: volTex },
+      uRasToVox: { value: rasToVox },
+      uVolumeSize: { value: new THREE.Vector3(vol.dim[0], vol.dim[1], vol.dim[2]) },
+      uBoxMin: { value: new THREE.Vector3(bbox.xmin, bbox.ymin, bbox.zmin) },
+      uBoxMax: { value: new THREE.Vector3(bbox.xmax, bbox.ymax, bbox.zmax) },
+      uOpacity: { value: 0.6 },
+      uThreshold: { value: 0.32 },
+      uSteps: { value: 256.0 },
+      uColor: { value: new THREE.Color(1.0, 0.98, 0.92) },
+    },
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+      uniform sampler3D uVolume;
+      uniform mat4 uRasToVox;
+      uniform vec3 uVolumeSize;
+      uniform vec3 uBoxMin;
+      uniform vec3 uBoxMax;
+      uniform float uOpacity;
+      uniform float uThreshold;
+      uniform float uSteps;
+      uniform vec3 uColor;
+      varying vec3 vWorldPos;
+      void main() {
+        vec3 ro = cameraPosition;
+        vec3 rd = normalize(vWorldPos - ro);
+        vec3 ta = (uBoxMin - ro) / rd;
+        vec3 tb = (uBoxMax - ro) / rd;
+        vec3 tlo = min(ta, tb);
+        vec3 thi = max(ta, tb);
+        float tnear = max(max(tlo.x, tlo.y), tlo.z);
+        float tfar = min(min(thi.x, thi.y), thi.z);
+        tnear = max(tnear, 0.0);
+        if (tnear > tfar) discard;
+        int steps = int(uSteps);
+        float dt = (tfar - tnear) / float(steps);
+        float maxv = 0.0;
+        for (int i = 0; i < 1024; i++) {
+          if (i >= steps) break;
+          float t = tnear + (float(i) + 0.5) * dt;
+          vec3 p = ro + rd * t;
+          vec3 vox = (uRasToVox * vec4(p, 1.0)).xyz;
+          vec3 uvw = (vox + 0.5) / uVolumeSize;
+          if (all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)))) {
+            maxv = max(maxv, texture(uVolume, uvw).r);
+          }
+        }
+        if (maxv < uThreshold) discard;
+        float v = (maxv - uThreshold) / max(1e-4, 1.0 - uThreshold);
+        gl_FragColor = vec4(uColor * v, uOpacity * v);
+      }
+    `,
+    side: THREE.BackSide,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(
+    0.5 * (bbox.xmin + bbox.xmax),
+    0.5 * (bbox.ymin + bbox.ymax),
+    0.5 * (bbox.zmin + bbox.zmax),
+  );
+  mesh.renderOrder = -1;
+  mesh.visible = false;
+  return mesh;
+}
+
 function initCutPlanes(vol) {
   // Wipe any previous planes (defensive — loadMri can fire twice).
   for (const axis of Object.keys(cutPlanes)) {
     scene.remove(cutPlanes[axis]);
     delete cutPlanes[axis];
   }
+  if (mipMesh) { scene.remove(mipMesh); mipMesh = null; }
   cutVolumeBox = _volumeRasBbox(vol);
   const tex = _buildVolumeTexture(vol);
   for (const axis of ["axial", "coronal", "sagittal"]) {
@@ -789,6 +890,21 @@ function initCutPlanes(vol) {
       const v = parseFloat(slider.value);
       _setCutPlaneValue(axis, v);
     });
+  }
+
+  // Maximum-intensity projection (off by default), built on the same volume +
+  // 3D texture. Toggle + threshold/opacity wired from the toolbar.
+  mipMesh = _makeMipMesh(cutVolumeBox, tex, vol);
+  scene.add(mipMesh);
+  const mipCtl = document.querySelector('.plane-ctl[data-control="mip"]');
+  if (mipCtl) {
+    const mcb = mipCtl.querySelector('input[type="checkbox"]');
+    const thr = mipCtl.querySelector('input[data-mip="threshold"]');
+    const op = mipCtl.querySelector('input[data-mip="opacity"]');
+    mcb.checked = false;
+    mcb.addEventListener("change", () => { if (mipMesh) mipMesh.visible = mcb.checked; });
+    if (thr) thr.addEventListener("input", () => { if (mipMesh) mipMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); });
+    if (op) op.addEventListener("input", () => { if (mipMesh) mipMesh.material.uniforms.uOpacity.value = parseFloat(op.value); });
   }
 }
 
