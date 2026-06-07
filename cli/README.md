@@ -1,12 +1,18 @@
 # CLI Guide — `rosa-agent`
 
-Last updated: 2026-05-11
+Last updated: 2026-06-07
 
-A pure-Python command-line agent that runs the SEEG localization
-pipeline end-to-end without Slicer. Same algorithm as the Slicer
-extension — see [`docs/USER_GUIDE.md`](../docs/USER_GUIDE.md) for the
-cross-surface mental model and [`docs/PIPELINE_CONSTANTS.md`](../docs/PIPELINE_CONSTANTS.md)
-for tunable knobs.
+A pure-Python command-line agent that runs the SEEG localization pipeline
+end-to-end without Slicer — detection, contact placement, electrode-model
+fitting, atlas labeling, cross-frame trajectory naming, and a browser 3D viewer.
+Same algorithm as the Slicer extension — see
+[`docs/USER_GUIDE.md`](../docs/USER_GUIDE.md) for the cross-surface mental model
+and [`docs/PIPELINE_CONSTANTS.md`](../docs/PIPELINE_CONSTANTS.md) for tunable
+knobs.
+
+**New here?** Read [Install](#install), then [Common
+workflows](#common-workflows) — that's enough to do real work. The per-command
+sections are the reference.
 
 ## Install
 
@@ -59,6 +65,75 @@ iteration only; production use should `pip install`.
 
 `rosa-agent <subcommand> --help` prints flags for any individual
 subcommand.
+
+## Common workflows
+
+Most tasks are one of these. Each command writes a self-contained output
+directory you can inspect or feed to the next step. (Detailed flags + the
+output contract are in the per-command sections further down.)
+
+**Detect + place contacts on a postop CT** (no priors — full auto):
+
+```bash
+rosa-agent place --ct postop_ct.nii.gz --output out/ --library dixi
+```
+
+**Full pipeline on a ROSA case folder** — loads an embedded display as the
+working CT and uses the `.ros` plan as guided-fit seeds:
+
+```bash
+rosa-agent pipeline /path/to/ROSA_CASE --ref-volume post --out-dir out/
+```
+
+**Fit electrode models per planned `.ros` trajectory** (snap → model pick →
+contacts + plan-vs-fit QC):
+
+```bash
+rosa-agent fit-rosa /path/to/ROSA_CASE --postop-ct <display-name> -o out/
+```
+
+**Name detections from a plan in a *different* coordinate frame** — line
+geometry only, no image registration:
+
+```bash
+rosa-agent match-ros --rosa-folder PLAN/ --ct any_frame_ct.nii.gz --output out/
+# …or from a bare named-trajectory TSV instead of a .ros:
+rosa-agent match-trajectories --plan plan.tsv --ct ct.nii.gz -o out/
+```
+
+**Look at a result in the browser.** Build a viewer from an *existing* result
+(no detection re-run), then open it:
+
+```bash
+rosa-agent view-results CASE/fitrosa_qc -o view/   # auto-scans the results dir
+rosa-agent view view/                              # serves + opens the browser
+```
+
+Or detect + view from a raw case in one step (FreeSurfer recon optional — omit
+it for a CT-only view):
+
+```bash
+rosa-agent export-view CASE --out-dir view/ [--freesurfer-dir RECON]
+rosa-agent view view/
+```
+
+No-install / shareable: open
+**`ashaikhouni.github.io/slicer-rosa-helper/viewer/`** and drag in the
+`scene.glb` + `scene_meta.json` + `ct_in_view.nii.gz` from any viewer output —
+it renders locally, nothing is uploaded.
+
+**Intracranial brain mask** (CT or MRI):
+
+```bash
+rosa-agent brain-extract postop_ct.nii.gz -o brain_mask.nii.gz
+```
+
+**De-identify a ROSA case** before sharing or batch processing (strips PHI,
+pseudonymises DICOM UIDs):
+
+```bash
+rosa-agent deidentify-ros CASE/ --out-dir CLEAN/ --subject-id S01
+```
 
 ## Inputs
 

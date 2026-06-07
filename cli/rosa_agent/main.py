@@ -13,19 +13,23 @@ Two ways to run:
   CLI still works against a fresh checkout. This fallback is for
   developer convenience only; production use should ``pip install``.
 
-Subcommands::
+Subcommands (see cli/README.md for the full reference)::
 
-    rosa-agent load          <ros_folder>           [--out manifest.json]
-    rosa-agent detect        <ct.nii> [--seeds tsv]  --out trajectories.tsv
-    rosa-agent contacts      <traj.tsv> <ct.nii>     --out contacts.tsv
-    rosa-agent label         <contacts.tsv> [...]    --out labels.tsv
-    rosa-agent pipeline      <ros_folder|subj_id> --out-dir DIR [...]
-    rosa-agent place         --ct ct.nii [--seeds tsv | --expected tsv | --n-expected N] --output DIR
-    rosa-agent rosa-to-nifti --rosa-folder DIR --output DIR [--volume NAME ...]
-    rosa-agent match-ros     (--rosa-folder DIR | --ros-file FILE) --ct ct.nii --output DIR
-    rosa-agent export-view   <ros_folder|subj_id> --freesurfer-dir DIR --out-dir DIR
-    rosa-agent view          <export-view-out-dir> [--port N] [--no-open]
-    rosa-agent deidentify-ros <ros_file> [--subject-id ID] [--trajectories-csv [path]]
+    rosa-agent load             <ros_folder>          [--out manifest.json]
+    rosa-agent detect           <ct.nii> [--seeds tsv]  --out trajectories.tsv
+    rosa-agent contacts         <traj.tsv> <ct.nii>     --out contacts.tsv
+    rosa-agent label            <contacts.tsv> [...]    --out labels.tsv
+    rosa-agent place            --ct ct.nii [--seeds tsv | --expected tsv | --n-expected N] --output DIR
+    rosa-agent fit-rosa         <ros_folder> --postop-ct NAME -o DIR   (or --seeds / --auto)
+    rosa-agent pipeline         <ros_folder|subj_id> --out-dir DIR [...]
+    rosa-agent rosa-to-nifti    --rosa-folder DIR --output DIR [--volume NAME ...]
+    rosa-agent match-trajectories --plan plan.tsv --ct ct.nii --output DIR
+    rosa-agent match-ros        (--rosa-folder DIR | --ros-file FILE) --ct ct.nii --output DIR
+    rosa-agent brain-extract    <ct_or_mri.nii> -o mask.nii [--backend auto|synthstrip|log-watershed]
+    rosa-agent export-view      <ros_folder|subj_id> --out-dir DIR [--freesurfer-dir DIR]
+    rosa-agent view-results     <results_dir> -o DIR   (or --ct / --contacts / --trajectories)
+    rosa-agent view             <viewer-out-dir> [--port N] [--no-open]
+    rosa-agent deidentify-ros   <ros_file|case_dir> [--out-dir DIR] [--subject-id ID]
 """
 
 from __future__ import annotations

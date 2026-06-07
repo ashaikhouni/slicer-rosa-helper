@@ -1,6 +1,6 @@
 # Installation
 
-Last updated: 2026-05-11
+Last updated: 2026-06-07
 
 The repo ships two surfaces. Install whichever you need (or both —
 they share `CommonLib/`):
@@ -46,9 +46,13 @@ Verify:
 rosa-agent --help
 ```
 
-Eight subcommands are wired: `load`, `detect`, `contacts`, `label`,
-`pipeline`, `place`, `rosa-to-nifti`, `match-ros`. See
-[`cli/README.md`](cli/README.md) for what each does.
+Fifteen subcommands are wired — detection/placement (`detect`, `contacts`,
+`place`, `fit-rosa`, `pipeline`), atlas labeling (`label`), ROSA-case utilities
+(`load`, `rosa-to-nifti`, `deidentify-ros`), cross-frame trajectory naming
+(`match-trajectories`, `match-ros`), brain masking (`brain-extract`), and the
+in-browser viewer (`export-view`, `view-results`, `view`). See
+[`cli/README.md`](cli/README.md) for what each does and the
+[Common workflows](cli/README.md#common-workflows) recipes to get started.
 
 The Slicer-coupled packages (`rosa_scene`, `rosa_workflow`) are
 deliberately NOT installed — they require Slicer's `__main__`
