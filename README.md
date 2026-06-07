@@ -2,9 +2,9 @@
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19994662.svg)](https://doi.org/10.5281/zenodo.19994662)
 
-Last updated: 2026-05-11
+Last updated: 2026-06-07
 
-A modular toolkit for SEEG planning, localization, atlas labeling, and
+A modular toolkit for SEEG planning, localization, atlas labeling, viewing, and
 export workflows. Two surfaces share one algorithm core:
 
 - **3D Slicer extension** — clinical / research workflow with full UI
@@ -12,9 +12,14 @@ export workflows. Two surfaces share one algorithm core:
   label against atlases, export). See [`docs/SLICER_GUIDE.md`](docs/SLICER_GUIDE.md).
 - **`rosa-agent` CLI** — headless `pip install`-able command-line agent
   that runs the same pipeline outside Slicer for batch processing,
-  regression testing, and reproducible scripting. Eight subcommands:
-  `load`, `detect`, `contacts`, `label`, `pipeline`, `place`,
-  `rosa-to-nifti`, `match-ros`. See [`cli/README.md`](cli/README.md).
+  regression testing, reproducible scripting, and an in-browser 3D
+  viewer. 15 subcommands spanning detection/placement (`detect`,
+  `contacts`, `place`, `fit-rosa`, `pipeline`), atlas labeling
+  (`label`), ROSA-case utilities (`load`, `rosa-to-nifti`,
+  `deidentify-ros`), cross-frame trajectory naming (`match-trajectories`,
+  `match-ros`), brain masking (`brain-extract`), and viewing
+  (`export-view`, `view-results`, `view`). See
+  [`cli/README.md`](cli/README.md).
 
 ## Capabilities
 
@@ -30,10 +35,21 @@ export workflows. Two surfaces share one algorithm core:
 - 5-mode staged contact placer (auto / count / named / seeded /
   seeded+model) exposed as `rosa-agent place` and as the
   `rosa_core.placement_modes.place_seeg` library API
-- cross-volume trajectory matching: pair a `.ros` plan with a CT in any
-  RAS frame (no reference volume / image registration needed) via
-  `rosa-agent match-ros` — useful when the post-op CT was registered to
-  a different MRI atlas than the one the surgeon planned on
+- electrode-model fitting per planned trajectory with plan-vs-placement
+  QC (`rosa-agent fit-rosa`)
+- cross-volume trajectory matching: pair a `.ros` plan (or any named
+  trajectory file) with a CT in any RAS frame (no reference volume /
+  image registration needed) via `rosa-agent match-ros` /
+  `match-trajectories` — useful when the post-op CT was registered to a
+  different MRI atlas than the one the surgeon planned on
+- intracranial brain-mask extraction — SynthStrip (CT/MRI) or a
+  pure-Python LoG-watershed fallback (CT) — via `rosa-agent brain-extract`
+- ROSA `.ros` de-identification (strip PHI, pseudonymise DICOM UIDs)
+  via `rosa-agent deidentify-ros` (and a browser-only version)
+- an in-browser 3D result viewer — electrodes + CT/FreeSurfer slice
+  planes that snap to each contact + a rotatable CT MIP — built by
+  `rosa-agent export-view` / `view-results` and served by `view`, also
+  hosted as a no-install GitHub Pages drag-and-drop app
 - atlas source loading (FreeSurfer, THOMAS, WM) and contact labeling,
   with optional inline registration of an atlas T1 to the contact
   volume
@@ -88,9 +104,17 @@ needed):
 rosa-agent match-ros --rosa-folder PLAN/ --ct any_frame_ct.nii.gz --output /tmp/out
 ```
 
-See [`cli/README.md`](cli/README.md) for the full subcommand reference,
-TSV column contract, and the Library API (calling `rosa_core` /
-`rosa_detect` from Python).
+View a result in the browser — bundle an existing output (no detection
+re-run), then open it (FreeSurfer optional):
+
+```bash
+rosa-agent view-results /tmp/out -o /tmp/view && rosa-agent view /tmp/view
+```
+
+See [`cli/README.md § Common workflows`](cli/README.md#common-workflows)
+for the recipe list, the full subcommand reference, the TSV column
+contract, and the Library API (calling `rosa_core` / `rosa_detect` from
+Python).
 
 ## Architecture (high level)
 
