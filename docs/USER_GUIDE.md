@@ -1,6 +1,6 @@
 # User Guide
 
-Last updated: 2026-05-11
+Last updated: 2026-06-07
 
 A cross-surface guide to working with the SEEG / ROSA Toolkit. Covers the
 end-to-end mental model and the data formats that flow between stages,
@@ -31,6 +31,10 @@ The toolkit takes you from those raw inputs to:
   (or is closest to), under one or more atlas sources.
 - **Exports** — TSV / NIfTI / Slicer Markups / Curry POM in the frame
   of your choice.
+- **A browser view** — the electrodes in 3D with CT (and optional
+  FreeSurfer) slice planes that snap to each contact, plus a rotatable CT
+  MIP. Built headless and opened locally or via a hosted drag-and-drop
+  page, so you don't need Slicer just to eyeball a result.
 
 ## 2) Two surfaces, one algorithm
 
@@ -62,7 +66,7 @@ in Slicer, batch-rerun a cohort headless, and trust that they match.
                                   label against atlas (rosa_core.atlas_assignment_policy)
                                                      │
                                                      ▼
-                                                  exports
+                                            exports ──► view (3D browser)
 ```
 
 Each stage is independent — you can start in the middle if you already
@@ -120,6 +124,11 @@ lets you fix any subset of inputs:
 | 4    | seeds + models  | external/manual seeds with vouched electrode models            |
 | 5    | seeds only      | external/manual seeds; let the library matcher pick the model  |
 
+When the surgeon's `.ros` plan *is* the prior, the CLI `rosa-agent fit-rosa`
+composes guided detection + placement + electrode-model picking driven by the
+planned trajectories, and adds a **plan-vs-placement QC** table (how far each
+fitted shank/contact drifted from the plan).
+
 ### Stage D — label
 
 Input: contacts + atlas sources.
@@ -138,6 +147,25 @@ trajectories only, atlas only, full bundle …). In the CLI: every
 subcommand writes its own QC directory; `rosa-agent pipeline` composes
 the full bundle.
 
+### Stage F — view (optional)
+
+Any result — a fresh run or a saved one — can become an interactive 3D **browser
+view**: the electrode model + CT (and optional FreeSurfer T1) slice planes that
+snap to whichever contact you click, plus a rotatable CT maximum-intensity
+projection. In Slicer you review in **02 Contacts & Trajectory View**; in the
+CLI:
+
+- `rosa-agent export-view` builds the view from a raw case (runs detection;
+  FreeSurfer optional — omit it for a CT-only view),
+- `rosa-agent view-results` builds it from an *existing* contacts/trajectories
+  TSV + a CT with **no** re-detection (seconds, shows exactly that run),
+- `rosa-agent view` serves either output locally, and the same viewer is hosted
+  as a **no-install GitHub Pages drag-and-drop app** (data stays in your
+  browser — nothing is uploaded).
+
+This replaces "open Slicer just to eyeball a result." See
+[`CLI guide`](../cli/README.md#common-workflows).
+
 ## 4) Coordinate frames
 
 Everything in this toolkit works in **RAS millimeters** by default. The
@@ -152,9 +180,11 @@ conventions:
 
 When working across two coordinate frames for the same patient (e.g. a
 plan in the ROSA reference frame + a CT post-registered to a different
-MRI atlas), see [`CLI guide § match-ros`](../cli/README.md) for the
-purely-geometric line-RANSAC matcher that re-aligns the two without
-needing the original reference volume.
+MRI atlas), the purely-geometric line-RANSAC matcher re-aligns the two
+without needing the original reference volume: `rosa-agent match-ros`
+takes the plan from a `.ros`, and `rosa-agent match-trajectories` takes
+it from any named-trajectory TSV (same engine). See
+[`CLI guide`](../cli/README.md).
 
 ## 5) Data inputs and where they come from
 
@@ -229,6 +259,15 @@ even on disk anymore.
 - **Slicer**: 01 Setup → 02 Contact Import → 03 Atlas Labeling → Export.
 - **CLI**: `rosa-agent label contacts.tsv --target-volume ct.nii.gz
   --freesurfer ...` skips detection and goes straight to labeling.
+
+### Just look at a result in the browser
+
+- **Slicer**: 02 Contacts & Trajectory View.
+- **CLI**: `rosa-agent view-results CASE/fitrosa_qc -o view/ && rosa-agent
+  view view/` turns an existing result into the 3D viewer with no
+  re-detection. From a raw case instead, `rosa-agent export-view CASE
+  --out-dir view/` (add `--freesurfer-dir` for the brain mesh). Or drop the
+  output files into the hosted Pages viewer — no install, nothing uploaded.
 
 ### Re-running detection with new tunables
 The pipeline knobs (LoG threshold, walker tolerances, score weights,
