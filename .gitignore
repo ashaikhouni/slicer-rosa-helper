@@ -30,3 +30,8 @@ tests/data/**/*.nii.gz
 # kept out of the repo. Memory references them as resume anchors;
 # they live on local disk only.
 notebooks/
+
+# Local-only probe / diagnostic scratch scripts. The committed tools/
+# utilities don't use the leading-underscore prefix; the _*.py files are
+# one-off A/B and diagnostic harnesses that accumulate during sessions.
+tools/_*.py
