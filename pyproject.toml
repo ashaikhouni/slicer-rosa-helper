@@ -63,6 +63,15 @@ dependencies = [
 test = [
     "pytest >= 7.0",
 ]
+# Vendored, FreeSurfer-free SynthStrip skull-stripping. Installs the PyTorch
+# runtime + surfa that the standalone ``mri_synthstrip`` script needs; the
+# script + ~30 MB weights are fetched (checksum-pinned) on first use. CPU is
+# sufficient — for the slim CPU-only torch wheel install with:
+#   pip install 'rosa-agent[synthstrip]' --extra-index-url https://download.pytorch.org/whl/cpu
+synthstrip = [
+    "torch >= 2.0",
+    "surfa >= 0.6",
+]
 
 [project.scripts]
 # Entry point — installs a ``rosa-agent`` shell command pointing at

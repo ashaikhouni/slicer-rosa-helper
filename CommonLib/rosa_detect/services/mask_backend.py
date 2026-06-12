@@ -46,6 +46,7 @@ def select_brain_mask_to_path(
     )
 
     def _try_synthstrip() -> bool:
+        # 1. FreeSurfer-installed binary, if present (fastest; no torch needed).
         try:
             run_synthstrip(
                 input_path=ct_path, mask_path=mask_path,
@@ -53,13 +54,30 @@ def select_brain_mask_to_path(
             )
             return True
         except SynthStripNotFound:
-            return False
+            pass  # no system binary — fall through to the vendored standalone
         except subprocess.CalledProcessError as exc:
+            # Binary present but failed — a real error; don't silently swap
+            # backends. Surface and let the caller fall back to watershed.
             log(f"[mask] synthstrip exit {exc.returncode}; "
                 f"stderr: {(exc.stderr or b'').decode('utf-8', errors='replace')[:400]}")
             return False
         except Exception as exc:  # noqa: BLE001
             log(f"[mask] synthstrip raised: {exc}")
+            return False
+
+        # 2. Vendored standalone SynthStrip (torch + surfa; no FreeSurfer).
+        #    Only reachable when no system binary exists.
+        try:
+            from .synthstrip_bundled import (
+                run_bundled_synthstrip, BundledSynthStripUnavailable,
+            )
+            run_bundled_synthstrip(input_path=ct_path, mask_path=mask_path)
+            return True
+        except BundledSynthStripUnavailable as exc:
+            log(f"[mask] bundled synthstrip unavailable: {exc}")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log(f"[mask] bundled synthstrip failed: {exc}")
             return False
 
     def _try_log_watershed() -> bool:
@@ -92,13 +110,19 @@ def select_brain_mask_to_path(
         return "synthstrip" if _try_synthstrip() else None
     if backend == "log-watershed":
         return "log-watershed" if _try_log_watershed() else None
-    # auto
+    # auto: SynthStrip *binary* if installed, else log-watershed — unchanged.
+    # The vendored standalone (torch) is deliberately NOT auto-activated here:
+    # it would mean a 30 MB download + slow NN inference the moment torch is
+    # importable, surprising callers and destabilising the default mask. The
+    # vendored path is reachable only via an explicit ``backend="synthstrip"``
+    # (which routes through ``_try_synthstrip``'s system→vendored fallback).
     if find_synthstrip(synthstrip_path) is not None:
         if _try_synthstrip():
             return "synthstrip"
         log("[mask] synthstrip available but failed; falling back to log-watershed")
     else:
-        log("[mask] synthstrip not found; using log-watershed")
+        log("[mask] synthstrip binary not found; using log-watershed "
+            "(force the vendored standalone with backend='synthstrip')")
     return "log-watershed" if _try_log_watershed() else None
 
 
