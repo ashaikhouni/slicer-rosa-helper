@@ -52,4 +52,66 @@ class JobStatus(BaseModel):
     artifacts: list[Artifact] = Field(default_factory=list)
 
 
-__all__ = ["JobState", "JobSpec", "Artifact", "JobStatus"]
+# ---------------------------------------------------------------------
+# Review & edit — the editable-results contract the review UI binds to.
+# ---------------------------------------------------------------------
+
+
+class ReviewContact(BaseModel):
+    """One contact in the reviewable result."""
+
+    shank: str
+    index: int                       # contact_index (1-based, along the shank)
+    name: str                        # channel name, e.g. "LAC1" (TSV `label`)
+    x: float
+    y: float
+    z: float
+    model: str | None = None         # electrode model
+    region: str | None = None        # anatomical label (editable via relabel)
+    accepted: bool = True            # reject to drop from export
+
+
+class ReviewShank(BaseModel):
+    """One electrode (trajectory) and its contacts."""
+
+    name: str
+    model: str | None = None
+    accepted: bool = True            # reject to drop the whole shank
+    contacts: list[ReviewContact] = Field(default_factory=list)
+
+
+class ReviewDoc(BaseModel):
+    """The editable result of a run — what the review-and-edit UI reads/patches."""
+
+    subject_id: str | None = None
+    ct_path: str | None = None
+    shanks: list[ReviewShank] = Field(default_factory=list)
+
+
+class ReviewOp(str, Enum):
+    accept_contact = "accept_contact"
+    reject_contact = "reject_contact"
+    relabel_contact = "relabel_contact"
+    accept_shank = "accept_shank"
+    reject_shank = "reject_shank"
+
+
+class ReviewEdit(BaseModel):
+    """A single edit. ``index`` is required for ``*_contact`` ops; ``region``
+    for ``relabel_contact``."""
+
+    op: ReviewOp
+    shank: str
+    index: int | None = None
+    region: str | None = None
+
+
+class ReviewPatch(BaseModel):
+    ops: list[ReviewEdit] = Field(default_factory=list)
+
+
+__all__ = [
+    "JobState", "JobSpec", "Artifact", "JobStatus",
+    "ReviewContact", "ReviewShank", "ReviewDoc",
+    "ReviewOp", "ReviewEdit", "ReviewPatch",
+]
