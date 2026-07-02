@@ -111,6 +111,30 @@ def find_synthstrip(synthstrip_path: str | Path | None = None) -> Optional[Path]
     return None
 
 
+def fix_mask_geometry(input_path: str | Path, mask_path: str | Path) -> None:
+    """Force a SynthStrip mask to inherit the input image's full geometry.
+
+    SynthStrip occasionally writes the output mask with the volume's s-form
+    affine while the input CT it read used q-form (e.g., AMC136 in our cohort
+    has qform_code=1, sform_code=2, q-vs-s differ by 50 mm). Copying the input's
+    geometry onto the same-sized mask keeps downstream tools (which read the
+    input's q-form) aligned. Best-effort: if SimpleITK is unavailable or the
+    mask shape doesn't match, the file is left as SynthStrip wrote it.
+
+    Shared by the system-binary runner (:func:`run_synthstrip`) and the vendored
+    runner (``synthstrip_bundled.run_bundled_synthstrip``).
+    """
+    try:
+        import SimpleITK as sitk
+        ref_img = sitk.ReadImage(str(input_path))
+        mask_img = sitk.ReadImage(str(mask_path))
+        if mask_img.GetSize() == ref_img.GetSize():
+            mask_img.CopyInformation(ref_img)
+            sitk.WriteImage(mask_img, str(mask_path))
+    except Exception:
+        pass
+
+
 def run_synthstrip(
     input_path: str | Path,
     mask_path: str | Path,
@@ -181,23 +205,7 @@ def run_synthstrip(
     subprocess.run(cmd, check=True, timeout=timeout, env=env,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    # SynthStrip occasionally writes the output mask with the volume's
-    # s-form affine while the input CT it read used q-form (e.g., AMC136
-    # in our cohort has qform_code=1, sform_code=2, q-vs-s differ by 50mm).
-    # Force the mask to inherit the input image's full geometry so that
-    # downstream tools that read the input's q-form get an aligned mask.
-    try:
-        import SimpleITK as sitk
-        ref_img = sitk.ReadImage(str(input_path))
-        mask_img = sitk.ReadImage(str(mask_path))
-        if mask_img.GetSize() == ref_img.GetSize():
-            mask_img.CopyInformation(ref_img)
-            sitk.WriteImage(mask_img, str(mask_path))
-    except Exception:
-        # Best-effort; if SITK isn't available or the mask shape doesn't
-        # match, leave the file as SynthStrip wrote it.
-        pass
-
+    fix_mask_geometry(input_path, mask_path)
     return mask_path
 
 
