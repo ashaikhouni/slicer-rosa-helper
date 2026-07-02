@@ -23,7 +23,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
 from .jobs import JobNotFound, JobRunner
-from .models import JobSpec, JobStatus
+from .models import JobSpec, JobStatus, ReviewDoc, ReviewPatch
+from .review import ReviewStore, export_contacts
 
 API_VERSION = "v1"
 
@@ -49,8 +50,17 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     runner = JobRunner(work_root, max_concurrent=int(
         os.environ.get("ROSA_APP_MAX_CONCURRENT", max_concurrent)))
 
+    reviews = ReviewStore()
+
     app = FastAPI(title="ROSA app service", version=API_VERSION)
     app.state.runner = runner
+    app.state.reviews = reviews
+
+    def _job_or_404(job_id: str):
+        try:
+            return runner.get(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"no job {job_id!r}") from exc
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -99,6 +109,37 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             yield "event: end\ndata: \n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    # ---- review & edit ---------------------------------------------
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/review", response_model=ReviewDoc)
+    async def get_review(job_id: str) -> ReviewDoc:
+        job = _job_or_404(job_id)
+        try:
+            return reviews.get_or_build(job_id, job.workdir)
+        except FileNotFoundError as exc:      # run produced no contacts yet
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.patch(f"/api/{API_VERSION}/jobs/{{job_id}}/review", response_model=ReviewDoc)
+    async def patch_review(job_id: str, patch: ReviewPatch) -> ReviewDoc:
+        job = _job_or_404(job_id)
+        try:
+            return reviews.apply(job_id, job.workdir, patch.ops)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:             # bad edit target / op
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/review/export")
+    async def export_review(job_id: str) -> dict:
+        job = _job_or_404(job_id)
+        try:
+            doc = reviews.get_or_build(job_id, job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        out = job.workdir / "contacts_reviewed.tsv"
+        n = export_contacts(doc, out)
+        return {"path": str(out), "rel_path": out.name, "n_contacts": n}
 
     return app
 

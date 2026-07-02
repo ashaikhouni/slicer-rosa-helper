@@ -56,6 +56,22 @@ def build_command(spec: JobSpec, workdir: Path) -> list[str]:
         return [sys.executable, "-u", "-c", "import time\nwhile True:\n    time.sleep(0.05)\n"]
     if kind == "selftest-fail":
         return [sys.executable, "-u", "-c", "import sys\nprint('boom', flush=True)\nsys.exit(3)\n"]
+    if kind == "selftest-emit":
+        # Write a small synthetic contacts.tsv into the job dir (cwd), so the
+        # review flow can be exercised end-to-end without a real pipeline run.
+        script = (
+            "import csv\n"
+            "cols=['trajectory','label','contact_index','x','y','z','peak_detected','electrode_model','region']\n"
+            "rows=[]\n"
+            "for sh,(base,reg) in {'LAC':(0.0,'Amygdala'),'LPC':(20.0,'Hippocampus')}.items():\n"
+            "    for i in range(1,4):\n"
+            "        rows.append({'trajectory':sh,'label':f'{sh}{i}','contact_index':i,"
+            "'x':base+i,'y':i*2.0,'z':5.0,'peak_detected':'1','electrode_model':'DIXI-15AM','region':reg})\n"
+            "with open('contacts.tsv','w',newline='') as f:\n"
+            "    w=csv.DictWriter(f,fieldnames=cols,delimiter='\\t'); w.writeheader(); w.writerows(rows)\n"
+            "print('emitted',len(rows),'contacts',flush=True)\n"
+        )
+        return [sys.executable, "-u", "-c", script]
     if kind == "pipeline":
         ct = spec.params.get("ct")
         if not ct:
