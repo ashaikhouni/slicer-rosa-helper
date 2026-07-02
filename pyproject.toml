@@ -72,6 +72,12 @@ synthstrip = [
     "torch >= 2.0",
     "surfa >= 0.6",
 ]
+# Brain-surface mesh generation for the 3D viewer (rosa_core.brain_mesh):
+# marching cubes on a brain mask -> GLB context surface. Only scikit-image
+# is extra; numpy/scipy/nibabel are already hard deps.
+mesh = [
+    "scikit-image >= 0.19",
+]
 
 [project.scripts]
 # Entry point — installs a ``rosa-agent`` shell command pointing at
