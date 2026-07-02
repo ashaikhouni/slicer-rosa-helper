@@ -1,0 +1,42 @@
+# The ROSA desktop app front-end (rosa-app): a local FastAPI service (and, in
+# later phases, an Electron shell + web UI) over the headless `rosa-agent`
+# engine. Isolated in-repo now; splits into its own repo once the engine<->app
+# contract stabilises (all app code lives under app/ for a clean subtree split).
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rosa-app"
+version = "0.0.1"
+description = "Desktop app front-end (FastAPI service + Electron shell + web UI) for the ROSA SEEG electrode localizer, over the rosa-agent engine."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Ammar Shaikhouni", email = "ashaikhouni@gmail.com" },
+]
+
+dependencies = [
+    # The engine. In-repo dev: install the parent editable FIRST
+    #   pip install -e ..     # rosa-agent (engine), then
+    #   pip install -e .      # rosa-app (this)
+    # so this requirement is satisfied by the local editable install.
+    # At repo-split time this line becomes a pinned "rosa-agent>=X".
+    "rosa-agent",
+    "fastapi >= 0.110",
+    "uvicorn[standard] >= 0.29",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest >= 7.0",
+    "httpx >= 0.27",   # fastapi TestClient
+]
+
+[project.scripts]
+# Launch the local service (binds 127.0.0.1, prints its URL as JSON).
+rosa-app-serve = "rosa_service.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["rosa_service*"]

@@ -1,0 +1,14 @@
+# App-local build/runtime artifacts.
+__pycache__/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Electron / web toolchain (later phases).
+node_modules/
+electron/dist/
+web/dist/
+
+# Local run scratch.
+*.log
