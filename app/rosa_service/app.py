@@ -65,6 +65,15 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     app.state.runner = runner
     app.state.reviews = reviews
 
+    @app.middleware("http")
+    async def _no_store(request, call_next):
+        # A local app under active iteration: never let the browser serve a
+        # stale JS/HTML/viewer from cache (no CDN benefit on localhost). Avoids
+        # "I edited the UI but the browser runs the old one" confusion.
+        resp = await call_next(request)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
     def _job_or_404(job_id: str):
         try:
             return runner.get(job_id)

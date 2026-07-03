@@ -182,11 +182,13 @@ function renderReview(doc) {
       const row = document.createElement("div");
       row.className = "contact" + (c.accepted ? "" : " rejected");
       row.dataset.label = c.name;
+      // Click anywhere on the row (except the checkbox / region field) → show
+      // the contact in the 3D viewer.
+      row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
       const acc = el("input", { type: "checkbox" });
       acc.checked = c.accepted; acc.disabled = !shank.accepted;
       acc.onchange = () => patch([{ op: acc.checked ? "accept_contact" : "reject_contact", shank: shank.name, index: c.index }]);
       const name = el("span", { class: "cname", title: "show in 3D" }, c.name);
-      name.onclick = () => selectInViewer(c.name, shank.name);
       const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: "—" });
       region.disabled = !shank.accepted;
       region.onchange = () => {

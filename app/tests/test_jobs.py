@@ -121,5 +121,27 @@ class JobEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["exit_code"], 0)
 
 
+@unittest.skipUnless(HAVE_DEPS, "fastapi/httpx (app [test] extra) unavailable")
+class RehydrateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finished_jobs_survive_a_new_runner(self):
+        from rosa_service.jobs import JobRunner
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        app = create_app(work_root=td.name)
+        client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://t")
+        jid = (await client.post(f"{API}/jobs", json={"kind": "selftest-emit"})).json()["id"]
+        for _ in range(200):
+            if (await client.get(f"{API}/jobs/{jid}")).json()["state"] == "succeeded":
+                break
+            await asyncio.sleep(0.05)
+        await client.aclose()
+
+        # A fresh runner on the same work dir rebuilds the finished job.
+        r2 = JobRunner(td.name)
+        statuses = {s.id: s.state.value for s in r2.list()}
+        self.assertIn(jid, statuses)
+        self.assertEqual(statuses[jid], "succeeded")
+
+
 if __name__ == "__main__":
     unittest.main()
