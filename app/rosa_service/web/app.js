@@ -181,16 +181,19 @@ function renderReview(doc) {
     for (const c of shank.contacts) {
       const row = document.createElement("div");
       row.className = "contact" + (c.accepted ? "" : " rejected");
+      row.dataset.label = c.name;
       const acc = el("input", { type: "checkbox" });
       acc.checked = c.accepted; acc.disabled = !shank.accepted;
       acc.onchange = () => patch([{ op: acc.checked ? "accept_contact" : "reject_contact", shank: shank.name, index: c.index }]);
+      const name = el("span", { class: "cname", title: "show in 3D" }, c.name);
+      name.onclick = () => selectInViewer(c.name, shank.name);
       const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: "—" });
       region.disabled = !shank.accepted;
       region.onchange = () => {
         if (region.value.trim())
           patch([{ op: "relabel_contact", shank: shank.name, index: c.index, region: region.value.trim() }]);
       };
-      row.append(acc, el("span", { class: "cname" }, c.name), region);
+      row.append(acc, name, region);
       cs.append(row);
     }
     box.append(cs);
@@ -201,6 +204,17 @@ function renderReview(doc) {
 async function patch(ops) {
   try { renderReview(await jsend(`${API}/jobs/${state.jobId}/review`, "PATCH", { ops })); }
   catch (e) { $("exportmsg").textContent = `Edit failed: ${e.message}`; }
+}
+
+// Click a contact in the list → highlight it in the embedded 3D viewer
+// (postMessage) and mark the row selected. The viewer snaps camera + slices.
+function selectInViewer(label, shank) {
+  try { $("viewerframe").contentWindow.postMessage({ type: "rosa:select", label, shank }, "*"); }
+  catch (_e) { /* viewer not loaded yet */ }
+  document.querySelectorAll("#reviewlist .contact.selected").forEach((r) => r.classList.remove("selected"));
+  const sel = window.CSS && CSS.escape ? CSS.escape(label) : label;
+  const row = document.querySelector(`#reviewlist .contact[data-label="${sel}"]`);
+  if (row) row.classList.add("selected");
 }
 
 async function doExport() {

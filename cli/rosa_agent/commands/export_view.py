@@ -1631,6 +1631,13 @@ function selectContact(label, shank) {{
   }}
 }}
 
+// Embedded mode: let a parent frame (e.g. the rosa-app UI) drive selection so
+// its contact list and this 3D scene stay in sync. No-op standalone.
+window.addEventListener("message", (e) => {{
+  const m = e.data || {{}};
+  if (m && m.type === "rosa:select" && m.label) selectContact(m.label, m.shank || "");
+}});
+
 function showAll() {{
   selectedShank = null;
   for (const [, nodes] of shankNodes) for (const n of nodes) n.visible = true;
