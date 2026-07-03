@@ -910,6 +910,9 @@ const onGltf = gltf => {{
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
   fitToObject(gltfRoot);
+  // Re-apply any visibility a parent frame requested before the GLB finished
+  // loading (embedded rosa-app: rejected contacts start hidden).
+  if (_pendingVisibility) applyContactVisibility(_pendingVisibility.hideShanks, _pendingVisibility.hideContacts);
 }};
 const onGltfErr = err => {{
   console.error("GLB load failed", err);
@@ -1631,11 +1634,27 @@ function selectContact(label, shank) {{
   }}
 }}
 
-// Embedded mode: let a parent frame (e.g. the rosa-app UI) drive selection so
-// its contact list and this 3D scene stay in sync. No-op standalone.
+// Embedded mode: let a parent frame (e.g. the rosa-app UI) drive selection +
+// visibility so its contact list and this 3D scene stay in sync. No-op standalone.
+let _pendingVisibility = null;
+function applyContactVisibility(hideShanks, hideContacts) {{
+  _pendingVisibility = {{ hideShanks: hideShanks || [], hideContacts: hideContacts || [] }};
+  if (!gltfRoot) return;  // GLB not loaded yet — re-applied from onGltf
+  const hs = new Set(_pendingVisibility.hideShanks);
+  const hc = new Set(_pendingVisibility.hideContacts.map(c => (c.shank || "") + "::" + c.label));
+  gltfRoot.traverse(obj => {{
+    const ex = obj.userData || {{}};
+    if (ex.kind === "contact")
+      obj.visible = !(hs.has(ex.shank) || hc.has((ex.shank || "") + "::" + ex.label));
+    else if (ex.kind === "shaft")
+      obj.visible = !hs.has(ex.shank);
+  }});
+}}
 window.addEventListener("message", (e) => {{
   const m = e.data || {{}};
-  if (m && m.type === "rosa:select" && m.label) selectContact(m.label, m.shank || "");
+  if (!m) return;
+  if (m.type === "rosa:select" && m.label) selectContact(m.label, m.shank || "");
+  else if (m.type === "rosa:visibility") applyContactVisibility(m.hideShanks, m.hideContacts);
 }});
 
 function showAll() {{

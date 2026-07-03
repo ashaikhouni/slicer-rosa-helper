@@ -147,6 +147,7 @@ async function loadResults(id) {
       s.textContent = "#side{display:none!important} #app{grid-template-columns:1fr 340px!important}";
       d.head.appendChild(s);
     } catch (_e) { /* ignore */ }
+    syncVisibility(state.doc);   // apply reject-hiding once the viewer is ready
   };
   frame.src = `${API}/jobs/${id}/viewer/`;
   showStep("results");
@@ -155,6 +156,7 @@ async function loadResults(id) {
 }
 
 function renderReview(doc) {
+  state.doc = doc;
   const nShanks = doc.shanks.length;
   const nContacts = doc.shanks.reduce((a, s) => a + s.contacts.length, 0);
   const nKept = doc.shanks.filter((s) => s.accepted)
@@ -201,6 +203,19 @@ function renderReview(doc) {
     box.append(cs);
     list.append(box);
   }
+  syncVisibility(doc);
+}
+
+// Hide rejected shanks/contacts in the 3D viewer; re-accepting brings them back.
+function syncVisibility(doc) {
+  if (!doc) return;
+  const hideShanks = [], hideContacts = [];
+  for (const s of doc.shanks) {
+    if (!s.accepted) { hideShanks.push(s.name); continue; }
+    for (const c of s.contacts) if (!c.accepted) hideContacts.push({ label: c.name, shank: s.name });
+  }
+  try { $("viewerframe").contentWindow.postMessage({ type: "rosa:visibility", hideShanks, hideContacts }, "*"); }
+  catch (_e) { /* viewer not ready */ }
 }
 
 async function patch(ops) {
