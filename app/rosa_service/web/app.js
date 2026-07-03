@@ -136,7 +136,19 @@ async function cancel() {
 // ---- step 3: review + viewer -----------------------------------------
 
 async function loadResults(id) {
-  $("viewerframe").src = `${API}/jobs/${id}/viewer/`;
+  const frame = $("viewerframe");
+  // The embedded viewer (export-view) has its OWN trajectories/contacts sidebar
+  // (#side) — redundant with our editable list. Hide it (same-origin iframe) and
+  // let the 3D scene + slices reflow to fill. Cosmetic; degrades gracefully.
+  frame.onload = () => {
+    try {
+      const d = frame.contentDocument;
+      const s = d.createElement("style");
+      s.textContent = "#side{display:none!important} #app{grid-template-columns:1fr 340px!important}";
+      d.head.appendChild(s);
+    } catch (_e) { /* ignore */ }
+  };
+  frame.src = `${API}/jobs/${id}/viewer/`;
   showStep("results");
   try { renderReview(await jget(`${API}/jobs/${id}/review`)); }
   catch (e) { $("reviewlist").textContent = `Could not load review: ${e.message}`; }
@@ -230,5 +242,12 @@ async function boot() {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
   } catch { $("engine").textContent = "service unreachable"; }
+  // Resume the most recent completed run so a reload lands on results, not a
+  // blank form (single-user local app).
+  try {
+    const jobs = await jget(`${API}/jobs`);        // newest first
+    const done = jobs.find((j) => j.state === "succeeded");
+    if (done) { state.jobId = done.id; loadResults(done.id); }
+  } catch (_e) { /* ignore */ }
 }
 boot();
