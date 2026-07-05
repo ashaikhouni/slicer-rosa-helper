@@ -280,6 +280,103 @@ def register_rigid_mi(
     )
 
 
+def register_affine_mi(
+    fixed,
+    moving,
+    *,
+    sampling_percentage: float = 0.10,
+    num_iterations: int = 500,
+    min_step_mm: float = 1e-4,
+    max_step_mm: float = 1.0,
+    num_histogram_bins: int = DEFAULT_NUM_HISTOGRAM_BINS,
+    shrink_factors: tuple[int, ...] = DEFAULT_SHRINK_FACTORS,
+    smoothing_sigmas_mm: tuple[float, ...] = DEFAULT_SMOOTHING_SIGMAS_MM,
+    init_mode: str = "geometry",
+    seed: int = 1,
+    logger: Optional[Callable[[str], None]] = None,
+) -> RegistrationResult:
+    """Affine (12-DOF) registration with Mattes mutual information.
+
+    The affine counterpart to :func:`register_rigid_mi`. Registering an
+    MNI/atlas template to a patient volume is *not* rigid — brains differ
+    in size and shape — so the atlas-labeling path needs the extra scale
+    and shear that an affine transform provides. Everything else (Mattes
+    MI, regular-step gradient descent, the 4×2×1 multi-resolution
+    pyramid) mirrors the rigid routine so the two behave consistently.
+
+    Defaults are looser than the rigid path (more iterations, larger
+    initial step, higher sampling): affine has twice the parameters and
+    the template→patient gap is larger than the rigid CT↔MR case. Returns
+    the same :class:`RegistrationResult`; ``transform`` is a
+    ``sitk.AffineTransform`` and ``transform_to_4x4_ras`` handles it (it
+    reads GetMatrix/GetTranslation/GetCenter, which affine also exposes).
+    """
+    import SimpleITK as sitk
+
+    if len(shrink_factors) != len(smoothing_sigmas_mm):
+        raise ValueError(
+            f"shrink_factors ({len(shrink_factors)}) and "
+            f"smoothing_sigmas_mm ({len(smoothing_sigmas_mm)}) must align"
+        )
+
+    fixed_f = sitk.Cast(fixed, sitk.sitkFloat32)
+    moving_f = sitk.Cast(moving, sitk.sitkFloat32)
+
+    if str(init_mode).lower() in ("moments", "moment", "usemomentsalign"):
+        init_filter = sitk.CenteredTransformInitializerFilter.MOMENTS
+    else:
+        init_filter = sitk.CenteredTransformInitializerFilter.GEOMETRY
+    initial_tx = sitk.CenteredTransformInitializer(
+        fixed_f,
+        moving_f,
+        sitk.AffineTransform(3),
+        init_filter,
+    )
+
+    reg = sitk.ImageRegistrationMethod()
+    reg.SetMetricAsMattesMutualInformation(
+        numberOfHistogramBins=int(num_histogram_bins),
+    )
+    reg.SetMetricSamplingStrategy(reg.RANDOM)
+    reg.SetMetricSamplingPercentage(float(sampling_percentage), int(seed))
+    reg.SetInterpolator(sitk.sitkLinear)
+    reg.SetOptimizerAsRegularStepGradientDescent(
+        learningRate=float(max_step_mm),
+        minStep=float(min_step_mm),
+        numberOfIterations=int(num_iterations),
+        gradientMagnitudeTolerance=1e-8,
+    )
+    reg.SetOptimizerScalesFromPhysicalShift()
+    reg.SetShrinkFactorsPerLevel(list(shrink_factors))
+    reg.SetSmoothingSigmasPerLevel(list(smoothing_sigmas_mm))
+    reg.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    reg.SetInitialTransform(initial_tx, inPlace=True)
+
+    if logger is not None:
+        def _log_event():
+            try:
+                logger(
+                    f"[reg-affine] iter={reg.GetOptimizerIteration():>3} "
+                    f"metric={reg.GetMetricValue():+.5f}"
+                )
+            except Exception:
+                pass
+
+        reg.AddCommand(sitk.sitkIterationEvent, _log_event)
+
+    final_tx = reg.Execute(fixed_f, moving_f)
+    fixed_to_moving = transform_to_4x4_ras(final_tx)
+    moving_to_fixed = np.linalg.inv(fixed_to_moving)
+    return RegistrationResult(
+        transform=final_tx,
+        fixed_to_moving_ras_4x4=fixed_to_moving,
+        moving_to_fixed_ras_4x4=moving_to_fixed,
+        final_metric=float(reg.GetMetricValue()),
+        n_iterations=int(reg.GetOptimizerIteration()),
+        converged_reason=str(reg.GetOptimizerStopConditionDescription()),
+    )
+
+
 # ---------------------------------------------------------------------
 # Resampling helper (for atlas labelmaps + optional CT → ref output)
 # ---------------------------------------------------------------------

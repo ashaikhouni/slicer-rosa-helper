@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from rosa_core import bundled_atlases
 from rosa_core.atlas_assignment_policy import (
     build_assignment_row,
     choose_closest_sample,
@@ -58,6 +59,8 @@ def _build_providers(
     wm_lut: str | None,
     atlas_base_path: str | None = None,
     target_volume_path: str | None = None,
+    bundled_atlas_id: str | None = None,
+    atlas_resource_root: str | None = None,
 ) -> dict[str, Any]:
     """Construct the headless atlas providers.
 
@@ -66,8 +69,41 @@ def _build_providers(
     onto the target volume's grid (so contacts in target RAS align with
     atlas labels). THOMAS skips this — its segmentations are typically
     already in the same frame as the labelmap they're paired with.
+
+    ``bundled_atlas_id`` selects a permissively-licensed MNI atlas shipped
+    in ``rosa_core/resources/atlases`` (e.g. ``"cerebra"``): its template is
+    **affinely** registered to ``target_volume_path`` and its labelmap warped
+    onto that grid before sampling. Affine (not rigid) because a population
+    atlas differs from the patient in size and shape.
     """
     providers: dict[str, Any] = {}
+
+    if bundled_atlas_id:
+        try:
+            assets = bundled_atlases.ensure_available(
+                bundled_atlas_id, root=atlas_resource_root,
+                allow_download=False, logger=_stderr,
+            )
+            label_names = bundled_atlases.parse_lut(
+                assets.lut_path, assets.lut_format)
+            providers[bundled_atlas_id] = LabelmapAtlasProvider(
+                source_id=bundled_atlas_id,
+                display_name=assets.name,
+                label_path=assets.labelmap_path,
+                label_names=label_names,
+                atlas_base_path=assets.template_path,
+                target_volume_path=target_volume_path,
+                transform_kind=assets.transform_kind,
+                logger=_stderr,
+            )
+            _stderr(
+                f"[label] {bundled_atlas_id}: ready "
+                f"({len(providers[bundled_atlas_id]._labels)} voxels, "
+                f"{assets.transform_kind} reg → target)"
+            )
+        except Exception as exc:
+            _stderr(f"[label] bundled atlas {bundled_atlas_id!r} failed: {exc}")
+            providers[bundled_atlas_id] = None
 
     if thomas_dir:
         try:
@@ -175,7 +211,8 @@ def main(argv: list[str] | None = None) -> int:
         prog="rosa-agent label",
         description="Assign atlas labels to a contacts TSV via headless providers.",
     )
-    parser.add_argument("contacts_tsv", help="Input contacts TSV (rosa-agent contacts output)")
+    parser.add_argument("contacts_tsv", nargs="?",
+                        help="Input contacts TSV (rosa-agent contacts output)")
     parser.add_argument("--thomas", default="", help="THOMAS segmentation directory (optional)")
     parser.add_argument("--freesurfer", default="", help="FreeSurfer parcellation labelmap (optional)")
     parser.add_argument("--freesurfer-lut", default="", help="FreeSurfer color LUT (optional)")
@@ -190,13 +227,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target-volume", default="",
         help="Volume the contacts live in (typically the postop CT). "
-             "Required when --atlas-base is passed.",
+             "Required when --atlas-base or --bundled-atlas is passed.",
     )
-    parser.add_argument("--out", "-o", required=True, help="Output labels TSV")
+    parser.add_argument(
+        "--bundled-atlas", default="",
+        help="Id of a bundled MNI atlas to label with (e.g. 'cerebra'). Its "
+             "template is affinely registered to --target-volume and its "
+             "labelmap warped onto that grid. See `--list-atlases`.",
+    )
+    parser.add_argument(
+        "--list-atlases", action="store_true",
+        help="Print the bundled atlas ids (+ coverage/license) and exit.",
+    )
+    parser.add_argument("--out", "-o", help="Output labels TSV")
     args = parser.parse_args(argv)
 
-    if bool(args.atlas_base) != bool(args.target_volume):
+    if args.list_atlases:
+        for a in bundled_atlases.list_atlases():
+            mark = " (default)" if a["is_default"] else ""
+            avail = "bundled" if a["available"] else "fetch-required"
+            print(f"{a['id']:16}{mark}  [{avail}]  {a['license']}\n"
+                  f"{'':16}  {a['coverage']}")
+        return 0
+
+    if not args.contacts_tsv:
+        parser.error("contacts_tsv is required (unless --list-atlases)")
+    if not args.out:
+        parser.error("--out/-o is required")
+
+    if bool(args.atlas_base) != bool(args.target_volume) and not args.bundled_atlas:
         parser.error("--atlas-base and --target-volume must be passed together")
+    if args.bundled_atlas and not args.target_volume:
+        parser.error("--bundled-atlas requires --target-volume "
+                     "(the volume the contacts live in)")
 
     contacts = read_tsv_rows(args.contacts_tsv)
     if not contacts:
@@ -212,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         wm_lut=args.wm_lut or None,
         atlas_base_path=args.atlas_base or None,
         target_volume_path=args.target_volume or None,
+        bundled_atlas_id=args.bundled_atlas or None,
     )
     if not any(p is not None and p.is_ready() for p in providers.values()):
         # Distinguish "nothing requested" (fine — empty output) from
@@ -220,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         # FreeSurfer labelmap path).
         requested = [
             ("--thomas", args.thomas), ("--freesurfer", args.freesurfer),
-            ("--wm", args.wm),
+            ("--wm", args.wm), ("--bundled-atlas", args.bundled_atlas),
         ]
         named = [flag for flag, val in requested if val]
         if named:
