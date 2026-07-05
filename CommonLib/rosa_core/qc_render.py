@@ -84,11 +84,20 @@ def render_registration_qc(
     *,
     axis: int = 2,
     frac: float = 0.5,
-    mode: str = "checker",
+    mode: str = "color",
+    value: float = 0.5,
+    direction: str = "h",
     max_dim: int = 512,
     checker: int = 28,
 ) -> bytes:
-    """Render one CT↔MRI overlay slice as PNG bytes. See module docstring."""
+    """Render one composited CT↔MRI slice as PNG bytes.
+
+    ``mode``: ``color`` (CT magenta / MRI green) · ``opacity`` (weighted
+    blend; ``value`` = MRI weight 0→1) · ``wipe`` (CT one side, MRI the other,
+    split at ``value`` along ``direction`` ``h``/``v``, with a marker line) ·
+    ``checker`` · ``ct`` · ``mri``. Compositing is done here (server-side) so
+    the browser only swaps one image per plane — no fragile client overlay.
+    """
     import nibabel as nib
 
     if axis not in _AXES:
@@ -104,15 +113,34 @@ def render_registration_qc(
 
     cg = _downsample(_window(_slice(ct, axis, frac)), max_dim)
     mg = _downsample(_window(_slice(mri, axis, frac)), max_dim)
+    v = float(min(max(value, 0.0), 1.0))
 
     if mode == "ct":
         rgb = np.stack([cg, cg, cg], axis=-1)
     elif mode == "mri":
         rgb = np.stack([mg, mg, mg], axis=-1)
-    elif mode == "blend":
+    elif mode in ("color", "blend"):
         # CT → magenta (R,B), MRI → green (G). Aligned = gray; misaligned fringes.
         rgb = np.stack([cg, mg, cg], axis=-1)
-    else:  # checker (default)
+    elif mode == "opacity":
+        g = ((1.0 - v) * cg + v * mg).astype(np.uint8)
+        rgb = np.stack([g, g, g], axis=-1)
+    elif mode == "wipe":
+        h, w = cg.shape
+        if direction == "v":
+            split = int(round(v * h))
+            take_mri = np.arange(h)[:, None] < split      # top = MRI
+        else:
+            split = int(round(v * w))
+            take_mri = np.arange(w)[None, :] < split       # left = MRI
+        g = np.where(np.broadcast_to(take_mri, cg.shape), mg, cg)
+        rgb = np.stack([g, g, g], axis=-1)
+        # bright marker line at the split
+        if direction == "v" and 0 < split < h:
+            rgb[max(0, split - 1):split + 1, :, :] = (255, 220, 0)
+        elif 0 < split < w:
+            rgb[:, max(0, split - 1):split + 1, :] = (255, 220, 0)
+    else:  # checker
         h, w = cg.shape
         yy, xx = np.mgrid[0:h, 0:w]
         pick_ct = ((yy // checker) + (xx // checker)) % 2 == 0

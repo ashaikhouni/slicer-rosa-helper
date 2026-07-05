@@ -44,13 +44,23 @@ class QcRenderTests(unittest.TestCase):
         self.td.cleanup()
 
     def test_each_mode_and_axis_renders_valid_png(self):
-        for mode in ("checker", "blend", "ct", "mri"):
+        for mode in ("color", "opacity", "wipe", "checker", "ct", "mri"):
             for axis in (0, 1, 2):
                 png = render_registration_qc(self.ct, self.mri, axis=axis,
                                              frac=0.5, mode=mode)
                 w, h = _png_dims(png)
                 self.assertGreater(w, 0)
                 self.assertGreater(h, 0)
+
+    def test_opacity_value_changes_output(self):
+        a = render_registration_qc(self.ct, self.mri, mode="opacity", value=0.0)
+        b = render_registration_qc(self.ct, self.mri, mode="opacity", value=1.0)
+        self.assertNotEqual(a, b)   # 0 = CT only, 1 = MRI only
+
+    def test_wipe_direction_changes_output(self):
+        h = render_registration_qc(self.ct, self.mri, mode="wipe", value=0.5, direction="h")
+        v = render_registration_qc(self.ct, self.mri, mode="wipe", value=0.5, direction="v")
+        self.assertNotEqual(h, v)
 
     def test_frac_clamped(self):
         # Out-of-range fracs should not raise (clamped to the end slices).

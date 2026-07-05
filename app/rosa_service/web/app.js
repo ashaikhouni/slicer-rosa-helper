@@ -345,79 +345,46 @@ async function showProposed(id) {
 }
 
 // Registration QC lives in the big viewer pane (a tab beside the 3D electrode
-// view). Three orthogonal planes, each a CT slice with the MRI slice stacked on
-// top; a comparison mode composites the two IN THE BROWSER so the sliders are
-// smooth: Opacity fades MRI over CT, Wipe reveals MRI up to a split (⇄/⇅), Color
-// uses the server magenta/green blend. Panes hold DIRECT element references
-// (no DOM re-query) so slice + mode updates are reliable.
+// view). Three orthogonal planes; each is a SINGLE <img> whose URL carries the
+// full composite request (mode + value + slice). The SERVER composites CT+MRI
+// (opacity / wipe / color), so there is no fragile browser overlay — a plane is
+// exactly one image that we re-fetch when something changes.
 const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
-function qcUrl(axis, frac, mode) {
-  return `${API}/jobs/${state.labelJobId}/qc?axis=${axis}&mode=${mode}` +
-    `&frac=${frac.toFixed(3)}`;
+function qcSrc(p) {
+  const { mode, value, dir } = state.qc;
+  return `${API}/jobs/${state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
+    `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}`;
+}
+
+function refreshPane(p) { if (state.qc) p.img.src = qcSrc(p); }
+
+let _qcRaf = 0;
+function refreshAllPanes() {
+  if (!state.qc) return;
+  cancelAnimationFrame(_qcRaf);   // coalesce rapid slider ticks into one frame
+  _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
 function showQc() {
-  state.qc = { mode: "opacity", value: 0.5, dir: "h", panes: [] };
+  state.qc = { mode: "color", value: 0.5, dir: "h", panes: [] };
   const wrap = $("qcplanes");
   wrap.innerHTML = "";
   for (const [axis, name] of QC_PLANES) {
-    const base = el("img", { class: "qc-base", alt: `${name} CT` });
-    const over = el("img", { class: "qc-over", alt: `${name} MRI` });
-    const stack = el("div", { class: "qc-stack" });
-    stack.append(base, over);
+    const img = el("img", { class: "qc-img", alt: `${name} registration` });
     const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-    const p = { axis, base, over, frac: 0.5 };
-    slice.addEventListener("input", () => {
-      p.frac = Number(slice.value) / 100;
-      loadPane(p);
-      applyComparison();
-    });
+    const p = { axis, img, frac: 0.5 };
+    slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
     const pane = el("div", { class: "qc-pane" });
-    pane.append(el("div", { class: "muted qc-plane-label" }, name), stack, slice);
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), img, slice);
     wrap.append(pane);
     state.qc.panes.push(p);
   }
-  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="opacity"]'));
-  $("qcvalue").value = 50;
-  $("qcvaluewrap").style.visibility = "visible";
+  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
+  $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
   $("qcdir").hidden = true;
-  for (const p of state.qc.panes) loadPane(p);
-  applyComparison();
   $("tab-qc").disabled = false;
-  setViewerTab("qc");           // jump to the QC when it's ready
-}
-
-// (Re)point a plane's two <img> at its current slice, per the active mode.
-function loadPane(p) {
-  if (state.qc.mode === "color") {
-    p.base.src = qcUrl(p.axis, p.frac, "blend");
-    p.over.removeAttribute("src");
-    p.over.style.display = "none";
-  } else {
-    p.base.src = qcUrl(p.axis, p.frac, "ct");
-    p.over.src = qcUrl(p.axis, p.frac, "mri");
-    p.over.style.display = "";
-  }
-}
-
-// Composite the MRI over the CT for every plane, per mode + slider value.
-function applyComparison() {
-  if (!state.qc) return;
-  const { mode, value, dir } = state.qc;
-  for (const p of state.qc.panes) {
-    if (mode === "color") continue;   // base already shows the blend
-    if (mode === "opacity") {
-      p.over.style.opacity = String(value);
-      p.over.style.clipPath = "";
-    } else { // wipe
-      p.over.style.opacity = "1";
-      const pct = Math.round(value * 100);
-      p.over.style.clipPath = dir === "h"
-        ? `inset(0 ${100 - pct}% 0 0)`   // reveal MRI from the left
-        : `inset(0 0 ${100 - pct}% 0)`;  // reveal MRI from the top
-    }
-  }
+  setViewerTab("qc");             // jump to the QC (which refreshes the panes)
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC.
@@ -428,6 +395,7 @@ function setViewerTab(tab) {
   $("qctools").hidden = !qc;
   for (const b of $("viewertabs").querySelectorAll("button[data-tab]"))
     b.classList.toggle("active", b.dataset.tab === tab);
+  if (qc) refreshAllPanes();      // (re)load images every time the QC is shown
 }
 
 function wireQc() {
@@ -439,21 +407,21 @@ function wireQc() {
     const b = ev.target.closest("button"); if (!b || !state.qc) return;
     state.qc.mode = b.dataset.mode;
     setActive("qcmodes", b);
-    $("qcvaluewrap").style.visibility = b.dataset.mode === "color" ? "hidden" : "visible";
+    const showVal = b.dataset.mode === "opacity" || b.dataset.mode === "wipe";
+    $("qcvaluewrap").style.visibility = showVal ? "visible" : "hidden";
     $("qcdir").hidden = b.dataset.mode !== "wipe";
-    for (const p of state.qc.panes) loadPane(p);
-    applyComparison();
+    refreshAllPanes();
   });
   $("qcvalue").addEventListener("input", (ev) => {
     if (!state.qc) return;
     state.qc.value = Number(ev.target.value) / 100;
-    applyComparison();
+    refreshAllPanes();
   });
   $("qcdir").addEventListener("click", () => {
     if (!state.qc) return;
     state.qc.dir = state.qc.dir === "h" ? "v" : "h";
     $("qcdir").textContent = state.qc.dir === "h" ? "⇄" : "⇅";
-    applyComparison();
+    refreshAllPanes();
   });
 }
 

@@ -276,11 +276,13 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/qc")
     async def registration_qc(job_id: str, axis: int = 2, frac: float = 0.5,
-                              mode: str = "checker") -> Response:
-        """Render a CT↔MRI overlay slice (PNG) so the registration can be eyed.
+                              mode: str = "color", value: float = 0.5,
+                              direction: str = "h") -> Response:
+        """Render a composited CT↔MRI slice (PNG) so registration can be eyed.
 
-        Uses the label job's ``mri_in_ct.nii.gz`` (MRI resampled onto the CT
-        grid) against the CT it was registered to.
+        Compositing (opacity/wipe/color) is server-side, so the UI just swaps
+        one image per plane. Uses the label job's ``mri_in_ct.nii.gz`` (MRI
+        resampled onto the CT grid) against the CT it was registered to.
         """
         job = _job_or_404(job_id)
         mri = job.workdir / "mri_in_ct.nii.gz"
@@ -291,7 +293,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         try:
             from rosa_core.qc_render import render_registration_qc
             png = render_registration_qc(ct, str(mri), axis=int(axis),
-                                         frac=float(frac), mode=str(mode))
+                                         frac=float(frac), mode=str(mode),
+                                         value=float(value), direction=str(direction))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"QC render failed: {exc}") from exc
         return Response(content=png, media_type="image/png",
