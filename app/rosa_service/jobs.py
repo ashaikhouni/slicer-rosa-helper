@@ -33,29 +33,43 @@ class JobNotFound(KeyError):
     pass
 
 
-def build_command(spec: JobSpec, workdir: Path) -> list[str]:
-    """Map a :class:`JobSpec` to the argv to run in ``workdir``.
+def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
+    """Map a :class:`JobSpec` to an ordered list of subprocess STEPS.
 
-    Only known kinds are runnable — the UI can't inject arbitrary commands.
-    ``selftest*`` kinds are fast synthetic jobs used to exercise the runner
-    (they need no data and run in CI). ``pipeline`` maps to the real engine.
+    Returns a list of argv lists; the runner executes them in order, fail-fast.
+    Single-command kinds return one step; ``pipeline`` returns the real engine
+    chain (``detect`` → ``contacts`` → ``view-results``). Only known kinds are
+    runnable, so the UI can't inject arbitrary commands. ``selftest*`` kinds are
+    fast synthetic jobs used to exercise the runner (no data, run in tests).
     """
+    py = sys.executable
     kind = spec.kind
     if kind == "selftest":
-        steps = int(spec.params.get("steps", 3))
+        n = int(spec.params.get("steps", 3))
         script = (
             "import time\n"
-            f"for i in range({steps}):\n"
-            f"    print('step', i + 1, 'of', {steps}, flush=True)\n"
+            f"for i in range({n}):\n"
+            f"    print('step', i + 1, 'of', {n}, flush=True)\n"
             "    time.sleep(0.02)\n"
             "print('done', flush=True)\n"
         )
-        return [sys.executable, "-u", "-c", script]
+        return [[py, "-u", "-c", script]]
     if kind == "selftest-hang":
         # Never exits on its own — used to test cancellation.
-        return [sys.executable, "-u", "-c", "import time\nwhile True:\n    time.sleep(0.05)\n"]
+        return [[py, "-u", "-c", "import time\nwhile True:\n    time.sleep(0.05)\n"]]
     if kind == "selftest-fail":
-        return [sys.executable, "-u", "-c", "import sys\nprint('boom', flush=True)\nsys.exit(3)\n"]
+        return [[py, "-u", "-c", "import sys\nprint('boom', flush=True)\nsys.exit(3)\n"]]
+    if kind == "selftest-multi":
+        return [
+            [py, "-u", "-c", "print('step-A done', flush=True)"],
+            [py, "-u", "-c", "print('step-B done', flush=True)"],
+        ]
+    if kind == "selftest-multi-fail":
+        # First step fails → the runner must not run the second.
+        return [
+            [py, "-u", "-c", "import sys\nprint('step-A', flush=True)\nsys.exit(2)"],
+            [py, "-u", "-c", "print('step-B should not run', flush=True)"],
+        ]
     if kind == "selftest-emit":
         # Write a small synthetic contacts.tsv into the job dir (cwd), so the
         # review flow can be exercised end-to-end without a real pipeline run.
@@ -71,28 +85,44 @@ def build_command(spec: JobSpec, workdir: Path) -> list[str]:
             "    w=csv.DictWriter(f,fieldnames=cols,delimiter='\\t'); w.writeheader(); w.writerows(rows)\n"
             "print('emitted',len(rows),'contacts',flush=True)\n"
         )
-        return [sys.executable, "-u", "-c", script]
+        return [[py, "-u", "-c", script]]
     if kind == "pipeline":
         ct = spec.params.get("ct")
         if not ct:
             raise ValueError("pipeline job requires params.ct")
-        # Real engine run. `python -m rosa_agent` works whether the engine is
-        # pip-installed or on PYTHONPATH; in the frozen app this becomes the
-        # frozen exe re-invoked. Outputs land in the job dir.
-        argv = [sys.executable, "-u", "-m", "rosa_agent", "pipeline", str(ct),
-                "--out-dir", str(workdir)]
-        for flag in ("t1", "ref_volume", "mask_backend"):
-            if spec.params.get(flag):
-                argv += [f"--{flag.replace('_', '-')}", str(spec.params[flag])]
-        return argv
+        ct = str(ct)
+        label = str(spec.params.get("label") or "case")
+        traj = str(workdir / "trajectories.tsv")
+        contacts = str(workdir / "contacts.tsv")
+        viewer = str(workdir / "viewer")
+        # `python -m rosa_agent` works whether the engine is pip-installed or on
+        # PYTHONPATH; in the frozen app this becomes the frozen exe re-invoked.
+        # detect (CT → trajectories) → contacts (+CT → contacts) → view-results
+        # (→ served viewer dir: index.html + scene.glb + scene_meta.json + CT).
+        base = [py, "-u", "-m", "rosa_agent"]
+        return [
+            base + ["detect", ct, "--out", traj],
+            base + ["contacts", traj, ct, "--out", contacts],
+            base + ["view-results", str(workdir), "--output", viewer,
+                    "--ct", ct, "--contacts", contacts, "--trajectories", traj,
+                    "--subject-label", label],
+        ]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 
+def _step_label(argv: list[str]) -> str:
+    """A short human label for a step, e.g. ``rosa_agent detect`` → ``detect``."""
+    if "-m" in argv:
+        i = argv.index("-m")
+        return " ".join(argv[i + 1:i + 3]) if len(argv) > i + 2 else argv[i + 1]
+    return "run"
+
+
 class _Job:
-    def __init__(self, job_id: str, spec: JobSpec, argv: list[str], workdir: Path):
+    def __init__(self, job_id: str, spec: JobSpec, steps: list[list[str]], workdir: Path):
         self.id = job_id
         self.kind = spec.kind
-        self.argv = argv
+        self.steps = steps
         self.workdir = workdir
         self.state = JobState.queued
         self.created_at = time.time()
@@ -129,7 +159,7 @@ class _Job:
 
     def _write_manifest(self) -> None:
         manifest = {
-            "id": self.id, "kind": self.kind, "argv": self.argv,
+            "id": self.id, "kind": self.kind, "steps": self.steps,
             "state": self.state.value, "created_at": self.created_at,
             "started_at": self.started_at, "ended_at": self.ended_at,
             "exit_code": self.exit_code, "error": self.error,
@@ -168,8 +198,8 @@ class JobRunner:
         job_id = uuid.uuid4().hex[:12]
         workdir = self.work_root / job_id
         workdir.mkdir(parents=True, exist_ok=True)
-        argv = build_command(spec, workdir)  # raises ValueError on bad spec
-        job = _Job(job_id, spec, argv, workdir)
+        steps = build_command(spec, workdir)  # raises ValueError on bad spec
+        job = _Job(job_id, spec, steps, workdir)
         self._jobs[job_id] = job
         # Requires a running loop — create() is called from async endpoints.
         asyncio.create_task(self._run(job))
@@ -183,31 +213,48 @@ class JobRunner:
             job.state = JobState.running
             job.started_at = time.time()
             log_path = job.workdir / "job.log"
+            n = len(job.steps)
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *job.argv, cwd=str(job.workdir),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                job._proc = proc
                 with open(log_path, "wb") as logf:
-                    assert proc.stdout is not None
-                    async for raw in proc.stdout:
-                        logf.write(raw)
-                        logf.flush()
-                        line = raw.decode("utf-8", "replace").rstrip("\n")
-                        async with job._cond:
-                            job.lines.append(line)
-                            job._cond.notify_all()
-                rc = await proc.wait()
-                job.exit_code = rc
-                if job._cancel_requested:
-                    await self._finish(job, JobState.cancelled)
-                else:
-                    await self._finish(job, JobState.succeeded if rc == 0 else JobState.failed)
+                    for i, argv in enumerate(job.steps, 1):
+                        if job._cancel_requested:
+                            await self._finish(job, JobState.cancelled)
+                            return
+                        if n > 1:
+                            await self._emit(job, logf, f"[step {i}/{n}] {_step_label(argv)}")
+                        proc = await asyncio.create_subprocess_exec(
+                            *argv, cwd=str(job.workdir),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        job._proc = proc
+                        assert proc.stdout is not None
+                        async for raw in proc.stdout:
+                            logf.write(raw)
+                            logf.flush()
+                            async with job._cond:
+                                job.lines.append(raw.decode("utf-8", "replace").rstrip("\n"))
+                                job._cond.notify_all()
+                        rc = await proc.wait()
+                        job.exit_code = rc
+                        if job._cancel_requested:
+                            await self._finish(job, JobState.cancelled)
+                            return
+                        if rc != 0:                    # fail-fast: stop the chain
+                            await self._finish(job, JobState.failed)
+                            return
+                await self._finish(job, JobState.succeeded)
             except Exception as exc:  # noqa: BLE001
                 job.error = f"{type(exc).__name__}: {exc}"
                 await self._finish(job, JobState.failed)
+
+    async def _emit(self, job: "_Job", logf, line: str) -> None:
+        """Write a synthetic (non-subprocess) line to the log + subscribers."""
+        logf.write((line + "\n").encode())
+        logf.flush()
+        async with job._cond:
+            job.lines.append(line)
+            job._cond.notify_all()
 
     async def _finish(self, job: _Job, state: JobState) -> None:
         job.state = state

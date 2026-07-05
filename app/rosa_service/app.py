@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from .jobs import JobNotFound, JobRunner
 from .models import JobSpec, JobStatus, ReviewDoc, ReviewPatch
@@ -140,6 +140,29 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         out = job.workdir / "contacts_reviewed.tsv"
         n = export_contacts(doc, out)
         return {"path": str(out), "rel_path": out.name, "n_contacts": n}
+
+    # ---- viewer (served-mode static dir produced by view-results) ----
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/viewer")
+    async def viewer_root(job_id: str) -> RedirectResponse:
+        _job_or_404(job_id)
+        # Trailing slash so the viewer's relative fetches (scene.glb, …) resolve.
+        return RedirectResponse(
+            url=f"/api/{API_VERSION}/jobs/{job_id}/viewer/", status_code=307)
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/viewer/{{path:path}}")
+    async def viewer_files(job_id: str, path: str = "") -> FileResponse:
+        job = _job_or_404(job_id)
+        viewer_dir = (job.workdir / "viewer").resolve()
+        if not viewer_dir.is_dir():
+            raise HTTPException(status_code=404, detail="no viewer for this job (run a pipeline job)")
+        target = (viewer_dir / (path or "index.html")).resolve()
+        # Path-traversal guard: target must stay inside the viewer dir.
+        if target != viewer_dir and viewer_dir not in target.parents:
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"not found: {path or 'index.html'}")
+        return FileResponse(target)
 
     return app
 
