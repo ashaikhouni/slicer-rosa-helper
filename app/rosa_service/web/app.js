@@ -5,7 +5,8 @@
 
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
-const state = { ct: null, jobId: null, es: null, poll: null };
+const state = { ct: null, jobId: null, es: null, poll: null,
+                mri: null, labelJobId: null, labelPoll: null, qc: null };
 
 async function jget(url) {
   const r = await fetch(url);
@@ -151,8 +152,25 @@ async function loadResults(id) {
   };
   frame.src = `${API}/jobs/${id}/viewer/`;
   showStep("results");
+  resetLabelCard();
   try { renderReview(await jget(`${API}/jobs/${id}/review`)); }
   catch (e) { $("reviewlist").textContent = `Could not load review: ${e.message}`; }
+}
+
+// The label card is per-job: a fresh run starts with no MRI / no proposal.
+function resetLabelCard() {
+  clearInterval(state.labelPoll);
+  state.mri = null; state.labelJobId = null;
+  $("mriinput").value = "";
+  $("labelbtn").disabled = true;
+  $("approvebtn").hidden = true;
+  $("labelstatus").textContent = "";
+  $("labelmsg").textContent = "";
+  const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
+  $("qcplanes").innerHTML = ""; state.qc = null;
+  $("qcspace").hidden = true;
+  $("tab-qc").disabled = true;
+  setViewerTab("electrodes");
 }
 
 function renderReview(doc) {
@@ -246,11 +264,215 @@ async function doExport() {
 function restart() {
   if (state.es) state.es.close();
   clearInterval(state.poll);
+  resetLabelCard();
   state.ct = null; state.jobId = null;
   $("ctpath").value = ""; $("fileinput").value = ""; $("exportmsg").textContent = "";
   $("viewerframe").src = "about:blank";
   setCt(null);
   showStep("drop");
+}
+
+// ---- anatomical labeling (MRI → register → propose → approve) --------
+
+async function loadAtlases() {
+  try {
+    const { atlases, default: def } = await jget(`${API}/atlases`);
+    const sel = $("atlassel");
+    sel.innerHTML = "";
+    for (const a of atlases) {
+      const short = (a.name || a.id).split(":")[0].trim();
+      const lic = (a.license || "").split("(")[0].trim();
+      const o = el("option", { value: a.id }, `${short}${lic ? ` — ${lic}` : ""}`);
+      if (!a.available) { o.disabled = true; o.textContent += " (not installed)"; }
+      if (a.id === def) o.selected = true;
+      sel.append(o);
+    }
+  } catch (_e) { $("labelstatus").textContent = "· atlas list unavailable"; }
+}
+
+async function uploadMri(file) {
+  $("labelstatus").textContent = `· uploading ${file.name}…`;
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) { $("labelstatus").textContent = "· MRI upload failed"; return; }
+  state.mri = await r.json();
+  $("labelstatus").textContent = `· MRI ${state.mri.name}`;
+  $("labelbtn").disabled = false;
+}
+
+async function runLabel() {
+  if (!state.mri || !state.jobId) return;
+  $("labelbtn").disabled = true;
+  $("approvebtn").hidden = true;
+  const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
+  $("labelmsg").textContent = "Registering MRI → CT and warping atlas (~30 s)…";
+  try {
+    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
+      { t1: state.mri.path, atlas: $("atlassel").value });
+    state.labelJobId = job.id;
+    streamInto(job.id, "labellog");     // shows the registration metrics (QC)
+    pollLabel(job.id);
+  } catch (e) {
+    $("labelmsg").textContent = `Failed to start: ${e.message}`;
+    $("labelbtn").disabled = false;
+  }
+}
+
+function pollLabel(id) {
+  clearInterval(state.labelPoll);
+  state.labelPoll = setInterval(async () => {
+    let st;
+    try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
+    if (["succeeded", "failed", "cancelled"].includes(st.state)) {
+      clearInterval(state.labelPoll);
+      $("labelbtn").disabled = false;
+      if (st.state === "succeeded") showProposed(id);
+      else $("labelmsg").textContent =
+        `Labeling ${st.state}${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}`;
+    }
+  }, 1000);
+}
+
+async function showProposed(id) {
+  try {
+    const p = await jget(`${API}/jobs/${id}/labels`);
+    $("labelmsg").innerHTML =
+      `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
+      `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
+    $("approvebtn").hidden = false;
+    if (p.has_mri_qc) showQc(p.has_mni_qc);
+  } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
+}
+
+// Registration QC lives in the big viewer pane (a tab beside the 3D electrode
+// view). Three orthogonal planes; each is a SINGLE <img> whose URL carries the
+// full composite request (mode + value + slice). The SERVER composites CT+MRI
+// (opacity / wipe / color), so there is no fragile browser overlay — a plane is
+// exactly one image that we re-fetch when something changes.
+const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
+
+function qcSrc(p) {
+  const { mode, value, dir, space } = state.qc;
+  return `${API}/jobs/${state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
+    `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
+}
+
+// Load a FRESH <img> each time and swap it in on load. Mutating one <img>'s
+// src in place proved unreliable (Safari would fetch the new image — visible in
+// the server log — but not repaint the element). A new element always paints,
+// and swapping on `load` avoids flicker (the old slice stays until the new one
+// is ready).
+function refreshPane(p) {
+  if (!state.qc) return;
+  const img = new Image();
+  img.className = "qc-img";
+  img.alt = p.label;
+  img.onload = () => { if (state.qc && p.holder.isConnected) p.holder.replaceChildren(img); };
+  img.src = qcSrc(p);
+}
+
+let _qcRaf = 0;
+function refreshAllPanes() {
+  if (!state.qc) return;
+  cancelAnimationFrame(_qcRaf);   // coalesce rapid slider ticks into one frame
+  _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
+}
+
+function showQc(hasMni) {
+  // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
+  // when available; otherwise slice the CT's native frame.
+  state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", panes: [] };
+  $("qcspace").hidden = !hasMni;
+  if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
+  const wrap = $("qcplanes");
+  wrap.innerHTML = "";
+  for (const [axis, name] of QC_PLANES) {
+    const holder = el("div", { class: "qc-holder" });
+    const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
+    const p = { axis, label: name, holder, frac: 0.5 };
+    slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
+    const pane = el("div", { class: "qc-pane" });
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
+    wrap.append(pane);
+    state.qc.panes.push(p);
+  }
+  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
+  $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
+  $("qcdir").hidden = true;
+  $("tab-qc").disabled = false;
+  setViewerTab("qc");             // jump to the QC (which refreshes the panes)
+}
+
+// Switch the big pane between the 3D electrode view and the registration QC.
+function setViewerTab(tab) {
+  const qc = tab === "qc";
+  $("viewerframe").hidden = qc;
+  $("viewerqc").hidden = !qc;
+  $("qctools").hidden = !qc;
+  for (const b of $("viewertabs").querySelectorAll("button[data-tab]"))
+    b.classList.toggle("active", b.dataset.tab === tab);
+  if (qc) refreshAllPanes();      // (re)load images every time the QC is shown
+}
+
+function wireQc() {
+  $("viewertabs").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-tab]");
+    if (b && !b.disabled) setViewerTab(b.dataset.tab);
+  });
+  $("qcspace").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    state.qc.space = b.dataset.space;
+    setActive("qcspace", b);
+    refreshAllPanes();
+  });
+  $("qcmodes").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    state.qc.mode = b.dataset.mode;
+    setActive("qcmodes", b);
+    const showVal = b.dataset.mode === "opacity" || b.dataset.mode === "wipe";
+    $("qcvaluewrap").style.visibility = showVal ? "visible" : "hidden";
+    $("qcdir").hidden = b.dataset.mode !== "wipe";
+    refreshAllPanes();
+  });
+  $("qcvalue").addEventListener("input", (ev) => {
+    if (!state.qc) return;
+    state.qc.value = Number(ev.target.value) / 100;
+    refreshAllPanes();
+  });
+  $("qcdir").addEventListener("click", () => {
+    if (!state.qc) return;
+    state.qc.dir = state.qc.dir === "h" ? "v" : "h";
+    $("qcdir").textContent = state.qc.dir === "h" ? "⇄" : "⇅";
+    refreshAllPanes();
+  });
+}
+
+function setActive(groupId, btn) {
+  for (const b of $(groupId).querySelectorAll("button")) b.classList.toggle("active", b === btn);
+}
+
+async function approveLabels() {
+  if (!state.labelJobId) return;
+  try {
+    const doc = await jsend(`${API}/jobs/${state.labelJobId}/labels/approve`, "POST");
+    renderReview(doc);   // regions now populated → visible per contact + in export
+    $("labelmsg").textContent = "Labels applied — shown per contact and included in the export.";
+    $("approvebtn").hidden = true;
+  } catch (e) { $("labelmsg").textContent = `Approve failed: ${e.message}`; }
+}
+
+// Stream a job's logs into a <pre> by id (used for the label job's reg metrics).
+function streamInto(id, elId) {
+  const es = new EventSource(`${API}/jobs/${id}/logs`);
+  es.onmessage = (ev) => {
+    if (!ev.data) return;
+    const e = $(elId);
+    e.textContent += ev.data + "\n";
+    e.scrollTop = e.scrollHeight;
+  };
+  es.addEventListener("end", () => es.close());
+  es.onerror = () => es.close();
 }
 
 // tiny element helper
@@ -269,6 +491,13 @@ async function boot() {
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   $("restartbtn").onclick = restart;
+  $("mriinput").addEventListener("change", (ev) => {
+    const f = ev.target.files[0]; if (f) uploadMri(f);
+  });
+  $("labelbtn").onclick = runLabel;
+  $("approvebtn").onclick = approveLabels;
+  wireQc();
+  loadAtlases();
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;

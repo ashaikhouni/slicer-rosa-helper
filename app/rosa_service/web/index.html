@@ -59,10 +59,56 @@
           <button id="exportbtn" class="primary">Export corrected TSV</button>
         </div>
         <div id="exportmsg" class="muted"></div>
+
+        <details id="labelcard" class="labelcard">
+          <summary>Anatomical labels <span id="labelstatus" class="muted"></span></summary>
+          <div class="labelcard-body">
+            <p class="muted">Bring in the patient MRI (T1); it's registered to the CT
+              and a bundled atlas is warped in to label each contact. Labels are
+              proposed — review, then approve to show them.</p>
+            <div class="labelrow">
+              <label class="field small">MRI (T1)
+                <input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd">
+              </label>
+              <label class="field small">Atlas
+                <select id="atlassel"></select>
+              </label>
+            </div>
+            <button id="labelbtn" class="ghost" disabled>Register MRI &amp; label</button>
+            <pre id="labellog" class="log mini" hidden></pre>
+            <div id="labelmsg" class="muted"></div>
+            <button id="approvebtn" class="primary" hidden>Approve → show labels</button>
+          </div>
+        </details>
+
         <div id="reviewlist"></div>
       </div>
       <div class="viewer">
-        <iframe id="viewerframe" title="3D viewer" allow="fullscreen"></iframe>
+        <div class="viewer-tabs" id="viewertabs">
+          <button data-tab="electrodes" class="active">Electrodes (3D)</button>
+          <button data-tab="qc" id="tab-qc" disabled>Registration</button>
+          <span class="viewer-tools" id="qctools" hidden>
+            <span class="btnset" id="qcspace" hidden>
+              <button data-space="mni" class="active">AC-PC</button>
+              <button data-space="ct">Native</button>
+            </span>
+            <span class="btnset" id="qcmodes">
+              <button data-mode="opacity" class="active">Opacity</button>
+              <button data-mode="wipe">Wipe</button>
+              <button data-mode="color">Color</button>
+            </span>
+            <label id="qcvaluewrap" class="qc-op muted">CT<input type="range" id="qcvalue" min="0" max="100" value="50">MRI</label>
+            <button id="qcdir" class="ghost small" hidden title="wipe direction">⇄</button>
+          </span>
+        </div>
+        <div class="viewer-body">
+          <iframe id="viewerframe" class="viewer-view" title="3D viewer" allow="fullscreen"></iframe>
+          <div id="viewerqc" class="viewer-view" hidden>
+            <div class="qc-planes" id="qcplanes"></div>
+            <p class="qc-hint muted">Structures should line up across the wipe / read gray in
+              Color. Drag a plane's slider to scrub through it.</p>
+          </div>
+        </div>
       </div>
     </div>
     <button id="restartbtn" class="ghost">◀ New case</button>
