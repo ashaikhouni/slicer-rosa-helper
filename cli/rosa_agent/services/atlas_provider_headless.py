@@ -118,21 +118,39 @@ def _register_and_resample_labelmap_to_temp(
     atlas_base_path: str | Path,
     target_volume_path: str | Path,
     *,
+    transform_kind: str = "rigid",
     logger=None,
 ) -> Path:
-    """Register ``atlas_base`` to ``target_volume`` (rigid + Mattes MI),
-    resample ``label_path`` through the same transform onto the target
-    volume's grid (nearest-neighbor), and write the result to a NamedTemp
-    NIfTI. Returns that path.
+    """Register ``atlas_base`` to ``target_volume`` (Mattes MI), resample
+    ``label_path`` through the same transform onto the target volume's
+    grid (nearest-neighbor), and write the result to a NamedTemp NIfTI.
+    Returns that path.
 
-    This is the bridge between FreeSurfer / THOMAS atlases (which were
-    reconned on a T1 in the patient's MRI frame) and SEEG contacts
-    (which live in the postop CT's frame). Without it, sampling the
-    raw parcellation at CT-frame contact RAS coords gives nonsense.
+    ``transform_kind`` selects the registration model:
+
+    * ``"rigid"`` (default) — for a same-subject atlas (FreeSurfer / THOMAS
+      reconned on the patient's own T1). Only pose differs from the CT, so
+      6-DOF is right and safest.
+    * ``"affine"`` — for a **population/MNI** atlas template. A standard
+      brain differs from the patient in size and shape, so 12-DOF (scale +
+      shear) is required; rigid would leave the atlas grossly misaligned.
+
+    This is the bridge between an atlas (in its own template frame) and
+    SEEG contacts (which live in the postop CT's frame). Without it,
+    sampling the raw parcellation at CT-frame contact RAS coords gives
+    nonsense.
     """
     import tempfile
     import SimpleITK as sitk
-    from rosa_core.registration import register_rigid_mi, resample_volume
+    from rosa_core.registration import (
+        register_affine_mi,
+        register_rigid_mi,
+        resample_volume,
+    )
+
+    kind = str(transform_kind).lower()
+    if kind not in ("rigid", "affine"):
+        raise ValueError(f"transform_kind must be 'rigid' or 'affine', got {transform_kind!r}")
 
     target_img = sitk.ReadImage(str(target_volume_path))
     base_img = sitk.ReadImage(str(atlas_base_path))
@@ -141,9 +159,10 @@ def _register_and_resample_labelmap_to_temp(
     if logger is not None:
         logger(
             f"[atlas-reg] registering {Path(atlas_base_path).name} -> "
-            f"{Path(target_volume_path).name} (rigid + MI)…"
+            f"{Path(target_volume_path).name} ({kind} + MI)…"
         )
-    reg_result = register_rigid_mi(
+    register = register_affine_mi if kind == "affine" else register_rigid_mi
+    reg_result = register(
         fixed=target_img, moving=base_img,
         logger=logger,
     )
@@ -202,6 +221,7 @@ class LabelmapAtlasProvider:
         label_names: dict[int, str] | None = None,
         atlas_base_path: str | Path | None = None,
         target_volume_path: str | Path | None = None,
+        transform_kind: str = "rigid",
         logger=None,
     ) -> None:
         self.source_id = str(source_id)
@@ -216,6 +236,7 @@ class LabelmapAtlasProvider:
                 label_path=label_path,
                 atlas_base_path=atlas_base_path,
                 target_volume_path=target_volume_path,
+                transform_kind=transform_kind,
                 logger=logger,
             )
             label_path = self._registered_labelmap_path

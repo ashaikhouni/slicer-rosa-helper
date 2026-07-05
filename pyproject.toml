@@ -116,9 +116,13 @@ exclude = [
 ]
 
 # Non-Python data files that ship inside packages: the bundled
-# electrode-model library JSON and the FreeSurfer color LUT. Both must
+# electrode-model library JSON, the FreeSurfer color LUT, and the bundled
+# MNI atlases (CerebrA labelmap + LUT + the MNI152 2009c template). All must
 # live under ``rosa_core/resources/...`` to ship in the wheel — setuptools
 # only packages data inside the rosa_core/ tree, so a repo-relative
 # ``CommonLib/resources/`` path is NOT included.
 [tool.setuptools.package-data]
-rosa_core = ["resources/**/*.json", "resources/**/*.txt"]
+rosa_core = [
+    "resources/**/*.json", "resources/**/*.txt",
+    "resources/**/*.nii.gz", "resources/**/*.csv", "resources/**/*.md",
+]

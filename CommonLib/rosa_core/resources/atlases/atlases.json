@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "description": "Bundleable MNI-space atlases for contact labeling via affine registration. Each atlas is warped from its template space into the patient CT/T1 frame (see rosa_core.registration.register_affine_mi + the LabelmapAtlasProvider affine path), then sampled at each contact. Only permissively-licensed, redistributable atlases are listed here; non-commercial / all-rights-reserved atlases (FreeSurfer thalamic, AAL3, THOMAS, JHU, Morel, SUIT) are intentionally excluded and remain bring-your-own.",
+  "default": "cerebra",
+  "templates": {
+    "mni152_2009c_sym": {
+      "name": "MNI ICBM152 2009c Nonlinear Symmetric (T1w, 1mm)",
+      "file": "templates/mni152_2009c_sym_T1.nii.gz",
+      "sha256": "317e112c49d086b971e4a26cba853b041ee210faf750a6fe02e04f15909b6b6b",
+      "space": "MNI152NLin2009cSym",
+      "grid": [193, 229, 193],
+      "license": "MNI / Louis Collins BSD-style permissive (redistribution + commercial use granted; retain the copyright notice)",
+      "attribution": "Fonov VS, Evans AC, et al. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54(1):313-327 (2011).",
+      "source_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cSym/tpl-MNI152NLin2009cSym_res-1_T1w.nii.gz"
+    }
+  },
+  "atlases": {
+    "cerebra": {
+      "name": "CerebrA",
+      "long_name": "Cerebrum Atlas (whole-brain): Mindboggle DKT cortical + manually-corrected subcortical",
+      "bundled": true,
+      "labelmap": "cerebra/CerebrA.nii.gz",
+      "labelmap_sha256": "a8f474eb784a3d2e6603b39fe380b6ef5695f668a0a8a36943973538d60ca171",
+      "lut": "cerebra/CerebrA_LabelDetails.csv",
+      "lut_sha256": "1f27188447421c37f35d0cb3c7adebd072ecbe745f52ae23066f3a98337d8c4c",
+      "lut_format": "cerebra_csv",
+      "template": "mni152_2009c_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin2009cSym",
+      "coverage": "whole-brain: 102 labels (51 per hemisphere) — cortical DKT gyri plus thalamus, caudate, putamen, pallidum, hippocampus, amygdala, accumbens, ventral diencephalon, basal forebrain, cerebellum GM/WM, vermal lobules, brainstem, ventricles.",
+      "license": "CC0-1.0 (public-domain dedication of the atlas data)",
+      "attribution": "Manera AL, Dadar M, Fonov V, Collins DL. CerebrA, registration and the human brain atlas. Scientific Data 7:237 (2020).",
+      "source_url": "https://gin.g-node.org/anamanera/CerebrA/raw/master/CerebrA.nii",
+      "provenance": "Upstream CerebrA.nii is float32 (193x229x193, 1mm); bundled copy recast to uint8 (max label 102) and gzipped. Label values and the affine are byte-for-byte preserved; only the storage dtype changed. lut fetched from the same repo's CerebrA_LabelDetails.csv."
+    }
+  }
+}
