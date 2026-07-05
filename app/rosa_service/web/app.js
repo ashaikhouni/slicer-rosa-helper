@@ -358,7 +358,19 @@ function qcSrc(p) {
     `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
 }
 
-function refreshPane(p) { if (state.qc) p.img.src = qcSrc(p); }
+// Load a FRESH <img> each time and swap it in on load. Mutating one <img>'s
+// src in place proved unreliable (Safari would fetch the new image — visible in
+// the server log — but not repaint the element). A new element always paints,
+// and swapping on `load` avoids flicker (the old slice stays until the new one
+// is ready).
+function refreshPane(p) {
+  if (!state.qc) return;
+  const img = new Image();
+  img.className = "qc-img";
+  img.alt = p.label;
+  img.onload = () => { if (state.qc && p.holder.isConnected) p.holder.replaceChildren(img); };
+  img.src = qcSrc(p);
+}
 
 let _qcRaf = 0;
 function refreshAllPanes() {
@@ -376,12 +388,12 @@ function showQc(hasMni) {
   const wrap = $("qcplanes");
   wrap.innerHTML = "";
   for (const [axis, name] of QC_PLANES) {
-    const img = el("img", { class: "qc-img", alt: `${name} registration` });
+    const holder = el("div", { class: "qc-holder" });
     const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-    const p = { axis, img, frac: 0.5 };
+    const p = { axis, label: name, holder, frac: 0.5 };
     slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
     const pane = el("div", { class: "qc-pane" });
-    pane.append(el("div", { class: "muted qc-plane-label" }, name), img, slice);
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
     wrap.append(pane);
     state.qc.panes.push(p);
   }
