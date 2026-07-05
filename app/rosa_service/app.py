@@ -276,10 +276,14 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # NOTE: sync ``def`` on purpose — Starlette runs it in a threadpool, so the
+    # CPU-bound render (numpy + PNG) does NOT block the event loop (job polls,
+    # SSE logs stay responsive even while sliders are dragged). It only reads
+    # runner state (no job scheduling), which is safe off the loop.
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/qc")
-    async def registration_qc(job_id: str, axis: int = 2, frac: float = 0.5,
-                              mode: str = "color", value: float = 0.5,
-                              direction: str = "h", space: str = "ct") -> Response:
+    def registration_qc(job_id: str, axis: int = 2, frac: float = 0.5,
+                        mode: str = "color", value: float = 0.5,
+                        direction: str = "h", space: str = "ct") -> Response:
         """Render a composited CT↔MRI slice (PNG) so registration can be eyed.
 
         ``space``: ``ct`` slices in the CT's native frame; ``mni`` slices in the

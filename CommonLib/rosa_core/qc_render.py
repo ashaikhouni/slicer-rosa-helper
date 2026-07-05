@@ -18,6 +18,7 @@ index samples corresponding anatomy.
 """
 from __future__ import annotations
 
+import os
 import struct
 import zlib
 from pathlib import Path
@@ -25,6 +26,26 @@ from pathlib import Path
 import numpy as np
 
 _AXES = {0: "sagittal", 1: "coronal", 2: "axial"}
+
+# Loading + RAS-reorienting a ~30 MB volume takes ~180 ms; doing it on every
+# slice/opacity/wipe request makes the sliders crawl. Cache the reoriented
+# array per file (invalidated by mtime) so repeat renders only slice + encode.
+_VOL_CACHE: dict[str, tuple[float, np.ndarray]] = {}
+_VOL_CACHE_MAX = 6
+
+
+def _load_canonical_array(path: str | Path) -> np.ndarray:
+    import nibabel as nib
+    path = str(path)
+    mtime = os.path.getmtime(path)
+    hit = _VOL_CACHE.get(path)
+    if hit is not None and hit[0] == mtime:
+        return hit[1]
+    arr = np.asanyarray(nib.as_closest_canonical(nib.load(path)).dataobj)
+    if len(_VOL_CACHE) >= _VOL_CACHE_MAX:
+        _VOL_CACHE.pop(next(iter(_VOL_CACHE)))   # evict oldest
+    _VOL_CACHE[path] = (mtime, arr)
+    return arr
 
 
 def _png_bytes(rgb: np.ndarray) -> bytes:
@@ -55,11 +76,6 @@ def _window(sl: np.ndarray) -> np.ndarray:
         hi = lo + 1.0
     out = np.clip((sl - lo) / (hi - lo), 0.0, 1.0)
     return (out * 255.0 + 0.5).astype(np.uint8)
-
-
-def _canonical(img):
-    import nibabel as nib
-    return nib.as_closest_canonical(img)
 
 
 def _slice(arr: np.ndarray, axis: int, frac: float) -> np.ndarray:
@@ -98,14 +114,10 @@ def render_registration_qc(
     ``checker`` · ``ct`` · ``mri``. Compositing is done here (server-side) so
     the browser only swaps one image per plane — no fragile client overlay.
     """
-    import nibabel as nib
-
     if axis not in _AXES:
         raise ValueError(f"axis must be 0/1/2, got {axis}")
-    ct_img = _canonical(nib.load(str(ct_path)))
-    mri_img = _canonical(nib.load(str(mri_path)))
-    ct = np.asanyarray(ct_img.dataobj)
-    mri = np.asanyarray(mri_img.dataobj)
+    ct = _load_canonical_array(ct_path)
+    mri = _load_canonical_array(mri_path)
     if ct.shape != mri.shape:
         raise ValueError(
             f"CT {ct.shape} and MRI {mri.shape} differ — MRI must be resampled "
