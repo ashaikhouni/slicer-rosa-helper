@@ -15,6 +15,10 @@ The web UI (served at ``/``) talks only to this versioned HTTP+JSON API (under
   * ``POST /api/v1/jobs/{id}/review/export``     — write corrected TSV
   * ``GET  /api/v1/jobs/{id}/files/{path}``      — download a job file
   * ``GET  /api/v1/jobs/{id}/viewer/{path}``     — the 3D viewer
+  * ``GET  /api/v1/atlases``                     — bundled atlases (label picker)
+  * ``POST /api/v1/jobs/{id}/label``             — label a run's contacts (MRI+atlas)
+  * ``GET  /api/v1/jobs/{id}/labels``            — proposed labels + reg QC
+  * ``POST /api/v1/jobs/{id}/labels/approve``    — apply labels to parent's ReviewDoc
 
 Jobs run as supervised subprocesses in an auditable per-job dir (see
 ``jobs.JobRunner``).
@@ -32,7 +36,9 @@ from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .jobs import JobNotFound, JobRunner
-from .models import JobSpec, JobStatus, ReviewDoc, ReviewPatch
+from .models import (
+    JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch,
+)
 from .review import ReviewStore, export_contacts
 
 API_VERSION = "v1"
@@ -50,6 +56,35 @@ def _engine_info() -> dict:
     except Exception:  # noqa: BLE001
         engine_ok = False
     return {"engine": "rosa-agent", "engine_version": version, "engine_import_ok": engine_ok}
+
+
+def _read_proposed_labels(job_dir: Path) -> list[dict]:
+    """Parse a label job's ``contacts_labeled.tsv`` into per-contact regions.
+
+    The engine ``label`` command writes the region under ``closest_label``,
+    keyed by ``trajectory`` + ``contact_index``. Raises FileNotFoundError if
+    the job hasn't produced it (e.g. still running / failed).
+    """
+    from rosa_agent.io.trajectory_io import read_tsv_rows
+    tsv = job_dir / "contacts_labeled.tsv"
+    if not tsv.is_file():
+        raise FileNotFoundError("no contacts_labeled.tsv (label job not finished?)")
+    out: list[dict] = []
+    for r in read_tsv_rows(tsv):
+        region = (r.get("closest_label") or "").strip()
+        if region in ("", "Unknown", "None"):
+            region = None
+        try:
+            idx = int(float(r.get("contact_index") or 0))
+        except ValueError:
+            continue
+        out.append({
+            "shank": (r.get("trajectory") or "").strip(),
+            "index": idx,
+            "name": r.get("contact_label") or "",
+            "region": region,
+        })
+    return out
 
 
 def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) -> FastAPI:
@@ -158,6 +193,84 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         out = job.workdir / "contacts_reviewed.tsv"
         n = export_contacts(doc, out)
         return {"path": str(out), "rel_path": out.name, "n_contacts": n}
+
+    # ---- anatomical labeling (MRI + bundled atlas → proposed labels) ----
+
+    @app.get(f"/api/{API_VERSION}/atlases")
+    async def list_atlases() -> dict:
+        """Bundled atlases available for labeling (for the picker)."""
+        try:
+            from rosa_core import bundled_atlases
+            return {"atlases": bundled_atlases.list_atlases(),
+                    "default": bundled_atlases.load_manifest()["default"]}
+        except Exception as exc:  # noqa: BLE001 — engine/resources missing
+            raise HTTPException(status_code=500, detail=f"atlas registry error: {exc}") from exc
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/label",
+              response_model=JobStatus, status_code=201)
+    async def create_label_job(job_id: str, req: LabelRequest) -> JobStatus:
+        """Start a labeling job for a pipeline run's contacts (through the MRI).
+
+        Registration goes MNI→T1(MRI)→CT; labels are *proposed* and only reach
+        the ReviewDoc once approved (``/labels/approve``).
+        """
+        parent = _job_or_404(job_id)
+        contacts = parent.workdir / "contacts.tsv"
+        if not contacts.is_file():
+            raise HTTPException(status_code=409,
+                                detail="parent job has no contacts.tsv (run a pipeline job first)")
+        ct = parent.params.get("ct")
+        if not ct:
+            raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        spec = JobSpec(kind="label", params={
+            "parent": job_id, "contacts": str(contacts), "ct": ct,
+            "t1": req.t1, "atlas": req.atlas})
+        try:
+            job = runner.create(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return job.status()
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/labels")
+    async def proposed_labels(job_id: str) -> dict:
+        """Proposed labels from a finished label job (not yet applied)."""
+        job = _job_or_404(job_id)
+        try:
+            contacts = _read_proposed_labels(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        n_labeled = sum(1 for c in contacts if c["region"])
+        return {
+            "parent": job.params.get("parent"),
+            "atlas": job.params.get("atlas"),
+            "n_contacts": len(contacts),
+            "n_labeled": n_labeled,
+            "has_mri_qc": (job.workdir / "mri_in_ct.nii.gz").is_file(),
+            "contacts": contacts,
+        }
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/labels/approve",
+              response_model=ReviewDoc)
+    async def approve_labels(job_id: str) -> ReviewDoc:
+        """Apply a label job's proposed regions to the parent's ReviewDoc."""
+        job = _job_or_404(job_id)
+        parent_id = job.params.get("parent")
+        if not parent_id:
+            raise HTTPException(status_code=409, detail="label job has no parent recorded")
+        parent = _job_or_404(parent_id)
+        try:
+            contacts = _read_proposed_labels(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        edits = [ReviewEdit(op=ReviewOp.relabel_contact, shank=c["shank"],
+                            index=c["index"], region=c["region"])
+                 for c in contacts if c["region"]]
+        try:
+            return reviews.apply(parent_id, parent.workdir, edits)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/files/{{path:path}}")
     async def job_file(job_id: str, path: str) -> FileResponse:

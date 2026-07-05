@@ -110,8 +110,20 @@ class ReviewPatch(BaseModel):
     ops: list[ReviewEdit] = Field(default_factory=list)
 
 
+class LabelRequest(BaseModel):
+    """Kick off anatomical labeling of a pipeline job's contacts.
+
+    ``t1`` is the uploaded MRI path (from ``POST /uploads``); ``atlas`` is a
+    bundled atlas id (see ``GET /atlases``). The CT + contacts come from the
+    parent pipeline job.
+    """
+
+    t1: str
+    atlas: str = "cerebra"
+
+
 __all__ = [
     "JobState", "JobSpec", "Artifact", "JobStatus",
     "ReviewContact", "ReviewShank", "ReviewDoc",
-    "ReviewOp", "ReviewEdit", "ReviewPatch",
+    "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest",
 ]

@@ -110,4 +110,20 @@ button:disabled { opacity: .5; cursor: default; }
   border-radius: 6px; background: var(--panel); }
 .viewer { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #0f1720; }
 .viewer iframe { width: 100%; height: 100%; border: 0; display: block; }
+
+/* Anatomical-labels card */
+.labelcard { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  margin: 6px 0 12px; padding: 0 12px; }
+.labelcard > summary { cursor: pointer; padding: 10px 2px; font-weight: 600; font-size: 14px;
+  list-style: none; }
+.labelcard > summary::-webkit-details-marker { display: none; }
+.labelcard > summary::before { content: "▸ "; color: var(--muted); }
+.labelcard[open] > summary::before { content: "▾ "; }
+.labelcard-body { padding: 2px 2px 12px; }
+.labelrow { display: flex; gap: 12px; flex-wrap: wrap; }
+.labelrow .field.small { flex: 1 1 140px; margin: 6px 0; }
+.field.small select { width: 100%; padding: 8px 10px; font: inherit; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.log.mini { max-height: 120px; font-size: 11px; margin: 8px 0; padding: 8px;
+  background: #0f1720; color: #cdd6e0; border-radius: 8px; overflow: auto; white-space: pre-wrap; }
 #restartbtn { margin-top: 12px; }

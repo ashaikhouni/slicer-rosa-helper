@@ -86,6 +86,24 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             "print('emitted',len(rows),'contacts',flush=True)\n"
         )
         return [[py, "-u", "-c", script]]
+    if kind == "selftest-label":
+        # Synthetic contacts_labeled.tsv matching selftest-emit's contacts, so
+        # the label → proposed → approve flow is testable without real
+        # registration (SITK). closest_label carries the region, keyed by
+        # trajectory + contact_index — the same contract the engine emits.
+        script = (
+            "import csv\n"
+            "cols=['trajectory','contact_label','contact_index','closest_label']\n"
+            "rows=[]\n"
+            "for sh,reg in {'LAC':'Left Amygdala','LPC':'Left Hippocampus'}.items():\n"
+            "    for i in range(1,4):\n"
+            "        rows.append({'trajectory':sh,'contact_label':f'{sh}{i}',"
+            "'contact_index':i,'closest_label':reg})\n"
+            "with open('contacts_labeled.tsv','w',newline='') as f:\n"
+            "    w=csv.DictWriter(f,fieldnames=cols,delimiter='\\t'); w.writeheader(); w.writerows(rows)\n"
+            "print('labeled',len(rows),'contacts',flush=True)\n"
+        )
+        return [[py, "-u", "-c", script]]
     if kind == "pipeline":
         ct = spec.params.get("ct")
         if not ct:
@@ -107,6 +125,26 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                     "--ct", ct, "--contacts", contacts, "--trajectories", traj,
                     "--subject-label", label],
         ]
+    if kind == "label":
+        # Anatomical labeling of an existing pipeline run's contacts against a
+        # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a
+        # proposed labeling (contacts_labeled.tsv) + an MRI-in-CT QC volume;
+        # the app applies the labels to the parent's ReviewDoc only on approval.
+        contacts = spec.params.get("contacts")
+        ct = spec.params.get("ct")
+        t1 = spec.params.get("t1")
+        if not (contacts and ct and t1):
+            raise ValueError("label job requires params.contacts, params.ct, params.t1")
+        atlas = str(spec.params.get("atlas") or "cerebra")
+        out = str(workdir / "contacts_labeled.tsv")
+        mri_qc = str(workdir / "mri_in_ct.nii.gz")
+        base = [py, "-u", "-m", "rosa_agent"]
+        return [base + ["label", str(contacts),
+                        "--bundled-atlas", atlas,
+                        "--target-volume", str(ct),
+                        "--intermediate-volume", str(t1),
+                        "--save-registered-mri", mri_qc,
+                        "-o", out]]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 
@@ -122,6 +160,7 @@ class _Job:
     def __init__(self, job_id: str, spec: JobSpec, steps: list[list[str]], workdir: Path):
         self.id = job_id
         self.kind = spec.kind
+        self.params = dict(spec.params)   # kept so e.g. a label job can find its parent's CT
         self.steps = steps
         self.workdir = workdir
         self.state = JobState.queued
@@ -159,7 +198,7 @@ class _Job:
 
     def _write_manifest(self) -> None:
         manifest = {
-            "id": self.id, "kind": self.kind, "steps": self.steps,
+            "id": self.id, "kind": self.kind, "params": self.params, "steps": self.steps,
             "state": self.state.value, "created_at": self.created_at,
             "started_at": self.started_at, "ended_at": self.ended_at,
             "exit_code": self.exit_code, "error": self.error,
@@ -191,7 +230,8 @@ class JobRunner:
                 jid = m.get("id")
                 if not jid or jid in self._jobs:
                     continue
-                job = _Job(jid, JobSpec(kind=m.get("kind", "unknown")),
+                job = _Job(jid, JobSpec(kind=m.get("kind", "unknown"),
+                                        params=m.get("params", {})),
                            m.get("steps", []), manifest.parent)
                 job.state = JobState(m.get("state", "succeeded"))
                 job.created_at = m.get("created_at") or 0.0

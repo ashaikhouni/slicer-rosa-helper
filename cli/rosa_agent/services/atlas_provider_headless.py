@@ -119,6 +119,8 @@ def _register_and_resample_labelmap_to_temp(
     target_volume_path: str | Path,
     *,
     transform_kind: str = "rigid",
+    intermediate_volume_path: str | Path | None = None,
+    save_intermediate_in_target: str | Path | None = None,
     logger=None,
 ) -> Path:
     """Register ``atlas_base`` to ``target_volume`` (Mattes MI), resample
@@ -134,6 +136,18 @@ def _register_and_resample_labelmap_to_temp(
     * ``"affine"`` — for a **population/MNI** atlas template. A standard
       brain differs from the patient in size and shape, so 12-DOF (scale +
       shear) is required; rigid would leave the atlas grossly misaligned.
+
+    ``intermediate_volume_path`` (the patient's own T1) turns on the
+    **through-T1** path, the accurate route for an MNI atlas onto a CT:
+
+        MNI template --affine--> T1 --rigid--> CT
+
+    Cross-modal MNI→CT affine (skull, metal, no cortex contrast) is noisier
+    than MNI→T1 (MR↔MR); registering to the patient's T1 first, then rigidly
+    to the CT, is more robust. The two transforms are composed so the
+    labelmap warps straight onto the CT grid. ``save_intermediate_in_target``
+    additionally writes the T1 resampled into CT space (registration QC — the
+    MRI backdrop the clinician approves against).
 
     This is the bridge between an atlas (in its own template frame) and
     SEEG contacts (which live in the postop CT's frame). Without it,
@@ -156,28 +170,55 @@ def _register_and_resample_labelmap_to_temp(
     base_img = sitk.ReadImage(str(atlas_base_path))
     label_img = sitk.ReadImage(str(label_path))
 
-    if logger is not None:
-        logger(
-            f"[atlas-reg] registering {Path(atlas_base_path).name} -> "
-            f"{Path(target_volume_path).name} ({kind} + MI)…"
+    if intermediate_volume_path is not None:
+        # Through-T1: MNI --affine--> T1 --rigid--> CT, composed.
+        t1_img = sitk.ReadImage(str(intermediate_volume_path))
+        if logger is not None:
+            logger(f"[atlas-reg] through-T1: {Path(atlas_base_path).name} "
+                   f"--affine--> {Path(intermediate_volume_path).name} "
+                   f"--rigid--> {Path(target_volume_path).name}")
+        reg_a = register_affine_mi(fixed=t1_img, moving=base_img, logger=logger)   # T1<-MNI
+        reg_r = register_rigid_mi(fixed=target_img, moving=t1_img, logger=logger)  # CT<-T1
+        if logger is not None:
+            logger(f"[atlas-reg] MNI→T1 metric={reg_a.final_metric:+.5f}; "
+                   f"T1→CT metric={reg_r.final_metric:+.5f}")
+        # Resample maps CT (reference) points → moving space. We need
+        # CT→MNI = affine ∘ rigid, i.e. apply rigid (CT→T1) first. ITK
+        # CompositeTransform applies the LAST-added transform first, so add
+        # the affine (T1→MNI) first and the rigid (CT→T1) last.
+        composite = sitk.CompositeTransform(3)
+        composite.AddTransform(reg_a.transform)
+        composite.AddTransform(reg_r.transform)
+        resampled_label = resample_volume(
+            label_img, composite, reference=target_img, interp="nearest")
+        if save_intermediate_in_target is not None:
+            t1_in_ct = resample_volume(
+                t1_img, reg_r.transform, reference=target_img, interp="linear")
+            sitk.WriteImage(t1_in_ct, str(save_intermediate_in_target))
+            if logger is not None:
+                logger(f"[atlas-reg] wrote MRI-in-CT QC → {save_intermediate_in_target}")
+    else:
+        if logger is not None:
+            logger(
+                f"[atlas-reg] registering {Path(atlas_base_path).name} -> "
+                f"{Path(target_volume_path).name} ({kind} + MI)…"
+            )
+        register = register_affine_mi if kind == "affine" else register_rigid_mi
+        reg_result = register(
+            fixed=target_img, moving=base_img,
+            logger=logger,
         )
-    register = register_affine_mi if kind == "affine" else register_rigid_mi
-    reg_result = register(
-        fixed=target_img, moving=base_img,
-        logger=logger,
-    )
-    if logger is not None:
-        logger(
-            f"[atlas-reg] done: metric={reg_result.final_metric:+.5f} "
-            f"iters={reg_result.n_iterations} "
-            f"({reg_result.converged_reason})"
+        if logger is not None:
+            logger(
+                f"[atlas-reg] done: metric={reg_result.final_metric:+.5f} "
+                f"iters={reg_result.n_iterations} "
+                f"({reg_result.converged_reason})"
+            )
+        resampled_label = resample_volume(
+            label_img, reg_result.transform,
+            reference=target_img,
+            interp="nearest",
         )
-
-    resampled_label = resample_volume(
-        label_img, reg_result.transform,
-        reference=target_img,
-        interp="nearest",
-    )
     # NamedTemporaryFile delete=False so the path survives until the
     # caller (Provider.__init__) can read it back via nibabel; the
     # provider keeps a reference so the file is preserved for the
@@ -222,6 +263,8 @@ class LabelmapAtlasProvider:
         atlas_base_path: str | Path | None = None,
         target_volume_path: str | Path | None = None,
         transform_kind: str = "rigid",
+        intermediate_volume_path: str | Path | None = None,
+        save_intermediate_in_target: str | Path | None = None,
         logger=None,
     ) -> None:
         self.source_id = str(source_id)
@@ -237,6 +280,8 @@ class LabelmapAtlasProvider:
                 atlas_base_path=atlas_base_path,
                 target_volume_path=target_volume_path,
                 transform_kind=transform_kind,
+                intermediate_volume_path=intermediate_volume_path,
+                save_intermediate_in_target=save_intermediate_in_target,
                 logger=logger,
             )
             label_path = self._registered_labelmap_path

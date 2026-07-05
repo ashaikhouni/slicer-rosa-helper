@@ -59,6 +59,28 @@
           <button id="exportbtn" class="primary">Export corrected TSV</button>
         </div>
         <div id="exportmsg" class="muted"></div>
+
+        <details id="labelcard" class="labelcard">
+          <summary>Anatomical labels <span id="labelstatus" class="muted"></span></summary>
+          <div class="labelcard-body">
+            <p class="muted">Bring in the patient MRI (T1); it's registered to the CT
+              and a bundled atlas is warped in to label each contact. Labels are
+              proposed — review, then approve to show them.</p>
+            <div class="labelrow">
+              <label class="field small">MRI (T1)
+                <input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd">
+              </label>
+              <label class="field small">Atlas
+                <select id="atlassel"></select>
+              </label>
+            </div>
+            <button id="labelbtn" class="ghost" disabled>Register MRI &amp; label</button>
+            <pre id="labellog" class="log mini" hidden></pre>
+            <div id="labelmsg" class="muted"></div>
+            <button id="approvebtn" class="primary" hidden>Approve → show labels</button>
+          </div>
+        </details>
+
         <div id="reviewlist"></div>
       </div>
       <div class="viewer">

@@ -5,7 +5,8 @@
 
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
-const state = { ct: null, jobId: null, es: null, poll: null };
+const state = { ct: null, jobId: null, es: null, poll: null,
+                mri: null, labelJobId: null, labelPoll: null };
 
 async function jget(url) {
   const r = await fetch(url);
@@ -151,8 +152,21 @@ async function loadResults(id) {
   };
   frame.src = `${API}/jobs/${id}/viewer/`;
   showStep("results");
+  resetLabelCard();
   try { renderReview(await jget(`${API}/jobs/${id}/review`)); }
   catch (e) { $("reviewlist").textContent = `Could not load review: ${e.message}`; }
+}
+
+// The label card is per-job: a fresh run starts with no MRI / no proposal.
+function resetLabelCard() {
+  clearInterval(state.labelPoll);
+  state.mri = null; state.labelJobId = null;
+  $("mriinput").value = "";
+  $("labelbtn").disabled = true;
+  $("approvebtn").hidden = true;
+  $("labelstatus").textContent = "";
+  $("labelmsg").textContent = "";
+  const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
 }
 
 function renderReview(doc) {
@@ -246,11 +260,108 @@ async function doExport() {
 function restart() {
   if (state.es) state.es.close();
   clearInterval(state.poll);
+  resetLabelCard();
   state.ct = null; state.jobId = null;
   $("ctpath").value = ""; $("fileinput").value = ""; $("exportmsg").textContent = "";
   $("viewerframe").src = "about:blank";
   setCt(null);
   showStep("drop");
+}
+
+// ---- anatomical labeling (MRI → register → propose → approve) --------
+
+async function loadAtlases() {
+  try {
+    const { atlases, default: def } = await jget(`${API}/atlases`);
+    const sel = $("atlassel");
+    sel.innerHTML = "";
+    for (const a of atlases) {
+      const short = (a.name || a.id).split(":")[0].trim();
+      const lic = (a.license || "").split("(")[0].trim();
+      const o = el("option", { value: a.id }, `${short}${lic ? ` — ${lic}` : ""}`);
+      if (!a.available) { o.disabled = true; o.textContent += " (not installed)"; }
+      if (a.id === def) o.selected = true;
+      sel.append(o);
+    }
+  } catch (_e) { $("labelstatus").textContent = "· atlas list unavailable"; }
+}
+
+async function uploadMri(file) {
+  $("labelstatus").textContent = `· uploading ${file.name}…`;
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) { $("labelstatus").textContent = "· MRI upload failed"; return; }
+  state.mri = await r.json();
+  $("labelstatus").textContent = `· MRI ${state.mri.name}`;
+  $("labelbtn").disabled = false;
+}
+
+async function runLabel() {
+  if (!state.mri || !state.jobId) return;
+  $("labelbtn").disabled = true;
+  $("approvebtn").hidden = true;
+  const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
+  $("labelmsg").textContent = "Registering MRI → CT and warping atlas (~30 s)…";
+  try {
+    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
+      { t1: state.mri.path, atlas: $("atlassel").value });
+    state.labelJobId = job.id;
+    streamInto(job.id, "labellog");     // shows the registration metrics (QC)
+    pollLabel(job.id);
+  } catch (e) {
+    $("labelmsg").textContent = `Failed to start: ${e.message}`;
+    $("labelbtn").disabled = false;
+  }
+}
+
+function pollLabel(id) {
+  clearInterval(state.labelPoll);
+  state.labelPoll = setInterval(async () => {
+    let st;
+    try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
+    if (["succeeded", "failed", "cancelled"].includes(st.state)) {
+      clearInterval(state.labelPoll);
+      $("labelbtn").disabled = false;
+      if (st.state === "succeeded") showProposed(id);
+      else $("labelmsg").textContent =
+        `Labeling ${st.state}${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}`;
+    }
+  }, 1000);
+}
+
+async function showProposed(id) {
+  try {
+    const p = await jget(`${API}/jobs/${id}/labels`);
+    $("labelmsg").innerHTML =
+      `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
+      `<strong>${p.atlas}</strong>. Check the registration metrics above and the ` +
+      `anatomy, then approve.`;
+    $("approvebtn").hidden = false;
+  } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
+}
+
+async function approveLabels() {
+  if (!state.labelJobId) return;
+  try {
+    const doc = await jsend(`${API}/jobs/${state.labelJobId}/labels/approve`, "POST");
+    renderReview(doc);   // regions now populated → visible per contact + in export
+    $("labelmsg").textContent = "Labels applied — shown per contact and included in the export.";
+    $("approvebtn").hidden = true;
+  } catch (e) { $("labelmsg").textContent = `Approve failed: ${e.message}`; }
+}
+
+// Stream a job's logs into a <pre> by id (used for the label job's reg metrics).
+function streamInto(id, elId) {
+  const es = new EventSource(`${API}/jobs/${id}/logs`);
+  es.onmessage = (ev) => {
+    if (!ev.data) return;
+    const e = $(elId);
+    e.textContent += ev.data + "\n";
+    e.scrollTop = e.scrollHeight;
+  };
+  es.addEventListener("end", () => es.close());
+  es.onerror = () => es.close();
 }
 
 // tiny element helper
@@ -269,6 +380,12 @@ async function boot() {
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   $("restartbtn").onclick = restart;
+  $("mriinput").addEventListener("change", (ev) => {
+    const f = ev.target.files[0]; if (f) uploadMri(f);
+  });
+  $("labelbtn").onclick = runLabel;
+  $("approvebtn").onclick = approveLabels;
+  loadAtlases();
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
