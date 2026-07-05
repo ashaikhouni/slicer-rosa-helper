@@ -102,6 +102,7 @@ def _build_providers(
                 save_intermediate_in_target=save_registered_mri,
                 save_target_in_atlas=save_ct_in_mni,
                 save_intermediate_in_atlas=save_mri_in_mni,
+                max_distance_mm=assets.max_label_distance_mm,
                 logger=_stderr,
             )
             _route = (f"through-T1 ({Path(intermediate_volume_path).name})"

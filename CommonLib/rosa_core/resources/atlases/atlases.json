@@ -12,6 +12,17 @@
       "license": "MNI / Louis Collins BSD-style permissive (redistribution + commercial use granted; retain the copyright notice)",
       "attribution": "Fonov VS, Evans AC, et al. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54(1):313-327 (2011).",
       "source_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009cSym/tpl-MNI152NLin2009cSym_res-1_T1w.nii.gz"
+    },
+    "mni152_2009a_sym": {
+      "name": "MNI ICBM152 2009a Nonlinear Symmetric (T1w, 2mm)",
+      "file": "templates/mni152_2009a_sym_T1.nii.gz",
+      "sha256": "2012c60a4310c77f06012e0c73c92d4404e35cc0b08b0d0a8945ee38376c9ed9",
+      "space": "MNI152NLin2009aSym",
+      "grid": [98, 116, 94],
+      "license": "MNI / Louis Collins BSD-style permissive (redistribution + commercial use granted; retain the copyright notice)",
+      "attribution": "Fonov VS, Evans AC, et al. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54(1):313-327 (2011).",
+      "source_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009aSym/tpl-MNI152NLin2009aSym_res-1_T1w.nii.gz",
+      "provenance": "Downsampled from the TemplateFlow res-1 (1mm) T1 to 2mm isotropic and rescaled to uint8 (0-255) to keep it small; intensity structure preserved for MI registration. The thalamus_mial atlas is on the native 1mm 2009a-sym grid and warps through the same affine transform."
     }
   },
   "atlases": {
@@ -32,6 +43,25 @@
       "attribution": "Manera AL, Dadar M, Fonov V, Collins DL. CerebrA, registration and the human brain atlas. Scientific Data 7:237 (2020).",
       "source_url": "https://gin.g-node.org/anamanera/CerebrA/raw/master/CerebrA.nii",
       "provenance": "Upstream CerebrA.nii is float32 (193x229x193, 1mm); bundled copy recast to uint8 (max label 102) and gzipped. Label values and the affine are byte-for-byte preserved; only the storage dtype changed. lut fetched from the same repo's CerebrA_LabelDetails.csv."
+    },
+    "thalamus_mial": {
+      "name": "Thalamic nuclei (MIAL)",
+      "long_name": "Probabilistic atlas of the thalamic nuclei (Najdenovska/MIAL) — 7 subparts per hemisphere",
+      "bundled": true,
+      "labelmap": "thalamus_mial/ThalamicNuclei.nii.gz",
+      "labelmap_sha256": "91a6841c62ac86533802f1062627e93fa37cf9e309730848b8272853b77bdb61",
+      "lut": "thalamus_mial/Thalamic_Nuclei-ColorLUT.txt",
+      "lut_sha256": "141df5af64bb33fb51671d2244b38764828e54398ad4bd7488f01daf1e7f39f8",
+      "lut_format": "freesurfer",
+      "template": "mni152_2009a_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin2009aSym",
+      "max_label_distance_mm": 2.0,
+      "coverage": "thalamus only: 14 labels (7 nuclei per hemisphere) — pulvinar, anterior, medio-dorsal, ventral latero-dorsal, central-lateral/lateral-posterior/medial-pulvinar, ventral anterior, ventral latero-ventral. Complements CerebrA's single whole-thalamus label. Contacts outside the thalamus read Unknown.",
+      "license": "CC BY-SA 4.0 (atlas data on Zenodo). ShareAlike: keep the license with the files; ship the labelmap unmodified except the dtype recast noted below.",
+      "attribution": "Najdenovska E, Aleman-Gomez Y, et al. In-vivo probabilistic atlas of human thalamic nuclei based on diffusion-weighted MRI. Scientific Data 5:180270 (2018). Zenodo 10.5281/zenodo.1405484.",
+      "source_url": "https://zenodo.org/records/1405484/files/Thalamus_Nuclei-HCP-MaxProb.nii.gz",
+      "provenance": "Upstream MaxProb map (197x233x189, 1mm, MNI152 2009a nonlinear symmetric) recast to uint8 (max label 14) and gzipped; label values + affine preserved. LUT is the upstream Thalamic_Nuclei-ColorLUT.txt (FreeSurfer-format)."
     }
   }
 }

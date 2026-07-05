@@ -289,11 +289,17 @@ class LabelmapAtlasProvider:
         save_intermediate_in_target: str | Path | None = None,
         save_target_in_atlas: str | Path | None = None,
         save_intermediate_in_atlas: str | Path | None = None,
+        max_distance_mm: float | None = None,
         logger=None,
     ) -> None:
         self.source_id = str(source_id)
         self.display_name = str(display_name)
         self.label_path = str(label_path)
+        # Region-specific atlases (e.g. thalamus-only) should only label
+        # contacts that actually fall inside a labeled voxel; beyond this
+        # distance the nearest-labeled-voxel answer is spurious → return None.
+        self._max_distance_mm = (float(max_distance_mm)
+                                 if max_distance_mm is not None else None)
         # Holds the resampled labelmap temp file (when registration ran)
         # so it survives for the provider's lifetime.
         self._registered_labelmap_path: Path | None = None
@@ -344,6 +350,8 @@ class LabelmapAtlasProvider:
         if not self.is_ready():
             return None
         idx, distance_mm = self._query(point_world_ras)
+        if self._max_distance_mm is not None and distance_mm > self._max_distance_mm:
+            return None   # contact is outside this atlas's coverage
         label_value = int(self._labels[idx])
         label_name = self._label_names.get(label_value, f"Label_{label_value}")
         centroid = self._centroids.get(label_value)
@@ -389,6 +397,7 @@ class ThomasAtlasProvider:
         self.source_id = str(source_id)
         self.display_name = str(display_name)
         self.segmentation_dir = str(segmentation_dir)
+        self._max_distance_mm = None   # THOMAS is not distance-gated
 
         np = _require_numpy()
         seg_paths = sorted(
@@ -429,6 +438,8 @@ class ThomasAtlasProvider:
         if not self.is_ready():
             return None
         idx, distance_mm = self._query(point_world_ras)
+        if self._max_distance_mm is not None and distance_mm > self._max_distance_mm:
+            return None   # contact is outside this atlas's coverage
         label_value = int(self._labels[idx])
         label_name = self._label_names.get(label_value, f"Label_{label_value}")
         centroid = self._centroids.get(label_value)
