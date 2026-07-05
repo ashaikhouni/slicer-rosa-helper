@@ -167,7 +167,9 @@ function resetLabelCard() {
   $("labelstatus").textContent = "";
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
-  $("qcbox").hidden = true; $("qcplanes").innerHTML = ""; state.qc = null;
+  $("qcplanes").innerHTML = ""; state.qc = null;
+  $("tab-qc").disabled = true;
+  setViewerTab("electrodes");
 }
 
 function renderReview(doc) {
@@ -336,16 +338,18 @@ async function showProposed(id) {
     const p = await jget(`${API}/jobs/${id}/labels`);
     $("labelmsg").innerHTML =
       `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
-      `<strong>${p.atlas}</strong>. Evaluate the registration below, then approve.`;
+      `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
     $("approvebtn").hidden = false;
     if (p.has_mri_qc) showQc();
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
 }
 
-// Registration QC: three orthogonal planes, each a CT slice with the MRI slice
-// stacked on top. A global comparison mode composites the two IN THE BROWSER so
-// the sliders are smooth (no re-fetch): Opacity fades MRI over CT; Wipe reveals
-// MRI up to a draggable split (⇄ / ⇅); Color uses the server magenta/green blend.
+// Registration QC lives in the big viewer pane (a tab beside the 3D electrode
+// view). Three orthogonal planes, each a CT slice with the MRI slice stacked on
+// top; a comparison mode composites the two IN THE BROWSER so the sliders are
+// smooth: Opacity fades MRI over CT, Wipe reveals MRI up to a split (⇄/⇅), Color
+// uses the server magenta/green blend. Panes hold DIRECT element references
+// (no DOM re-query) so slice + mode updates are reliable.
 const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
 function qcUrl(axis, frac, mode) {
@@ -354,78 +358,90 @@ function qcUrl(axis, frac, mode) {
 }
 
 function showQc() {
-  state.qc = { mode: "opacity", value: 0.5, dir: "h", frac: { 2: 0.5, 1: 0.5, 0: 0.5 } };
+  state.qc = { mode: "opacity", value: 0.5, dir: "h", panes: [] };
   const wrap = $("qcplanes");
   wrap.innerHTML = "";
   for (const [axis, name] of QC_PLANES) {
-    const pane = el("div", { class: "qc-pane" });
-    const stack = el("div", { class: "qc-stack" });
     const base = el("img", { class: "qc-base", alt: `${name} CT` });
     const over = el("img", { class: "qc-over", alt: `${name} MRI` });
+    const stack = el("div", { class: "qc-stack" });
     stack.append(base, over);
     const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-    slice.dataset.axis = axis;
+    const p = { axis, base, over, frac: 0.5 };
     slice.addEventListener("input", () => {
-      state.qc.frac[axis] = Number(slice.value) / 100;
-      loadPlane(axis);
+      p.frac = Number(slice.value) / 100;
+      loadPane(p);
       applyComparison();
     });
-    pane.append(stack, slice, el("div", { class: "muted qc-plane-label" }, name));
-    pane.dataset.axis = axis;
+    const pane = el("div", { class: "qc-pane" });
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), stack, slice);
     wrap.append(pane);
+    state.qc.panes.push(p);
   }
-  $("qcbox").hidden = false;
   setActive("qcmodes", $("qcmodes").querySelector('[data-mode="opacity"]'));
   $("qcvalue").value = 50;
-  for (const [axis] of QC_PLANES) loadPlane(axis);
+  $("qcvaluewrap").style.visibility = "visible";
+  $("qcdir").hidden = true;
+  for (const p of state.qc.panes) loadPane(p);
   applyComparison();
+  $("tab-qc").disabled = false;
+  setViewerTab("qc");           // jump to the QC when it's ready
 }
 
-// (Re)point a plane's two <img> at the current slice, per the active mode.
-function loadPlane(axis) {
-  const pane = $("qcplanes").querySelector(`.qc-pane[data-axis="${axis}"]`);
-  if (!pane) return;
-  const base = pane.querySelector(".qc-base");
-  const over = pane.querySelector(".qc-over");
-  const frac = state.qc.frac[axis];
+// (Re)point a plane's two <img> at its current slice, per the active mode.
+function loadPane(p) {
   if (state.qc.mode === "color") {
-    base.src = qcUrl(axis, frac, "blend");
-    over.removeAttribute("src");
+    p.base.src = qcUrl(p.axis, p.frac, "blend");
+    p.over.removeAttribute("src");
+    p.over.style.display = "none";
   } else {
-    base.src = qcUrl(axis, frac, "ct");
-    over.src = qcUrl(axis, frac, "mri");
+    p.base.src = qcUrl(p.axis, p.frac, "ct");
+    p.over.src = qcUrl(p.axis, p.frac, "mri");
+    p.over.style.display = "";
   }
 }
 
 // Composite the MRI over the CT for every plane, per mode + slider value.
 function applyComparison() {
+  if (!state.qc) return;
   const { mode, value, dir } = state.qc;
-  for (const [axis] of QC_PLANES) {
-    const pane = $("qcplanes").querySelector(`.qc-pane[data-axis="${axis}"]`);
-    if (!pane) continue;
-    const over = pane.querySelector(".qc-over");
-    if (mode === "color") { over.style.opacity = "0"; over.style.clipPath = ""; continue; }
+  for (const p of state.qc.panes) {
+    if (mode === "color") continue;   // base already shows the blend
     if (mode === "opacity") {
-      over.style.opacity = String(value);
-      over.style.clipPath = "";
+      p.over.style.opacity = String(value);
+      p.over.style.clipPath = "";
     } else { // wipe
-      over.style.opacity = "1";
+      p.over.style.opacity = "1";
       const pct = Math.round(value * 100);
-      over.style.clipPath = dir === "h"
+      p.over.style.clipPath = dir === "h"
         ? `inset(0 ${100 - pct}% 0 0)`   // reveal MRI from the left
         : `inset(0 0 ${100 - pct}% 0)`;  // reveal MRI from the top
     }
   }
 }
 
+// Switch the big pane between the 3D electrode view and the registration QC.
+function setViewerTab(tab) {
+  const qc = tab === "qc";
+  $("viewerframe").hidden = qc;
+  $("viewerqc").hidden = !qc;
+  $("qctools").hidden = !qc;
+  for (const b of $("viewertabs").querySelectorAll("button[data-tab]"))
+    b.classList.toggle("active", b.dataset.tab === tab);
+}
+
 function wireQc() {
+  $("viewertabs").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-tab]");
+    if (b && !b.disabled) setViewerTab(b.dataset.tab);
+  });
   $("qcmodes").addEventListener("click", (ev) => {
     const b = ev.target.closest("button"); if (!b || !state.qc) return;
     state.qc.mode = b.dataset.mode;
     setActive("qcmodes", b);
     $("qcvaluewrap").style.visibility = b.dataset.mode === "color" ? "hidden" : "visible";
     $("qcdir").hidden = b.dataset.mode !== "wipe";
-    for (const [axis] of QC_PLANES) loadPlane(axis);
+    for (const p of state.qc.panes) loadPane(p);
     applyComparison();
   });
   $("qcvalue").addEventListener("input", (ev) => {

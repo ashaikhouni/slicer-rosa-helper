@@ -108,8 +108,21 @@ button:disabled { opacity: .5; cursor: default; }
 .contact input.region { cursor: text; }
 .contact input.region { padding: 4px 8px; font-size: 13px; border: 1px solid var(--line);
   border-radius: 6px; background: var(--panel); }
-.viewer { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: #0f1720; }
-.viewer iframe { width: 100%; height: 100%; border: 0; display: block; }
+.viewer { border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+  background: #0f1720; display: flex; flex-direction: column; }
+.viewer-tabs { display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  background: #0b1017; border-bottom: 1px solid #1c2733; flex-wrap: wrap; }
+.viewer-tabs > button[data-tab] { font: inherit; font-size: 12px; cursor: pointer;
+  padding: 5px 12px; border-radius: 7px; border: 1px solid transparent;
+  background: transparent; color: #9fb0c0; }
+.viewer-tabs > button[data-tab].active { background: #1b2836; color: #eaf1f8; }
+.viewer-tabs > button[data-tab]:disabled { opacity: .45; cursor: default; }
+.viewer-tools { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.viewer-tools .qc-op { color: #9fb0c0; }
+.viewer-body { position: relative; flex: 1; min-height: 0; }
+.viewer-view { position: absolute; inset: 0; }
+iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
+#viewerqc { overflow: auto; background: #0f1720; padding: 10px; }
 
 /* Anatomical-labels card */
 .labelcard { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
@@ -136,16 +149,15 @@ button:disabled { opacity: .5; cursor: default; }
 .btnset button:last-child { border-right: 0; }
 .btnset button.active { background: var(--accent); color: var(--accent-ink); }
 .qc-op { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
-.qc-op input[type=range] { width: 120px; }
+.qc-op input[type=range] { width: 110px; }
 .ghost.small { padding: 4px 9px; font-size: 13px; }
-.qc-planes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.qc-planes { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
 .qc-pane { min-width: 0; }
 .qc-stack { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #000;
   border-radius: 8px; overflow: hidden; }
 .qc-stack img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .qc-over { pointer-events: none; }
 .qc-slice { width: 100%; margin: 6px 0 2px; }
-.qc-plane-label { text-align: center; font-size: 12px; }
-.qc-hint { font-size: 12px; margin: 6px 0 0; }
-@media (max-width: 720px) { .qc-planes { grid-template-columns: 1fr; } }
+.qc-plane-label { text-align: center; font-size: 12px; color: #9fb0c0; margin-bottom: 4px; }
+.qc-hint { font-size: 12px; margin: 6px 2px 0; color: #8595a5; }
 #restartbtn { margin-top: 12px; }
