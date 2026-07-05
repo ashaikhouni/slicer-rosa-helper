@@ -138,12 +138,16 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         atlas = str(spec.params.get("atlas") or "cerebra")
         out = str(workdir / "contacts_labeled.tsv")
         mri_qc = str(workdir / "mri_in_ct.nii.gz")
+        ct_mni = str(workdir / "ct_in_mni.nii.gz")
+        mri_mni = str(workdir / "mri_in_mni.nii.gz")
         base = [py, "-u", "-m", "rosa_agent"]
         return [base + ["label", str(contacts),
                         "--bundled-atlas", atlas,
                         "--target-volume", str(ct),
                         "--intermediate-volume", str(t1),
                         "--save-registered-mri", mri_qc,
+                        "--save-ct-in-mni", ct_mni,
+                        "--save-mri-in-mni", mri_mni,
                         "-o", out]]
     raise ValueError(f"unknown job kind: {kind!r}")
 

@@ -168,6 +168,7 @@ function resetLabelCard() {
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
   $("qcplanes").innerHTML = ""; state.qc = null;
+  $("qcspace").hidden = true;
   $("tab-qc").disabled = true;
   setViewerTab("electrodes");
 }
@@ -340,7 +341,7 @@ async function showProposed(id) {
       `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
       `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
     $("approvebtn").hidden = false;
-    if (p.has_mri_qc) showQc();
+    if (p.has_mri_qc) showQc(p.has_mni_qc);
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
 }
 
@@ -352,9 +353,9 @@ async function showProposed(id) {
 const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
 function qcSrc(p) {
-  const { mode, value, dir } = state.qc;
+  const { mode, value, dir, space } = state.qc;
   return `${API}/jobs/${state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
-    `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}`;
+    `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
 }
 
 function refreshPane(p) { if (state.qc) p.img.src = qcSrc(p); }
@@ -366,8 +367,12 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
-function showQc() {
-  state.qc = { mode: "color", value: 0.5, dir: "h", panes: [] };
+function showQc(hasMni) {
+  // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
+  // when available; otherwise slice the CT's native frame.
+  state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", panes: [] };
+  $("qcspace").hidden = !hasMni;
+  if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
   const wrap = $("qcplanes");
   wrap.innerHTML = "";
   for (const [axis, name] of QC_PLANES) {
@@ -402,6 +407,12 @@ function wireQc() {
   $("viewertabs").addEventListener("click", (ev) => {
     const b = ev.target.closest("button[data-tab]");
     if (b && !b.disabled) setViewerTab(b.dataset.tab);
+  });
+  $("qcspace").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    state.qc.space = b.dataset.space;
+    setActive("qcspace", b);
+    refreshAllPanes();
   });
   $("qcmodes").addEventListener("click", (ev) => {
     const b = ev.target.closest("button"); if (!b || !state.qc) return;

@@ -121,6 +121,8 @@ def _register_and_resample_labelmap_to_temp(
     transform_kind: str = "rigid",
     intermediate_volume_path: str | Path | None = None,
     save_intermediate_in_target: str | Path | None = None,
+    save_target_in_atlas: str | Path | None = None,
+    save_intermediate_in_atlas: str | Path | None = None,
     logger=None,
 ) -> Path:
     """Register ``atlas_base`` to ``target_volume`` (Mattes MI), resample
@@ -197,6 +199,26 @@ def _register_and_resample_labelmap_to_temp(
             sitk.WriteImage(t1_in_ct, str(save_intermediate_in_target))
             if logger is not None:
                 logger(f"[atlas-reg] wrote MRI-in-CT QC → {save_intermediate_in_target}")
+        # Atlas-space (AC-PC aligned MNI grid) copies of CT + MRI for QC in
+        # standard neuroanatomical planes. Invert the two registrations:
+        #   MRI→MNI = resample(T1, ref=MNI, MNI→T1)
+        #   CT →MNI = resample(CT, ref=MNI, MNI→T1→CT)
+        if save_target_in_atlas is not None or save_intermediate_in_atlas is not None:
+            a_inv = reg_a.transform.GetInverse()   # MNI→T1
+            r_inv = reg_r.transform.GetInverse()   # T1→CT
+            if save_intermediate_in_atlas is not None:
+                mri_in_mni = resample_volume(
+                    t1_img, a_inv, reference=base_img, interp="linear")
+                sitk.WriteImage(mri_in_mni, str(save_intermediate_in_atlas))
+            if save_target_in_atlas is not None:
+                mni_to_ct = sitk.CompositeTransform(3)
+                mni_to_ct.AddTransform(r_inv)   # applied second: T1→CT
+                mni_to_ct.AddTransform(a_inv)   # applied first:  MNI→T1
+                ct_in_mni = resample_volume(
+                    target_img, mni_to_ct, reference=base_img, interp="linear")
+                sitk.WriteImage(ct_in_mni, str(save_target_in_atlas))
+            if logger is not None:
+                logger("[atlas-reg] wrote AC-PC (MNI-space) CT/MRI QC copies")
     else:
         if logger is not None:
             logger(
@@ -265,6 +287,8 @@ class LabelmapAtlasProvider:
         transform_kind: str = "rigid",
         intermediate_volume_path: str | Path | None = None,
         save_intermediate_in_target: str | Path | None = None,
+        save_target_in_atlas: str | Path | None = None,
+        save_intermediate_in_atlas: str | Path | None = None,
         logger=None,
     ) -> None:
         self.source_id = str(source_id)
@@ -282,6 +306,8 @@ class LabelmapAtlasProvider:
                 transform_kind=transform_kind,
                 intermediate_volume_path=intermediate_volume_path,
                 save_intermediate_in_target=save_intermediate_in_target,
+                save_target_in_atlas=save_target_in_atlas,
+                save_intermediate_in_atlas=save_intermediate_in_atlas,
                 logger=logger,
             )
             label_path = self._registered_labelmap_path

@@ -63,6 +63,8 @@ def _build_providers(
     atlas_resource_root: str | None = None,
     intermediate_volume_path: str | None = None,
     save_registered_mri: str | None = None,
+    save_ct_in_mni: str | None = None,
+    save_mri_in_mni: str | None = None,
 ) -> dict[str, Any]:
     """Construct the headless atlas providers.
 
@@ -98,6 +100,8 @@ def _build_providers(
                 transform_kind=assets.transform_kind,
                 intermediate_volume_path=intermediate_volume_path,
                 save_intermediate_in_target=save_registered_mri,
+                save_target_in_atlas=save_ct_in_mni,
+                save_intermediate_in_atlas=save_mri_in_mni,
                 logger=_stderr,
             )
             _route = (f"through-T1 ({Path(intermediate_volume_path).name})"
@@ -252,6 +256,16 @@ def main(argv: list[str] | None = None) -> int:
              "the target (CT) frame here — a registration-QC backdrop.",
     )
     parser.add_argument(
+        "--save-ct-in-mni", default="",
+        help="With --intermediate-volume, write the CT resampled into the "
+             "atlas (MNI, AC-PC aligned) grid here — for QC in standard planes.",
+    )
+    parser.add_argument(
+        "--save-mri-in-mni", default="",
+        help="With --intermediate-volume, write the T1 resampled into the "
+             "atlas (MNI) grid here — pairs with --save-ct-in-mni for AC-PC QC.",
+    )
+    parser.add_argument(
         "--list-atlases", action="store_true",
         help="Print the bundled atlas ids (+ coverage/license) and exit.",
     )
@@ -294,6 +308,8 @@ def main(argv: list[str] | None = None) -> int:
         bundled_atlas_id=args.bundled_atlas or None,
         intermediate_volume_path=args.intermediate_volume or None,
         save_registered_mri=args.save_registered_mri or None,
+        save_ct_in_mni=args.save_ct_in_mni or None,
+        save_mri_in_mni=args.save_mri_in_mni or None,
     )
     if not any(p is not None and p.is_ready() for p in providers.values()):
         # Distinguish "nothing requested" (fine — empty output) from
