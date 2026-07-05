@@ -179,6 +179,30 @@ class JobRunner:
         self.work_root.mkdir(parents=True, exist_ok=True)
         self._jobs: dict[str, _Job] = {}
         self._sem = asyncio.Semaphore(max(1, int(max_concurrent)))
+        self._rehydrate()
+
+    def _rehydrate(self) -> None:
+        """Rebuild finished jobs from prior runs' manifests, so a restart keeps
+        their results viewable/reviewable (in-memory registry survives)."""
+        from .models import JobSpec
+        for manifest in sorted(self.work_root.glob("*/manifest.json")):
+            try:
+                m = json.loads(manifest.read_text(encoding="utf-8"))
+                jid = m.get("id")
+                if not jid or jid in self._jobs:
+                    continue
+                job = _Job(jid, JobSpec(kind=m.get("kind", "unknown")),
+                           m.get("steps", []), manifest.parent)
+                job.state = JobState(m.get("state", "succeeded"))
+                job.created_at = m.get("created_at") or 0.0
+                job.started_at = m.get("started_at")
+                job.ended_at = m.get("ended_at")
+                job.exit_code = m.get("exit_code")
+                job.error = m.get("error")
+                job._finished = True   # completed → logs won't stream, routes read disk
+                self._jobs[jid] = job
+            except Exception:  # noqa: BLE001 — skip an unreadable/partial manifest
+                continue
 
     # ---- lookup -----------------------------------------------------
 

@@ -1,26 +1,35 @@
 """FastAPI service — the desktop app's contract over the rosa-agent engine.
 
-The UI talks only to this versioned HTTP+JSON API (under ``/api/v1``), never to
-the engine CLI directly. Endpoints:
+The web UI (served at ``/``) talks only to this versioned HTTP+JSON API (under
+``/api/v1``), never to the engine CLI directly. Endpoints:
 
+  * ``GET  /``                            — the single-page wizard UI
   * ``GET  /healthz``                     — liveness + engine link
+  * ``POST /api/v1/uploads``              — drag-drop a CT → a local path
   * ``POST /api/v1/jobs``                 — create + start a job (JobSpec)
   * ``GET  /api/v1/jobs``                 — list jobs (newest first)
   * ``GET  /api/v1/jobs/{id}``            — job status + artifacts
   * ``GET  /api/v1/jobs/{id}/logs``       — live log stream (SSE)
   * ``DELETE /api/v1/jobs/{id}``          — cancel a running/queued job
+  * ``GET/PATCH /api/v1/jobs/{id}/review``       — editable ReviewDoc
+  * ``POST /api/v1/jobs/{id}/review/export``     — write corrected TSV
+  * ``GET  /api/v1/jobs/{id}/files/{path}``      — download a job file
+  * ``GET  /api/v1/jobs/{id}/viewer/{path}``     — the 3D viewer
 
 Jobs run as supervised subprocesses in an auditable per-job dir (see
-``jobs.JobRunner``). The ReviewDoc DTO + static viewer serving land later.
+``jobs.JobRunner``).
 """
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .jobs import JobNotFound, JobRunner
 from .models import JobSpec, JobStatus, ReviewDoc, ReviewPatch
@@ -55,6 +64,15 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     app = FastAPI(title="ROSA app service", version=API_VERSION)
     app.state.runner = runner
     app.state.reviews = reviews
+
+    @app.middleware("http")
+    async def _no_store(request, call_next):
+        # A local app under active iteration: never let the browser serve a
+        # stale JS/HTML/viewer from cache (no CDN benefit on localhost). Avoids
+        # "I edited the UI but the browser runs the old one" confusion.
+        resp = await call_next(request)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     def _job_or_404(job_id: str):
         try:
@@ -141,6 +159,18 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         n = export_contacts(doc, out)
         return {"path": str(out), "rel_path": out.name, "n_contacts": n}
 
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/files/{{path:path}}")
+    async def job_file(job_id: str, path: str) -> FileResponse:
+        """Download a file from the job dir (e.g. the exported TSV)."""
+        job = _job_or_404(job_id)
+        root = job.workdir.resolve()
+        target = (root / path).resolve()
+        if target != root and root not in target.parents:
+            raise HTTPException(status_code=400, detail="invalid path")
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail=f"not found: {path}")
+        return FileResponse(target, filename=target.name)
+
     # ---- viewer (served-mode static dir produced by view-results) ----
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/viewer")
@@ -163,6 +193,26 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"not found: {path or 'index.html'}")
         return FileResponse(target)
+
+    # ---- uploads (browser drag-drop → a local path a job can consume) ----
+
+    @app.post(f"/api/{API_VERSION}/uploads")
+    async def upload(file: UploadFile = File(...)) -> dict:
+        uploads = Path(work_root) / "_uploads"
+        uploads.mkdir(parents=True, exist_ok=True)
+        name = Path(file.filename or "upload.nii.gz").name  # strip any path
+        dest = uploads / f"{uuid.uuid4().hex[:8]}_{name}"
+        with open(dest, "wb") as out:
+            shutil.copyfileobj(file.file, out)
+        return {"path": str(dest), "name": name, "bytes": dest.stat().st_size}
+
+    # ---- the web UI (single-page wizard), served at / ----
+    # Mounted LAST so the /api and /healthz routes above take precedence; the
+    # SPA + its assets are served for everything else. html=True serves
+    # index.html at /.
+    web_dir = Path(__file__).resolve().parent / "web"
+    if web_dir.is_dir():
+        app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
 
     return app
 

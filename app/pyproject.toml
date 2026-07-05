@@ -26,6 +26,7 @@ dependencies = [
     "rosa-agent",
     "fastapi >= 0.110",
     "uvicorn[standard] >= 0.29",
+    "python-multipart >= 0.0.9",   # UploadFile (drag-drop CT upload)
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,10 @@ test = [
 [project.scripts]
 # Launch the local service (binds 127.0.0.1, prints its URL as JSON).
 rosa-app-serve = "rosa_service.__main__:main"
+
+# Ship the single-page web UI (rosa_service/web/) inside the wheel.
+[tool.setuptools.package-data]
+rosa_service = ["web/*"]
 
 [tool.setuptools.packages.find]
 include = ["rosa_service*"]

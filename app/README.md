@@ -63,5 +63,25 @@ pytest app/tests
 
 ## Status
 
-Scaffold: `/healthz` proving the engine link. Job endpoints, the ReviewDoc DTO,
-SSE logs, static viewer serving, and the Electron shell land in later phases.
+**Working web app** (browser, localhost): drop a postop CT → the service runs
+the real engine (`detect` → place `contacts` → build viewer) → review/edit the
+contacts and inspect them in an in-browser 3D viewer → export a corrected TSV.
+
+- `rosa_service` — FastAPI service: `/healthz`, uploads, jobs (subprocess
+  runner + SSE logs + cancel + manifest), the editable ReviewDoc
+  (`GET/PATCH /review`, `POST /review/export`), file download, and the served
+  3D viewer. It also serves the single-page wizard UI at `/`.
+- `web/` (`rosa_service/web/`) — the vanilla-JS wizard (Drop → Run → Review &
+  export), no build step.
+
+Run it:
+
+```bash
+pip install -e ..            # engine (rosa-agent)
+pip install -e './app[test]' # this app
+rosa-app-serve               # prints the localhost URL; open it in a browser
+```
+
+**Later phases:** model-change / tip-nudge *re-derive* edits (need the engine's
+placement), the FastSurfer/SynthSeg labeling backend, and the **Electron shell**
+with PyInstaller packaging for a double-click desktop app.
