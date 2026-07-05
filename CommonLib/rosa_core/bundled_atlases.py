@@ -52,6 +52,7 @@ class AtlasAssets:
     coverage: str
     license: str
     attribution: str
+    max_label_distance_mm: float | None = None
 
 
 # ---------------------------------------------------------------------
@@ -251,6 +252,7 @@ def resolve(atlas_id: str | None = None,
         coverage=entry.get("coverage", ""),
         license=entry.get("license", ""),
         attribution=entry.get("attribution", ""),
+        max_label_distance_mm=entry.get("max_label_distance_mm"),
     )
 
 

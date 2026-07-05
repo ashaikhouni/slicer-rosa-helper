@@ -74,22 +74,35 @@ class IntegrityTests(unittest.TestCase):
     """The committed atlas binaries must match the manifest's pinned sha256s."""
 
     def test_bundled_files_match_pinned_checksums(self):
+        # Every bundled atlas (labelmap + lut) and every template it uses.
         root = ba.default_resource_root()
         m = ba.load_manifest(root)
-        entry = m["atlases"]["cerebra"]
-        tmpl = m["templates"][entry["template"]]
-        cases = [
-            (root / entry["labelmap"], entry["labelmap_sha256"]),
-            (root / entry["lut"], entry["lut_sha256"]),
-            (root / tmpl["file"], tmpl["sha256"]),
-        ]
-        for path, expected in cases:
-            self.assertEqual(ba.sha256_of(path), expected, f"checksum drift: {path.name}")
+        checked = 0
+        for entry in m["atlases"].values():
+            if not entry.get("bundled"):
+                continue
+            tmpl = m["templates"][entry["template"]]
+            for path, expected in [
+                (root / entry["labelmap"], entry["labelmap_sha256"]),
+                (root / entry["lut"], entry["lut_sha256"]),
+                (root / tmpl["file"], tmpl["sha256"]),
+            ]:
+                self.assertEqual(ba.sha256_of(path), expected, f"checksum drift: {path.name}")
+                checked += 1
+        self.assertGreaterEqual(checked, 6)   # cerebra + thalamus_mial
 
     def test_ensure_available_bundled_verifies_without_download(self):
-        # Should succeed (files present + checksums good) with downloads off.
-        a = ba.ensure_available("cerebra", allow_download=False)
-        self.assertEqual(a.atlas_id, "cerebra")
+        for atlas_id in ("cerebra", "thalamus_mial"):
+            a = ba.ensure_available(atlas_id, allow_download=False)
+            self.assertEqual(a.atlas_id, atlas_id)
+
+    def test_thalamic_atlas_is_distance_gated(self):
+        a = ba.resolve("thalamus_mial")
+        self.assertEqual(a.max_label_distance_mm, 2.0)   # thalamus-only → gated
+        self.assertIsNone(ba.resolve("cerebra").max_label_distance_mm)  # whole-brain → ungated
+        lut = ba.parse_lut(a.lut_path, a.lut_format)
+        self.assertEqual(lut[0], "Unknown")
+        self.assertIn("Pulvinar", lut[1])                # LH-Pulvinar
 
 
 class ChecksumHelperTests(unittest.TestCase):
