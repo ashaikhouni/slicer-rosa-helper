@@ -76,6 +76,23 @@
             </div>
             <button id="labelbtn" class="ghost" disabled>Register MRI &amp; label</button>
             <pre id="labellog" class="log mini" hidden></pre>
+
+            <div id="qcbox" class="qcbox" hidden>
+              <div class="qc-controls">
+                <span class="muted">Registration (MRI ↔ CT):</span>
+                <span class="btnset" id="qcmodes">
+                  <button data-mode="opacity" class="active">Opacity</button>
+                  <button data-mode="wipe">Wipe</button>
+                  <button data-mode="color">Color</button>
+                </span>
+                <label id="qcvaluewrap" class="qc-op muted">CT<input type="range" id="qcvalue" min="0" max="100" value="50">MRI</label>
+                <button id="qcdir" class="ghost small" hidden title="wipe direction">⇄</button>
+              </div>
+              <div class="qc-planes" id="qcplanes"></div>
+              <p class="muted qc-hint">Structures should line up across the wipe / read gray in
+                Color. Drag each slider to scrub that plane.</p>
+            </div>
+
             <div id="labelmsg" class="muted"></div>
             <button id="approvebtn" class="primary" hidden>Approve → show labels</button>
           </div>

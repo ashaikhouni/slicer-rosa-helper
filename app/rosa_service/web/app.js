@@ -6,7 +6,7 @@
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
 const state = { ct: null, jobId: null, es: null, poll: null,
-                mri: null, labelJobId: null, labelPoll: null };
+                mri: null, labelJobId: null, labelPoll: null, qc: null };
 
 async function jget(url) {
   const r = await fetch(url);
@@ -167,6 +167,7 @@ function resetLabelCard() {
   $("labelstatus").textContent = "";
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
+  $("qcbox").hidden = true; $("qcplanes").innerHTML = ""; state.qc = null;
 }
 
 function renderReview(doc) {
@@ -335,10 +336,113 @@ async function showProposed(id) {
     const p = await jget(`${API}/jobs/${id}/labels`);
     $("labelmsg").innerHTML =
       `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
-      `<strong>${p.atlas}</strong>. Check the registration metrics above and the ` +
-      `anatomy, then approve.`;
+      `<strong>${p.atlas}</strong>. Evaluate the registration below, then approve.`;
     $("approvebtn").hidden = false;
+    if (p.has_mri_qc) showQc();
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
+}
+
+// Registration QC: three orthogonal planes, each a CT slice with the MRI slice
+// stacked on top. A global comparison mode composites the two IN THE BROWSER so
+// the sliders are smooth (no re-fetch): Opacity fades MRI over CT; Wipe reveals
+// MRI up to a draggable split (⇄ / ⇅); Color uses the server magenta/green blend.
+const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
+
+function qcUrl(axis, frac, mode) {
+  return `${API}/jobs/${state.labelJobId}/qc?axis=${axis}&mode=${mode}` +
+    `&frac=${frac.toFixed(3)}`;
+}
+
+function showQc() {
+  state.qc = { mode: "opacity", value: 0.5, dir: "h", frac: { 2: 0.5, 1: 0.5, 0: 0.5 } };
+  const wrap = $("qcplanes");
+  wrap.innerHTML = "";
+  for (const [axis, name] of QC_PLANES) {
+    const pane = el("div", { class: "qc-pane" });
+    const stack = el("div", { class: "qc-stack" });
+    const base = el("img", { class: "qc-base", alt: `${name} CT` });
+    const over = el("img", { class: "qc-over", alt: `${name} MRI` });
+    stack.append(base, over);
+    const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
+    slice.dataset.axis = axis;
+    slice.addEventListener("input", () => {
+      state.qc.frac[axis] = Number(slice.value) / 100;
+      loadPlane(axis);
+      applyComparison();
+    });
+    pane.append(stack, slice, el("div", { class: "muted qc-plane-label" }, name));
+    pane.dataset.axis = axis;
+    wrap.append(pane);
+  }
+  $("qcbox").hidden = false;
+  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="opacity"]'));
+  $("qcvalue").value = 50;
+  for (const [axis] of QC_PLANES) loadPlane(axis);
+  applyComparison();
+}
+
+// (Re)point a plane's two <img> at the current slice, per the active mode.
+function loadPlane(axis) {
+  const pane = $("qcplanes").querySelector(`.qc-pane[data-axis="${axis}"]`);
+  if (!pane) return;
+  const base = pane.querySelector(".qc-base");
+  const over = pane.querySelector(".qc-over");
+  const frac = state.qc.frac[axis];
+  if (state.qc.mode === "color") {
+    base.src = qcUrl(axis, frac, "blend");
+    over.removeAttribute("src");
+  } else {
+    base.src = qcUrl(axis, frac, "ct");
+    over.src = qcUrl(axis, frac, "mri");
+  }
+}
+
+// Composite the MRI over the CT for every plane, per mode + slider value.
+function applyComparison() {
+  const { mode, value, dir } = state.qc;
+  for (const [axis] of QC_PLANES) {
+    const pane = $("qcplanes").querySelector(`.qc-pane[data-axis="${axis}"]`);
+    if (!pane) continue;
+    const over = pane.querySelector(".qc-over");
+    if (mode === "color") { over.style.opacity = "0"; over.style.clipPath = ""; continue; }
+    if (mode === "opacity") {
+      over.style.opacity = String(value);
+      over.style.clipPath = "";
+    } else { // wipe
+      over.style.opacity = "1";
+      const pct = Math.round(value * 100);
+      over.style.clipPath = dir === "h"
+        ? `inset(0 ${100 - pct}% 0 0)`   // reveal MRI from the left
+        : `inset(0 0 ${100 - pct}% 0)`;  // reveal MRI from the top
+    }
+  }
+}
+
+function wireQc() {
+  $("qcmodes").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    state.qc.mode = b.dataset.mode;
+    setActive("qcmodes", b);
+    $("qcvaluewrap").style.visibility = b.dataset.mode === "color" ? "hidden" : "visible";
+    $("qcdir").hidden = b.dataset.mode !== "wipe";
+    for (const [axis] of QC_PLANES) loadPlane(axis);
+    applyComparison();
+  });
+  $("qcvalue").addEventListener("input", (ev) => {
+    if (!state.qc) return;
+    state.qc.value = Number(ev.target.value) / 100;
+    applyComparison();
+  });
+  $("qcdir").addEventListener("click", () => {
+    if (!state.qc) return;
+    state.qc.dir = state.qc.dir === "h" ? "v" : "h";
+    $("qcdir").textContent = state.qc.dir === "h" ? "⇄" : "⇅";
+    applyComparison();
+  });
+}
+
+function setActive(groupId, btn) {
+  for (const b of $(groupId).querySelectorAll("button")) b.classList.toggle("active", b === btn);
 }
 
 async function approveLabels() {
@@ -385,6 +489,7 @@ async function boot() {
   });
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
+  wireQc();
   loadAtlases();
   try {
     const h = await jget("/healthz");

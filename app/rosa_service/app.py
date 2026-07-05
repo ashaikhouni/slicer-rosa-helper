@@ -32,7 +32,9 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse, RedirectResponse, Response, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from .jobs import JobNotFound, JobRunner
@@ -271,6 +273,29 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/qc")
+    async def registration_qc(job_id: str, axis: int = 2, frac: float = 0.5,
+                              mode: str = "checker") -> Response:
+        """Render a CT↔MRI overlay slice (PNG) so the registration can be eyed.
+
+        Uses the label job's ``mri_in_ct.nii.gz`` (MRI resampled onto the CT
+        grid) against the CT it was registered to.
+        """
+        job = _job_or_404(job_id)
+        mri = job.workdir / "mri_in_ct.nii.gz"
+        ct = job.params.get("ct")
+        if not mri.is_file() or not ct or not Path(ct).is_file():
+            raise HTTPException(status_code=409,
+                                detail="no registration QC (label job unfinished or no MRI)")
+        try:
+            from rosa_core.qc_render import render_registration_qc
+            png = render_registration_qc(ct, str(mri), axis=int(axis),
+                                         frac=float(frac), mode=str(mode))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"QC render failed: {exc}") from exc
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/files/{{path:path}}")
     async def job_file(job_id: str, path: str) -> FileResponse:

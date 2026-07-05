@@ -126,4 +126,26 @@ button:disabled { opacity: .5; cursor: default; }
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .log.mini { max-height: 120px; font-size: 11px; margin: 8px 0; padding: 8px;
   background: #0f1720; color: #cdd6e0; border-radius: 8px; overflow: auto; white-space: pre-wrap; }
+
+/* Registration QC viewer */
+.qcbox { margin: 10px 0; }
+.qc-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+.btnset { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.btnset button { border: 0; border-right: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); font: inherit; font-size: 12px; padding: 5px 10px; cursor: pointer; }
+.btnset button:last-child { border-right: 0; }
+.btnset button.active { background: var(--accent); color: var(--accent-ink); }
+.qc-op { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.qc-op input[type=range] { width: 120px; }
+.ghost.small { padding: 4px 9px; font-size: 13px; }
+.qc-planes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.qc-pane { min-width: 0; }
+.qc-stack { position: relative; width: 100%; aspect-ratio: 1 / 1; background: #000;
+  border-radius: 8px; overflow: hidden; }
+.qc-stack img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.qc-over { pointer-events: none; }
+.qc-slice { width: 100%; margin: 6px 0 2px; }
+.qc-plane-label { text-align: center; font-size: 12px; }
+.qc-hint { font-size: 12px; margin: 6px 0 0; }
+@media (max-width: 720px) { .qc-planes { grid-template-columns: 1fr; } }
 #restartbtn { margin-top: 12px; }
