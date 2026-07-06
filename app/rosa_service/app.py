@@ -226,7 +226,10 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=409, detail="parent job has no CT recorded")
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
-            "t1": req.t1, "atlas": req.atlas})
+            "t1": req.t1, "atlas": req.atlas,
+            # Cache registrations in the parent case dir so labeling more atlases
+            # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
+            "regcache": str(parent.workdir / "regcache")})
         try:
             job = runner.create(spec)
         except ValueError as exc:

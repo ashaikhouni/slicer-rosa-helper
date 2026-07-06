@@ -378,6 +378,23 @@ def register_affine_mi(
 
 
 # ---------------------------------------------------------------------
+# Transform persistence (for a per-case registration cache)
+# ---------------------------------------------------------------------
+
+
+def save_transform(transform, path) -> None:
+    """Write a SITK transform to ``path`` (.tfm)."""
+    import SimpleITK as sitk
+    sitk.WriteTransform(transform, str(path))
+
+
+def load_transform(path):
+    """Read a SITK transform written by :func:`save_transform`."""
+    import SimpleITK as sitk
+    return sitk.ReadTransform(str(path))
+
+
+# ---------------------------------------------------------------------
 # Resampling helper (for atlas labelmaps + optional CT → ref output)
 # ---------------------------------------------------------------------
 

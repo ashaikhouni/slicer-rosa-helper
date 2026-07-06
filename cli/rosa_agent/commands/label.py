@@ -65,6 +65,7 @@ def _build_providers(
     save_registered_mri: str | None = None,
     save_ct_in_mni: str | None = None,
     save_mri_in_mni: str | None = None,
+    registration_cache: str | None = None,
 ) -> dict[str, Any]:
     """Construct the headless atlas providers.
 
@@ -103,6 +104,8 @@ def _build_providers(
                 save_target_in_atlas=save_ct_in_mni,
                 save_intermediate_in_atlas=save_mri_in_mni,
                 max_distance_mm=assets.max_label_distance_mm,
+                cache_dir=registration_cache,
+                atlas_space=assets.space,
                 logger=_stderr,
             )
             _route = (f"through-T1 ({Path(intermediate_volume_path).name})"
@@ -267,6 +270,12 @@ def main(argv: list[str] | None = None) -> int:
              "atlas (MNI) grid here — pairs with --save-ct-in-mni for AC-PC QC.",
     )
     parser.add_argument(
+        "--registration-cache", default="",
+        help="Directory to cache registration transforms in. T1→CT is computed "
+             "once per case; MNI→T1 once per template space — so labeling more "
+             "atlases (esp. in the same MNI space) skips re-registering.",
+    )
+    parser.add_argument(
         "--list-atlases", action="store_true",
         help="Print the bundled atlas ids (+ coverage/license) and exit.",
     )
@@ -311,6 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         save_registered_mri=args.save_registered_mri or None,
         save_ct_in_mni=args.save_ct_in_mni or None,
         save_mri_in_mni=args.save_mri_in_mni or None,
+        registration_cache=args.registration_cache or None,
     )
     if not any(p is not None and p.is_ready() for p in providers.values()):
         # Distinguish "nothing requested" (fine — empty output) from
