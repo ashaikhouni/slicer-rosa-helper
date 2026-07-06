@@ -57,6 +57,20 @@ class RegisterAffineTests(unittest.TestCase):
         self.assertLess(disp, 8.0)               # in the right ballpark
         self.assertGreater(disp, 1.0)            # and it actually moved
 
+    def test_transform_save_load_roundtrip(self):
+        # The registration cache relies on save/load producing an equivalent
+        # transform (same mapping of a point).
+        import tempfile
+        from rosa_core.registration import save_transform, load_transform
+        tx = sitk.AffineTransform(3)
+        tx.SetTranslation((3.0, -2.0, 1.5))
+        with tempfile.NamedTemporaryFile(suffix=".tfm", delete=False) as f:
+            p = f.name
+        save_transform(tx, p)
+        back = load_transform(p)
+        pt = (5.0, 6.0, 7.0)
+        self.assertTrue(np.allclose(tx.TransformPoint(pt), back.TransformPoint(pt), atol=1e-5))
+
     def test_resample_labelmap_nearest_preserves_labels(self):
         fixed = _phantom()
         moving_labels = sitk.GetImageFromArray(

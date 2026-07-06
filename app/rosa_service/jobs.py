@@ -144,6 +144,10 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         mri_qc = str(workdir / "mri_in_ct.nii.gz")
         ct_mni = str(workdir / "ct_in_mni.nii.gz")
         mri_mni = str(workdir / "mri_in_mni.nii.gz")
+        # Per-case registration cache (in the parent pipeline job's dir) — T1→CT
+        # once per case, MNI→T1 once per template space, so labeling more atlases
+        # reuses the transforms instead of re-registering.
+        regcache = str(spec.params.get("regcache") or (workdir / "regcache"))
         base = [py, "-u", "-m", "rosa_agent"]
         return [base + ["label", str(contacts),
                         "--bundled-atlas", atlas,
@@ -152,6 +156,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                         "--save-registered-mri", mri_qc,
                         "--save-ct-in-mni", ct_mni,
                         "--save-mri-in-mni", mri_mni,
+                        "--registration-cache", regcache,
                         "-o", out]]
     raise ValueError(f"unknown job kind: {kind!r}")
 
