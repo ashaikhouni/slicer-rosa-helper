@@ -147,6 +147,16 @@ class ReviewStore:
 
     def get_or_build(self, job_id: str, job_dir: str | Path) -> ReviewDoc:
         if job_id not in self._docs:
+            # Restore a persisted review (accept/reject/relabel + approved atlas
+            # labels) across restarts; only rebuild from contacts.tsv when there
+            # is no saved review yet.
+            saved = Path(job_dir) / "review.json"
+            if saved.is_file():
+                try:
+                    self._docs[job_id] = ReviewDoc.model_validate_json(saved.read_text())
+                    return self._docs[job_id]
+                except Exception:  # noqa: BLE001 — fall back to a fresh build
+                    pass
             self._docs[job_id] = build_review_doc(job_dir)
             self._persist(job_id, job_dir)
         return self._docs[job_id]

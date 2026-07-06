@@ -503,11 +503,12 @@ async function boot() {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
   } catch { $("engine").textContent = "service unreachable"; }
-  // Resume the most recent completed run so a reload lands on results, not a
-  // blank form (single-user local app).
+  // Resume the most recent completed PIPELINE run so a reload lands on results
+  // (with its viewer + reviewed contacts), not a blank form or a label job that
+  // has no viewer. Label/selftest jobs are skipped here.
   try {
     const jobs = await jget(`${API}/jobs`);        // newest first
-    const done = jobs.find((j) => j.state === "succeeded");
+    const done = jobs.find((j) => j.state === "succeeded" && j.kind === "pipeline");
     if (done) { state.jobId = done.id; loadResults(done.id); }
   } catch (_e) { /* ignore */ }
 }
