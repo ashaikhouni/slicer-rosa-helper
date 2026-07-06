@@ -67,6 +67,13 @@ def main(argv: list[str] | None = None) -> int:
         "--freesurfer-dir", default="",
         help="optional FreeSurfer recon dir — adds the brain mesh (registered to the CT)",
     )
+    parser.add_argument(
+        "--brain-volume", default="",
+        help="optional volume ALREADY in the CT frame (the CT, or an MRI "
+             "resampled to CT) — brain-extracted + marching-cubed into the "
+             "subject's own translucent brain surface. Ignored if --freesurfer-dir "
+             "is given.",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -118,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             trajectories_tsv=trajectories,
             labels_tsv=labels,
             freesurfer_dir=args.freesurfer_dir,
+            brain_volume=args.brain_volume or None,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),
