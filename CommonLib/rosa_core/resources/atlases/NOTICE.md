@@ -5,10 +5,39 @@ templates, redistributed here under their own licenses (not the project's).
 Each is listed in `atlases.json`. This NOTICE satisfies the attribution
 requirement of those licenses; keep it alongside the data when redistributing.
 
-Only permissively-licensed, redistributable resources are bundled. Atlases
-with non-commercial or all-rights-reserved terms (FreeSurfer thalamic nuclei,
-AAL3, THOMAS, Morel, JHU, SUIT/Diedrichsen cerebellum) are deliberately **not**
-bundled and remain bring-your-own.
+Atlases are tagged with a `license_tier` in `atlases.json`:
+
+- **permissive** (CC0 / CC-BY / MIT / BSD) — CerebrA, thalamus_mial, Harvard-Oxford,
+  Schaefer, all templates. Redistributable including commercially.
+- **noncommercial** (CC-BY-NC / FreeSurfer) — SUIT cerebellum, FreeSurfer/Iglesias
+  thalamic nuclei. Bundled here for **non-commercial research use** (the
+  FieldTrip/MNE model); do not use commercially, and keep this notice with them.
+
+All-rights-reserved / registration-gated atlases (THOMAS, Brainnetome) grant no
+redistribution right and remain bring-your-own. The atlas DATA licenses are
+independent of the app's own (permissive) code license.
+
+---
+
+## FreeSurfer / Iglesias thalamic nuclei — `thalamus_iglesias/`  *(non-commercial)*
+
+- **License:** FreeSurfer Software License (permissive Part-A/B grant; retain the
+  MGH copyright notice). Bundled under the non-commercial tier; a commercial
+  redistribution should confirm the atlas-data terms with MGH.
+- **Citation:** Iglesias JE, Insausti R, Lerma-Usabiaga G, et al. *A probabilistic
+  atlas of the human thalamic nuclei combining ex vivo MRI and histology.*
+  NeuroImage 183:314–326 (2018).
+- **Source:** FreeSurfer `SubfieldAtlasesICBMspace` (Thalamus.zip); the 4D
+  probability maps argmaxed to a discrete max-prob labelmap. MNI152 2009c-Sym space.
+
+## SUIT cerebellum (Diedrichsen 2009) — `suit_cerebellum/`  *(non-commercial)*
+
+- **License:** CC BY-NC 3.0 (Diedrichsen lab). Non-commercial use only; attribution
+  required; keep this notice with the files.
+- **Citation:** Diedrichsen J, Balsters JH, Flavell J, Cussans E, Ramnani N. *A
+  probabilistic MR atlas of the human cerebellum.* NeuroImage 46(1):39–46 (2009).
+- **Source:** DiedrichsenLab/cerebellar_atlases `Diedrichsen_2009` (space-MNI dseg).
+  FSL MNI152 space.
 
 ---
 
