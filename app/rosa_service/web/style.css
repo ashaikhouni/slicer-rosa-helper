@@ -118,6 +118,7 @@ button:disabled { opacity: .5; cursor: default; }
 .viewer-tabs > button[data-tab].active { background: #1b2836; color: #eaf1f8; }
 .viewer-tabs > button[data-tab]:disabled { opacity: .45; cursor: default; }
 .viewer-tools { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+.viewer-tools[hidden] { display: none !important; }   /* hidden must beat inline-flex */
 .viewer-tools .qc-op { color: #9fb0c0; }
 .viewer-body { position: relative; flex: 1; min-height: 0; }
 .viewer-view { position: absolute; inset: 0; }
