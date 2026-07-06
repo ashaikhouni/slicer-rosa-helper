@@ -121,9 +121,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         return [
             base + ["detect", ct, "--out", traj],
             base + ["contacts", traj, ct, "--out", contacts],
+            # --brain-volume ct: brain-extract (SynthStrip) + marching-cubes the
+            # CT into the subject's OWN translucent brain surface (accurate — the
+            # patient's actual anatomy, not a template warp) with electrodes
+            # penetrating it. Adds ~1-2 min (SynthStrip) to the run.
             base + ["view-results", str(workdir), "--output", viewer,
                     "--ct", ct, "--contacts", contacts, "--trajectories", traj,
-                    "--subject-label", label],
+                    "--brain-volume", ct, "--subject-label", label],
         ]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a

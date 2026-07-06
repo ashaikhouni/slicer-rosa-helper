@@ -1891,6 +1891,7 @@ def _assemble_viewer(
     contacts: list[dict[str, Any]],
     contact_labels: dict[str, dict[str, str]],
     fs,
+    brain_volume_path: Path | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -1941,8 +1942,35 @@ def _assemble_viewer(
             f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
+    elif brain_volume_path is not None:
+        # No FreeSurfer recon, but we have a volume already in the CT frame
+        # (the CT itself, or the MRI resampled to CT): brain-extract it and
+        # marching-cubes the mask into ONE subject-own brain surface. It's the
+        # patient's actual anatomy (accurate), unlike a template warp — the
+        # electrodes penetrate a translucent gray brain. Vertices come out in
+        # the mask's RAS (== CT RAS), so no registration is needed.
+        try:
+            import tempfile
+            from types import SimpleNamespace
+            from rosa_detect.services.mask_backend import select_brain_mask_to_path
+            from rosa_core.brain_mesh import surface_from_mask
+            _mask = Path(tempfile.mkdtemp()) / "brain_mask.nii.gz"
+            backend = select_brain_mask_to_path(
+                brain_volume_path, _mask, backend="auto", log=_stderr)
+            if backend is None:
+                raise RuntimeError("no brain-extract backend available")
+            bs = surface_from_mask(_mask)
+            surfaces = [SimpleNamespace(
+                name="brain", hemi="lh", kind="brain", annotation_name=None,
+                vertices_ras=bs.vertices_ras, faces=bs.faces,
+                vertex_normals=bs.vertex_normals, vertex_colors_rgba=None,
+            )]
+            _stderr(f"[view] subject brain surface ({backend}): "
+                    f"{bs.n_vertices} verts / {bs.n_faces} faces")
+        except Exception as exc:  # noqa: BLE001 — brain mesh is optional context
+            _stderr(f"[view] brain-extract/mesh failed ({exc}); no brain mesh")
     else:
-        _stderr("[view] no FreeSurfer surfaces; skipping brain mesh")
+        _stderr("[view] no FreeSurfer surfaces / brain volume; skipping brain mesh")
 
     # Always export the working CT as a windowed uint8 slice/MIP volume so the
     # viewer has anatomy even without a FreeSurfer recon. The CT already lives
@@ -2120,6 +2148,7 @@ def run_view_results(
     trajectories_tsv: str | Path | None = None,
     labels_tsv: str | Path | None = None,
     freesurfer_dir: str = "",
+    brain_volume: str | Path | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2164,6 +2193,7 @@ def run_view_results(
         contacts=contacts,
         contact_labels=contact_labels,
         fs=fs,
+        brain_volume_path=(Path(brain_volume) if brain_volume else None),
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,
