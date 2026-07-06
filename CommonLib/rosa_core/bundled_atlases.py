@@ -52,6 +52,7 @@ class AtlasAssets:
     coverage: str
     license: str
     attribution: str
+    license_tier: str = "permissive"   # permissive | noncommercial | fetch
     max_label_distance_mm: float | None = None
 
 
@@ -93,6 +94,7 @@ def list_atlases(root: str | Path | None = None) -> list[dict]:
             "name": entry.get("long_name") or entry.get("name") or atlas_id,
             "coverage": entry.get("coverage", ""),
             "license": entry.get("license", ""),
+            "license_tier": entry.get("license_tier", "permissive"),
             "space": entry.get("space", ""),
             "bundled": bool(entry.get("bundled", False)),
             "available": _atlas_files_present(root, manifest, atlas_id),
@@ -276,6 +278,7 @@ def resolve(atlas_id: str | None = None,
         coverage=entry.get("coverage", ""),
         license=entry.get("license", ""),
         attribution=entry.get("attribution", ""),
+        license_tier=entry.get("license_tier", "permissive"),
         max_label_distance_mm=entry.get("max_label_distance_mm"),
     )
 

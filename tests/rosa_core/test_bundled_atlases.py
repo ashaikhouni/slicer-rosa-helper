@@ -117,9 +117,19 @@ class IntegrityTests(unittest.TestCase):
 
     def test_all_bundled_atlases_available(self):
         rows = {r["id"]: r for r in ba.list_atlases()}
-        for aid in ("cerebra", "thalamus_mial", "harvard_oxford", "schaefer"):
+        for aid in ("cerebra", "thalamus_mial", "harvard_oxford", "schaefer",
+                    "thalamus_iglesias", "suit_cerebellum"):
             self.assertIn(aid, rows)
             self.assertTrue(rows[aid]["available"], aid)
+
+    def test_license_tiers(self):
+        rows = {r["id"]: r for r in ba.list_atlases()}
+        self.assertEqual(rows["cerebra"]["license_tier"], "permissive")
+        self.assertEqual(rows["suit_cerebellum"]["license_tier"], "noncommercial")
+        self.assertEqual(rows["thalamus_iglesias"]["license_tier"], "noncommercial")
+        # every tier is one of the known values
+        self.assertTrue(all(r["license_tier"] in ("permissive", "noncommercial", "fetch")
+                            for r in rows.values()))
 
 
 class ChecksumHelperTests(unittest.TestCase):

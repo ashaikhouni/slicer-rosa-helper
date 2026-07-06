@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "description": "Bundleable MNI-space atlases for contact labeling via affine registration. Each atlas is warped from its template space into the patient CT/T1 frame (see rosa_core.registration.register_affine_mi + the LabelmapAtlasProvider affine path), then sampled at each contact. Only permissively-licensed, redistributable atlases are listed here; non-commercial / all-rights-reserved atlases (FreeSurfer thalamic, AAL3, THOMAS, JHU, Morel, SUIT) are intentionally excluded and remain bring-your-own.",
+  "description": "Bundleable MNI-space atlases for contact labeling via affine registration. Each atlas is warped from its template space into the patient CT/T1 frame (see rosa_core.registration.register_affine_mi + the LabelmapAtlasProvider affine path), then sampled at each contact. Each entry carries a license_tier: 'permissive' (CC0/CC-BY/MIT/BSD — redistributable commercially) or 'noncommercial' (CC-BY-NC / FreeSurfer — redistributable for NON-COMMERCIAL research only; the shipped bundle is thus non-commercial, matching the FieldTrip/MNE model). All-rights-reserved / registration-gated atlases (THOMAS, Brainnetome) grant no redistribution right and remain bring-your-own. The atlas DATA licenses are independent of the app's code license; keep NOTICE.md with the files.",
   "default": "cerebra",
   "templates": {
     "mni152_2009c_sym": {
@@ -41,6 +41,7 @@
       "name": "CerebrA",
       "long_name": "Cerebrum Atlas (whole-brain): Mindboggle DKT cortical + manually-corrected subcortical",
       "bundled": true,
+      "license_tier": "permissive",
       "labelmap": "cerebra/CerebrA.nii.gz",
       "labelmap_sha256": "a8f474eb784a3d2e6603b39fe380b6ef5695f668a0a8a36943973538d60ca171",
       "lut": "cerebra/CerebrA_LabelDetails.csv",
@@ -59,6 +60,7 @@
       "name": "Thalamic nuclei (MIAL)",
       "long_name": "Probabilistic atlas of the thalamic nuclei (Najdenovska/MIAL) — 7 subparts per hemisphere",
       "bundled": true,
+      "license_tier": "permissive",
       "labelmap": "thalamus_mial/ThalamicNuclei.nii.gz",
       "labelmap_sha256": "91a6841c62ac86533802f1062627e93fa37cf9e309730848b8272853b77bdb61",
       "lut": "thalamus_mial/Thalamic_Nuclei-ColorLUT.txt",
@@ -78,6 +80,7 @@
       "name": "Harvard-Oxford",
       "long_name": "Harvard-Oxford cortical + subcortical (maxprob thr25), combined",
       "bundled": true,
+      "license_tier": "permissive",
       "labelmap": "harvard_oxford/HarvardOxford.nii.gz",
       "labelmap_sha256": "04026293210d8203cf57542fc1718620c9b87d49dbfbe807c5ea2d2ec858a997",
       "lut": "harvard_oxford/HarvardOxford_labels.tsv",
@@ -96,6 +99,7 @@
       "name": "Schaefer2018 (400/7)",
       "long_name": "Schaefer 2018 local-global functional cortical parcellation — 400 parcels, 7 networks",
       "bundled": true,
+      "license_tier": "permissive",
       "labelmap": "schaefer/Schaefer400-7.nii.gz",
       "labelmap_sha256": "c59d956bc3b678411defa87b09c054226fc24c5eb0dab8207be71af7047b3cb8",
       "lut": "schaefer/Schaefer400-7_labels.tsv",
@@ -109,6 +113,46 @@
       "attribution": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-Global Parcellation of the Human Cerebral Cortex. Cerebral Cortex 28:3095-3114 (2018).",
       "source_url": "nilearn.datasets.fetch_atlas_schaefer_2018(n_rois=400, yeo_networks=7, resolution_mm=2)",
       "provenance": "nilearn/CBIG 400x7 labelmap (2mm, FSL MNI152) as uint16 (400 > 255) + gzipped; index-name TSV LUT from the nilearn label list."
+    },
+    "thalamus_iglesias": {
+      "name": "Thalamic nuclei (FreeSurfer/Iglesias)",
+      "long_name": "FreeSurfer thalamic nuclei (Iglesias 2018) — 26 nuclei per hemisphere, max-prob",
+      "bundled": true,
+      "license_tier": "noncommercial",
+      "labelmap": "thalamus_iglesias/ThalamicNuclei_Iglesias.nii.gz",
+      "labelmap_sha256": "b38b16ab10ad871f83217d30c6cd94e9d01d3d578fdac192c277d044fe4b6ee9",
+      "lut": "thalamus_iglesias/ThalamicNuclei_Iglesias_labels.tsv",
+      "lut_sha256": "e6b7f7f9a66a53699ae3482dc11c585d6f6b5bf51b2be0233fa4e01112dca27e",
+      "lut_format": "tsv",
+      "template": "mni152_2009c_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin2009cSym",
+      "max_label_distance_mm": 2.0,
+      "coverage": "thalamus only: 52 labels (26 nuclei per hemisphere — AV, VA, VLa/VLp, VPL, VM, CM, MD, Pf, Pulvinar subdivisions, LGN, MGN, CeM, CL, Pc, LD, LP, ...). Finer than thalamus_mial's 7 subparts; the gold-standard thalamic nuclei atlas. Distance-gated; contacts outside the thalamus read Unknown.",
+      "license": "FreeSurfer Software License (permissive Part-A/B grant; retain the MGH notice). NON-COMMERCIAL bundle: usable for research; a commercial distribution should confirm the atlas-data terms with MGH.",
+      "attribution": "Iglesias JE, Insausti R, Lerma-Usabiaga G, et al. A probabilistic atlas of the human thalamic nuclei combining ex vivo MRI and histology. NeuroImage 183:314-326 (2018).",
+      "source_url": "https://surfer.nmr.mgh.harvard.edu/fswiki/SubfieldAtlasesICBMspace (Thalamus.zip)",
+      "provenance": "FreeSurfer ThalamusProbs.MNIsymSpace (4D probability maps, 0.5mm, MNI152 2009c symmetric, cropped to the thalamus) argmaxed to a discrete max-prob labelmap (uint8); LUT names from the shipped names.txt (FreeSurfer thalamic-nuclei IDs)."
+    },
+    "suit_cerebellum": {
+      "name": "Cerebellum (SUIT/Diedrichsen)",
+      "long_name": "SUIT probabilistic cerebellar atlas (Diedrichsen 2009) — lobules + deep nuclei",
+      "bundled": true,
+      "license_tier": "noncommercial",
+      "labelmap": "suit_cerebellum/SUIT_Cerebellum.nii.gz",
+      "labelmap_sha256": "ed075719bcbc87a685db075a58c432d8aa118a8fd0354c1edcb0da37c674ad96",
+      "lut": "suit_cerebellum/SUIT_Cerebellum_labels.tsv",
+      "lut_sha256": "0bf39d7cabe2ecb7e252437ccc6d60a7eed3265590d23749098223f39544d997",
+      "lut_format": "tsv",
+      "template": "mni152_nlin6_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin6Asym",
+      "max_label_distance_mm": 3.0,
+      "coverage": "cerebellum only: 34 labels — lobules (I-IV, V, VI, CrusI/II, VIIb, VIIIa/b, IX, X, split L/R + vermis) plus deep nuclei (dentate, interposed, fastigial). Distance-gated; SEEG rarely targets cerebellum, so most contacts read Unknown.",
+      "license": "CC BY-NC 3.0 (Diedrichsen lab). NON-COMMERCIAL: bundle with attribution + this notice; do not use commercially.",
+      "attribution": "Diedrichsen J, Balsters JH, Flavell J, Cussans E, Ramnani N. A probabilistic MR atlas of the human cerebellum. NeuroImage 46(1):39-46 (2009).",
+      "source_url": "https://github.com/DiedrichsenLab/cerebellar_atlases (Diedrichsen_2009/atl-Anatom_space-MNI_dseg.nii)",
+      "provenance": "space-MNI (FSL MNI152) discrete dseg recast to uint8; index-name TSV LUT derived from atl-Anatom.tsv (color column dropped)."
     }
   }
 }

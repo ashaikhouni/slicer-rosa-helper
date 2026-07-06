@@ -281,8 +281,9 @@ async function loadAtlases() {
     sel.innerHTML = "";
     for (const a of atlases) {
       const short = (a.name || a.id).split(":")[0].trim();
-      const lic = (a.license || "").split("(")[0].trim();
-      const o = el("option", { value: a.id }, `${short}${lic ? ` — ${lic}` : ""}`);
+      const nc = a.license_tier === "noncommercial" ? " · non-commercial" : "";
+      const o = el("option", { value: a.id }, `${short}${nc}`);
+      o.title = a.license || "";                     // full license on hover
       if (!a.available) { o.disabled = true; o.textContent += " (not installed)"; }
       if (a.id === def) o.selected = true;
       sel.append(o);
