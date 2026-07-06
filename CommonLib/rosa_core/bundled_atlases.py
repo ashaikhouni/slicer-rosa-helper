@@ -190,9 +190,33 @@ def _parse_freesurfer_lut(path: str | Path) -> dict[int, str]:
     return parse_freesurfer_lut(path)
 
 
+def parse_index_name_tsv(path: str | Path) -> dict[int, str]:
+    """Parse a two-column ``index<TAB>name`` TSV into ``{value: name}``.
+
+    The BIDS-style LUT the nilearn-derived atlases (Schaefer, Harvard-Oxford)
+    ship with here. A header row and blank/comment lines are skipped; value 0
+    is background/unknown.
+    """
+    names: dict[int, str] = {0: "Unknown"}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 2:
+                continue
+            try:
+                value = int(parts[0])
+            except ValueError:
+                continue          # header / comment
+            name = parts[1].strip()
+            if name:
+                names[value] = name
+    return names
+
+
 _LUT_PARSERS: dict[str, Callable[[str | Path], dict[int, str]]] = {
     "cerebra_csv": parse_cerebra_lut,
     "freesurfer": _parse_freesurfer_lut,
+    "tsv": parse_index_name_tsv,
 }
 
 

@@ -23,6 +23,17 @@
       "attribution": "Fonov VS, Evans AC, et al. Unbiased average age-appropriate atlases for pediatric studies. NeuroImage 54(1):313-327 (2011).",
       "source_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin2009aSym/tpl-MNI152NLin2009aSym_res-1_T1w.nii.gz",
       "provenance": "Downsampled from the TemplateFlow res-1 (1mm) T1 to 2mm isotropic and rescaled to uint8 (0-255) to keep it small; intensity structure preserved for MI registration. The thalamus_mial atlas is on the native 1mm 2009a-sym grid and warps through the same affine transform."
+    },
+    "mni152_nlin6_sym": {
+      "name": "MNI ICBM152 Nonlinear 6th-gen (FSL, T1w, 2mm)",
+      "file": "templates/mni152_nlin6_sym_T1.nii.gz",
+      "sha256": "ec3be584c74622d6b09614acbed05c7668447fa7306b75a3ca6f57c0c7d8ee1a",
+      "space": "MNI152NLin6Asym",
+      "grid": [91, 109, 91],
+      "license": "MNI / Louis Collins BSD-style permissive.",
+      "attribution": "Grabner G, et al.; FSL MNI152 6th-generation nonlinear template. Redistributed via TemplateFlow tpl-MNI152NLin6Asym.",
+      "source_url": "https://templateflow.s3.amazonaws.com/tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_T1w.nii.gz",
+      "provenance": "TemplateFlow res-02 (2mm) T1, rescaled to uint8. Shared by the schaefer + harvard_oxford atlases (both FSL MNI152 2mm space)."
     }
   },
   "atlases": {
@@ -62,6 +73,42 @@
       "attribution": "Najdenovska E, Aleman-Gomez Y, et al. In-vivo probabilistic atlas of human thalamic nuclei based on diffusion-weighted MRI. Scientific Data 5:180270 (2018). Zenodo 10.5281/zenodo.1405484.",
       "source_url": "https://zenodo.org/records/1405484/files/Thalamus_Nuclei-HCP-MaxProb.nii.gz",
       "provenance": "Upstream MaxProb map (197x233x189, 1mm, MNI152 2009a nonlinear symmetric) recast to uint8 (max label 14) and gzipped; label values + affine preserved. LUT is the upstream Thalamic_Nuclei-ColorLUT.txt (FreeSurfer-format)."
+    },
+    "harvard_oxford": {
+      "name": "Harvard-Oxford",
+      "long_name": "Harvard-Oxford cortical + subcortical (maxprob thr25), combined",
+      "bundled": true,
+      "labelmap": "harvard_oxford/HarvardOxford.nii.gz",
+      "labelmap_sha256": "04026293210d8203cf57542fc1718620c9b87d49dbfbe807c5ea2d2ec858a997",
+      "lut": "harvard_oxford/HarvardOxford_labels.tsv",
+      "lut_sha256": "4205a297bde74aa75c7919826473a98b94f96978693abf01519cdebf18aa5109",
+      "lut_format": "tsv",
+      "template": "mni152_nlin6_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin6Asym",
+      "coverage": "cortical (48 gyri, maxprob thr25) plus 15 subcortical structures (thalamus, caudate, putamen, pallidum, hippocampus, amygdala, accumbens per hemisphere + brainstem). Classic anatomical labels; overlaps CerebrA's coverage.",
+      "license": "CC BY-SA 4.0 (FSL Harvard-Oxford atlas). ShareAlike: keep this notice with the files.",
+      "attribution": "Harvard-Oxford atlas, FSL / Harvard Center for Morphometric Analysis (Makris, Goldstein, Kennedy et al.). Distributed with FSL.",
+      "source_url": "nilearn.datasets.fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm' + 'sub-maxprob-thr25-2mm')",
+      "provenance": "Cortical + subcortical maxprob-thr25 (2mm) from nilearn/FSL, merged into one uint8 labelmap (cortical 1-48 kept; true subcortical structures added as 49-63, excluding the WM/cortex/ventricle filler labels). Index-name TSV LUT generated from the nilearn label lists."
+    },
+    "schaefer": {
+      "name": "Schaefer2018 (400/7)",
+      "long_name": "Schaefer 2018 local-global functional cortical parcellation — 400 parcels, 7 networks",
+      "bundled": true,
+      "labelmap": "schaefer/Schaefer400-7.nii.gz",
+      "labelmap_sha256": "c59d956bc3b678411defa87b09c054226fc24c5eb0dab8207be71af7047b3cb8",
+      "lut": "schaefer/Schaefer400-7_labels.tsv",
+      "lut_sha256": "6d37dd7f49f60fbd93771005fde11bef6bb7f6c47526babbfab66fb0ef033362",
+      "lut_format": "tsv",
+      "template": "mni152_nlin6_sym",
+      "transform_kind": "affine",
+      "space": "MNI152NLin6Asym",
+      "coverage": "cortex only: 400 fine functional parcels grouped into 7 Yeo networks (e.g. 7Networks_LH_Vis_1). For research-grade functional-network localization; not anatomical gyrus names. Subcortical/deep contacts read Unknown.",
+      "license": "MIT-style (Schaefer/Yeo CBIG). Redistribution + commercial use permitted with attribution.",
+      "attribution": "Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ, Eickhoff SB, Yeo BTT. Local-Global Parcellation of the Human Cerebral Cortex. Cerebral Cortex 28:3095-3114 (2018).",
+      "source_url": "nilearn.datasets.fetch_atlas_schaefer_2018(n_rois=400, yeo_networks=7, resolution_mm=2)",
+      "provenance": "nilearn/CBIG 400x7 labelmap (2mm, FSL MNI152) as uint16 (400 > 255) + gzipped; index-name TSV LUT from the nilearn label list."
     }
   }
 }

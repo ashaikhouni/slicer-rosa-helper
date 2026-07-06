@@ -123,6 +123,6 @@ exclude = [
 # ``CommonLib/resources/`` path is NOT included.
 [tool.setuptools.package-data]
 rosa_core = [
-    "resources/**/*.json", "resources/**/*.txt",
+    "resources/**/*.json", "resources/**/*.txt", "resources/**/*.tsv",
     "resources/**/*.nii.gz", "resources/**/*.csv", "resources/**/*.md",
 ]

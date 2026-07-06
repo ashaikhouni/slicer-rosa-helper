@@ -35,6 +35,33 @@ bundled and remain bring-your-own.
 - **Source:** Zenodo https://doi.org/10.5281/zenodo.1405484 (MNI152 2009a
   nonlinear symmetric space).
 
+## Harvard-Oxford — `harvard_oxford/HarvardOxford.nii.gz`, `harvard_oxford/HarvardOxford_labels.tsv`
+
+- **License:** CC BY-SA 4.0 (FSL Harvard-Oxford atlas). ShareAlike — keep this
+  notice with the files.
+- **Citation:** Harvard-Oxford cortical & subcortical structural atlases, Harvard
+  Center for Morphometric Analysis (Makris N, Goldstein JM, Kennedy D, et al.);
+  distributed with FSL.
+- **Source:** `nilearn.datasets.fetch_atlas_harvard_oxford` (cort + sub
+  maxprob-thr25-2mm), merged into one labelmap (cortical 1–48 + true subcortical
+  49–63; WM/cortex/ventricle filler labels dropped). FSL MNI152 space.
+
+## Schaefer 2018 — `schaefer/Schaefer400-7.nii.gz`, `schaefer/Schaefer400-7_labels.tsv`
+
+- **License:** MIT-style (Schaefer/Yeo, CBIG). Redistribution + commercial use
+  with attribution.
+- **Citation:** Schaefer A, Kong R, Gordon EM, Laumann TO, Zuo XN, Holmes AJ,
+  Eickhoff SB, Yeo BTT. *Local-Global Parcellation of the Human Cerebral Cortex.*
+  Cerebral Cortex 28:3095–3114 (2018).
+- **Source:** `nilearn.datasets.fetch_atlas_schaefer_2018` (400 parcels, 7
+  networks, 2 mm). FSL MNI152 space.
+
+## MNI ICBM152 Nonlinear 6th-gen (FSL) — `templates/mni152_nlin6_sym_T1.nii.gz`
+
+- **License:** MNI / Louis Collins BSD-style permissive.
+- **Source:** TemplateFlow `tpl-MNI152NLin6Asym` (res-02 T1w), rescaled to uint8.
+  Shared registration template for Harvard-Oxford + Schaefer (both FSL MNI152).
+
 ## MNI ICBM152 2009a Nonlinear Symmetric — `templates/mni152_2009a_sym_T1.nii.gz`
 
 - **License:** MNI / Louis Collins BSD-style permissive grant (same as the 2009c

@@ -104,6 +104,23 @@ class IntegrityTests(unittest.TestCase):
         self.assertEqual(lut[0], "Unknown")
         self.assertIn("Pulvinar", lut[1])                # LH-Pulvinar
 
+    def test_tsv_atlases_parse(self):
+        # Harvard-Oxford + Schaefer ship BIDS index-name TSV LUTs.
+        ho = ba.resolve("harvard_oxford")
+        self.assertEqual(ho.lut_format, "tsv")
+        ho_lut = ba.parse_lut(ho.lut_path, ho.lut_format)
+        self.assertEqual(ho_lut[0], "Unknown")
+        self.assertIn("Right Thalamus", ho_lut.values())    # subcortical merged in
+        sch_lut = ba.parse_lut(*[(x.lut_path, x.lut_format) for x in [ba.resolve("schaefer")]][0])
+        self.assertEqual(len(sch_lut), 401)                 # 400 parcels + background
+        self.assertTrue(sch_lut[1].startswith("7Networks"))
+
+    def test_all_bundled_atlases_available(self):
+        rows = {r["id"]: r for r in ba.list_atlases()}
+        for aid in ("cerebra", "thalamus_mial", "harvard_oxford", "schaefer"):
+            self.assertIn(aid, rows)
+            self.assertTrue(rows[aid]["available"], aid)
+
 
 class ChecksumHelperTests(unittest.TestCase):
     def test_verify_mismatch_raises(self):
