@@ -1734,12 +1734,17 @@ const SURFACE_COLORS = {{
 }};
 function _applySurfaceColor(modeKey) {{
   const rgb = SURFACE_COLORS[modeKey] || SURFACE_COLORS.parcellation;
+  // Only "parcellation" uses the per-vertex COLOR_0; White/Skin are FLAT, so
+  // vertexColors must be turned OFF (otherwise the material colour just
+  // multiplies the parcellation and White/Skin never render).
+  const useVertexColors = (modeKey === "parcellation");
   for (const node of surfaceNodes) {{
     const mesh = node.userData && node.userData._mesh;
     if (!mesh || !mesh.material || !mesh.material.color) continue;
     mesh.material.color.setRGB(rgb[0], rgb[1], rgb[2]);
-    // Vertex colors are already enabled on the material from glTF
-    // (COLOR_0 attribute); nothing else to flip.
+    if (mesh.material.vertexColors !== useVertexColors) {{
+      mesh.material.vertexColors = useVertexColors;
+    }}
     mesh.material.needsUpdate = true;
   }}
 }}

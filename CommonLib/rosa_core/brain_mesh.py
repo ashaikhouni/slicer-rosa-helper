@@ -271,50 +271,62 @@ def brain_tissue_from_fastsurfer_aseg(aseg: Any, reference: Any, *,
     return np.isin(lab, list(exclude), invert=True) & (lab > 0)
 
 
-def aparc_vertex_colors(vertices_ras: np.ndarray, aseg: Any, lut: dict, *,
-                        inward_mm: float = 1.5,
-                        default: tuple = (200, 200, 200)) -> np.ndarray:
-    """Per-vertex RGBA (uint8, N×4) coloring a surface by a FreeSurfer/FastSurfer
-    ``aparc+aseg`` — the classic parcellated cortex look.
+# Subcortical GM / brainstem structures to keep as their own color when a
+# vertex lands directly on one (rare on a pial surface — medial wall/exposures);
+# everything else that isn't cortex is filled with the nearest cortex region.
+_SUBCORT_KEEP = (10, 49, 17, 53, 18, 54, 11, 50, 12, 51, 13, 52, 26, 58, 28, 60,
+                 7, 8, 46, 47, 16)
 
-    Samples the segmentation label a step ``inward_mm`` **toward the mesh
-    centroid** (robustly into the labelled GM ribbon — not along the surface
-    normal, whose winding is unreliable) and maps it through ``lut``
-    (``{label: {"rgba": (r,g,b,a)}}`` from ``parse_freesurfer_lut``). If a vertex
-    still lands unlabelled, it keeps the on-vertex sample. Physical (RAS) coords
-    are shared between the native surface and the (conformed) aseg, so no
-    resampling is needed.
+
+def aparc_vertex_colors(vertices_ras: np.ndarray, aseg: Any, lut: dict, *,
+                        default: tuple = (170, 170, 170)) -> np.ndarray:
+    """Per-vertex RGBA (uint8, N×4) coloring a surface by a FreeSurfer/FastSurfer
+    ``aparc+aseg`` — the classic parcellated cortex look, with **no black/unknown
+    cracks**.
+
+    Samples the label at each vertex. A cortex (1000–2999) or kept-subcortical
+    label is used directly; anything else (background/CSF/WM at the pial boundary
+    or a sulcal fundus) is filled with the **nearest cortex region** (a distance
+    transform over the cortical labels) so every vertex reads as real cortex, not
+    grey or black. Maps through ``lut`` (``{label:{"rgba"}}`` from
+    ``parse_freesurfer_lut``). Physical (RAS) coords are shared between the native
+    surface and the (conformed) aseg, so no resampling is needed.
     """
     import nibabel as nib
+    from scipy import ndimage
 
     aimg = aseg if hasattr(aseg, "dataobj") else nib.load(str(aseg))
     lab = np.asanyarray(aimg.dataobj).astype(np.int32)
     inv = np.linalg.inv(np.asarray(aimg.affine, dtype=float))
     shp = np.array(lab.shape)
 
-    def _sample(pts):
+    def _sample(arr, pts):
         hom = np.concatenate([pts, np.ones((pts.shape[0], 1))], axis=1)
         ijk = np.round((inv @ hom.T).T[:, :3]).astype(int)
         inb = np.all((ijk >= 0) & (ijk < shp), axis=1)
         out = np.zeros(pts.shape[0], dtype=np.int32)
         good = ijk[inb]
-        out[inb] = lab[good[:, 0], good[:, 1], good[:, 2]]
+        out[inb] = arr[good[:, 0], good[:, 1], good[:, 2]]
         return out
 
     v = np.asarray(vertices_ras, dtype=float)
-    labels = _sample(v)
-    if inward_mm:
-        d = v.mean(axis=0) - v
-        d /= (np.linalg.norm(d, axis=1, keepdims=True) + 1e-9)
-        inward = _sample(v + d * float(inward_mm))
-        labels = np.where(inward > 0, inward, labels)   # prefer the in-ribbon label
-    # Vectorized label→RGBA via a lookup table.
+    labels = _sample(lab, v)
+    keep = (((labels >= 1000) & (labels < 3000)) | np.isin(labels, _SUBCORT_KEEP))
+    if not keep.all():
+        cortex = (lab >= 1000) & (lab < 3000)
+        if cortex.any():
+            # For every voxel, the nearest cortex label (grow the parcellation).
+            _, idx = ndimage.distance_transform_edt(~cortex, return_indices=True)
+            near = _sample(lab[tuple(idx)], v)
+            labels = np.where(keep, labels, near)
+
     maxl = (max(lut) + 1) if lut else 1
     table = np.tile(np.array([*default, 255], dtype=np.uint8), (maxl, 1))
     for l, entry in lut.items():
         if 0 <= l < maxl:
             r, g, b, _a = entry["rgba"]
             table[l] = (r, g, b, 255)
+    table[0] = (*default, 255)   # any residual unknown → neutral, never black
     return table[np.clip(labels, 0, maxl - 1)]
 
 
