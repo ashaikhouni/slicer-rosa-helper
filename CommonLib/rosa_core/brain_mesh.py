@@ -250,6 +250,7 @@ def gyral_surface_from_mri(
     smooth_sigma: float = 0.4,
     taubin_iterations: int = 3,
     open_iterations: int = 1,
+    nodule_size: int = 3,
     bias_correct: bool = True,
 ) -> "BrainSurface":
     """Crisp gyral (pial-ish) surface from a T1, without FreeSurfer.
@@ -260,7 +261,9 @@ def gyral_surface_from_mri(
     mesh (whose blur also fills thin sulci). ``step_size=1`` samples every voxel
     for maximum fold detail; ``2`` is ~4× lighter.
 
-    Pipeline: N4 bias-correct (even resolution) → Otsu → build a *cleaned* GM+WM
+    Pipeline: N4 bias-correct (even resolution) → grayscale-open (``nodule_size``,
+    flattens bright vessel/dura specks so they don't bulge the surface) → Otsu →
+    build a *cleaned* GM+WM
     support (opening strips nodules, largest component, fill) → mesh the T1
     isocontour restricted to that support (so removed nodules can't reappear) →
     keep the largest mesh component (drops ventricle-wall shells) → Taubin. Verts
@@ -282,6 +285,11 @@ def gyral_surface_from_mri(
         raise ValueError("empty brain mask")
     if bias_correct:
         t1 = _n4_bias_correct(t1, m)
+    if nodule_size and nodule_size > 0:
+        # Grayscale opening flattens bright blobs smaller than the element
+        # (vessels/dura specks) while preserving the wider cortical ribbon, so
+        # the iso-surface doesn't bulge out into nodules on the gyri.
+        t1 = ndimage.grey_opening(t1, size=int(nodule_size))
     th = threshold_multiotsu(t1[m], classes=3)     # [CSF|GM, GM|WM]
     # Cleaned GM+WM support: opening strips bright nodules (vessels/dura) + the
     # thin bridges attaching them; dilate so the pial isocontour is inside it.

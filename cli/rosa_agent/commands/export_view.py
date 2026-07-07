@@ -789,13 +789,33 @@ host.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101010);
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const key = new THREE.DirectionalLight(0xffffff, 0.9);
-key.position.set(1, 1.2, 0.8);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0xffffff, 0.45);
-fill.position.set(-1, -0.7, -0.6);
-scene.add(fill);
+// Ambient kept low so sulci actually cast shadow (high ambient washes the
+// folds flat — the "mushy from some angles" look). The key + fill lights are
+// repositioned every frame RELATIVE to the camera (see updateLights) so the
+// raking that makes gyri read crisply follows the view instead of only working
+// from one fixed side.
+scene.add(new THREE.AmbientLight(0xffffff, 0.32));
+const key = new THREE.DirectionalLight(0xffffff, 0.95);
+const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+scene.add(key); scene.add(fill);
+scene.add(key.target); scene.add(fill.target);
+const _kOff = new THREE.Vector3(), _fOff = new THREE.Vector3();
+const _camDir = new THREE.Vector3(), _right = new THREE.Vector3();
+function updateLights() {{
+  // Rake the key light across the surface facing the camera: offset it up +
+  // left + toward the viewer from the orbit centre, so folds shadow from any
+  // orientation. Fill comes from the opposite lower-right to lift the darks.
+  camera.getWorldDirection(_camDir);                       // view direction
+  _right.crossVectors(_camDir, camera.up).normalize();
+  _kOff.copy(_camDir).multiplyScalar(-1)
+       .addScaledVector(camera.up, 0.85).addScaledVector(_right, -0.55).normalize();
+  key.position.copy(controls.target).addScaledVector(_kOff, 400);
+  key.target.position.copy(controls.target); key.target.updateMatrixWorld();
+  _fOff.copy(_camDir).multiplyScalar(-1)
+       .addScaledVector(camera.up, -0.6).addScaledVector(_right, 0.6).normalize();
+  fill.position.copy(controls.target).addScaledVector(_fOff, 400);
+  fill.target.position.copy(controls.target); fill.target.updateMatrixWorld();
+}}
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
 camera.position.set(220, 140, 220);
@@ -838,6 +858,7 @@ resize();
 (function loop() {{
   requestAnimationFrame(loop);
   controls.update();
+  updateLights();          // key/fill track the camera so folds rake from any view
   renderer.render(scene, camera);
 }})();
 
