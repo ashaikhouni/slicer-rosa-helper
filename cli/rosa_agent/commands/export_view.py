@@ -586,6 +586,10 @@ _HTML_TEMPLATE = """<!doctype html>
   #canvas-host {{ position: relative; }}
   #canvas-host canvas {{ display: block; }}
   #toolbar {{ position: absolute; top: 10px; left: 10px; right: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }}
+  /* Collapsed by default so the controls don't cover the 3D view — the toggle
+     button stays; everything else (sliders/checkboxes) hides until expanded. */
+  #toolbar.collapsed .plane-ctl {{ display: none; }}
+  #btn-tools {{ font-weight: 600; }}
   #toolbar button {{ background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
   #toolbar button:hover {{ background: rgba(70,70,70,0.95); }}
   .plane-ctl {{ display: inline-flex; align-items: center; gap: 6px; background: rgba(40,40,40,0.85); border: 1px solid #444; padding: 4px 8px; border-radius: 4px; font-size: 11px; color: #ddd; }}
@@ -664,7 +668,8 @@ _HTML_TEMPLATE = """<!doctype html>
     </div>
   </div>
   <div id="canvas-host">
-    <div id="toolbar">
+    <div id="toolbar" class="collapsed">
+      <button id="btn-tools" title="Show/hide controls">Controls ▾</button>
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
       <label class="plane-ctl" data-control="volume">
@@ -779,13 +784,33 @@ host.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x101010);
-scene.add(new THREE.AmbientLight(0xffffff, 0.55));
-const key = new THREE.DirectionalLight(0xffffff, 0.9);
-key.position.set(1, 1.2, 0.8);
-scene.add(key);
-const fill = new THREE.DirectionalLight(0xffffff, 0.45);
-fill.position.set(-1, -0.7, -0.6);
-scene.add(fill);
+// Ambient kept low so sulci actually cast shadow (high ambient washes the
+// folds flat — the "mushy from some angles" look). The key + fill lights are
+// repositioned every frame RELATIVE to the camera (see updateLights) so the
+// raking that makes gyri read crisply follows the view instead of only working
+// from one fixed side.
+scene.add(new THREE.AmbientLight(0xffffff, 0.32));
+const key = new THREE.DirectionalLight(0xffffff, 0.95);
+const fill = new THREE.DirectionalLight(0xffffff, 0.35);
+scene.add(key); scene.add(fill);
+scene.add(key.target); scene.add(fill.target);
+const _kOff = new THREE.Vector3(), _fOff = new THREE.Vector3();
+const _camDir = new THREE.Vector3(), _right = new THREE.Vector3();
+function updateLights() {{
+  // Rake the key light across the surface facing the camera: offset it up +
+  // left + toward the viewer from the orbit centre, so folds shadow from any
+  // orientation. Fill comes from the opposite lower-right to lift the darks.
+  camera.getWorldDirection(_camDir);                       // view direction
+  _right.crossVectors(_camDir, camera.up).normalize();
+  _kOff.copy(_camDir).multiplyScalar(-1)
+       .addScaledVector(camera.up, 0.85).addScaledVector(_right, -0.55).normalize();
+  key.position.copy(controls.target).addScaledVector(_kOff, 400);
+  key.target.position.copy(controls.target); key.target.updateMatrixWorld();
+  _fOff.copy(_camDir).multiplyScalar(-1)
+       .addScaledVector(camera.up, -0.6).addScaledVector(_right, 0.6).normalize();
+  fill.position.copy(controls.target).addScaledVector(_fOff, 400);
+  fill.target.position.copy(controls.target); fill.target.updateMatrixWorld();
+}}
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
 camera.position.set(220, 140, 220);
@@ -828,6 +853,7 @@ resize();
 (function loop() {{
   requestAnimationFrame(loop);
   controls.update();
+  updateLights();          // key/fill track the camera so folds rake from any view
   renderer.render(scene, camera);
 }})();
 
@@ -848,6 +874,21 @@ const originalMaterials = new Map();     // outer Object3D -> child Mesh's origi
 let gltfRoot = null;
 
 const RED = new THREE.MeshStandardMaterial({{ color: 0xff2030, metalness: 0.75, roughness: 0.25 }});
+
+// A bright marker sphere that jumps to the selected contact so it's obvious
+// which one is highlighted — a lone recoloured band is easy to lose among many
+// contacts or inside an opaque brain. depthTest off + high renderOrder draws it
+// on top of everything (visible even when the contact is buried).
+const selectionMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(2.2, 24, 18),
+  new THREE.MeshBasicMaterial({{
+    color: 0xff2233, transparent: true, opacity: 0.55,
+    depthTest: false, depthWrite: false,
+  }})
+);
+selectionMarker.renderOrder = 999;
+selectionMarker.visible = false;
+scene.add(selectionMarker);
 
 function _firstMeshChild(obj) {{
   let mesh = null;
@@ -1608,6 +1649,8 @@ function selectContact(label, shank) {{
     // to scene diag) so a typical shank fills the view comfortably,
     // not "inside the contact" the way a hard-coded 35mm would.
     const pos = node.getWorldPosition(new THREE.Vector3());
+    selectionMarker.position.copy(pos);   // beacon on the highlighted contact
+    selectionMarker.visible = true;
     controls.target.copy(pos);
     const dir = camera.position.clone().sub(pos).normalize();
     if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
@@ -1664,12 +1707,20 @@ function showAll() {{
     _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
     selectedContact = null;
   }}
+  selectionMarker.visible = false;   // clear the highlight beacon
   document.querySelectorAll(".shank-card").forEach(c => c.classList.remove("active"));
   document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
 }}
 
 document.getElementById("btn-reset").addEventListener("click", showAll);
 document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
+(() => {{
+  const bar = document.getElementById("toolbar");
+  const btn = document.getElementById("btn-tools");
+  const sync = () => {{ btn.textContent = bar.classList.contains("collapsed") ? "Controls ▾" : "Controls ▴"; }};
+  btn.addEventListener("click", () => {{ bar.classList.toggle("collapsed"); sync(); }});
+  sync();
+}})();
 
 // Surface color mode dropdown. The GLB already has per-vertex RGBA
 // colors painted from the FS aparc.annot; the surface material's
@@ -1893,6 +1944,10 @@ def _assemble_viewer(
     fs,
     brain_volume_path: Path | None = None,
     brain_mask_cache_path: Path | None = None,
+    brain_gyri: bool = False,
+    brain_native_volume_path: Path | None = None,
+    brain_to_ct_transform_path: Path | None = None,
+    brain_surface_cache_path: Path | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -1943,6 +1998,71 @@ def _assemble_viewer(
             f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
+    elif brain_native_volume_path is not None or (
+            brain_surface_cache_path is not None and Path(brain_surface_cache_path).is_file()):
+        # No FreeSurfer recon, but we have the NATIVE MRI (1mm, isotropic) +
+        # the MRI→CT rigid transform the labeling step already computed. Mesh
+        # the gyri in the native frame (clean, no interpolation ramps) and push
+        # the surface into CT via that transform — the same trick FS surfaces
+        # use. This is the accurate, bundleable "gyri without FreeSurfer" path;
+        # meshing the MRI *resampled onto the anisotropic CT grid* looks bumpy.
+        try:
+            import tempfile
+            import numpy as np
+            from types import SimpleNamespace
+            from rosa_core.brain_mesh import BrainSurface
+            scache = Path(brain_surface_cache_path) if brain_surface_cache_path else None
+            if scache is not None and scache.is_file():
+                # The surface is atlas-independent (it depends only on the MRI +
+                # CT + registration, all fixed per case), so it's built ONCE per
+                # case and every later label reuses it — no re-mesh, no re-warp.
+                d = np.load(scache)
+                bs = BrainSurface(vertices_ras=d["v"], faces=d["f"], vertex_normals=d["n"])
+                backend = "cached-surface"
+                _stderr(f"[view] reusing cached brain surface {scache.name} "
+                        f"({bs.n_vertices} verts)")
+            else:
+                from rosa_detect.services.mask_backend import select_brain_mask_to_path
+                from rosa_core.brain_mesh import gyral_surface_from_mri, transform_surface
+                from rosa_core.registration import transform_to_4x4_ras, load_transform
+                # Native brain mask (SynthStrip), cached once per case.
+                cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+                if cache is not None and cache.is_file():
+                    nmask, backend = cache, "cached"
+                else:
+                    nmask = cache or (Path(tempfile.mkdtemp()) / "brain_mask_native.nii.gz")
+                    if cache is not None:
+                        cache.parent.mkdir(parents=True, exist_ok=True)
+                    backend = select_brain_mask_to_path(
+                        brain_native_volume_path, nmask, backend="auto", log=_stderr)
+                    if backend is None:
+                        raise RuntimeError("no brain-extract backend available")
+                # Crisp gyral iso-surface in the native MRI frame (step_size=1 for
+                # fold detail; grayscale iso + N4 + nodule-stripped support).
+                bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
+                # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
+                # moving=T1) when present; otherwise register here as a fallback.
+                tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
+                if tfp is not None and tfp.is_file():
+                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(load_transform(str(tfp))))
+                    _stderr(f"[view] reusing cached MRI→CT transform {tfp.name}")
+                else:
+                    _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
+                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
+                bs = transform_surface(bs, ct_from_t1)
+                if scache is not None:
+                    scache.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals)
+                    _stderr(f"[view] cached brain surface → {scache.name}")
+            surfaces = [SimpleNamespace(
+                name="brain", hemi="lh", kind="brain", annotation_name=None,
+                vertices_ras=bs.vertices_ras, faces=bs.faces,
+                vertex_normals=bs.vertex_normals, vertex_colors_rgba=None,
+            )]
+            _stderr(f"[view] subject brain surface (native+gyri, {backend}): "
+                    f"{bs.n_vertices} verts / {bs.n_faces} faces")
+        except Exception as exc:  # noqa: BLE001 — brain mesh is optional context
+            _stderr(f"[view] native gyral mesh failed ({exc}); no brain mesh")
     elif brain_volume_path is not None or brain_mask_cache_path is not None:
         # No FreeSurfer recon, but we have a volume already in the CT frame
         # (typically the MRI resampled to CT): brain-extract it and marching-cubes
@@ -1969,9 +2089,21 @@ def _assemble_viewer(
                     raise RuntimeError("no brain-extract backend available")
             else:
                 raise RuntimeError("brain mask cache absent and no brain volume to extract")
-            # step_size=4 (~26k verts vs ~103k at the default 2) — a translucent
-            # context envelope needs no gyral detail, and it loads ~4x smaller.
-            bs = surface_from_mask(_mask, step_size=4)
+            if brain_gyri and brain_volume_path is not None:
+                # Fold the surface into the sulci: Otsu-drop CSF from the T1 so
+                # the mesh follows GM/WM (gyri) instead of the filled envelope.
+                # Low smooth_sigma / few Taubin passes so the folds survive;
+                # step_size=3 keeps the gyral detail at ~half the weight of
+                # step 2 (~100k verts / ~5MB vs ~240k / ~11MB — step 2 is overkill).
+                from rosa_core.brain_mesh import gyral_mask_from_mri
+                gmwm = gyral_mask_from_mri(brain_volume_path, _mask)
+                bs = surface_from_mask(
+                    gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=3)
+                backend = f"{backend}+gyri"
+            else:
+                # step_size=4 (~26k verts vs ~103k at the default 2) — a translucent
+                # context envelope needs no gyral detail, and it loads ~4x smaller.
+                bs = surface_from_mask(_mask, step_size=4)
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain", annotation_name=None,
                 vertices_ras=bs.vertices_ras, faces=bs.faces,
@@ -2162,6 +2294,10 @@ def run_view_results(
     freesurfer_dir: str = "",
     brain_volume: str | Path | None = None,
     brain_mask_cache: str | Path | None = None,
+    brain_gyri: bool = False,
+    brain_native_volume: str | Path | None = None,
+    brain_to_ct_transform: str | Path | None = None,
+    brain_surface_cache: str | Path | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2208,6 +2344,10 @@ def run_view_results(
         fs=fs,
         brain_volume_path=(Path(brain_volume) if brain_volume else None),
         brain_mask_cache_path=(Path(brain_mask_cache) if brain_mask_cache else None),
+        brain_gyri=brain_gyri,
+        brain_native_volume_path=(Path(brain_native_volume) if brain_native_volume else None),
+        brain_to_ct_transform_path=(Path(brain_to_ct_transform) if brain_to_ct_transform else None),
+        brain_surface_cache_path=(Path(brain_surface_cache) if brain_surface_cache else None),
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

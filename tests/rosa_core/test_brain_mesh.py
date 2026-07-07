@@ -20,7 +20,10 @@ try:
     import numpy as np
     import nibabel as nib
     import skimage  # noqa: F401  — the [mesh] extra
-    from rosa_core.brain_mesh import surface_from_mask, BrainSurface
+    from rosa_core.brain_mesh import (
+        surface_from_mask, gyral_mask_from_mri, gyral_surface_from_mri,
+        transform_surface, BrainSurface,
+    )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
     HAVE_DEPS = False
@@ -104,6 +107,115 @@ class SyntheticBallTests(unittest.TestCase):
         nib.save(nib.Nifti1Image(np.zeros((16, 16, 16), np.uint8), np.eye(4)), str(empty))
         with self.assertRaises(ValueError):
             surface_from_mask(empty)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
+class GyralMaskTests(unittest.TestCase):
+    """gyral_mask_from_mri: Otsu-drop CSF from a T1 inside the brain mask.
+
+    A synthetic 3-tissue phantom (dark CSF shell / mid GM / bright WM core)
+    inside a ball mask must keep GM+WM and drop the CSF, so the result is a
+    subset of the mask that still contains the bright core.
+    """
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        n = 48
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        r = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2)
+        # Concentric intensity shells: CSF (dark) outside, GM mid, WM bright core.
+        t1 = np.zeros((n, n, n), np.float32)
+        t1[r <= 20] = 30.0    # CSF-like rim
+        t1[r <= 15] = 120.0   # GM-like
+        t1[r <= 8] = 240.0    # WM-like core
+        mask = (r <= 20).astype(np.uint8)
+        affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        affine[:3, 3] = [-24.0, -24.0, -24.0]
+        self.vol = Path(self.td.name) / "t1.nii.gz"
+        self.mask = Path(self.td.name) / "mask.nii.gz"
+        nib.save(nib.Nifti1Image(t1, affine), str(self.vol))
+        nib.save(nib.Nifti1Image(mask, affine), str(self.mask))
+        self.affine = affine
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_drops_csf_keeps_gm_wm(self):
+        img = gyral_mask_from_mri(self.vol, self.mask)
+        gm = np.asanyarray(img.dataobj) > 0
+        full = np.asanyarray(nib.load(str(self.mask)).dataobj) > 0
+        # A strict subset of the brain mask (the dark CSF rim is dropped)...
+        self.assertTrue(gm[full].all() or gm.sum() < full.sum())
+        self.assertLess(int(gm.sum()), int(full.sum()))
+        # ...that still contains the bright WM core (never dropped).
+        n = gm.shape[0]
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        core = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2) <= 6
+        self.assertTrue(gm[core].all())
+        # Meshable with folds preserved (low smoothing).
+        surf = surface_from_mask(img, smooth_sigma=0.5, taubin_iterations=4)
+        self.assertGreater(surf.n_vertices, 100)
+
+    def test_accepts_nibabel_images(self):
+        # The viewer passes nibabel images (no temp file); path and image agree.
+        vimg = nib.load(str(self.vol))
+        mimg = nib.load(str(self.mask))
+        a = np.asanyarray(gyral_mask_from_mri(self.vol, self.mask, bias_correct=False).dataobj)
+        b = np.asanyarray(gyral_mask_from_mri(vimg, mimg, bias_correct=False).dataobj)
+        self.assertTrue(np.array_equal(a, b))
+
+    def test_gyral_surface_iso_is_watertight_and_placed(self):
+        # The grayscale iso-surface path: a valid placed BrainSurface whose
+        # largest-component filter leaves a single closed shell (the phantom's
+        # bright core), not internal fragments. Bias correction off (uniform
+        # phantom → N4 is a no-op but slow/edge-casey on a synthetic).
+        surf = gyral_surface_from_mri(
+            self.vol, self.mask, step_size=1, taubin_iterations=2, bias_correct=False)
+        self.assertIsInstance(surf, BrainSurface)
+        self.assertGreater(surf.n_vertices, 100)
+        self.assertEqual(_boundary_edge_count(surf.faces), 0)   # single closed shell
+        self.assertTrue(surf.faces.max() < surf.n_vertices)
+        # Surface sits around the GM/WM core (centered on the phantom).
+        centroid = surf.vertices_ras.mean(axis=0)
+        world_center = nib.affines.apply_affine(self.affine, np.array([24, 24, 24], float))
+        self.assertLess(float(np.linalg.norm(centroid - world_center)), 6.0)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
+class TransformSurfaceTests(unittest.TestCase):
+    """transform_surface: push a native-frame surface into the CT frame."""
+    def _ball_surface(self):
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        p = Path(td.name) / "b.nii.gz"
+        _write_ball(p, n=48, center=(24, 24, 24), radius=12)
+        return surface_from_mask(p)
+
+    def test_rigid_transform_moves_and_preserves_shape(self):
+        surf = self._ball_surface()
+        # Rigid: 90° about z + translation. Shape (extent) must be preserved,
+        # centroid must move by the translation (after rotation).
+        c, s = np.cos(np.pi / 2), np.sin(np.pi / 2)
+        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+        t = np.array([10.0, -5.0, 3.0])
+        M = np.eye(4); M[:3, :3] = R; M[:3, 3] = t
+        moved = transform_surface(surf, M)
+        # Same vertex/face count; extent (a rotation-invariant of a ball) preserved.
+        self.assertEqual(moved.n_vertices, surf.n_vertices)
+        self.assertTrue(np.array_equal(moved.faces, surf.faces))
+        ext0 = surf.vertices_ras.max(0) - surf.vertices_ras.min(0)
+        ext1 = moved.vertices_ras.max(0) - moved.vertices_ras.min(0)
+        self.assertTrue(np.allclose(np.sort(ext0), np.sort(ext1), atol=1e-3))
+        # Centroid maps by M.
+        c0 = surf.vertices_ras.mean(0)
+        expect = R @ c0 + t
+        self.assertTrue(np.allclose(moved.vertices_ras.mean(0), expect, atol=1e-2))
+        # Normals stay unit length in the new frame.
+        lens = np.linalg.norm(moved.vertex_normals, axis=1)
+        self.assertTrue(np.allclose(lens, 1.0, atol=1e-3))
+
+    def test_identity_is_noop(self):
+        surf = self._ball_surface()
+        same = transform_surface(surf, np.eye(4))
+        self.assertTrue(np.allclose(same.vertices_ras, surf.vertices_ras, atol=1e-4))
 
 
 _T22_MASK = REPO_ROOT / "tests" / "data" / "T22" / "T22_brain_mask_ct.nii.gz"

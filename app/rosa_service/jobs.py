@@ -148,14 +148,21 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # reuses the transforms instead of re-registering.
         regcache = str(spec.params.get("regcache") or (workdir / "regcache"))
         # Parent case dir + its viewer, so the 2nd step regenerates the 3D view
-        # with the subject brain SURFACE built from the MRI (mri_in_ct), electrodes
-        # penetrating it. Brain mask is cached in regcache → SynthStrip once/case.
+        # with the subject brain SURFACE (with gyri), electrodes penetrating it.
+        # The surface is meshed in the NATIVE MRI frame (clean, isotropic) and
+        # pushed into CT via the T1→CT transform the label step just cached —
+        # meshing the MRI resampled to the anisotropic CT grid looks bumpy.
+        # Native brain mask (SynthStrip) is cached in regcache → once per case.
         parent_dir = Path(contacts).parent
         parent_traj = str(parent_dir / "trajectories.tsv")
         parent_viewer = str(parent_dir / "viewer")
-        brain_mask = str(Path(regcache) / "brain_mask.nii.gz")
+        brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
+        t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
+        # The brain surface is atlas-independent — mesh it once per case and
+        # cache it here, so labeling a 2nd/3rd atlas reuses it (no re-mesh).
+        brain_surface = str(Path(regcache) / "brain_surface.npz")
         base = [py, "-u", "-m", "rosa_agent"]
-        return [
+        steps = [
             base + ["label", str(contacts),
                     "--bundled-atlas", atlas,
                     "--target-volume", str(ct),
@@ -165,11 +172,20 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                     "--save-mri-in-mni", mri_mni,
                     "--registration-cache", regcache,
                     "-o", out],
-            base + ["view-results", str(parent_dir), "--output", parent_viewer,
-                    "--ct", str(ct), "--contacts", str(contacts),
-                    "--trajectories", parent_traj,
-                    "--brain-volume", mri_qc, "--brain-mask-cache", brain_mask],
         ]
+        # The 3D viewer (brain surface + contacts) is atlas-independent, so it's
+        # built ONCE per case (first label). Switching atlas only recomputes the
+        # labels — skip the viewer rebuild once the surface is cached.
+        if not Path(brain_surface).is_file():
+            steps.append(
+                base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                        "--ct", str(ct), "--contacts", str(contacts),
+                        "--trajectories", parent_traj,
+                        "--brain-native-volume", str(t1),
+                        "--brain-to-ct-transform", t1_to_ct,
+                        "--brain-mask-cache", brain_mask,
+                        "--brain-surface-cache", brain_surface])
+        return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 
 
@@ -219,6 +235,8 @@ class _Job:
             created_at=self.created_at, started_at=self.started_at,
             ended_at=self.ended_at, exit_code=self.exit_code, error=self.error,
             artifacts=self.artifacts(),
+            parent=self.params.get("parent"), atlas=self.params.get("atlas"),
+            t1=self.params.get("t1"),
         )
 
     def _write_manifest(self) -> None:

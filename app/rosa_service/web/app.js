@@ -160,7 +160,7 @@ async function loadResults(id) {
 // The label card is per-job: a fresh run starts with no MRI / no proposal.
 function resetLabelCard() {
   clearInterval(state.labelPoll);
-  state.mri = null; state.labelJobId = null;
+  state.mri = null; state.labelJobId = null; state.labeledOnce = false;
   $("mriinput").value = "";
   $("labelbtn").disabled = true;
   $("approvebtn").hidden = true;
@@ -202,6 +202,8 @@ function renderReview(doc) {
       const row = document.createElement("div");
       row.className = "contact" + (c.accepted ? "" : " rejected");
       row.dataset.label = c.name;
+      row.dataset.shank = shank.name;
+      row.dataset.cindex = c.index;
       // Click anywhere on the row (except the checkbox / region field) → show
       // the contact in the 3D viewer.
       row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
@@ -304,23 +306,28 @@ async function uploadMri(file) {
 
 async function runLabel() {
   if (!state.mri || !state.jobId) return;
+  // First label of a case registers CT↔MRI (verify once); later atlas switches
+  // reuse that registration and only recompute labels.
+  const firstLabel = !state.labeledOnce;
   $("labelbtn").disabled = true;
   $("approvebtn").hidden = true;
   const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
-  $("labelmsg").textContent = "Registering MRI → CT and warping atlas (~30 s)…";
+  $("labelmsg").textContent = firstLabel
+    ? "Registering MRI → CT and warping atlas (~30 s)…"
+    : `Relabeling with ${$("atlassel").value} — CT↔MRI registration is cached…`;
   try {
     const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
       { t1: state.mri.path, atlas: $("atlassel").value });
     state.labelJobId = job.id;
     streamInto(job.id, "labellog");     // shows the registration metrics (QC)
-    pollLabel(job.id);
+    pollLabel(job.id, firstLabel);
   } catch (e) {
     $("labelmsg").textContent = `Failed to start: ${e.message}`;
     $("labelbtn").disabled = false;
   }
 }
 
-function pollLabel(id) {
+function pollLabel(id, firstLabel) {
   clearInterval(state.labelPoll);
   state.labelPoll = setInterval(async () => {
     let st;
@@ -328,27 +335,51 @@ function pollLabel(id) {
     if (["succeeded", "failed", "cancelled"].includes(st.state)) {
       clearInterval(state.labelPoll);
       $("labelbtn").disabled = false;
-      if (st.state === "succeeded") showProposed(id);
-      else $("labelmsg").textContent =
+      if (st.state === "succeeded") {
+        state.labeledOnce = true;
+        // Only the first label jumps to the registration screen (verify CT↔MRI
+        // once) and reloads the viewer (surface built); atlas switches just
+        // refresh the labels in place.
+        showProposed(id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
+      } else $("labelmsg").textContent =
         `Labeling ${st.state}${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}`;
     }
   }, 1000);
 }
 
-async function showProposed(id) {
+async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
-    $("labelmsg").innerHTML =
-      `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
-      `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
+    $("labelmsg").innerHTML = jumpToQc
+      ? `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
+        `<strong>${p.atlas}</strong>. Verify the <em>Registration</em> tab, then Apply.`
+      : `Labels from <strong>${p.atlas}</strong> ` +
+        `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
     $("approvebtn").hidden = false;
-    if (p.has_mri_qc) showQc(p.has_mni_qc);
-    // The label job's 2nd step rebuilt the 3D viewer with the subject brain
-    // surface (from the MRI); reload the iframe so it shows (Brain α to fade it,
-    // CT MIP toggle to overlay the CT).
+    if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
+    previewProposed(p.contacts);        // show the proposed regions per contact
+    if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
+    // The 3D viewer is (re)built only on the first label; reload the iframe then
+    // so the brain surface shows. Atlas switches leave the viewer untouched.
     const f = $("viewerframe");
-    if (f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
+    if (reloadViewer && f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
+}
+
+// Fill the review list's region fields with a label job's PROPOSED regions
+// (styled as proposed, not yet committed) so switching atlases visibly changes
+// the labels. Approve commits them into the ReviewDoc; a review edit re-renders
+// from the doc and clears the preview. Maps by shank+contact-index.
+function previewProposed(contacts) {
+  const list = $("reviewlist");
+  list.querySelectorAll(".region.proposed").forEach((r) => r.classList.remove("proposed"));
+  for (const c of contacts || []) {
+    if (!c.region) continue;
+    const row = list.querySelector(
+      `.contact[data-shank="${CSS.escape(c.shank)}"][data-cindex="${c.index}"]`);
+    const region = row && row.querySelector(".region");
+    if (region) { region.value = c.region; region.classList.add("proposed"); }
+  }
 }
 
 // Registration QC lives in the big viewer pane (a tab beside the 3D electrode
@@ -385,29 +416,34 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
-function showQc(hasMni) {
-  // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
-  // when available; otherwise slice the CT's native frame.
-  state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", panes: [] };
-  $("qcspace").hidden = !hasMni;
-  if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
-  const wrap = $("qcplanes");
-  wrap.innerHTML = "";
-  for (const [axis, name] of QC_PLANES) {
-    const holder = el("div", { class: "qc-holder" });
-    const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-    const p = { axis, label: name, holder, frac: 0.5 };
-    slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
-    const pane = el("div", { class: "qc-pane" });
-    pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
-    wrap.append(pane);
-    state.qc.panes.push(p);
+function showQc(hasMni, jumpToQc = true) {
+  // Build the QC panes ONCE per case (registration is per-case). Atlas switches
+  // re-enter here but keep the existing panes + the user's mode/slice settings.
+  if (!state.qc) {
+    // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
+    // when available; otherwise slice the CT's native frame.
+    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", panes: [] };
+    $("qcspace").hidden = !hasMni;
+    if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
+    const wrap = $("qcplanes");
+    wrap.innerHTML = "";
+    for (const [axis, name] of QC_PLANES) {
+      const holder = el("div", { class: "qc-holder" });
+      const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
+      const p = { axis, label: name, holder, frac: 0.5 };
+      slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
+      const pane = el("div", { class: "qc-pane" });
+      pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
+      wrap.append(pane);
+      state.qc.panes.push(p);
+    }
+    setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
+    $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
+    $("qcdir").hidden = true;
   }
-  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
-  $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
-  $("qcdir").hidden = true;
   $("tab-qc").disabled = false;
-  setViewerTab("qc");             // jump to the QC (which refreshes the panes)
+  if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
+  else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC.
@@ -502,8 +538,11 @@ async function boot() {
   });
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
+  // Selecting a different atlas re-labels immediately (registration is cached,
+  // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
+  $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
   wireQc();
-  loadAtlases();
+  await loadAtlases();   // populate the picker before a resume sets its value
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
@@ -514,7 +553,22 @@ async function boot() {
   try {
     const jobs = await jget(`${API}/jobs`);        // newest first
     const done = jobs.find((j) => j.state === "succeeded" && j.kind === "pipeline");
-    if (done) { state.jobId = done.id; loadResults(done.id); }
+    if (done) {
+      state.jobId = done.id;
+      await loadResults(done.id);
+      // Restore this case's most recent label job so the Registration tab and
+      // the proposed labels come back on reload (loadResults cleared them).
+      const lj = jobs.find((j) => j.state === "succeeded" && j.kind === "label"
+                                  && j.parent === done.id);
+      if (lj) {
+        state.labelJobId = lj.id;
+        state.labeledOnce = true;   // registration already verified for this case
+        // Restore the MRI reference so switching atlases relabels (reusing the
+        // cached registration) without re-uploading.
+        if (lj.t1) { state.mri = { path: lj.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
+        showProposed(lj.id, { reloadViewer: false, jumpToQc: false });
+      }
+    }
   } catch (_e) { /* ignore */ }
 }
 boot();
