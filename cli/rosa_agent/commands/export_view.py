@@ -1893,6 +1893,7 @@ def _assemble_viewer(
     fs,
     brain_volume_path: Path | None = None,
     brain_mask_cache_path: Path | None = None,
+    brain_gyri: bool = False,
     parcellation,
     lut,
     annotation: str,
@@ -1969,9 +1970,21 @@ def _assemble_viewer(
                     raise RuntimeError("no brain-extract backend available")
             else:
                 raise RuntimeError("brain mask cache absent and no brain volume to extract")
-            # step_size=4 (~26k verts vs ~103k at the default 2) — a translucent
-            # context envelope needs no gyral detail, and it loads ~4x smaller.
-            bs = surface_from_mask(_mask, step_size=4)
+            if brain_gyri and brain_volume_path is not None:
+                # Fold the surface into the sulci: Otsu-drop CSF from the T1 so
+                # the mesh follows GM/WM (gyri) instead of the filled envelope.
+                # Low smooth_sigma / few Taubin passes so the folds survive;
+                # step_size=3 keeps the gyral detail at ~half the weight of
+                # step 2 (~100k verts / ~5MB vs ~240k / ~11MB — step 2 is overkill).
+                from rosa_core.brain_mesh import gyral_mask_from_mri
+                gmwm = gyral_mask_from_mri(brain_volume_path, _mask)
+                bs = surface_from_mask(
+                    gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=3)
+                backend = f"{backend}+gyri"
+            else:
+                # step_size=4 (~26k verts vs ~103k at the default 2) — a translucent
+                # context envelope needs no gyral detail, and it loads ~4x smaller.
+                bs = surface_from_mask(_mask, step_size=4)
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain", annotation_name=None,
                 vertices_ras=bs.vertices_ras, faces=bs.faces,
@@ -2162,6 +2175,7 @@ def run_view_results(
     freesurfer_dir: str = "",
     brain_volume: str | Path | None = None,
     brain_mask_cache: str | Path | None = None,
+    brain_gyri: bool = False,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2208,6 +2222,7 @@ def run_view_results(
         fs=fs,
         brain_volume_path=(Path(brain_volume) if brain_volume else None),
         brain_mask_cache_path=(Path(brain_mask_cache) if brain_mask_cache else None),
+        brain_gyri=brain_gyri,
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

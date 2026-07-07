@@ -20,7 +20,9 @@ try:
     import numpy as np
     import nibabel as nib
     import skimage  # noqa: F401  — the [mesh] extra
-    from rosa_core.brain_mesh import surface_from_mask, BrainSurface
+    from rosa_core.brain_mesh import (
+        surface_from_mask, gyral_mask_from_mri, BrainSurface,
+    )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
     HAVE_DEPS = False
@@ -104,6 +106,61 @@ class SyntheticBallTests(unittest.TestCase):
         nib.save(nib.Nifti1Image(np.zeros((16, 16, 16), np.uint8), np.eye(4)), str(empty))
         with self.assertRaises(ValueError):
             surface_from_mask(empty)
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
+class GyralMaskTests(unittest.TestCase):
+    """gyral_mask_from_mri: Otsu-drop CSF from a T1 inside the brain mask.
+
+    A synthetic 3-tissue phantom (dark CSF shell / mid GM / bright WM core)
+    inside a ball mask must keep GM+WM and drop the CSF, so the result is a
+    subset of the mask that still contains the bright core.
+    """
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        n = 48
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        r = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2)
+        # Concentric intensity shells: CSF (dark) outside, GM mid, WM bright core.
+        t1 = np.zeros((n, n, n), np.float32)
+        t1[r <= 20] = 30.0    # CSF-like rim
+        t1[r <= 15] = 120.0   # GM-like
+        t1[r <= 8] = 240.0    # WM-like core
+        mask = (r <= 20).astype(np.uint8)
+        affine = np.diag([1.0, 1.0, 1.0, 1.0])
+        affine[:3, 3] = [-24.0, -24.0, -24.0]
+        self.vol = Path(self.td.name) / "t1.nii.gz"
+        self.mask = Path(self.td.name) / "mask.nii.gz"
+        nib.save(nib.Nifti1Image(t1, affine), str(self.vol))
+        nib.save(nib.Nifti1Image(mask, affine), str(self.mask))
+        self.affine = affine
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_drops_csf_keeps_gm_wm(self):
+        img = gyral_mask_from_mri(self.vol, self.mask)
+        gm = np.asanyarray(img.dataobj) > 0
+        full = np.asanyarray(nib.load(str(self.mask)).dataobj) > 0
+        # A strict subset of the brain mask (the dark CSF rim is dropped)...
+        self.assertTrue(gm[full].all() or gm.sum() < full.sum())
+        self.assertLess(int(gm.sum()), int(full.sum()))
+        # ...that still contains the bright WM core (never dropped).
+        n = gm.shape[0]
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        core = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2) <= 6
+        self.assertTrue(gm[core].all())
+        # Meshable with folds preserved (low smoothing).
+        surf = surface_from_mask(img, smooth_sigma=0.5, taubin_iterations=4)
+        self.assertGreater(surf.n_vertices, 100)
+
+    def test_accepts_nibabel_images(self):
+        # The viewer passes nibabel images (no temp file); path and image agree.
+        vimg = nib.load(str(self.vol))
+        mimg = nib.load(str(self.mask))
+        a = np.asanyarray(gyral_mask_from_mri(self.vol, self.mask).dataobj)
+        b = np.asanyarray(gyral_mask_from_mri(vimg, mimg).dataobj)
+        self.assertTrue(np.array_equal(a, b))
 
 
 _T22_MASK = REPO_ROOT / "tests" / "data" / "T22" / "T22_brain_mask_ct.nii.gz"

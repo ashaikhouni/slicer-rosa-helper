@@ -168,7 +168,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             base + ["view-results", str(parent_dir), "--output", parent_viewer,
                     "--ct", str(ct), "--contacts", str(contacts),
                     "--trajectories", parent_traj,
-                    "--brain-volume", mri_qc, "--brain-mask-cache", brain_mask],
+                    "--brain-volume", mri_qc, "--brain-mask-cache", brain_mask,
+                    "--brain-gyri"],
         ]
     raise ValueError(f"unknown job kind: {kind!r}")
 

@@ -109,6 +109,38 @@ def _vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return (vn / norms).astype(np.float32)
 
 
+def gyral_mask_from_mri(volume: Any, brain_mask: Any):
+    """Gray+white-matter mask (drops sulcal/ventricular CSF) from a T1 + brain mask.
+
+    Otsu-splits the in-brain T1 into CSF/GM/WM and keeps **GM+WM**, so meshing
+    this mask dips the surface into the sulci → a folded (pial-ish) surface,
+    unlike the filled brain mask's smooth envelope. Cleaner than a raw intensity
+    threshold — Otsu adapts to the histogram, ventricles are filled, and
+    ``surface_from_mask`` keeps the largest component. No new dependency
+    (skimage/scipy). Returns a nibabel image ready for :func:`surface_from_mask`
+    (use a low ``smooth_sigma`` there so the folds survive).
+
+    This is the bundleable "gyri without FreeSurfer" path; a real recon
+    (FreeSurfer/FastSurfer pial) is cleaner when available.
+    """
+    import nibabel as nib
+    from scipy import ndimage
+    from skimage.filters import threshold_multiotsu
+
+    vimg = volume if hasattr(volume, "dataobj") else nib.load(str(volume))
+    mimg = brain_mask if hasattr(brain_mask, "dataobj") else nib.load(str(brain_mask))
+    t1 = np.asanyarray(vimg.dataobj).astype(np.float32)
+    m = np.asanyarray(mimg.dataobj) > 0
+    inb = t1[m]
+    if inb.size == 0:
+        raise ValueError("empty brain mask")
+    th = threshold_multiotsu(inb, classes=3)     # [CSF|GM, GM|WM]
+    gmwm = (t1 >= float(th[0])) & m               # drop the darkest (CSF) class
+    gmwm = ndimage.binary_closing(gmwm, iterations=1)
+    gmwm = ndimage.binary_fill_holes(gmwm)        # fill ventricles → only the pial surface
+    return nib.Nifti1Image(gmwm.astype(np.uint8), vimg.affine, vimg.header)
+
+
 def surface_from_mask(
     mask: Any,
     *,

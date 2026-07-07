@@ -79,6 +79,12 @@ def main(argv: list[str] | None = None) -> int:
              "SynthStrip), else --brain-volume is extracted and saved here — so "
              "the mask is computed once per case, not per label.",
     )
+    parser.add_argument(
+        "--brain-gyri", action="store_true",
+        help="mesh the MRI's gray/white matter (Otsu, no FreeSurfer) so the "
+             "brain surface shows gyri instead of a smooth envelope — heavier "
+             "mesh (~100k+ verts). Requires --brain-volume.",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -132,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             freesurfer_dir=args.freesurfer_dir,
             brain_volume=args.brain_volume or None,
             brain_mask_cache=args.brain_mask_cache or None,
+            brain_gyri=bool(args.brain_gyri),
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),
