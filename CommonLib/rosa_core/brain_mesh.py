@@ -109,6 +109,26 @@ def _vertex_normals(verts: np.ndarray, faces: np.ndarray) -> np.ndarray:
     return (vn / norms).astype(np.float32)
 
 
+def transform_surface(surface: "BrainSurface", ras_4x4: np.ndarray) -> "BrainSurface":
+    """Return a copy of ``surface`` with vertices mapped through a 4×4 RAS
+    transform (normals recomputed in the new frame).
+
+    Used to push a surface meshed in the native MRI frame into the CT/contact
+    frame via the MRI→CT rigid transform — the same trick FreeSurfer surfaces
+    use. Normals are recomputed rather than rotated so the call is correct for
+    any affine (rigid included).
+    """
+    v = np.asarray(surface.vertices_ras, dtype=float)
+    h = np.ones((v.shape[0], 4), dtype=float)
+    h[:, :3] = v
+    moved = (np.asarray(ras_4x4, dtype=float) @ h.T).T[:, :3].astype(np.float32)
+    return BrainSurface(
+        vertices_ras=np.ascontiguousarray(moved, dtype=np.float32),
+        faces=surface.faces,
+        vertex_normals=_vertex_normals(moved, surface.faces),
+    )
+
+
 def gyral_mask_from_mri(volume: Any, brain_mask: Any):
     """Gray+white-matter mask (drops sulcal/ventricular CSF) from a T1 + brain mask.
 
@@ -209,4 +229,6 @@ def surface_from_mask(
     )
 
 
-__all__ = ["BrainSurface", "surface_from_mask"]
+__all__ = [
+    "BrainSurface", "surface_from_mask", "gyral_mask_from_mri", "transform_surface",
+]

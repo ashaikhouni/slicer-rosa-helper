@@ -21,7 +21,7 @@ try:
     import nibabel as nib
     import skimage  # noqa: F401  — the [mesh] extra
     from rosa_core.brain_mesh import (
-        surface_from_mask, gyral_mask_from_mri, BrainSurface,
+        surface_from_mask, gyral_mask_from_mri, transform_surface, BrainSurface,
     )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
@@ -161,6 +161,44 @@ class GyralMaskTests(unittest.TestCase):
         a = np.asanyarray(gyral_mask_from_mri(self.vol, self.mask).dataobj)
         b = np.asanyarray(gyral_mask_from_mri(vimg, mimg).dataobj)
         self.assertTrue(np.array_equal(a, b))
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
+class TransformSurfaceTests(unittest.TestCase):
+    """transform_surface: push a native-frame surface into the CT frame."""
+    def _ball_surface(self):
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        p = Path(td.name) / "b.nii.gz"
+        _write_ball(p, n=48, center=(24, 24, 24), radius=12)
+        return surface_from_mask(p)
+
+    def test_rigid_transform_moves_and_preserves_shape(self):
+        surf = self._ball_surface()
+        # Rigid: 90° about z + translation. Shape (extent) must be preserved,
+        # centroid must move by the translation (after rotation).
+        c, s = np.cos(np.pi / 2), np.sin(np.pi / 2)
+        R = np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])
+        t = np.array([10.0, -5.0, 3.0])
+        M = np.eye(4); M[:3, :3] = R; M[:3, 3] = t
+        moved = transform_surface(surf, M)
+        # Same vertex/face count; extent (a rotation-invariant of a ball) preserved.
+        self.assertEqual(moved.n_vertices, surf.n_vertices)
+        self.assertTrue(np.array_equal(moved.faces, surf.faces))
+        ext0 = surf.vertices_ras.max(0) - surf.vertices_ras.min(0)
+        ext1 = moved.vertices_ras.max(0) - moved.vertices_ras.min(0)
+        self.assertTrue(np.allclose(np.sort(ext0), np.sort(ext1), atol=1e-3))
+        # Centroid maps by M.
+        c0 = surf.vertices_ras.mean(0)
+        expect = R @ c0 + t
+        self.assertTrue(np.allclose(moved.vertices_ras.mean(0), expect, atol=1e-2))
+        # Normals stay unit length in the new frame.
+        lens = np.linalg.norm(moved.vertex_normals, axis=1)
+        self.assertTrue(np.allclose(lens, 1.0, atol=1e-3))
+
+    def test_identity_is_noop(self):
+        surf = self._ball_surface()
+        same = transform_surface(surf, np.eye(4))
+        self.assertTrue(np.allclose(same.vertices_ras, surf.vertices_ras, atol=1e-4))
 
 
 _T22_MASK = REPO_ROOT / "tests" / "data" / "T22" / "T22_brain_mask_ct.nii.gz"

@@ -85,6 +85,19 @@ def main(argv: list[str] | None = None) -> int:
              "brain surface shows gyri instead of a smooth envelope — heavier "
              "mesh (~100k+ verts). Requires --brain-volume.",
     )
+    parser.add_argument(
+        "--brain-native-volume", default="",
+        help="the NATIVE MRI (1mm, not resampled to CT). Meshes gyri in the "
+             "native frame (clean, isotropic) and transforms the surface into "
+             "CT — much cleaner than meshing the CT-resampled MRI. Preferred "
+             "over --brain-volume; pair with --brain-to-ct-transform.",
+    )
+    parser.add_argument(
+        "--brain-to-ct-transform", default="",
+        help="cached MRI→CT rigid transform (t1_to_ct.tfm from the label step). "
+             "Reused to push the native brain surface into CT; if absent, "
+             "view-results registers the native MRI to the CT itself.",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -139,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             brain_volume=args.brain_volume or None,
             brain_mask_cache=args.brain_mask_cache or None,
             brain_gyri=bool(args.brain_gyri),
+            brain_native_volume=args.brain_native_volume or None,
+            brain_to_ct_transform=args.brain_to_ct_transform or None,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),

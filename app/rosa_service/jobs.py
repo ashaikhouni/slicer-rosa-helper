@@ -148,12 +148,16 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # reuses the transforms instead of re-registering.
         regcache = str(spec.params.get("regcache") or (workdir / "regcache"))
         # Parent case dir + its viewer, so the 2nd step regenerates the 3D view
-        # with the subject brain SURFACE built from the MRI (mri_in_ct), electrodes
-        # penetrating it. Brain mask is cached in regcache → SynthStrip once/case.
+        # with the subject brain SURFACE (with gyri), electrodes penetrating it.
+        # The surface is meshed in the NATIVE MRI frame (clean, isotropic) and
+        # pushed into CT via the T1→CT transform the label step just cached —
+        # meshing the MRI resampled to the anisotropic CT grid looks bumpy.
+        # Native brain mask (SynthStrip) is cached in regcache → once per case.
         parent_dir = Path(contacts).parent
         parent_traj = str(parent_dir / "trajectories.tsv")
         parent_viewer = str(parent_dir / "viewer")
-        brain_mask = str(Path(regcache) / "brain_mask.nii.gz")
+        brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
+        t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
         base = [py, "-u", "-m", "rosa_agent"]
         return [
             base + ["label", str(contacts),
@@ -168,8 +172,9 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             base + ["view-results", str(parent_dir), "--output", parent_viewer,
                     "--ct", str(ct), "--contacts", str(contacts),
                     "--trajectories", parent_traj,
-                    "--brain-volume", mri_qc, "--brain-mask-cache", brain_mask,
-                    "--brain-gyri"],
+                    "--brain-native-volume", str(t1),
+                    "--brain-to-ct-transform", t1_to_ct,
+                    "--brain-mask-cache", brain_mask],
         ]
     raise ValueError(f"unknown job kind: {kind!r}")
 

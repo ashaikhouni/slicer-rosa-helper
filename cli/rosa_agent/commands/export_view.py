@@ -586,6 +586,10 @@ _HTML_TEMPLATE = """<!doctype html>
   #canvas-host {{ position: relative; }}
   #canvas-host canvas {{ display: block; }}
   #toolbar {{ position: absolute; top: 10px; left: 10px; right: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }}
+  /* Collapsed by default so the controls don't cover the 3D view — the toggle
+     button stays; everything else (sliders/checkboxes) hides until expanded. */
+  #toolbar.collapsed .plane-ctl {{ display: none; }}
+  #btn-tools {{ font-weight: 600; }}
   #toolbar button {{ background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }}
   #toolbar button:hover {{ background: rgba(70,70,70,0.95); }}
   .plane-ctl {{ display: inline-flex; align-items: center; gap: 6px; background: rgba(40,40,40,0.85); border: 1px solid #444; padding: 4px 8px; border-radius: 4px; font-size: 11px; color: #ddd; }}
@@ -664,7 +668,8 @@ _HTML_TEMPLATE = """<!doctype html>
     </div>
   </div>
   <div id="canvas-host">
-    <div id="toolbar">
+    <div id="toolbar" class="collapsed">
+      <button id="btn-tools" title="Show/hide controls">Controls ▾</button>
       <button id="btn-reset">Show all</button>
       <button id="btn-fit">Fit view</button>
       <label class="plane-ctl" data-control="volume">
@@ -1670,6 +1675,13 @@ function showAll() {{
 
 document.getElementById("btn-reset").addEventListener("click", showAll);
 document.getElementById("btn-fit").addEventListener("click", () => {{ if (gltfRoot) fitToObject(gltfRoot); }});
+(() => {{
+  const bar = document.getElementById("toolbar");
+  const btn = document.getElementById("btn-tools");
+  const sync = () => {{ btn.textContent = bar.classList.contains("collapsed") ? "Controls ▾" : "Controls ▴"; }};
+  btn.addEventListener("click", () => {{ bar.classList.toggle("collapsed"); sync(); }});
+  sync();
+}})();
 
 // Surface color mode dropdown. The GLB already has per-vertex RGBA
 // colors painted from the FS aparc.annot; the surface material's
@@ -1894,6 +1906,8 @@ def _assemble_viewer(
     brain_volume_path: Path | None = None,
     brain_mask_cache_path: Path | None = None,
     brain_gyri: bool = False,
+    brain_native_volume_path: Path | None = None,
+    brain_to_ct_transform_path: Path | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -1944,6 +1958,57 @@ def _assemble_viewer(
             f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
+    elif brain_native_volume_path is not None:
+        # No FreeSurfer recon, but we have the NATIVE MRI (1mm, isotropic) +
+        # the MRI→CT rigid transform the labeling step already computed. Mesh
+        # the gyri in the native frame (clean, no interpolation ramps) and push
+        # the surface into CT via that transform — the same trick FS surfaces
+        # use. This is the accurate, bundleable "gyri without FreeSurfer" path;
+        # meshing the MRI *resampled onto the anisotropic CT grid* looks bumpy.
+        try:
+            import tempfile
+            import numpy as np
+            from types import SimpleNamespace
+            from rosa_detect.services.mask_backend import select_brain_mask_to_path
+            from rosa_core.brain_mesh import (
+                gyral_mask_from_mri, surface_from_mask, transform_surface,
+            )
+            from rosa_core.registration import transform_to_4x4_ras, load_transform
+            # Native brain mask (SynthStrip), cached once per case.
+            cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+            if cache is not None and cache.is_file():
+                nmask, backend = cache, "cached"
+            else:
+                nmask = cache or (Path(tempfile.mkdtemp()) / "brain_mask_native.nii.gz")
+                if cache is not None:
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                backend = select_brain_mask_to_path(
+                    brain_native_volume_path, nmask, backend="auto", log=_stderr)
+                if backend is None:
+                    raise RuntimeError("no brain-extract backend available")
+            # Gyral surface in the native MRI frame.
+            gmwm = gyral_mask_from_mri(brain_native_volume_path, nmask)
+            bs = surface_from_mask(
+                gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=2)
+            # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
+            # moving=T1) when present; otherwise register here as a fallback.
+            tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
+            if tfp is not None and tfp.is_file():
+                ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(load_transform(str(tfp))))
+                _stderr(f"[view] reusing cached MRI→CT transform {tfp.name}")
+            else:
+                _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
+                ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
+            bs = transform_surface(bs, ct_from_t1)
+            surfaces = [SimpleNamespace(
+                name="brain", hemi="lh", kind="brain", annotation_name=None,
+                vertices_ras=bs.vertices_ras, faces=bs.faces,
+                vertex_normals=bs.vertex_normals, vertex_colors_rgba=None,
+            )]
+            _stderr(f"[view] subject brain surface (native+gyri, {backend}): "
+                    f"{bs.n_vertices} verts / {bs.n_faces} faces")
+        except Exception as exc:  # noqa: BLE001 — brain mesh is optional context
+            _stderr(f"[view] native gyral mesh failed ({exc}); no brain mesh")
     elif brain_volume_path is not None or brain_mask_cache_path is not None:
         # No FreeSurfer recon, but we have a volume already in the CT frame
         # (typically the MRI resampled to CT): brain-extract it and marching-cubes
@@ -2176,6 +2241,8 @@ def run_view_results(
     brain_volume: str | Path | None = None,
     brain_mask_cache: str | Path | None = None,
     brain_gyri: bool = False,
+    brain_native_volume: str | Path | None = None,
+    brain_to_ct_transform: str | Path | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2223,6 +2290,8 @@ def run_view_results(
         brain_volume_path=(Path(brain_volume) if brain_volume else None),
         brain_mask_cache_path=(Path(brain_mask_cache) if brain_mask_cache else None),
         brain_gyri=brain_gyri,
+        brain_native_volume_path=(Path(brain_native_volume) if brain_native_volume else None),
+        brain_to_ct_transform_path=(Path(brain_to_ct_transform) if brain_to_ct_transform else None),
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,
