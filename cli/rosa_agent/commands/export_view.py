@@ -823,6 +823,11 @@ scene.add(key); scene.add(fill);
 scene.add(key.target); scene.add(fill.target);
 const _kOff = new THREE.Vector3(), _fOff = new THREE.Vector3();
 const _camDir = new THREE.Vector3(), _right = new THREE.Vector3();
+// DVR mesh + its camera-following light dir — declared here (before the render
+// loop / updateLights) to avoid a temporal-dead-zone crash; assigned in
+// initCutPlanes / used by _makeDvrMesh.
+let dvrMesh = null;
+const _dvrLightDir = new THREE.Vector3(0.4, 0.85, 0.55).normalize();
 function updateLights() {{
   // Rake the key light across the surface facing the camera: offset it up +
   // left + toward the viewer from the orbit centre, so folds shadow from any
@@ -1509,8 +1514,7 @@ function _makeMipMesh(bbox, volTex, vol) {{
 // mesh. Best on the brain-only MRI volume (masked → the isosurface is the pial
 // surface). Gradient is computed in voxel space and rotated to world via
 // uVoxToRas for lighting; light follows the camera (uLightDir, see updateLights).
-let dvrMesh = null;
-const _dvrLightDir = new THREE.Vector3(0.4, 0.85, 0.55).normalize();
+// (dvrMesh + _dvrLightDir are declared up near updateLights to avoid a TDZ crash.)
 function _makeDvrMesh(bbox, volTex, vol) {{
   const w = bbox.xmax - bbox.xmin, h = bbox.ymax - bbox.ymin, d = bbox.zmax - bbox.zmin;
   const geo = new THREE.BoxGeometry(w, h, d);
