@@ -251,6 +251,7 @@ def gyral_surface_from_mri(
     taubin_iterations: int = 3,
     open_iterations: int = 1,
     nodule_size: int = 3,
+    mask_erode: int = 1,
     bias_correct: bool = True,
 ) -> "BrainSurface":
     """Crisp gyral (pial-ish) surface from a T1, without FreeSurfer.
@@ -291,9 +292,15 @@ def gyral_surface_from_mri(
         # the iso-surface doesn't bulge out into nodules on the gyri.
         t1 = ndimage.grey_opening(t1, size=int(nodule_size))
     th = threshold_multiotsu(t1[m], classes=3)     # [CSF|GM, GM|WM]
+    # Erode the brain mask before meshing: the dura / pial vessels the strip
+    # leaves live in the outermost 1–2 mm rim, and post-mesh smoothing can't
+    # remove them selectively (it blurs the gyri too). Eroding the rim drops
+    # that material at the source while the fold structure (defined deeper, at
+    # the GM/WM interface) is preserved. 0 disables.
+    m_surf = ndimage.binary_erosion(m, iterations=int(mask_erode)) if (mask_erode and mask_erode > 0) else m
     # Cleaned GM+WM support: opening strips bright nodules (vessels/dura) + the
     # thin bridges attaching them; dilate so the pial isocontour is inside it.
-    gmwm = (t1 >= float(th[0])) & m
+    gmwm = (t1 >= float(th[0])) & m_surf
     if open_iterations and open_iterations > 0:
         gmwm = _largest_component(ndimage.binary_opening(gmwm, iterations=int(open_iterations)))
     gmwm = ndimage.binary_fill_holes(ndimage.binary_closing(gmwm, iterations=1))

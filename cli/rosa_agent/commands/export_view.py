@@ -689,16 +689,6 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" min="0" max="1" step="0.05" value="0.45" />
         <span class="coord">0.45</span>
       </label>
-      <label class="plane-ctl" data-control="brain-smooth" title="Smooth the brain surface live (Taubin — shaves noise but keeps gyri, so it's subtle by design). Use Erode for a visibly softer/cleaner surface.">
-        <span class="axis">Smooth</span>
-        <input type="range" min="0" max="30" step="1" value="0" />
-        <span class="coord">0</span>
-      </label>
-      <label class="plane-ctl" data-control="brain-erode" title="Erode the brain surface live (Laplacian — shrinks inward, flattening the dura/vessel material sitting on the gyri). This is the effective clean-up knob.">
-        <span class="axis">Erode</span>
-        <input type="range" min="0" max="30" step="1" value="0" />
-        <span class="coord">0</span>
-      </label>
       <label class="plane-ctl" data-control="plane-alpha">
         <span class="axis">Slice α</span>
         <input type="range" min="0" max="1" step="0.05" value="0.95" />
@@ -946,11 +936,6 @@ const onGltf = gltf => {{
       // dialed back to 1.0 — the source of the "fractured cortex at
       // α=1" report.
       surfaceNodes.push(obj);
-      // Stash the pristine geometry so the Smooth slider always re-smooths
-      // from the original (repeated smoothing must not compound).
-      if (mesh && mesh.geometry && mesh.geometry.attributes.position) {{
-        obj.userData._origPos = Float32Array.from(mesh.geometry.attributes.position.array);
-      }}
     }} else if (extras.shank) {{
       if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
       shankNodes.get(extras.shank).push(obj);
@@ -1816,106 +1801,6 @@ function _applyInitialBrainAlpha() {{
     coord.textContent = v.toFixed(2);
     _applyBrainAlpha(v);
   }});
-}})();
-
-// Brain smoothing slider — Taubin (λ|μ) smooth the brain surface live, so the
-// gyri can be dialled from crisp (0) to smooth without re-generating the mesh
-// server-side. Re-smooths from the pristine geometry each time (no compounding).
-// λ/μ match the server-side _taubin_smooth so N here ≈ N more baked passes.
-function _taubinSmoothPositions(orig, index, iterations) {{
-  const n = orig.length / 3;
-  const pos = Float32Array.from(orig);
-  const sx = new Float64Array(n), sy = new Float64Array(n), sz = new Float64Array(n);
-  const cnt = new Float32Array(n);
-  const lam = 0.5, mu = -0.53;
-  for (let it = 0; it < iterations; it++) {{
-    sx.fill(0); sy.fill(0); sz.fill(0); cnt.fill(0);
-    for (let f = 0; f < index.length; f += 3) {{
-      const a = index[f], b = index[f + 1], c = index[f + 2];
-      // each of a triangle's verts neighbours the other two
-      const pairs = [[a, b], [a, c], [b, a], [b, c], [c, a], [c, b]];
-      for (let k = 0; k < 6; k++) {{
-        const v = pairs[k][0], w = pairs[k][1];
-        sx[v] += pos[3 * w]; sy[v] += pos[3 * w + 1]; sz[v] += pos[3 * w + 2]; cnt[v]++;
-      }}
-    }}
-    const factor = (it % 2 === 0) ? lam : mu;
-    for (let v = 0; v < n; v++) {{
-      if (cnt[v] === 0) continue;
-      const inv = 1 / cnt[v];
-      pos[3 * v]     += factor * (sx[v] * inv - pos[3 * v]);
-      pos[3 * v + 1] += factor * (sy[v] * inv - pos[3 * v + 1]);
-      pos[3 * v + 2] += factor * (sz[v] * inv - pos[3 * v + 2]);
-    }}
-  }}
-  return pos;
-}}
-// Plain Laplacian ("Erode"): every pass pulls each vertex toward its neighbour
-// average with a POSITIVE factor and no inflate step, so the surface shrinks
-// inward and convex bumps (dura/vessel material perched on the gyri) flatten
-// faster than the bulk — a live stand-in for morphological erosion of the mask.
-function _laplacianErodePositions(orig, index, iterations) {{
-  const n = orig.length / 3;
-  const pos = Float32Array.from(orig);
-  const sx = new Float64Array(n), sy = new Float64Array(n), sz = new Float64Array(n);
-  const cnt = new Float32Array(n);
-  const lam = 0.6;
-  for (let it = 0; it < iterations; it++) {{
-    sx.fill(0); sy.fill(0); sz.fill(0); cnt.fill(0);
-    for (let f = 0; f < index.length; f += 3) {{
-      const a = index[f], b = index[f + 1], c = index[f + 2];
-      const pairs = [[a, b], [a, c], [b, a], [b, c], [c, a], [c, b]];
-      for (let k = 0; k < 6; k++) {{
-        const v = pairs[k][0], w = pairs[k][1];
-        sx[v] += pos[3 * w]; sy[v] += pos[3 * w + 1]; sz[v] += pos[3 * w + 2]; cnt[v]++;
-      }}
-    }}
-    for (let v = 0; v < n; v++) {{
-      if (cnt[v] === 0) continue;
-      const inv = 1 / cnt[v];
-      pos[3 * v]     += lam * (sx[v] * inv - pos[3 * v]);
-      pos[3 * v + 1] += lam * (sy[v] * inv - pos[3 * v + 1]);
-      pos[3 * v + 2] += lam * (sz[v] * inv - pos[3 * v + 2]);
-    }}
-  }}
-  return pos;
-}}
-// Apply Erode (Laplacian, first) then Smooth (Taubin) from the pristine geometry
-// each time, so the two sliders compose without compounding across ticks.
-function _applyBrainDeform() {{
-  const erode = _ctlVal("brain-erode"), smooth = _ctlVal("brain-smooth");
-  for (const node of surfaceNodes) {{
-    const mesh = node.userData && node.userData._mesh;
-    const orig = node.userData && node.userData._origPos;
-    if (!mesh || !mesh.geometry || !orig) continue;
-    const geom = mesh.geometry;
-    const idx = geom.index && geom.index.array;
-    let pos = orig;
-    if (idx && erode > 0) pos = _laplacianErodePositions(pos, idx, erode);
-    if (idx && smooth > 0) pos = _taubinSmoothPositions(pos, idx, smooth);
-    if (pos === orig) geom.attributes.position.array.set(orig);
-    else geom.attributes.position.array.set(pos);
-    geom.attributes.position.needsUpdate = true;
-    geom.computeVertexNormals();
-  }}
-}}
-function _ctlVal(name) {{
-  const el = document.querySelector(`.plane-ctl[data-control="${{name}}"] input[type="range"]`);
-  return el ? parseInt(el.value, 10) : 0;
-}}
-let _deformTimer = 0;
-(function _wireBrainDeform() {{
-  for (const name of ["brain-smooth", "brain-erode"]) {{
-    const ctl = document.querySelector(`.plane-ctl[data-control="${{name}}"]`);
-    if (!ctl) continue;
-    const slider = ctl.querySelector('input[type="range"]');
-    const coord = ctl.querySelector(".coord");
-    slider.addEventListener("input", () => {{
-      coord.textContent = slider.value;   // label tracks the drag; the (heavy)
-      clearTimeout(_deformTimer);         // deform is debounced to run on pause
-      _deformTimer = setTimeout(_applyBrainDeform, 120);
-    }});
-  }}
 }})();
 
 // Slice plane α slider — sets the uOpacity uniform on the three cut
