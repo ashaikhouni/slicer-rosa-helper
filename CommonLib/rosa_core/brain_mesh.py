@@ -129,7 +129,38 @@ def transform_surface(surface: "BrainSurface", ras_4x4: np.ndarray) -> "BrainSur
     )
 
 
-def gyral_mask_from_mri(volume: Any, brain_mask: Any, *, open_iterations: int = 1):
+def _n4_bias_correct(t1: np.ndarray, m: np.ndarray, *, shrink: int = 4) -> np.ndarray:
+    """N4 bias-field correction of an in-brain T1 (SITK). Returns raw t1 on any
+    failure (warns) so the caller degrades gracefully.
+
+    MRI RF inhomogeneity makes WM/GM dimmer in some regions, so a *global* Otsu
+    threshold separates tissue inconsistently — gyri stay crisp where the
+    intensity is nominal and smear where it's dim. N4 flattens the field, so the
+    threshold behaves the same everywhere → uniform gyral resolution. Estimated
+    on a shrunk volume (fast: ~1 s) then applied at full resolution.
+    """
+    try:
+        import SimpleITK as sitk
+    except ImportError:
+        return t1
+    try:
+        img = sitk.Cast(sitk.GetImageFromArray(t1), sitk.sitkFloat32)
+        msk = sitk.GetImageFromArray(m.astype(np.uint8))
+        img_s = sitk.Shrink(img, [int(shrink)] * 3)
+        msk_s = sitk.Shrink(msk, [int(shrink)] * 3)
+        n4 = sitk.N4BiasFieldCorrectionImageFilter()
+        n4.SetMaximumNumberOfIterations([50, 50, 50, 30])
+        n4.Execute(img_s, msk_s)                      # estimate on the shrunk grid
+        bias = n4.GetLogBiasFieldAsImage(img)         # evaluate at full resolution
+        return sitk.GetArrayFromImage(img / sitk.Exp(bias)).astype(np.float32)
+    except Exception as exc:  # noqa: BLE001
+        import warnings
+        warnings.warn(f"N4 bias correction failed ({exc}); using raw intensities")
+        return t1
+
+
+def gyral_mask_from_mri(volume: Any, brain_mask: Any, *,
+                        open_iterations: int = 1, bias_correct: bool = True):
     """Gray+white-matter mask (drops sulcal/ventricular CSF) from a T1 + brain mask.
 
     Otsu-splits the in-brain T1 into CSF/GM/WM and keeps **GM+WM**, so meshing
@@ -148,6 +179,9 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any, *, open_iterations: int = 
     them, it can't remove attached geometry). Higher = cleaner but eats thin
     gyri; 0 disables.
 
+    ``bias_correct`` N4-corrects the T1 first so the Otsu threshold gives even
+    gyral resolution across the whole brain (see :func:`_n4_bias_correct`).
+
     This is the bundleable "gyri without FreeSurfer" path; a real recon
     (FreeSurfer/FastSurfer pial) is cleaner when available.
     """
@@ -159,9 +193,13 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any, *, open_iterations: int = 
     mimg = brain_mask if hasattr(brain_mask, "dataobj") else nib.load(str(brain_mask))
     t1 = np.asanyarray(vimg.dataobj).astype(np.float32)
     m = np.asanyarray(mimg.dataobj) > 0
-    inb = t1[m]
-    if inb.size == 0:
+    if m.sum() == 0:
         raise ValueError("empty brain mask")
+    if bias_correct:
+        # Flatten RF inhomogeneity so a single Otsu threshold gives uniform
+        # gyral resolution across the whole brain (not crisp here, mushy there).
+        t1 = _n4_bias_correct(t1, m)
+    inb = t1[m]
     th = threshold_multiotsu(inb, classes=3)     # [CSF|GM, GM|WM]
     gmwm = (t1 >= float(th[0])) & m               # drop the darkest (CSF) class
     if open_iterations and open_iterations > 0:
