@@ -1892,6 +1892,7 @@ def _assemble_viewer(
     contact_labels: dict[str, dict[str, str]],
     fs,
     brain_volume_path: Path | None = None,
+    brain_mask_cache_path: Path | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -1942,23 +1943,32 @@ def _assemble_viewer(
             f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
-    elif brain_volume_path is not None:
+    elif brain_volume_path is not None or brain_mask_cache_path is not None:
         # No FreeSurfer recon, but we have a volume already in the CT frame
-        # (the CT itself, or the MRI resampled to CT): brain-extract it and
-        # marching-cubes the mask into ONE subject-own brain surface. It's the
-        # patient's actual anatomy (accurate), unlike a template warp — the
-        # electrodes penetrate a translucent gray brain. Vertices come out in
-        # the mask's RAS (== CT RAS), so no registration is needed.
+        # (typically the MRI resampled to CT): brain-extract it and marching-cubes
+        # the mask into ONE subject-own brain surface — the patient's actual
+        # anatomy (accurate), unlike a template warp. Vertices come out in the
+        # mask's RAS (== CT RAS), so no registration is needed. The mask is
+        # cached (brain_mask_cache_path) so SynthStrip runs once per case, not
+        # per atlas/label.
         try:
             import tempfile
             from types import SimpleNamespace
             from rosa_detect.services.mask_backend import select_brain_mask_to_path
             from rosa_core.brain_mesh import surface_from_mask
-            _mask = Path(tempfile.mkdtemp()) / "brain_mask.nii.gz"
-            backend = select_brain_mask_to_path(
-                brain_volume_path, _mask, backend="auto", log=_stderr)
-            if backend is None:
-                raise RuntimeError("no brain-extract backend available")
+            cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+            if cache is not None and cache.is_file():
+                _mask, backend = cache, "cached"
+            elif brain_volume_path is not None:
+                _mask = cache or (Path(tempfile.mkdtemp()) / "brain_mask.nii.gz")
+                if cache is not None:
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                backend = select_brain_mask_to_path(
+                    brain_volume_path, _mask, backend="auto", log=_stderr)
+                if backend is None:
+                    raise RuntimeError("no brain-extract backend available")
+            else:
+                raise RuntimeError("brain mask cache absent and no brain volume to extract")
             bs = surface_from_mask(_mask)
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain", annotation_name=None,
@@ -2149,6 +2159,7 @@ def run_view_results(
     labels_tsv: str | Path | None = None,
     freesurfer_dir: str = "",
     brain_volume: str | Path | None = None,
+    brain_mask_cache: str | Path | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2194,6 +2205,7 @@ def run_view_results(
         contact_labels=contact_labels,
         fs=fs,
         brain_volume_path=(Path(brain_volume) if brain_volume else None),
+        brain_mask_cache_path=(Path(brain_mask_cache) if brain_mask_cache else None),
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

@@ -343,6 +343,11 @@ async function showProposed(id) {
       `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
     $("approvebtn").hidden = false;
     if (p.has_mri_qc) showQc(p.has_mni_qc);
+    // The label job's 2nd step rebuilt the 3D viewer with the subject brain
+    // surface (from the MRI); reload the iframe so it shows (Brain α to fade it,
+    // CT MIP toggle to overlay the CT).
+    const f = $("viewerframe");
+    if (f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
 }
 

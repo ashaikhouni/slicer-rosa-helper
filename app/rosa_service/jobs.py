@@ -121,13 +121,12 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         return [
             base + ["detect", ct, "--out", traj],
             base + ["contacts", traj, ct, "--out", contacts],
-            # --brain-volume ct: brain-extract (SynthStrip) + marching-cubes the
-            # CT into the subject's OWN translucent brain surface (accurate — the
-            # patient's actual anatomy, not a template warp) with electrodes
-            # penetrating it. Adds ~1-2 min (SynthStrip) to the run.
+            # CT stays MIP-only here (fast). The subject brain SURFACE comes from
+            # the MRI, generated when the MRI is brought in for labeling (see the
+            # "label" kind's 2nd step), so the pipeline doesn't pay SynthStrip.
             base + ["view-results", str(workdir), "--output", viewer,
                     "--ct", ct, "--contacts", contacts, "--trajectories", traj,
-                    "--brain-volume", ct, "--subject-label", label],
+                    "--subject-label", label],
         ]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
@@ -148,16 +147,29 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # once per case, MNI→T1 once per template space, so labeling more atlases
         # reuses the transforms instead of re-registering.
         regcache = str(spec.params.get("regcache") or (workdir / "regcache"))
+        # Parent case dir + its viewer, so the 2nd step regenerates the 3D view
+        # with the subject brain SURFACE built from the MRI (mri_in_ct), electrodes
+        # penetrating it. Brain mask is cached in regcache → SynthStrip once/case.
+        parent_dir = Path(contacts).parent
+        parent_traj = str(parent_dir / "trajectories.tsv")
+        parent_viewer = str(parent_dir / "viewer")
+        brain_mask = str(Path(regcache) / "brain_mask.nii.gz")
         base = [py, "-u", "-m", "rosa_agent"]
-        return [base + ["label", str(contacts),
-                        "--bundled-atlas", atlas,
-                        "--target-volume", str(ct),
-                        "--intermediate-volume", str(t1),
-                        "--save-registered-mri", mri_qc,
-                        "--save-ct-in-mni", ct_mni,
-                        "--save-mri-in-mni", mri_mni,
-                        "--registration-cache", regcache,
-                        "-o", out]]
+        return [
+            base + ["label", str(contacts),
+                    "--bundled-atlas", atlas,
+                    "--target-volume", str(ct),
+                    "--intermediate-volume", str(t1),
+                    "--save-registered-mri", mri_qc,
+                    "--save-ct-in-mni", ct_mni,
+                    "--save-mri-in-mni", mri_mni,
+                    "--registration-cache", regcache,
+                    "-o", out],
+            base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                    "--ct", str(ct), "--contacts", str(contacts),
+                    "--trajectories", parent_traj,
+                    "--brain-volume", mri_qc, "--brain-mask-cache", brain_mask],
+        ]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 
