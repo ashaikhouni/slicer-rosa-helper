@@ -210,6 +210,17 @@ class GyralMaskTests(unittest.TestCase):
         self.assertGreater(surf.n_vertices, 100)
         self.assertEqual(_boundary_edge_count(surf.faces), 0)
 
+        # aparc_vertex_colors: color the surface by the (synthetic) parcellation.
+        from rosa_core.brain_mesh import aparc_vertex_colors
+        lut = {1001: {"rgba": (160, 100, 50, 0)}, 2: {"rgba": (245, 245, 245, 0)}}
+        cols = aparc_vertex_colors(surf.vertices_ras, aimg, lut, inward_mm=2.0)
+        self.assertEqual(cols.shape, (surf.n_vertices, 4))
+        self.assertEqual(cols.dtype, np.uint8)
+        self.assertTrue((cols[:, 3] == 255).all())          # opaque
+        # A real LUT color (cortex or WM) lands on the surface — not all default.
+        present = {tuple(c) for c in cols[:, :3].tolist()}
+        self.assertTrue((160, 100, 50) in present or (245, 245, 245) in present)
+
 
 @unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
 class TransformSurfaceTests(unittest.TestCase):

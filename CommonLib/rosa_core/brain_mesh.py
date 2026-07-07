@@ -271,6 +271,53 @@ def brain_tissue_from_fastsurfer_aseg(aseg: Any, reference: Any, *,
     return np.isin(lab, list(exclude), invert=True) & (lab > 0)
 
 
+def aparc_vertex_colors(vertices_ras: np.ndarray, aseg: Any, lut: dict, *,
+                        inward_mm: float = 1.5,
+                        default: tuple = (200, 200, 200)) -> np.ndarray:
+    """Per-vertex RGBA (uint8, N×4) coloring a surface by a FreeSurfer/FastSurfer
+    ``aparc+aseg`` — the classic parcellated cortex look.
+
+    Samples the segmentation label a step ``inward_mm`` **toward the mesh
+    centroid** (robustly into the labelled GM ribbon — not along the surface
+    normal, whose winding is unreliable) and maps it through ``lut``
+    (``{label: {"rgba": (r,g,b,a)}}`` from ``parse_freesurfer_lut``). If a vertex
+    still lands unlabelled, it keeps the on-vertex sample. Physical (RAS) coords
+    are shared between the native surface and the (conformed) aseg, so no
+    resampling is needed.
+    """
+    import nibabel as nib
+
+    aimg = aseg if hasattr(aseg, "dataobj") else nib.load(str(aseg))
+    lab = np.asanyarray(aimg.dataobj).astype(np.int32)
+    inv = np.linalg.inv(np.asarray(aimg.affine, dtype=float))
+    shp = np.array(lab.shape)
+
+    def _sample(pts):
+        hom = np.concatenate([pts, np.ones((pts.shape[0], 1))], axis=1)
+        ijk = np.round((inv @ hom.T).T[:, :3]).astype(int)
+        inb = np.all((ijk >= 0) & (ijk < shp), axis=1)
+        out = np.zeros(pts.shape[0], dtype=np.int32)
+        good = ijk[inb]
+        out[inb] = lab[good[:, 0], good[:, 1], good[:, 2]]
+        return out
+
+    v = np.asarray(vertices_ras, dtype=float)
+    labels = _sample(v)
+    if inward_mm:
+        d = v.mean(axis=0) - v
+        d /= (np.linalg.norm(d, axis=1, keepdims=True) + 1e-9)
+        inward = _sample(v + d * float(inward_mm))
+        labels = np.where(inward > 0, inward, labels)   # prefer the in-ribbon label
+    # Vectorized label→RGBA via a lookup table.
+    maxl = (max(lut) + 1) if lut else 1
+    table = np.tile(np.array([*default, 255], dtype=np.uint8), (maxl, 1))
+    for l, entry in lut.items():
+        if 0 <= l < maxl:
+            r, g, b, _a = entry["rgba"]
+            table[l] = (r, g, b, 255)
+    return table[np.clip(labels, 0, maxl - 1)]
+
+
 def gyral_surface_from_mri(
     volume: Any, brain_mask: Any, *,
     step_size: int = 1,
@@ -433,5 +480,6 @@ def surface_from_mask(
 
 __all__ = [
     "BrainSurface", "surface_from_mask", "gyral_mask_from_mri",
-    "gyral_surface_from_mri", "brain_tissue_from_fastsurfer_aseg", "transform_surface",
+    "gyral_surface_from_mri", "brain_tissue_from_fastsurfer_aseg",
+    "aparc_vertex_colors", "transform_surface",
 ]

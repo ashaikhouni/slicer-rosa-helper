@@ -2021,9 +2021,10 @@ def _assemble_viewer(
                 # case and every later label reuses it — no re-mesh, no re-warp.
                 d = np.load(scache)
                 bs = BrainSurface(vertices_ras=d["v"], faces=d["f"], vertex_normals=d["n"])
+                brain_colors = d["c"] if "c" in d.files else None
                 backend = "cached-surface"
                 _stderr(f"[view] reusing cached brain surface {scache.name} "
-                        f"({bs.n_vertices} verts)")
+                        f"({bs.n_vertices} verts{', parcellated' if brain_colors is not None else ''})")
             else:
                 from rosa_detect.services.mask_backend import select_brain_mask_to_path
                 from rosa_core.brain_mesh import (
@@ -2060,6 +2061,24 @@ def _assemble_viewer(
                     backend = f"{backend}+fastsurfer"
                 else:
                     bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
+                # aparc surface coloring (when a FastSurfer/FS aseg is available):
+                # sample the parcellation at each vertex → per-vertex RGBA for the
+                # viewer's "Parcellation" mode. Sample in the NATIVE frame (aseg +
+                # surface share RAS) before the CT transform; colors are per-vertex
+                # so they survive the transform + cache unchanged.
+                brain_colors = None
+                if aseg is not None and aseg.is_file():
+                    try:
+                        import rosa_core
+                        from rosa_core.brain_mesh import aparc_vertex_colors
+                        from rosa_agent.io.freesurfer import parse_freesurfer_lut
+                        lut = parse_freesurfer_lut(
+                            Path(rosa_core.__file__).parent / "resources" / "freesurfer"
+                            / "FreeSurferColorLUT20120827.txt")
+                        brain_colors = aparc_vertex_colors(bs.vertices_ras, aseg, lut)
+                        _stderr(f"[view] parcellated surface from aparc ({len(lut)} LUT entries)")
+                    except Exception as exc:  # noqa: BLE001
+                        _stderr(f"[view] aparc coloring skipped ({exc})")
                 # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
                 # moving=T1) when present; otherwise register here as a fallback.
                 tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
@@ -2069,15 +2088,17 @@ def _assemble_viewer(
                 else:
                     _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
                     ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
-                bs = transform_surface(bs, ct_from_t1)
+                bs = transform_surface(bs, ct_from_t1)   # colors are per-vertex, order preserved
                 if scache is not None:
                     scache.parent.mkdir(parents=True, exist_ok=True)
-                    np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals)
+                    extra = {"c": brain_colors} if brain_colors is not None else {}
+                    np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals, **extra)
                     _stderr(f"[view] cached brain surface → {scache.name}")
             surfaces = [SimpleNamespace(
-                name="brain", hemi="lh", kind="brain", annotation_name=None,
+                name="brain", hemi="lh", kind="brain",
+                annotation_name=("aparc" if brain_colors is not None else None),
                 vertices_ras=bs.vertices_ras, faces=bs.faces,
-                vertex_normals=bs.vertex_normals, vertex_colors_rgba=None,
+                vertex_normals=bs.vertex_normals, vertex_colors_rgba=brain_colors,
             )]
             _stderr(f"[view] subject brain surface (native+gyri, {backend}): "
                     f"{bs.n_vertices} verts / {bs.n_faces} faces")
