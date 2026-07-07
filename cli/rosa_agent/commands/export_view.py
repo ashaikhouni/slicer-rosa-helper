@@ -689,19 +689,14 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" min="0" max="1" step="0.05" value="0.45" />
         <span class="coord">0.45</span>
       </label>
-      <label class="plane-ctl" data-control="brain-smooth" title="Smooth the brain surface live (removes marching-cubes noise; higher = smoother, less gyral detail)">
+      <label class="plane-ctl" data-control="brain-smooth" title="Smooth the brain surface live (Taubin — shaves noise but keeps gyri, so it's subtle by design). Use Erode for a visibly softer/cleaner surface.">
         <span class="axis">Smooth</span>
-        <input type="range" min="0" max="20" step="1" value="0" />
+        <input type="range" min="0" max="30" step="1" value="0" />
         <span class="coord">0</span>
       </label>
-      <label class="plane-ctl" data-control="trim-inferior" title="Trim the brain surface from below — hide cerebellum / lower context the electrodes don't reach">
-        <span class="axis">Trim base</span>
-        <input type="range" min="0" max="100" step="1" value="0" />
-        <span class="coord">0</span>
-      </label>
-      <label class="plane-ctl" data-control="trim-posterior" title="Trim the brain surface from behind — hide occipital / posterior context">
-        <span class="axis">Trim back</span>
-        <input type="range" min="0" max="100" step="1" value="0" />
+      <label class="plane-ctl" data-control="brain-erode" title="Erode the brain surface live (Laplacian — shrinks inward, flattening the dura/vessel material sitting on the gyri). This is the effective clean-up knob.">
+        <span class="axis">Erode</span>
+        <input type="range" min="0" max="30" step="1" value="0" />
         <span class="coord">0</span>
       </label>
       <label class="plane-ctl" data-control="plane-alpha">
@@ -794,7 +789,6 @@ function setDbg(slot, msg, cls) {{
 const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-renderer.localClippingEnabled = true;   // per-material clip planes (brain trim)
 const host = document.getElementById("canvas-host");
 host.appendChild(renderer.domElement);
 
@@ -906,16 +900,6 @@ selectionMarker.renderOrder = 999;
 selectionMarker.visible = false;
 scene.add(selectionMarker);
 
-// Live clip planes applied to the BRAIN surface only (not contacts/shafts) so
-// context the electrodes never reach — cerebellum, occipital pole, posterior
-// dura — can be trimmed away without re-meshing. A point is kept where
-// normal·p + constant >= 0. Constants are initialised to the surface bounds
-// (no clip) once the GLB loads; the Trim sliders raise the cut inward.
-const _clipInferior = new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6);   // keep z >= cut
-const _clipPosterior = new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6);  // keep y >= cut
-const brainClipPlanes = [_clipInferior, _clipPosterior];
-let _brainBounds = null;   // {{zmin,zmax,ymin,ymax}} for the Trim slider mapping
-
 function _firstMeshChild(obj) {{
   let mesh = null;
   obj.traverse(c => {{ if (!mesh && c.isMesh) mesh = c; }});
@@ -981,19 +965,6 @@ const onGltf = gltf => {{
   // "slider says 0.45 but brain is solid" boot state.
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
-  // Enable brain-only trim clipping: bound the surface, start the planes at the
-  // bounds (nothing clipped), and attach them to the brain materials only.
-  if (surfaceNodes.length) {{
-    const bbox = new THREE.Box3();
-    for (const n of surfaceNodes) bbox.expandByObject(n);
-    _brainBounds = {{ zmin: bbox.min.z, zmax: bbox.max.z, ymin: bbox.min.y, ymax: bbox.max.y }};
-    _clipInferior.constant = -_brainBounds.zmin;
-    _clipPosterior.constant = -_brainBounds.ymin;
-    for (const n of surfaceNodes) {{
-      const mesh = n.userData && n.userData._mesh;
-      if (mesh && mesh.material) {{ mesh.material.clippingPlanes = brainClipPlanes; mesh.material.clipShadows = false; }}
-    }}
-  }}
   fitToObject(gltfRoot);
   // Re-apply any visibility a parent frame requested before the GLB finished
   // loading (embedded rosa-app: rejected contacts start hidden).
@@ -1879,56 +1850,70 @@ function _taubinSmoothPositions(orig, index, iterations) {{
   }}
   return pos;
 }}
-function _applyBrainSmooth(iterations) {{
+// Plain Laplacian ("Erode"): every pass pulls each vertex toward its neighbour
+// average with a POSITIVE factor and no inflate step, so the surface shrinks
+// inward and convex bumps (dura/vessel material perched on the gyri) flatten
+// faster than the bulk — a live stand-in for morphological erosion of the mask.
+function _laplacianErodePositions(orig, index, iterations) {{
+  const n = orig.length / 3;
+  const pos = Float32Array.from(orig);
+  const sx = new Float64Array(n), sy = new Float64Array(n), sz = new Float64Array(n);
+  const cnt = new Float32Array(n);
+  const lam = 0.6;
+  for (let it = 0; it < iterations; it++) {{
+    sx.fill(0); sy.fill(0); sz.fill(0); cnt.fill(0);
+    for (let f = 0; f < index.length; f += 3) {{
+      const a = index[f], b = index[f + 1], c = index[f + 2];
+      const pairs = [[a, b], [a, c], [b, a], [b, c], [c, a], [c, b]];
+      for (let k = 0; k < 6; k++) {{
+        const v = pairs[k][0], w = pairs[k][1];
+        sx[v] += pos[3 * w]; sy[v] += pos[3 * w + 1]; sz[v] += pos[3 * w + 2]; cnt[v]++;
+      }}
+    }}
+    for (let v = 0; v < n; v++) {{
+      if (cnt[v] === 0) continue;
+      const inv = 1 / cnt[v];
+      pos[3 * v]     += lam * (sx[v] * inv - pos[3 * v]);
+      pos[3 * v + 1] += lam * (sy[v] * inv - pos[3 * v + 1]);
+      pos[3 * v + 2] += lam * (sz[v] * inv - pos[3 * v + 2]);
+    }}
+  }}
+  return pos;
+}}
+// Apply Erode (Laplacian, first) then Smooth (Taubin) from the pristine geometry
+// each time, so the two sliders compose without compounding across ticks.
+function _applyBrainDeform() {{
+  const erode = _ctlVal("brain-erode"), smooth = _ctlVal("brain-smooth");
   for (const node of surfaceNodes) {{
     const mesh = node.userData && node.userData._mesh;
     const orig = node.userData && node.userData._origPos;
     if (!mesh || !mesh.geometry || !orig) continue;
     const geom = mesh.geometry;
-    const posAttr = geom.attributes.position;
-    if (iterations <= 0 || !geom.index) {{
-      posAttr.array.set(orig);
-    }} else {{
-      posAttr.array.set(_taubinSmoothPositions(orig, geom.index.array, iterations));
-    }}
-    posAttr.needsUpdate = true;
+    const idx = geom.index && geom.index.array;
+    let pos = orig;
+    if (idx && erode > 0) pos = _laplacianErodePositions(pos, idx, erode);
+    if (idx && smooth > 0) pos = _taubinSmoothPositions(pos, idx, smooth);
+    if (pos === orig) geom.attributes.position.array.set(orig);
+    else geom.attributes.position.array.set(pos);
+    geom.attributes.position.needsUpdate = true;
     geom.computeVertexNormals();
   }}
 }}
-let _smoothTimer = 0;
-(function _wireBrainSmooth() {{
-  const ctl = document.querySelector('.plane-ctl[data-control="brain-smooth"]');
-  if (!ctl) return;
-  const slider = ctl.querySelector('input[type="range"]');
-  const coord = ctl.querySelector(".coord");
-  slider.addEventListener("input", () => {{
-    const v = parseInt(slider.value, 10);
-    coord.textContent = String(v);     // label tracks the drag; the (heavy) smooth
-    clearTimeout(_smoothTimer);        // is debounced so it runs once you pause,
-    _smoothTimer = setTimeout(() => _applyBrainSmooth(v), 130);  // not every tick
-  }});
-}})();
-
-// Trim sliders — raise a clip plane inward from the surface bounds (0 = no trim
-// up to 60% of the extent) to cut away brain the electrodes don't reach. Only
-// the brain material is clipped, so trimmed-away electrodes still render.
-(function _wireTrim() {{
-  const specs = [
-    ["trim-inferior", _clipInferior, "z"],
-    ["trim-posterior", _clipPosterior, "y"],
-  ];
-  for (const [name, plane, axis] of specs) {{
+function _ctlVal(name) {{
+  const el = document.querySelector(`.plane-ctl[data-control="${{name}}"] input[type="range"]`);
+  return el ? parseInt(el.value, 10) : 0;
+}}
+let _deformTimer = 0;
+(function _wireBrainDeform() {{
+  for (const name of ["brain-smooth", "brain-erode"]) {{
     const ctl = document.querySelector(`.plane-ctl[data-control="${{name}}"]`);
     if (!ctl) continue;
     const slider = ctl.querySelector('input[type="range"]');
     const coord = ctl.querySelector(".coord");
     slider.addEventListener("input", () => {{
-      coord.textContent = slider.value;
-      if (!_brainBounds) return;
-      const lo = axis === "z" ? _brainBounds.zmin : _brainBounds.ymin;
-      const hi = axis === "z" ? _brainBounds.zmax : _brainBounds.ymax;
-      const cut = lo + (Number(slider.value) / 100) * 0.6 * (hi - lo);
-      plane.constant = -cut;   // keep coord >= cut
+      coord.textContent = slider.value;   // label tracks the drag; the (heavy)
+      clearTimeout(_deformTimer);         // deform is debounced to run on pause
+      _deformTimer = setTimeout(_applyBrainDeform, 120);
     }});
   }}
 }})();
