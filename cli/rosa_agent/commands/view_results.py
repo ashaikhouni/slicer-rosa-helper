@@ -104,6 +104,22 @@ def main(argv: list[str] | None = None) -> int:
              "atlas-independent, so it's meshed once per case and reused — "
              "labeling another atlas skips the re-mesh entirely.",
     )
+    parser.add_argument(
+        "--fastsurfer", action="store_true",
+        help="run FastSurfer seg-only (if available) and mesh the surface inside "
+             "its learned cortical tissue — no dura, cerebrum-only. Falls back to "
+             "the Otsu path when FastSurfer isn't found.",
+    )
+    parser.add_argument(
+        "--fastsurfer-aseg", default="",
+        help="path to a precomputed FastSurfer/FreeSurfer aparc+aseg to use as the "
+             "surface support (skips running FastSurfer).",
+    )
+    parser.add_argument(
+        "--keep-cerebellum", action="store_true",
+        help="keep cerebellum + brainstem in the FastSurfer surface (default: "
+             "cerebrum-only).",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -161,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
             brain_native_volume=args.brain_native_volume or None,
             brain_to_ct_transform=args.brain_to_ct_transform or None,
             brain_surface_cache=args.brain_surface_cache or None,
+            fastsurfer=bool(args.fastsurfer),
+            fastsurfer_aseg=args.fastsurfer_aseg or None,
+            drop_cerebellum=not bool(args.keep_cerebellum),
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),

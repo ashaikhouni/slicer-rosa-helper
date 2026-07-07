@@ -1948,6 +1948,9 @@ def _assemble_viewer(
     brain_native_volume_path: Path | None = None,
     brain_to_ct_transform_path: Path | None = None,
     brain_surface_cache_path: Path | None = None,
+    fastsurfer_aseg_path: Path | None = None,
+    fastsurfer: bool = False,
+    drop_cerebellum: bool = True,
     parcellation,
     lut,
     annotation: str,
@@ -2023,7 +2026,8 @@ def _assemble_viewer(
                         f"({bs.n_vertices} verts)")
             else:
                 from rosa_detect.services.mask_backend import select_brain_mask_to_path
-                from rosa_core.brain_mesh import gyral_surface_from_mri, transform_surface
+                from rosa_core.brain_mesh import (
+                    gyral_surface_from_mri, brain_tissue_from_fastsurfer_aseg, transform_surface)
                 from rosa_core.registration import transform_to_4x4_ras, load_transform
                 # Native brain mask (SynthStrip), cached once per case.
                 cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
@@ -2037,9 +2041,25 @@ def _assemble_viewer(
                         brain_native_volume_path, nmask, backend="auto", log=_stderr)
                     if backend is None:
                         raise RuntimeError("no brain-extract backend available")
-                # Crisp gyral iso-surface in the native MRI frame (step_size=1 for
-                # fold detail; grayscale iso + N4 + nodule-stripped support).
-                bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
+                # Prefer FastSurfer's LEARNED tissue as the surface support (dura
+                # never enters; cerebellum dropped cleanly). Fall back to the Otsu
+                # grayscale-iso path when FastSurfer isn't available. Either way,
+                # the same step_size=1 grayscale-iso mesher runs.
+                aseg = Path(fastsurfer_aseg_path) if fastsurfer_aseg_path else None
+                if aseg is None and fastsurfer:
+                    from rosa_detect.services.fastsurfer_seg import run_fastsurfer_seg
+                    aseg = run_fastsurfer_seg(
+                        brain_native_volume_path,
+                        (scache.parent if scache is not None else Path(tempfile.mkdtemp())) / "fastsurfer",
+                        sid="subject", log=_stderr)
+                if aseg is not None and aseg.is_file():
+                    tissue = brain_tissue_from_fastsurfer_aseg(
+                        aseg, brain_native_volume_path, drop_cerebellum=drop_cerebellum)
+                    bs = gyral_surface_from_mri(
+                        brain_native_volume_path, nmask, step_size=1, brain_tissue=tissue)
+                    backend = f"{backend}+fastsurfer"
+                else:
+                    bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
                 # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
                 # moving=T1) when present; otherwise register here as a fallback.
                 tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
@@ -2298,6 +2318,9 @@ def run_view_results(
     brain_native_volume: str | Path | None = None,
     brain_to_ct_transform: str | Path | None = None,
     brain_surface_cache: str | Path | None = None,
+    fastsurfer_aseg: str | Path | None = None,
+    fastsurfer: bool = False,
+    drop_cerebellum: bool = True,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2348,6 +2371,9 @@ def run_view_results(
         brain_native_volume_path=(Path(brain_native_volume) if brain_native_volume else None),
         brain_to_ct_transform_path=(Path(brain_to_ct_transform) if brain_to_ct_transform else None),
         brain_surface_cache_path=(Path(brain_surface_cache) if brain_surface_cache else None),
+        fastsurfer_aseg_path=(Path(fastsurfer_aseg) if fastsurfer_aseg else None),
+        fastsurfer=fastsurfer,
+        drop_cerebellum=drop_cerebellum,
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,
