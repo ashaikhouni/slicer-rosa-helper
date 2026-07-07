@@ -51,16 +51,16 @@ def find_fastsurfer() -> tuple[Path | None, str | None]:
 
 
 def _pick_device(device: str) -> str:
+    """Choose the inference device WITHOUT importing torch in this (parent)
+    process — the parent uses SimpleITK, and torch + SITK both load libomp,
+    which segfaults on a double-init. torch lives only in the FastSurfer
+    subprocess, which validates the device itself; here we just guess by
+    platform (Apple Silicon → mps, else cpu — override with device=)."""
     if device != "auto":
         return device
-    try:
-        import torch  # noqa: PLC0415
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:  # noqa: BLE001 — torch may live only in the FastSurfer env
-        return "cpu"
+    import platform
+    if platform.system() == "Darwin" and platform.machine() == "arm64":
+        return "mps"
     return "cpu"
 
 
