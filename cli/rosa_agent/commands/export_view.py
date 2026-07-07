@@ -215,6 +215,29 @@ def _slice_volume_meta(img, out_path: Path, *, vid: str, label: str) -> dict[str
     }
 
 
+def _brain_mri_dvr_volume(native_mri_path, native_mask_path, sitk_transform, ct_path):
+    """Brain-only MRI resampled into the CT frame, windowed to uint8.
+
+    The 3D texture the in-browser volume renderer (DVR) raycasts. Masking to the
+    brain + windowing on the brain's own intensity means a shader isosurface
+    lands on the pial surface (skull/scalp gone) — a Curry/Medtronic-style
+    volume-rendered brain, no mesh. Returns a SITK uint8 image on the CT grid.
+    """
+    import SimpleITK as sitk
+    from rosa_core.registration import resample_volume
+
+    mri = sitk.Cast(sitk.ReadImage(str(native_mri_path)), sitk.sitkFloat32)
+    mask = sitk.Cast(sitk.ReadImage(str(native_mask_path)) > 0, sitk.sitkFloat32)
+    masked = mri * mask                                   # same native grid
+    inct = resample_volume(masked, sitk_transform, reference=sitk.ReadImage(str(ct_path)),
+                           interp="linear")
+    arr = sitk.GetArrayViewFromImage(inct)
+    brain = arr[arr > 0]
+    hi = float(np.percentile(brain, 99.0)) if brain.size else 1.0
+    scaled = sitk.Clamp(inct * (255.0 / max(hi, 1e-3)), lowerBound=0.0, upperBound=255.0)
+    return sitk.Cast(scaled, sitk.sitkUInt8)
+
+
 def _write_ct_slice_volume(
     ct_path: Path, out_path: Path, window: tuple[float, float] = (-150.0, 1500.0),
 ) -> dict[str, Any]:
@@ -699,6 +722,10 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" data-mip="threshold" min="0" max="1" step="0.02" value="0.32" title="MIP threshold (raise to drop soft tissue / isolate bone + metal)" />
         <input type="range" data-mip="opacity" min="0" max="1" step="0.05" value="0.6" title="MIP opacity" />
       </label>
+      <label class="plane-ctl" data-control="dvr" title="Volume-render the selected volume as a gradient-shaded isosurface (Curry/Medtronic look, no mesh). Pick the 'MRI (brain)' volume for a brain surface.">
+        <input type="checkbox" /><span class="axis">Volume 3D</span>
+        <input type="range" data-dvr="threshold" min="0.02" max="0.9" step="0.01" value="0.28" title="Isosurface level (raise to peel outer tissue)" />
+      </label>
       <label class="plane-ctl" data-axis="axial">
         <input type="checkbox" /><span class="axis">Axial</span>
         <input type="range" min="0" max="1" step="0.5" disabled />
@@ -796,6 +823,11 @@ scene.add(key); scene.add(fill);
 scene.add(key.target); scene.add(fill.target);
 const _kOff = new THREE.Vector3(), _fOff = new THREE.Vector3();
 const _camDir = new THREE.Vector3(), _right = new THREE.Vector3();
+// DVR mesh + its camera-following light dir — declared here (before the render
+// loop / updateLights) to avoid a temporal-dead-zone crash; assigned in
+// initCutPlanes / used by _makeDvrMesh.
+let dvrMesh = null;
+const _dvrLightDir = new THREE.Vector3(0.4, 0.85, 0.55).normalize();
 function updateLights() {{
   // Rake the key light across the surface facing the camera: offset it up +
   // left + toward the viewer from the orbit centre, so folds shadow from any
@@ -810,6 +842,8 @@ function updateLights() {{
        .addScaledVector(camera.up, -0.6).addScaledVector(_right, 0.6).normalize();
   fill.position.copy(controls.target).addScaledVector(_fOff, 400);
   fill.target.position.copy(controls.target); fill.target.updateMatrixWorld();
+  // Rake the DVR isosurface the same way (direction from surface toward the key).
+  if (dvrMesh && dvrMesh.visible) dvrMesh.material.uniforms.uLightDir.value.copy(_kOff);
 }}
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
@@ -1475,6 +1509,101 @@ function _makeMipMesh(bbox, volTex, vol) {{
   return mesh;
 }}
 
+// Direct volume rendering (DVR): first-hit isosurface raycast with gradient
+// (Blinn-ish Lambert) shading — the Curry/Medtronic "volume brain" look, no
+// mesh. Best on the brain-only MRI volume (masked → the isosurface is the pial
+// surface). Gradient is computed in voxel space and rotated to world via
+// uVoxToRas for lighting; light follows the camera (uLightDir, see updateLights).
+// (dvrMesh + _dvrLightDir are declared up near updateLights to avoid a TDZ crash.)
+function _makeDvrMesh(bbox, volTex, vol) {{
+  const w = bbox.xmax - bbox.xmin, h = bbox.ymax - bbox.ymin, d = bbox.zmax - bbox.zmin;
+  const geo = new THREE.BoxGeometry(w, h, d);
+  const inv = vol.affineInv, A = vol.affine;
+  const rasToVox = new THREE.Matrix4().set(
+    inv[0][0], inv[0][1], inv[0][2], inv[0][3],
+    inv[1][0], inv[1][1], inv[1][2], inv[1][3],
+    inv[2][0], inv[2][1], inv[2][2], inv[2][3], 0, 0, 0, 1);
+  const voxToRas = new THREE.Matrix4().set(
+    A[0][0], A[0][1], A[0][2], A[0][3],
+    A[1][0], A[1][1], A[1][2], A[1][3],
+    A[2][0], A[2][1], A[2][2], A[2][3], 0, 0, 0, 1);
+  const mat = new THREE.ShaderMaterial({{
+    uniforms: {{
+      uVolume: {{ value: volTex }},
+      uRasToVox: {{ value: rasToVox }},
+      uVoxToRas: {{ value: voxToRas }},
+      uVolumeSize: {{ value: new THREE.Vector3(vol.dim[0], vol.dim[1], vol.dim[2]) }},
+      uBoxMin: {{ value: new THREE.Vector3(bbox.xmin, bbox.ymin, bbox.zmin) }},
+      uBoxMax: {{ value: new THREE.Vector3(bbox.xmax, bbox.ymax, bbox.zmax) }},
+      uThreshold: {{ value: 0.28 }},
+      uSteps: {{ value: 384.0 }},
+      uColor: {{ value: new THREE.Color(0.86, 0.86, 0.9) }},
+      uLightDir: {{ value: _dvrLightDir.clone() }},
+    }},
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {{ vec4 wp = modelMatrix * vec4(position, 1.0); vWorldPos = wp.xyz;
+                    gl_Position = projectionMatrix * viewMatrix * wp; }}
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+      uniform sampler3D uVolume;
+      uniform mat4 uRasToVox; uniform mat4 uVoxToRas;
+      uniform vec3 uVolumeSize, uBoxMin, uBoxMax, uColor, uLightDir;
+      uniform float uThreshold, uSteps;
+      varying vec3 vWorldPos;
+      float sVox(vec3 vox) {{
+        vec3 uvw = (vox + 0.5) / uVolumeSize;
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) return 0.0;
+        return texture(uVolume, uvw).r;
+      }}
+      void main() {{
+        vec3 ro = cameraPosition;
+        vec3 rd = normalize(vWorldPos - ro);
+        vec3 ta = (uBoxMin - ro) / rd, tb = (uBoxMax - ro) / rd;
+        vec3 tlo = min(ta, tb), thi = max(ta, tb);
+        float tnear = max(max(tlo.x, tlo.y), tlo.z);
+        float tfar = min(min(thi.x, thi.y), thi.z);
+        tnear = max(tnear, 0.0);
+        if (tnear > tfar) discard;
+        int steps = int(uSteps);
+        float dt = (tfar - tnear) / float(steps);
+        float prev = 0.0, tprev = tnear;
+        for (int i = 0; i < 1024; i++) {{
+          if (i >= steps) break;
+          float t = tnear + (float(i) + 0.5) * dt;
+          vec3 vox = (uRasToVox * vec4(ro + rd * t, 1.0)).xyz;
+          float v = sVox(vox);
+          if (v >= uThreshold && prev < uThreshold) {{
+            float f = (uThreshold - prev) / max(1e-4, v - prev);   // sub-step refine
+            vec3 hv = (uRasToVox * vec4(ro + rd * mix(tprev, t, f), 1.0)).xyz;
+            vec3 g = vec3(sVox(hv + vec3(1.,0,0)) - sVox(hv - vec3(1.,0,0)),
+                          sVox(hv + vec3(0,1.,0)) - sVox(hv - vec3(0,1.,0)),
+                          sVox(hv + vec3(0,0,1.)) - sVox(hv - vec3(0,0,1.)));
+            vec3 n = normalize((mat3(uVoxToRas) * (-g)) + 1e-6);   // outward (toward CSF)
+            float diff = max(dot(n, normalize(uLightDir)), 0.0);
+            gl_FragColor = vec4(uColor * (0.25 + 0.75 * diff), 1.0);
+            return;
+          }}
+          prev = v; tprev = t;
+        }}
+        discard;
+      }}
+    `,
+    side: THREE.BackSide,
+    transparent: false,
+    depthWrite: false,
+    depthTest: false,
+  }});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(0.5 * (bbox.xmin + bbox.xmax), 0.5 * (bbox.ymin + bbox.ymax),
+                    0.5 * (bbox.zmin + bbox.zmax));
+  mesh.renderOrder = -2;   // behind the MIP + electrodes
+  mesh.visible = false;
+  return mesh;
+}}
+
 function initCutPlanes(vol) {{
   // Wipe any previous planes (defensive — loadMri can fire twice).
   for (const axis of Object.keys(cutPlanes)) {{
@@ -1523,6 +1652,20 @@ function initCutPlanes(vol) {{
     mcb.addEventListener("change", () => {{ if (mipMesh) mipMesh.visible = mcb.checked; }});
     if (thr) thr.addEventListener("input", () => {{ if (mipMesh) mipMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); }});
     if (op) op.addEventListener("input", () => {{ if (mipMesh) mipMesh.material.uniforms.uOpacity.value = parseFloat(op.value); }});
+  }}
+
+  // Volume DVR (off by default), built on the same volume + 3D texture. Best on
+  // the "MRI (brain)" volume (isosurface = pial). Toggle + threshold from the toolbar.
+  if (dvrMesh) {{ scene.remove(dvrMesh); dvrMesh = null; }}
+  dvrMesh = _makeDvrMesh(cutVolumeBox, tex, vol);
+  scene.add(dvrMesh);
+  const dvrCtl = document.querySelector('.plane-ctl[data-control="dvr"]');
+  if (dvrCtl) {{
+    const cb = dvrCtl.querySelector('input[type="checkbox"]');
+    const thr = dvrCtl.querySelector('input[data-dvr="threshold"]');
+    dvrMesh.visible = cb.checked;   // keep across volume switches
+    cb.onchange = () => {{ if (dvrMesh) dvrMesh.visible = cb.checked; }};
+    if (thr) thr.oninput = () => {{ if (dvrMesh) dvrMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); }};
   }}
 }}
 
@@ -2087,17 +2230,27 @@ def _assemble_viewer(
                 # moving=T1) when present; otherwise register here as a fallback.
                 tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
                 if tfp is not None and tfp.is_file():
-                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(load_transform(str(tfp))))
+                    sitk_tf = load_transform(str(tfp))
                     _stderr(f"[view] reusing cached MRI→CT transform {tfp.name}")
                 else:
                     _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
-                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
+                ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
                 bs = transform_surface(bs, ct_from_t1)   # colors are per-vertex, order preserved
                 if scache is not None:
                     scache.parent.mkdir(parents=True, exist_ok=True)
                     extra = {"c": brain_colors} if brain_colors is not None else {}
                     np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals, **extra)
                     _stderr(f"[view] cached brain surface → {scache.name}")
+                    # Brain-extracted MRI in the CT frame → the DVR volume (cached
+                    # with the surface, atlas-independent). An isosurface raycast
+                    # of this in the browser is the mesh-free "volume brain".
+                    try:
+                        import SimpleITK as sitk
+                        dvr = _brain_mri_dvr_volume(brain_native_volume_path, nmask, sitk_tf, ct_path)
+                        sitk.WriteImage(dvr, str(scache.parent / "brain_mri_in_ct.nii.gz"))
+                        _stderr("[view] cached DVR volume → brain_mri_in_ct.nii.gz")
+                    except Exception as exc:  # noqa: BLE001
+                        _stderr(f"[view] DVR volume failed ({exc})")
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain",
                 annotation_name=("aparc" if brain_colors is not None else None),
@@ -2177,6 +2330,21 @@ def _assemble_viewer(
     volumes: list[dict[str, Any]] = []
     if t1_slice_meta is not None:
         volumes.append(t1_slice_meta)
+    # Brain-only MRI in the CT frame (cached with the surface) — the DVR source.
+    # First when present so it's the default and the Volume 3D toggle renders a
+    # brain immediately.
+    _dvr_cache = (Path(brain_surface_cache_path).parent / "brain_mri_in_ct.nii.gz"
+                  if brain_surface_cache_path else None)
+    if _dvr_cache is not None and _dvr_cache.is_file():
+        try:
+            import SimpleITK as sitk
+            dvr_meta = _slice_volume_meta(
+                sitk.ReadImage(str(_dvr_cache)), out / "mri_in_view.nii.gz",
+                vid="mri_brain", label="MRI (brain)")
+            volumes.insert(0, dvr_meta)
+            _stderr(f"[view] wrote mri_in_view.nii.gz (brain MRI for DVR; {dvr_meta['size']})")
+        except Exception as exc:  # noqa: BLE001
+            _stderr(f"[view] DVR volume export failed ({exc})")
     volumes.append(ct_slice_meta)
 
     scene, contact_meta = _build_scene(
