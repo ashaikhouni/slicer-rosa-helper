@@ -69,10 +69,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--brain-volume", default="",
-        help="optional volume ALREADY in the CT frame (the CT, or an MRI "
-             "resampled to CT) — brain-extracted + marching-cubed into the "
-             "subject's own translucent brain surface. Ignored if --freesurfer-dir "
-             "is given.",
+        help="optional volume ALREADY in the CT frame (an MRI resampled to CT) — "
+             "brain-extracted + marching-cubed into the subject's own translucent "
+             "brain surface. Ignored if --freesurfer-dir is given.",
+    )
+    parser.add_argument(
+        "--brain-mask-cache", default="",
+        help="path to cache the brain mask; if it exists it's reused (skip "
+             "SynthStrip), else --brain-volume is extracted and saved here — so "
+             "the mask is computed once per case, not per label.",
     )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
@@ -126,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
             labels_tsv=labels,
             freesurfer_dir=args.freesurfer_dir,
             brain_volume=args.brain_volume or None,
+            brain_mask_cache=args.brain_mask_cache or None,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),
