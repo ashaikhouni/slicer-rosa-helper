@@ -689,6 +689,11 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" min="0" max="1" step="0.05" value="0.45" />
         <span class="coord">0.45</span>
       </label>
+      <label class="plane-ctl" data-control="brain-smooth" title="Smooth the brain surface live (removes marching-cubes noise; higher = smoother, less gyral detail)">
+        <span class="axis">Smooth</span>
+        <input type="range" min="0" max="20" step="1" value="0" />
+        <span class="coord">0</span>
+      </label>
       <label class="plane-ctl" data-control="plane-alpha">
         <span class="axis">Slice α</span>
         <input type="range" min="0" max="1" step="0.05" value="0.95" />
@@ -915,6 +920,11 @@ const onGltf = gltf => {{
       // dialed back to 1.0 — the source of the "fractured cortex at
       // α=1" report.
       surfaceNodes.push(obj);
+      // Stash the pristine geometry so the Smooth slider always re-smooths
+      // from the original (repeated smoothing must not compound).
+      if (mesh && mesh.geometry && mesh.geometry.attributes.position) {{
+        obj.userData._origPos = Float32Array.from(mesh.geometry.attributes.position.array);
+      }}
     }} else if (extras.shank) {{
       if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
       shankNodes.get(extras.shank).push(obj);
@@ -1779,6 +1789,68 @@ function _applyInitialBrainAlpha() {{
     const v = parseFloat(slider.value);
     coord.textContent = v.toFixed(2);
     _applyBrainAlpha(v);
+  }});
+}})();
+
+// Brain smoothing slider — Taubin (λ|μ) smooth the brain surface live, so the
+// gyri can be dialled from crisp (0) to smooth without re-generating the mesh
+// server-side. Re-smooths from the pristine geometry each time (no compounding).
+// λ/μ match the server-side _taubin_smooth so N here ≈ N more baked passes.
+function _taubinSmoothPositions(orig, index, iterations) {{
+  const n = orig.length / 3;
+  const pos = Float32Array.from(orig);
+  const sx = new Float64Array(n), sy = new Float64Array(n), sz = new Float64Array(n);
+  const cnt = new Float32Array(n);
+  const lam = 0.5, mu = -0.53;
+  for (let it = 0; it < iterations; it++) {{
+    sx.fill(0); sy.fill(0); sz.fill(0); cnt.fill(0);
+    for (let f = 0; f < index.length; f += 3) {{
+      const a = index[f], b = index[f + 1], c = index[f + 2];
+      // each of a triangle's verts neighbours the other two
+      const pairs = [[a, b], [a, c], [b, a], [b, c], [c, a], [c, b]];
+      for (let k = 0; k < 6; k++) {{
+        const v = pairs[k][0], w = pairs[k][1];
+        sx[v] += pos[3 * w]; sy[v] += pos[3 * w + 1]; sz[v] += pos[3 * w + 2]; cnt[v]++;
+      }}
+    }}
+    const factor = (it % 2 === 0) ? lam : mu;
+    for (let v = 0; v < n; v++) {{
+      if (cnt[v] === 0) continue;
+      const inv = 1 / cnt[v];
+      pos[3 * v]     += factor * (sx[v] * inv - pos[3 * v]);
+      pos[3 * v + 1] += factor * (sy[v] * inv - pos[3 * v + 1]);
+      pos[3 * v + 2] += factor * (sz[v] * inv - pos[3 * v + 2]);
+    }}
+  }}
+  return pos;
+}}
+function _applyBrainSmooth(iterations) {{
+  for (const node of surfaceNodes) {{
+    const mesh = node.userData && node.userData._mesh;
+    const orig = node.userData && node.userData._origPos;
+    if (!mesh || !mesh.geometry || !orig) continue;
+    const geom = mesh.geometry;
+    const posAttr = geom.attributes.position;
+    if (iterations <= 0 || !geom.index) {{
+      posAttr.array.set(orig);
+    }} else {{
+      posAttr.array.set(_taubinSmoothPositions(orig, geom.index.array, iterations));
+    }}
+    posAttr.needsUpdate = true;
+    geom.computeVertexNormals();
+  }}
+}}
+let _smoothRaf = 0;
+(function _wireBrainSmooth() {{
+  const ctl = document.querySelector('.plane-ctl[data-control="brain-smooth"]');
+  if (!ctl) return;
+  const slider = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  slider.addEventListener("input", () => {{
+    const v = parseInt(slider.value, 10);
+    coord.textContent = String(v);
+    cancelAnimationFrame(_smoothRaf);   // coalesce rapid ticks — smoothing is O(faces·N)
+    _smoothRaf = requestAnimationFrame(() => _applyBrainSmooth(v));
   }});
 }})();
 
