@@ -129,7 +129,7 @@ def transform_surface(surface: "BrainSurface", ras_4x4: np.ndarray) -> "BrainSur
     )
 
 
-def gyral_mask_from_mri(volume: Any, brain_mask: Any):
+def gyral_mask_from_mri(volume: Any, brain_mask: Any, *, open_iterations: int = 1):
     """Gray+white-matter mask (drops sulcal/ventricular CSF) from a T1 + brain mask.
 
     Otsu-splits the in-brain T1 into CSF/GM/WM and keeps **GM+WM**, so meshing
@@ -139,6 +139,14 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any):
     ``surface_from_mask`` keeps the largest component. No new dependency
     (skimage/scipy). Returns a nibabel image ready for :func:`surface_from_mask`
     (use a low ``smooth_sigma`` there so the folds survive).
+
+    ``open_iterations`` binary-opens the GM+WM mask before keeping the largest
+    component: opening erodes then dilates, so it strips the small bright
+    inclusions the threshold pulls in near the cortex (vessels, dura,
+    partial-volume voxels) **and** the thin bridges that attach them — otherwise
+    they survive as blisters sitting on the gyri (mesh smoothing only rounds
+    them, it can't remove attached geometry). Higher = cleaner but eats thin
+    gyri; 0 disables.
 
     This is the bundleable "gyri without FreeSurfer" path; a real recon
     (FreeSurfer/FastSurfer pial) is cleaner when available.
@@ -156,6 +164,11 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any):
         raise ValueError("empty brain mask")
     th = threshold_multiotsu(inb, classes=3)     # [CSF|GM, GM|WM]
     gmwm = (t1 >= float(th[0])) & m               # drop the darkest (CSF) class
+    if open_iterations and open_iterations > 0:
+        # Strip surface nodules + the thin bridges attaching them, then keep the
+        # largest component so the detached blobs drop out (not just rounded).
+        gmwm = ndimage.binary_opening(gmwm, iterations=int(open_iterations))
+        gmwm = _largest_component(gmwm)
     gmwm = ndimage.binary_closing(gmwm, iterations=1)
     gmwm = ndimage.binary_fill_holes(gmwm)        # fill ventricles → only the pial surface
     return nib.Nifti1Image(gmwm.astype(np.uint8), vimg.affine, vimg.header)
