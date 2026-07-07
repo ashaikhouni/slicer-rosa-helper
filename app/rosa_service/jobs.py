@@ -158,6 +158,9 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_viewer = str(parent_dir / "viewer")
         brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
         t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
+        # The brain surface is atlas-independent — mesh it once per case and
+        # cache it here, so labeling a 2nd/3rd atlas reuses it (no re-mesh).
+        brain_surface = str(Path(regcache) / "brain_surface.npz")
         base = [py, "-u", "-m", "rosa_agent"]
         return [
             base + ["label", str(contacts),
@@ -174,7 +177,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                     "--trajectories", parent_traj,
                     "--brain-native-volume", str(t1),
                     "--brain-to-ct-transform", t1_to_ct,
-                    "--brain-mask-cache", brain_mask],
+                    "--brain-mask-cache", brain_mask,
+                    "--brain-surface-cache", brain_surface],
         ]
     raise ValueError(f"unknown job kind: {kind!r}")
 
@@ -225,6 +229,8 @@ class _Job:
             created_at=self.created_at, started_at=self.started_at,
             ended_at=self.ended_at, exit_code=self.exit_code, error=self.error,
             artifacts=self.artifacts(),
+            parent=self.params.get("parent"), atlas=self.params.get("atlas"),
+            t1=self.params.get("t1"),
         )
 
     def _write_manifest(self) -> None:

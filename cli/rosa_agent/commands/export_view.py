@@ -854,6 +854,21 @@ let gltfRoot = null;
 
 const RED = new THREE.MeshStandardMaterial({{ color: 0xff2030, metalness: 0.75, roughness: 0.25 }});
 
+// A bright marker sphere that jumps to the selected contact so it's obvious
+// which one is highlighted — a lone recoloured band is easy to lose among many
+// contacts or inside an opaque brain. depthTest off + high renderOrder draws it
+// on top of everything (visible even when the contact is buried).
+const selectionMarker = new THREE.Mesh(
+  new THREE.SphereGeometry(2.2, 24, 18),
+  new THREE.MeshBasicMaterial({{
+    color: 0xff2233, transparent: true, opacity: 0.55,
+    depthTest: false, depthWrite: false,
+  }})
+);
+selectionMarker.renderOrder = 999;
+selectionMarker.visible = false;
+scene.add(selectionMarker);
+
 function _firstMeshChild(obj) {{
   let mesh = null;
   obj.traverse(c => {{ if (!mesh && c.isMesh) mesh = c; }});
@@ -1613,6 +1628,8 @@ function selectContact(label, shank) {{
     // to scene diag) so a typical shank fills the view comfortably,
     // not "inside the contact" the way a hard-coded 35mm would.
     const pos = node.getWorldPosition(new THREE.Vector3());
+    selectionMarker.position.copy(pos);   // beacon on the highlighted contact
+    selectionMarker.visible = true;
     controls.target.copy(pos);
     const dir = camera.position.clone().sub(pos).normalize();
     if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
@@ -1669,6 +1686,7 @@ function showAll() {{
     _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
     selectedContact = null;
   }}
+  selectionMarker.visible = false;   // clear the highlight beacon
   document.querySelectorAll(".shank-card").forEach(c => c.classList.remove("active"));
   document.querySelectorAll(".contact-row").forEach(r => r.classList.remove("selected"));
 }}
@@ -1908,6 +1926,7 @@ def _assemble_viewer(
     brain_gyri: bool = False,
     brain_native_volume_path: Path | None = None,
     brain_to_ct_transform_path: Path | None = None,
+    brain_surface_cache_path: Path | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -1958,7 +1977,8 @@ def _assemble_viewer(
             f"[view] wrote {t1_out} (T1 resampled onto CT grid; "
             f"{t1_slice_meta['size']} {t1_slice_meta['dtype']})"
         )
-    elif brain_native_volume_path is not None:
+    elif brain_native_volume_path is not None or (
+            brain_surface_cache_path is not None and Path(brain_surface_cache_path).is_file()):
         # No FreeSurfer recon, but we have the NATIVE MRI (1mm, isotropic) +
         # the MRI→CT rigid transform the labeling step already computed. Mesh
         # the gyri in the native frame (clean, no interpolation ramps) and push
@@ -1969,37 +1989,53 @@ def _assemble_viewer(
             import tempfile
             import numpy as np
             from types import SimpleNamespace
-            from rosa_detect.services.mask_backend import select_brain_mask_to_path
-            from rosa_core.brain_mesh import (
-                gyral_mask_from_mri, surface_from_mask, transform_surface,
-            )
-            from rosa_core.registration import transform_to_4x4_ras, load_transform
-            # Native brain mask (SynthStrip), cached once per case.
-            cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
-            if cache is not None and cache.is_file():
-                nmask, backend = cache, "cached"
+            from rosa_core.brain_mesh import BrainSurface
+            scache = Path(brain_surface_cache_path) if brain_surface_cache_path else None
+            if scache is not None and scache.is_file():
+                # The surface is atlas-independent (it depends only on the MRI +
+                # CT + registration, all fixed per case), so it's built ONCE per
+                # case and every later label reuses it — no re-mesh, no re-warp.
+                d = np.load(scache)
+                bs = BrainSurface(vertices_ras=d["v"], faces=d["f"], vertex_normals=d["n"])
+                backend = "cached-surface"
+                _stderr(f"[view] reusing cached brain surface {scache.name} "
+                        f"({bs.n_vertices} verts)")
             else:
-                nmask = cache or (Path(tempfile.mkdtemp()) / "brain_mask_native.nii.gz")
-                if cache is not None:
-                    cache.parent.mkdir(parents=True, exist_ok=True)
-                backend = select_brain_mask_to_path(
-                    brain_native_volume_path, nmask, backend="auto", log=_stderr)
-                if backend is None:
-                    raise RuntimeError("no brain-extract backend available")
-            # Gyral surface in the native MRI frame.
-            gmwm = gyral_mask_from_mri(brain_native_volume_path, nmask)
-            bs = surface_from_mask(
-                gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=2)
-            # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
-            # moving=T1) when present; otherwise register here as a fallback.
-            tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
-            if tfp is not None and tfp.is_file():
-                ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(load_transform(str(tfp))))
-                _stderr(f"[view] reusing cached MRI→CT transform {tfp.name}")
-            else:
-                _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
-                ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
-            bs = transform_surface(bs, ct_from_t1)
+                from rosa_detect.services.mask_backend import select_brain_mask_to_path
+                from rosa_core.brain_mesh import (
+                    gyral_mask_from_mri, surface_from_mask, transform_surface,
+                )
+                from rosa_core.registration import transform_to_4x4_ras, load_transform
+                # Native brain mask (SynthStrip), cached once per case.
+                cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+                if cache is not None and cache.is_file():
+                    nmask, backend = cache, "cached"
+                else:
+                    nmask = cache or (Path(tempfile.mkdtemp()) / "brain_mask_native.nii.gz")
+                    if cache is not None:
+                        cache.parent.mkdir(parents=True, exist_ok=True)
+                    backend = select_brain_mask_to_path(
+                        brain_native_volume_path, nmask, backend="auto", log=_stderr)
+                    if backend is None:
+                        raise RuntimeError("no brain-extract backend available")
+                # Gyral surface in the native MRI frame.
+                gmwm = gyral_mask_from_mri(brain_native_volume_path, nmask)
+                bs = surface_from_mask(
+                    gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=2)
+                # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
+                # moving=T1) when present; otherwise register here as a fallback.
+                tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
+                if tfp is not None and tfp.is_file():
+                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(load_transform(str(tfp))))
+                    _stderr(f"[view] reusing cached MRI→CT transform {tfp.name}")
+                else:
+                    _, _, _, sitk_tf = _register_fs_to_ct(brain_native_volume_path, ct_path)
+                    ct_from_t1 = np.linalg.inv(transform_to_4x4_ras(sitk_tf))
+                bs = transform_surface(bs, ct_from_t1)
+                if scache is not None:
+                    scache.parent.mkdir(parents=True, exist_ok=True)
+                    np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals)
+                    _stderr(f"[view] cached brain surface → {scache.name}")
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain", annotation_name=None,
                 vertices_ras=bs.vertices_ras, faces=bs.faces,
@@ -2243,6 +2279,7 @@ def run_view_results(
     brain_gyri: bool = False,
     brain_native_volume: str | Path | None = None,
     brain_to_ct_transform: str | Path | None = None,
+    brain_surface_cache: str | Path | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2292,6 +2329,7 @@ def run_view_results(
         brain_gyri=brain_gyri,
         brain_native_volume_path=(Path(brain_native_volume) if brain_native_volume else None),
         brain_to_ct_transform_path=(Path(brain_to_ct_transform) if brain_to_ct_transform else None),
+        brain_surface_cache_path=(Path(brain_surface_cache) if brain_surface_cache else None),
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

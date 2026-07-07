@@ -98,6 +98,12 @@ def main(argv: list[str] | None = None) -> int:
              "Reused to push the native brain surface into CT; if absent, "
              "view-results registers the native MRI to the CT itself.",
     )
+    parser.add_argument(
+        "--brain-surface-cache", default="",
+        help="path to cache the built brain surface (.npz). The surface is "
+             "atlas-independent, so it's meshed once per case and reused — "
+             "labeling another atlas skips the re-mesh entirely.",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -154,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             brain_gyri=bool(args.brain_gyri),
             brain_native_volume=args.brain_native_volume or None,
             brain_to_ct_transform=args.brain_to_ct_transform or None,
+            brain_surface_cache=args.brain_surface_cache or None,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),

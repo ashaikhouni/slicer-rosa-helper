@@ -108,6 +108,10 @@ button:disabled { opacity: .5; cursor: default; }
 .contact input.region { cursor: text; }
 .contact input.region { padding: 4px 8px; font-size: 13px; border: 1px solid var(--line);
   border-radius: 6px; background: var(--panel); }
+/* Proposed (from a label job, not yet approved): tinted + dashed so it reads as
+   a preview, and so switching atlases visibly changes the values. */
+.contact input.region.proposed { background: #fff7e6; border-style: dashed;
+  border-color: #e0a83b; color: #7a5200; font-style: italic; }
 .viewer { border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
   background: #0f1720; display: flex; flex-direction: column; }
 .viewer-tabs { display: flex; align-items: center; gap: 6px; padding: 6px 8px;

@@ -202,6 +202,8 @@ function renderReview(doc) {
       const row = document.createElement("div");
       row.className = "contact" + (c.accepted ? "" : " rejected");
       row.dataset.label = c.name;
+      row.dataset.shank = shank.name;
+      row.dataset.cindex = c.index;
       // Click anywhere on the row (except the checkbox / region field) → show
       // the contact in the 3D viewer.
       row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
@@ -335,20 +337,38 @@ function pollLabel(id) {
   }, 1000);
 }
 
-async function showProposed(id) {
+async function showProposed(id, reloadViewer = true) {
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
     $("labelmsg").innerHTML =
       `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
       `<strong>${p.atlas}</strong>. Check the <em>Registration</em> tab, then approve.`;
     $("approvebtn").hidden = false;
+    if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
+    previewProposed(p.contacts);        // show the proposed regions per contact
     if (p.has_mri_qc) showQc(p.has_mni_qc);
-    // The label job's 2nd step rebuilt the 3D viewer with the subject brain
-    // surface (from the MRI); reload the iframe so it shows (Brain α to fade it,
-    // CT MIP toggle to overlay the CT).
+    // The label job's 2nd step (re)built the 3D viewer with the subject brain
+    // surface; reload the iframe so it shows. Skipped on a reload-resume, where
+    // loadResults already loaded the current viewer.
     const f = $("viewerframe");
-    if (f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
+    if (reloadViewer && f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
   } catch (e) { $("labelmsg").textContent = `Could not read labels: ${e.message}`; }
+}
+
+// Fill the review list's region fields with a label job's PROPOSED regions
+// (styled as proposed, not yet committed) so switching atlases visibly changes
+// the labels. Approve commits them into the ReviewDoc; a review edit re-renders
+// from the doc and clears the preview. Maps by shank+contact-index.
+function previewProposed(contacts) {
+  const list = $("reviewlist");
+  list.querySelectorAll(".region.proposed").forEach((r) => r.classList.remove("proposed"));
+  for (const c of contacts || []) {
+    if (!c.region) continue;
+    const row = list.querySelector(
+      `.contact[data-shank="${CSS.escape(c.shank)}"][data-cindex="${c.index}"]`);
+    const region = row && row.querySelector(".region");
+    if (region) { region.value = c.region; region.classList.add("proposed"); }
+  }
 }
 
 // Registration QC lives in the big viewer pane (a tab beside the 3D electrode
@@ -502,8 +522,11 @@ async function boot() {
   });
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
+  // Selecting a different atlas re-labels immediately (registration is cached,
+  // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
+  $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
   wireQc();
-  loadAtlases();
+  await loadAtlases();   // populate the picker before a resume sets its value
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
@@ -514,7 +537,21 @@ async function boot() {
   try {
     const jobs = await jget(`${API}/jobs`);        // newest first
     const done = jobs.find((j) => j.state === "succeeded" && j.kind === "pipeline");
-    if (done) { state.jobId = done.id; loadResults(done.id); }
+    if (done) {
+      state.jobId = done.id;
+      await loadResults(done.id);
+      // Restore this case's most recent label job so the Registration tab and
+      // the proposed labels come back on reload (loadResults cleared them).
+      const lj = jobs.find((j) => j.state === "succeeded" && j.kind === "label"
+                                  && j.parent === done.id);
+      if (lj) {
+        state.labelJobId = lj.id;
+        // Restore the MRI reference so switching atlases relabels (reusing the
+        // cached registration) without re-uploading.
+        if (lj.t1) { state.mri = { path: lj.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
+        showProposed(lj.id, /*reloadViewer=*/false);
+      }
+    }
   } catch (_e) { /* ignore */ }
 }
 boot();

@@ -50,6 +50,13 @@ class JobStatus(BaseModel):
     exit_code: int | None = None
     error: str | None = None
     artifacts: list[Artifact] = Field(default_factory=list)
+    # Surfaced for the UI: a label job's parent pipeline id + its atlas + the MRI
+    # it used, so a reload can find the case's label job, re-enable the
+    # registration tab, and keep atlas-switching working (relabel reuses the
+    # cached registration) without re-uploading the MRI.
+    parent: str | None = None
+    atlas: str | None = None
+    t1: str | None = None
 
 
 # ---------------------------------------------------------------------
