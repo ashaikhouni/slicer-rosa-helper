@@ -70,6 +70,38 @@ def _largest_component(binary: np.ndarray) -> np.ndarray:
     return lbl == int(counts.argmax())
 
 
+def _largest_mesh_component(verts: np.ndarray, faces: np.ndarray):
+    """Keep the largest connected component of a triangle mesh (by vertex count).
+
+    A grayscale iso-surface over the whole brain yields the outer pial surface
+    PLUS separate closed shells for internal isocontours (ventricle walls). Those
+    are disconnected components; the pial surface is overwhelmingly the largest,
+    so keeping it drops the internal shells. Union-find over the edge list.
+    """
+    n = int(verts.shape[0])
+    parent = np.arange(n)
+
+    def find(x):
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for tri in faces:
+        a = find(int(tri[0])); b = find(int(tri[1])); c = find(int(tri[2]))
+        parent[b] = a
+        parent[c] = a
+    roots = np.array([find(i) for i in range(n)])
+    keep_root = int(np.bincount(roots).argmax())
+    vmask = roots == keep_root
+    remap = -np.ones(n, dtype=np.int64)
+    remap[vmask] = np.arange(int(vmask.sum()))
+    keep_faces = faces[vmask[faces[:, 0]] & vmask[faces[:, 1]] & vmask[faces[:, 2]]]
+    return verts[vmask], remap[keep_faces].astype(np.int32)
+
+
 def _taubin_smooth(
     verts: np.ndarray, faces: np.ndarray,
     *, iterations: int, lamb: float = 0.5, mu: float = -0.53,
@@ -212,6 +244,71 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any, *,
     return nib.Nifti1Image(gmwm.astype(np.uint8), vimg.affine, vimg.header)
 
 
+def gyral_surface_from_mri(
+    volume: Any, brain_mask: Any, *,
+    step_size: int = 1,
+    smooth_sigma: float = 0.4,
+    taubin_iterations: int = 3,
+    open_iterations: int = 1,
+    bias_correct: bool = True,
+) -> "BrainSurface":
+    """Crisp gyral (pial-ish) surface from a T1, without FreeSurfer.
+
+    Meshes the **grayscale intensity iso-surface** at the Otsu CSF/GM threshold
+    rather than a binary GM+WM mask: the isocontour is sub-voxel and follows the
+    true tissue boundary, so gyri resolve far better than a staircased binary
+    mesh (whose blur also fills thin sulci). ``step_size=1`` samples every voxel
+    for maximum fold detail; ``2`` is ~4× lighter.
+
+    Pipeline: N4 bias-correct (even resolution) → Otsu → build a *cleaned* GM+WM
+    support (opening strips nodules, largest component, fill) → mesh the T1
+    isocontour restricted to that support (so removed nodules can't reappear) →
+    keep the largest mesh component (drops ventricle-wall shells) → Taubin. Verts
+    are returned in the MRI's RAS; the caller transforms them into CT.
+
+    A real recon (FreeSurfer/FastSurfer pial) is still the accuracy tier; this is
+    the bundleable best-effort (numpy/scipy/skimage + SITK, all dependencies).
+    """
+    import nibabel as nib
+    from scipy import ndimage
+    from skimage import measure
+    from skimage.filters import threshold_multiotsu
+
+    vimg = volume if hasattr(volume, "dataobj") else nib.load(str(volume))
+    mimg = brain_mask if hasattr(brain_mask, "dataobj") else nib.load(str(brain_mask))
+    t1 = np.asanyarray(vimg.dataobj).astype(np.float32)
+    m = np.asanyarray(mimg.dataobj) > 0
+    if m.sum() == 0:
+        raise ValueError("empty brain mask")
+    if bias_correct:
+        t1 = _n4_bias_correct(t1, m)
+    th = threshold_multiotsu(t1[m], classes=3)     # [CSF|GM, GM|WM]
+    # Cleaned GM+WM support: opening strips bright nodules (vessels/dura) + the
+    # thin bridges attaching them; dilate so the pial isocontour is inside it.
+    gmwm = (t1 >= float(th[0])) & m
+    if open_iterations and open_iterations > 0:
+        gmwm = _largest_component(ndimage.binary_opening(gmwm, iterations=int(open_iterations)))
+    gmwm = ndimage.binary_fill_holes(ndimage.binary_closing(gmwm, iterations=1))
+    support = ndimage.binary_dilation(gmwm, iterations=2)
+    # Grayscale iso-surface of the T1 at the CSF/GM threshold, within the support.
+    vol = np.where(support, t1, 0.0).astype(np.float32)
+    if smooth_sigma and smooth_sigma > 0:
+        vol = ndimage.gaussian_filter(vol, sigma=float(smooth_sigma))
+    verts_ijk, faces, _n, _v = measure.marching_cubes(
+        vol, level=float(th[0]), step_size=int(max(1, step_size)))
+    faces = np.ascontiguousarray(faces, dtype=np.int32)
+    verts_ijk, faces = _largest_mesh_component(verts_ijk, faces)
+    verts_ras = nib.affines.apply_affine(
+        np.asarray(vimg.affine, dtype=float), verts_ijk).astype(np.float32)
+    if taubin_iterations and taubin_iterations > 0:
+        verts_ras = _taubin_smooth(verts_ras, faces, iterations=int(taubin_iterations))
+    return BrainSurface(
+        vertices_ras=np.ascontiguousarray(verts_ras, dtype=np.float32),
+        faces=faces,
+        vertex_normals=_vertex_normals(verts_ras, faces),
+    )
+
+
 def surface_from_mask(
     mask: Any,
     *,
@@ -281,5 +378,6 @@ def surface_from_mask(
 
 
 __all__ = [
-    "BrainSurface", "surface_from_mask", "gyral_mask_from_mri", "transform_surface",
+    "BrainSurface", "surface_from_mask", "gyral_mask_from_mri",
+    "gyral_surface_from_mri", "transform_surface",
 ]

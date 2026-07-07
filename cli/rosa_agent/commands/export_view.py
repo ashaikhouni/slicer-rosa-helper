@@ -1840,7 +1840,7 @@ function _applyBrainSmooth(iterations) {{
     geom.computeVertexNormals();
   }}
 }}
-let _smoothRaf = 0;
+let _smoothTimer = 0;
 (function _wireBrainSmooth() {{
   const ctl = document.querySelector('.plane-ctl[data-control="brain-smooth"]');
   if (!ctl) return;
@@ -1848,9 +1848,9 @@ let _smoothRaf = 0;
   const coord = ctl.querySelector(".coord");
   slider.addEventListener("input", () => {{
     const v = parseInt(slider.value, 10);
-    coord.textContent = String(v);
-    cancelAnimationFrame(_smoothRaf);   // coalesce rapid ticks — smoothing is O(faces·N)
-    _smoothRaf = requestAnimationFrame(() => _applyBrainSmooth(v));
+    coord.textContent = String(v);     // label tracks the drag; the (heavy) smooth
+    clearTimeout(_smoothTimer);        // is debounced so it runs once you pause,
+    _smoothTimer = setTimeout(() => _applyBrainSmooth(v), 130);  // not every tick
   }});
 }})();
 
@@ -2074,9 +2074,7 @@ def _assemble_viewer(
                         f"({bs.n_vertices} verts)")
             else:
                 from rosa_detect.services.mask_backend import select_brain_mask_to_path
-                from rosa_core.brain_mesh import (
-                    gyral_mask_from_mri, surface_from_mask, transform_surface,
-                )
+                from rosa_core.brain_mesh import gyral_surface_from_mri, transform_surface
                 from rosa_core.registration import transform_to_4x4_ras, load_transform
                 # Native brain mask (SynthStrip), cached once per case.
                 cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
@@ -2090,10 +2088,9 @@ def _assemble_viewer(
                         brain_native_volume_path, nmask, backend="auto", log=_stderr)
                     if backend is None:
                         raise RuntimeError("no brain-extract backend available")
-                # Gyral surface in the native MRI frame.
-                gmwm = gyral_mask_from_mri(brain_native_volume_path, nmask)
-                bs = surface_from_mask(
-                    gmwm, smooth_sigma=0.5, taubin_iterations=6, step_size=2)
+                # Crisp gyral iso-surface in the native MRI frame (step_size=1 for
+                # fold detail; grayscale iso + N4 + nodule-stripped support).
+                bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
                 # Native-MRI RAS → CT RAS. Reuse the cached t1_to_ct.tfm (fixed=CT,
                 # moving=T1) when present; otherwise register here as a fallback.
                 tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None

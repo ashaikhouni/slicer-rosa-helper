@@ -21,7 +21,8 @@ try:
     import nibabel as nib
     import skimage  # noqa: F401  — the [mesh] extra
     from rosa_core.brain_mesh import (
-        surface_from_mask, gyral_mask_from_mri, transform_surface, BrainSurface,
+        surface_from_mask, gyral_mask_from_mri, gyral_surface_from_mri,
+        transform_surface, BrainSurface,
     )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
@@ -158,9 +159,25 @@ class GyralMaskTests(unittest.TestCase):
         # The viewer passes nibabel images (no temp file); path and image agree.
         vimg = nib.load(str(self.vol))
         mimg = nib.load(str(self.mask))
-        a = np.asanyarray(gyral_mask_from_mri(self.vol, self.mask).dataobj)
-        b = np.asanyarray(gyral_mask_from_mri(vimg, mimg).dataobj)
+        a = np.asanyarray(gyral_mask_from_mri(self.vol, self.mask, bias_correct=False).dataobj)
+        b = np.asanyarray(gyral_mask_from_mri(vimg, mimg, bias_correct=False).dataobj)
         self.assertTrue(np.array_equal(a, b))
+
+    def test_gyral_surface_iso_is_watertight_and_placed(self):
+        # The grayscale iso-surface path: a valid placed BrainSurface whose
+        # largest-component filter leaves a single closed shell (the phantom's
+        # bright core), not internal fragments. Bias correction off (uniform
+        # phantom → N4 is a no-op but slow/edge-casey on a synthetic).
+        surf = gyral_surface_from_mri(
+            self.vol, self.mask, step_size=1, taubin_iterations=2, bias_correct=False)
+        self.assertIsInstance(surf, BrainSurface)
+        self.assertGreater(surf.n_vertices, 100)
+        self.assertEqual(_boundary_edge_count(surf.faces), 0)   # single closed shell
+        self.assertTrue(surf.faces.max() < surf.n_vertices)
+        # Surface sits around the GM/WM core (centered on the phantom).
+        centroid = surf.vertices_ras.mean(axis=0)
+        world_center = nib.affines.apply_affine(self.affine, np.array([24, 24, 24], float))
+        self.assertLess(float(np.linalg.norm(centroid - world_center)), 6.0)
 
 
 @unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
