@@ -694,6 +694,16 @@ _HTML_TEMPLATE = """<!doctype html>
         <input type="range" min="0" max="20" step="1" value="0" />
         <span class="coord">0</span>
       </label>
+      <label class="plane-ctl" data-control="trim-inferior" title="Trim the brain surface from below — hide cerebellum / lower context the electrodes don't reach">
+        <span class="axis">Trim base</span>
+        <input type="range" min="0" max="100" step="1" value="0" />
+        <span class="coord">0</span>
+      </label>
+      <label class="plane-ctl" data-control="trim-posterior" title="Trim the brain surface from behind — hide occipital / posterior context">
+        <span class="axis">Trim back</span>
+        <input type="range" min="0" max="100" step="1" value="0" />
+        <span class="coord">0</span>
+      </label>
       <label class="plane-ctl" data-control="plane-alpha">
         <span class="axis">Slice α</span>
         <input type="range" min="0" max="1" step="0.05" value="0.95" />
@@ -784,6 +794,7 @@ function setDbg(slot, msg, cls) {{
 const renderer = new THREE.WebGLRenderer({{ antialias: true, alpha: false }});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.localClippingEnabled = true;   // per-material clip planes (brain trim)
 const host = document.getElementById("canvas-host");
 host.appendChild(renderer.domElement);
 
@@ -895,6 +906,16 @@ selectionMarker.renderOrder = 999;
 selectionMarker.visible = false;
 scene.add(selectionMarker);
 
+// Live clip planes applied to the BRAIN surface only (not contacts/shafts) so
+// context the electrodes never reach — cerebellum, occipital pole, posterior
+// dura — can be trimmed away without re-meshing. A point is kept where
+// normal·p + constant >= 0. Constants are initialised to the surface bounds
+// (no clip) once the GLB loads; the Trim sliders raise the cut inward.
+const _clipInferior = new THREE.Plane(new THREE.Vector3(0, 0, 1), 1e6);   // keep z >= cut
+const _clipPosterior = new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6);  // keep y >= cut
+const brainClipPlanes = [_clipInferior, _clipPosterior];
+let _brainBounds = null;   // {{zmin,zmax,ymin,ymax}} for the Trim slider mapping
+
 function _firstMeshChild(obj) {{
   let mesh = null;
   obj.traverse(c => {{ if (!mesh && c.isMesh) mesh = c; }});
@@ -960,6 +981,19 @@ const onGltf = gltf => {{
   // "slider says 0.45 but brain is solid" boot state.
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
+  // Enable brain-only trim clipping: bound the surface, start the planes at the
+  // bounds (nothing clipped), and attach them to the brain materials only.
+  if (surfaceNodes.length) {{
+    const bbox = new THREE.Box3();
+    for (const n of surfaceNodes) bbox.expandByObject(n);
+    _brainBounds = {{ zmin: bbox.min.z, zmax: bbox.max.z, ymin: bbox.min.y, ymax: bbox.max.y }};
+    _clipInferior.constant = -_brainBounds.zmin;
+    _clipPosterior.constant = -_brainBounds.ymin;
+    for (const n of surfaceNodes) {{
+      const mesh = n.userData && n.userData._mesh;
+      if (mesh && mesh.material) {{ mesh.material.clippingPlanes = brainClipPlanes; mesh.material.clipShadows = false; }}
+    }}
+  }}
   fitToObject(gltfRoot);
   // Re-apply any visibility a parent frame requested before the GLB finished
   // loading (embedded rosa-app: rejected contacts start hidden).
@@ -1873,6 +1907,30 @@ let _smoothTimer = 0;
     clearTimeout(_smoothTimer);        // is debounced so it runs once you pause,
     _smoothTimer = setTimeout(() => _applyBrainSmooth(v), 130);  // not every tick
   }});
+}})();
+
+// Trim sliders — raise a clip plane inward from the surface bounds (0 = no trim
+// up to 60% of the extent) to cut away brain the electrodes don't reach. Only
+// the brain material is clipped, so trimmed-away electrodes still render.
+(function _wireTrim() {{
+  const specs = [
+    ["trim-inferior", _clipInferior, "z"],
+    ["trim-posterior", _clipPosterior, "y"],
+  ];
+  for (const [name, plane, axis] of specs) {{
+    const ctl = document.querySelector(`.plane-ctl[data-control="${{name}}"]`);
+    if (!ctl) continue;
+    const slider = ctl.querySelector('input[type="range"]');
+    const coord = ctl.querySelector(".coord");
+    slider.addEventListener("input", () => {{
+      coord.textContent = slider.value;
+      if (!_brainBounds) return;
+      const lo = axis === "z" ? _brainBounds.zmin : _brainBounds.ymin;
+      const hi = axis === "z" ? _brainBounds.zmax : _brainBounds.ymax;
+      const cut = lo + (Number(slider.value) / 100) * 0.6 * (hi - lo);
+      plane.constant = -cut;   // keep coord >= cut
+    }});
+  }}
 }})();
 
 // Slice plane α slider — sets the uOpacity uniform on the three cut
