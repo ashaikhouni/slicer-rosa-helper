@@ -179,6 +179,37 @@ class GyralMaskTests(unittest.TestCase):
         world_center = nib.affines.apply_affine(self.affine, np.array([24, 24, 24], float))
         self.assertLess(float(np.linalg.norm(centroid - world_center)), 6.0)
 
+    def test_fastsurfer_tissue_support(self):
+        from rosa_core.brain_mesh import brain_tissue_from_fastsurfer_aseg
+        # Synthetic aseg: WM core (2), GM shell (ctx 1001), CSF rim (24), bg (0).
+        n = 48
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        r = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2)
+        aseg = np.zeros((n, n, n), np.int32)
+        aseg[r <= 20] = 24      # CSF rim
+        aseg[r <= 17] = 1001    # cortex (GM)
+        aseg[r <= 10] = 2       # WM core
+        aff = np.diag([1.0, 1.0, 1.0, 1.0]); aff[:3, 3] = [-24, -24, -24]
+        aimg = nib.Nifti1Image(aseg, aff)
+        # A matching T1 so gyral_surface_from_mri can mesh the intensity iso.
+        t1 = np.where(aseg == 2, 240.0, np.where(aseg == 1001, 120.0,
+             np.where(aseg == 24, 30.0, 0.0))).astype(np.float32)
+        td = tempfile.TemporaryDirectory(); self.addCleanup(td.cleanup)
+        vol = Path(td.name) / "t1.nii.gz"; mask = Path(td.name) / "m.nii.gz"
+        nib.save(nib.Nifti1Image(t1, aff), str(vol))
+        nib.save(nib.Nifti1Image((r <= 20).astype(np.uint8), aff), str(mask))
+
+        tissue = brain_tissue_from_fastsurfer_aseg(aimg, aimg)
+        self.assertTrue(tissue[aseg == 2].all() and tissue[aseg == 1001].all())  # GM+WM kept
+        self.assertFalse(tissue[aseg == 24].any())                               # CSF dropped
+        self.assertFalse(tissue[aseg == 0].any())                                # bg dropped
+        # Feeding it as the support yields a valid placed surface (N4 off — the
+        # phantom is uniform so N4 can be edge-casey on a synthetic).
+        surf = gyral_surface_from_mri(vol, mask, step_size=1, taubin_iterations=2,
+                                      bias_correct=False, brain_tissue=tissue)
+        self.assertGreater(surf.n_vertices, 100)
+        self.assertEqual(_boundary_edge_count(surf.faces), 0)
+
 
 @unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
 class TransformSurfaceTests(unittest.TestCase):
