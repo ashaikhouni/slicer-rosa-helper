@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +230,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--thomas", default="", help="THOMAS segmentation directory (optional)")
     parser.add_argument("--freesurfer", default="", help="FreeSurfer parcellation labelmap (optional)")
     parser.add_argument("--freesurfer-lut", default="", help="FreeSurfer color LUT (optional)")
+    parser.add_argument(
+        "--fastsurfer", action="store_true",
+        help="Run FastSurfer seg-only on --intermediate-volume (the T1) and label "
+             "contacts from its NATIVE aparc+aseg — subject-specific, no MNI warp. "
+             "Requires --intermediate-volume (T1) + --target-volume (CT).",
+    )
     parser.add_argument("--wm", default="", help="White-matter labelmap (optional)")
     parser.add_argument("--wm-lut", default="", help="White-matter LUT (optional)")
     parser.add_argument(
@@ -295,11 +302,32 @@ def main(argv: list[str] | None = None) -> int:
     if not args.out:
         parser.error("--out/-o is required")
 
-    if bool(args.atlas_base) != bool(args.target_volume) and not args.bundled_atlas:
+    if bool(args.atlas_base) != bool(args.target_volume) and not args.bundled_atlas \
+            and not args.fastsurfer:
         parser.error("--atlas-base and --target-volume must be passed together")
     if args.bundled_atlas and not args.target_volume:
         parser.error("--bundled-atlas requires --target-volume "
                      "(the volume the contacts live in)")
+
+    if args.fastsurfer:
+        # Subject-specific labeling: run FastSurfer seg-only on the T1 and route
+        # its native aparc+aseg through the FreeSurfer labelmap provider (which
+        # registers the conformed grid → CT and samples at contacts). No MNI warp.
+        if not args.intermediate_volume or not args.target_volume:
+            parser.error("--fastsurfer requires --intermediate-volume (T1) and --target-volume (CT)")
+        import rosa_core
+        from rosa_detect.services.fastsurfer_seg import run_fastsurfer_seg
+        fs_out = Path(args.registration_cache) / "fastsurfer" if args.registration_cache \
+            else Path(tempfile.mkdtemp()) / "fastsurfer"
+        aseg = run_fastsurfer_seg(args.intermediate_volume, fs_out, sid="subject", log=_stderr)
+        if aseg is None:
+            _stderr("error: --fastsurfer requested but FastSurfer unavailable/failed")
+            return 2
+        args.freesurfer = str(aseg)
+        args.atlas_base = str(aseg.parent / "orig.mgz")   # conformed T1 (aseg grid) → CT
+        args.freesurfer_lut = args.freesurfer_lut or str(
+            Path(rosa_core.__file__).parent / "resources" / "freesurfer"
+            / "FreeSurferColorLUT20120827.txt")
 
     contacts = read_tsv_rows(args.contacts_tsv)
     if not contacts:
