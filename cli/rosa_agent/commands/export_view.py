@@ -1969,7 +1969,9 @@ def _assemble_viewer(
                     raise RuntimeError("no brain-extract backend available")
             else:
                 raise RuntimeError("brain mask cache absent and no brain volume to extract")
-            bs = surface_from_mask(_mask)
+            # step_size=4 (~26k verts vs ~103k at the default 2) — a translucent
+            # context envelope needs no gyral detail, and it loads ~4x smaller.
+            bs = surface_from_mask(_mask, step_size=4)
             surfaces = [SimpleNamespace(
                 name="brain", hemi="lh", kind="brain", annotation_name=None,
                 vertices_ras=bs.vertices_ras, faces=bs.faces,
