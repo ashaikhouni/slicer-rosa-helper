@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SEEG GT labeler</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>SEEG GT labeler</h1>
+  <span id="dataset-info"></span>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <h2>Subjects</h2>
+    <ul id="subjects"></ul>
+
+    <h2>Trajectories</h2>
+    <ul id="trajectories"></ul>
+  </aside>
+
+  <section id="editor">
+    <div id="status-bar">
+      <span id="current-traj">— select a trajectory —</span>
+      <span id="status-msg"></span>
+    </div>
+
+    <div id="slab-container">
+      <div class="slab-block">
+        <div class="slab-title">View A — axis × perp1</div>
+        <canvas id="slab-canvas-1" class="slab-canvas" width="1200" height="280"
+                data-which="axis_perp1"></canvas>
+      </div>
+      <div class="slab-block">
+        <div class="slab-title">View B — axis × perp2 (rotated 90° around axis)</div>
+        <canvas id="slab-canvas-2" class="slab-canvas" width="1200" height="280"
+                data-which="axis_perp2"></canvas>
+      </div>
+      <div id="legend"></div>
+    </div>
+
+    <div id="controls">
+      <fieldset>
+        <legend>1. Electrode model</legend>
+        <label>
+          Vendor:
+          <select id="vendor-filter">
+            <option value="">all</option>
+          </select>
+        </label>
+        <label>
+          Model:
+          <select id="model-select">
+            <option value="">— pick a model —</option>
+          </select>
+        </label>
+        <span id="model-info"></span>
+      </fieldset>
+
+      <fieldset>
+        <legend>2. Click-to-set landmarks</legend>
+        <div id="landmark-row">
+          <label><input type="radio" name="active-landmark" value="tip" checked>
+            <span class="dot tip"></span> Tip (deep edge of bright metal)
+            <span class="value" data-landmark="tip">—</span></label>
+          <label><input type="radio" name="active-landmark" value="bone_inner">
+            <span class="dot bone"></span> Bone inner edge
+            <span class="value" data-landmark="bone_inner">—</span></label>
+          <label><input type="radio" name="active-landmark" value="bolt_start">
+            <span class="dot bolt-start"></span> Bolt start (outer)
+            <span class="value" data-landmark="bolt_start">—</span></label>
+          <label><input type="radio" name="active-landmark" value="bolt_end">
+            <span class="dot bolt-end"></span> Bolt end (inner)
+            <span class="value" data-landmark="bolt_end">—</span></label>
+          <button id="clear-active-btn" type="button" title="Clear the active landmark">
+            Clear active
+          </button>
+        </div>
+        <p class="hint">Click on either slab to set the active landmark — both views are linked
+        on the same arc axis. Right-click clears all landmarks. <b>The tip is the deep edge of
+        the bright metal signal</b> (= the physical electrode tip — easier to click than
+        a contact center). Contacts are then placed walking back at the model's offsets,
+        so contact 1 sits ~1 mm bolt-ward of your click, contact 2 ~4.5 mm, etc.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>3. Notes</legend>
+        <textarea id="notes" rows="2" placeholder="curved shank, collision with X, weird artifact, ..."></textarea>
+      </fieldset>
+
+      <div id="action-bar">
+        <button id="save-btn" type="button">Save</button>
+        <button id="prev-btn" type="button">‹ Prev</button>
+        <button id="next-btn" type="button">Next ›</button>
+        <button id="skip-btn" type="button">Skip</button>
+        <button id="delete-btn" type="button" class="danger">Delete GT</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

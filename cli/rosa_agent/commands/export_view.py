@@ -2076,8 +2076,7 @@ def _assemble_viewer(
                     try:
                         import rosa_core
                         from rosa_core.brain_mesh import aparc_vertex_colors
-                        from rosa_agent.io.freesurfer import parse_freesurfer_lut
-                        lut = parse_freesurfer_lut(
+                        lut = parse_freesurfer_lut(   # module-level import
                             Path(rosa_core.__file__).parent / "resources" / "freesurfer"
                             / "FreeSurferColorLUT20120827.txt")
                         brain_colors = aparc_vertex_colors(bs.vertices_ras, aseg, lut)
