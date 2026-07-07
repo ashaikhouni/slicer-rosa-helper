@@ -244,6 +244,92 @@ def gyral_mask_from_mri(volume: Any, brain_mask: Any, *,
     return nib.Nifti1Image(gmwm.astype(np.uint8), vimg.affine, vimg.header)
 
 
+def brain_tissue_from_fastsurfer_aseg(aseg: Any, reference: Any, *,
+                                      drop_cerebellum: bool = False) -> np.ndarray:
+    """Binary brain-tissue mask (cortex + WM + subcortical GM) from a FastSurfer /
+    FreeSurfer ``aparc+aseg`` segmentation, on the ``reference`` volume's grid.
+
+    Drops background, CSF and ventricle labels — so the resulting surface follows
+    the *learned* cortical boundary and never includes dura/vessels (they are
+    simply unlabelled). ``drop_cerebellum`` additionally removes cerebellum +
+    brainstem for a cerebrum-only surface (FastSurfer labels them separately, so
+    this is clean — unlike a threshold, which can't). Nearest-neighbour resampled
+    onto the reference grid when they differ.
+    """
+    import nibabel as nib
+    import nibabel.processing
+
+    aimg = aseg if hasattr(aseg, "dataobj") else nib.load(str(aseg))
+    rimg = reference if hasattr(reference, "dataobj") else nib.load(str(reference))
+    if aimg.shape != rimg.shape or not np.allclose(aimg.affine, rimg.affine, atol=1e-3):
+        aimg = nib.processing.resample_from_to(aimg, (rimg.shape, rimg.affine), order=0)
+    lab = np.asanyarray(aimg.dataobj).astype(np.int32)
+    # FreeSurfer LUT: background/CSF/ventricles/choroid/vessels.
+    exclude = {0, 24, 4, 43, 5, 44, 14, 15, 72, 31, 63, 30, 62}
+    if drop_cerebellum:
+        exclude |= {7, 8, 46, 47, 16}   # cerebellum WM/cortex (L/R) + brainstem
+    return np.isin(lab, list(exclude), invert=True) & (lab > 0)
+
+
+# Subcortical GM / brainstem structures to keep as their own color when a
+# vertex lands directly on one (rare on a pial surface — medial wall/exposures);
+# everything else that isn't cortex is filled with the nearest cortex region.
+_SUBCORT_KEEP = (10, 49, 17, 53, 18, 54, 11, 50, 12, 51, 13, 52, 26, 58, 28, 60,
+                 7, 8, 46, 47, 16)
+
+
+def aparc_vertex_colors(vertices_ras: np.ndarray, aseg: Any, lut: dict, *,
+                        default: tuple = (170, 170, 170)) -> np.ndarray:
+    """Per-vertex RGBA (uint8, N×4) coloring a surface by a FreeSurfer/FastSurfer
+    ``aparc+aseg`` — the classic parcellated cortex look, with **no black/unknown
+    cracks**.
+
+    Samples the label at each vertex. A cortex (1000–2999) or kept-subcortical
+    label is used directly; anything else (background/CSF/WM at the pial boundary
+    or a sulcal fundus) is filled with the **nearest cortex region** (a distance
+    transform over the cortical labels) so every vertex reads as real cortex, not
+    grey or black. Maps through ``lut`` (``{label:{"rgba"}}`` from
+    ``parse_freesurfer_lut``). Physical (RAS) coords are shared between the native
+    surface and the (conformed) aseg, so no resampling is needed.
+    """
+    import nibabel as nib
+    from scipy import ndimage
+
+    aimg = aseg if hasattr(aseg, "dataobj") else nib.load(str(aseg))
+    lab = np.asanyarray(aimg.dataobj).astype(np.int32)
+    inv = np.linalg.inv(np.asarray(aimg.affine, dtype=float))
+    shp = np.array(lab.shape)
+
+    def _sample(arr, pts):
+        hom = np.concatenate([pts, np.ones((pts.shape[0], 1))], axis=1)
+        ijk = np.round((inv @ hom.T).T[:, :3]).astype(int)
+        inb = np.all((ijk >= 0) & (ijk < shp), axis=1)
+        out = np.zeros(pts.shape[0], dtype=np.int32)
+        good = ijk[inb]
+        out[inb] = arr[good[:, 0], good[:, 1], good[:, 2]]
+        return out
+
+    v = np.asarray(vertices_ras, dtype=float)
+    labels = _sample(lab, v)
+    keep = (((labels >= 1000) & (labels < 3000)) | np.isin(labels, _SUBCORT_KEEP))
+    if not keep.all():
+        cortex = (lab >= 1000) & (lab < 3000)
+        if cortex.any():
+            # For every voxel, the nearest cortex label (grow the parcellation).
+            _, idx = ndimage.distance_transform_edt(~cortex, return_indices=True)
+            near = _sample(lab[tuple(idx)], v)
+            labels = np.where(keep, labels, near)
+
+    maxl = (max(lut) + 1) if lut else 1
+    table = np.tile(np.array([*default, 255], dtype=np.uint8), (maxl, 1))
+    for l, entry in lut.items():
+        if 0 <= l < maxl:
+            r, g, b, _a = entry["rgba"]
+            table[l] = (r, g, b, 255)
+    table[0] = (*default, 255)   # any residual unknown → neutral, never black
+    return table[np.clip(labels, 0, maxl - 1)]
+
+
 def gyral_surface_from_mri(
     volume: Any, brain_mask: Any, *,
     step_size: int = 1,
@@ -253,6 +339,7 @@ def gyral_surface_from_mri(
     nodule_size: int = 3,
     mask_erode: int = 1,
     bias_correct: bool = True,
+    brain_tissue: "np.ndarray | None" = None,
 ) -> "BrainSurface":
     """Crisp gyral (pial-ish) surface from a T1, without FreeSurfer.
 
@@ -270,8 +357,12 @@ def gyral_surface_from_mri(
     keep the largest mesh component (drops ventricle-wall shells) → Taubin. Verts
     are returned in the MRI's RAS; the caller transforms them into CT.
 
-    A real recon (FreeSurfer/FastSurfer pial) is still the accuracy tier; this is
-    the bundleable best-effort (numpy/scipy/skimage + SITK, all dependencies).
+    ``brain_tissue`` (optional) supplies the GM+WM support from an external
+    segmentation — e.g. FastSurfer's ``aparc+aseg`` via
+    :func:`brain_tissue_from_fastsurfer_aseg`. When given, the Otsu/opening/erode
+    support-building is skipped and the iso-surface is meshed inside that
+    (learned) region, so dura never enters. When ``None``, the Otsu path is the
+    zero-dependency fallback. A real recon pial is still the accuracy tier.
     """
     import nibabel as nib
     from scipy import ndimage
@@ -292,19 +383,26 @@ def gyral_surface_from_mri(
         # the iso-surface doesn't bulge out into nodules on the gyri.
         t1 = ndimage.grey_opening(t1, size=int(nodule_size))
     th = threshold_multiotsu(t1[m], classes=3)     # [CSF|GM, GM|WM]
-    # Erode the brain mask before meshing: the dura / pial vessels the strip
-    # leaves live in the outermost 1–2 mm rim, and post-mesh smoothing can't
-    # remove them selectively (it blurs the gyri too). Eroding the rim drops
-    # that material at the source while the fold structure (defined deeper, at
-    # the GM/WM interface) is preserved. 0 disables.
-    m_surf = ndimage.binary_erosion(m, iterations=int(mask_erode)) if (mask_erode and mask_erode > 0) else m
-    # Cleaned GM+WM support: opening strips bright nodules (vessels/dura) + the
-    # thin bridges attaching them; dilate so the pial isocontour is inside it.
-    gmwm = (t1 >= float(th[0])) & m_surf
-    if open_iterations and open_iterations > 0:
-        gmwm = _largest_component(ndimage.binary_opening(gmwm, iterations=int(open_iterations)))
-    gmwm = ndimage.binary_fill_holes(ndimage.binary_closing(gmwm, iterations=1))
-    support = ndimage.binary_dilation(gmwm, iterations=2)
+    if brain_tissue is not None:
+        # External (learned) GM+WM support — FastSurfer/FreeSurfer aseg. Dilate
+        # by 1 so the pial iso-contour sits just inside it; no Otsu/opening/erode.
+        gmwm = _largest_component(np.asarray(brain_tissue).astype(bool) & m)
+        gmwm = ndimage.binary_fill_holes(gmwm)
+        support = ndimage.binary_dilation(gmwm, iterations=1)
+    else:
+        # Erode the brain mask before meshing: the dura / pial vessels the strip
+        # leaves live in the outermost 1–2 mm rim, and post-mesh smoothing can't
+        # remove them selectively (it blurs the gyri too). Eroding the rim drops
+        # that material at the source while the fold structure (defined deeper, at
+        # the GM/WM interface) is preserved. 0 disables.
+        m_surf = ndimage.binary_erosion(m, iterations=int(mask_erode)) if (mask_erode and mask_erode > 0) else m
+        # Cleaned GM+WM support: opening strips bright nodules (vessels/dura) + the
+        # thin bridges attaching them; dilate so the pial isocontour is inside it.
+        gmwm = (t1 >= float(th[0])) & m_surf
+        if open_iterations and open_iterations > 0:
+            gmwm = _largest_component(ndimage.binary_opening(gmwm, iterations=int(open_iterations)))
+        gmwm = ndimage.binary_fill_holes(ndimage.binary_closing(gmwm, iterations=1))
+        support = ndimage.binary_dilation(gmwm, iterations=2)
     # Grayscale iso-surface of the T1 at the CSF/GM threshold, within the support.
     vol = np.where(support, t1, 0.0).astype(np.float32)
     if smooth_sigma and smooth_sigma > 0:
@@ -394,5 +492,6 @@ def surface_from_mask(
 
 __all__ = [
     "BrainSurface", "surface_from_mask", "gyral_mask_from_mri",
-    "gyral_surface_from_mri", "transform_surface",
+    "gyral_surface_from_mri", "brain_tissue_from_fastsurfer_aseg",
+    "aparc_vertex_colors", "transform_surface",
 ]

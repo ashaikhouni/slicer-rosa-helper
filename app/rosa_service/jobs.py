@@ -158,33 +158,50 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_viewer = str(parent_dir / "viewer")
         brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
         t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
-        # The brain surface is atlas-independent — mesh it once per case and
-        # cache it here, so labeling a 2nd/3rd atlas reuses it (no re-mesh).
-        brain_surface = str(Path(regcache) / "brain_surface.npz")
+        # The brain surface is atlas-independent within a segmentation backend,
+        # so it's meshed once per case and reused — but FastSurfer's surface
+        # (learned tissue + parcellation colors) differs from the Otsu one, so
+        # they cache separately (selecting FastSurfer rebuilds the parcellated
+        # surface; MNI atlases keep the Otsu surface).
+        brain_surface = str(Path(regcache) / (
+            "brain_surface_fs.npz" if atlas == "fastsurfer" else "brain_surface.npz"))
         base = [py, "-u", "-m", "rosa_agent"]
-        steps = [
-            base + ["label", str(contacts),
-                    "--bundled-atlas", atlas,
-                    "--target-volume", str(ct),
-                    "--intermediate-volume", str(t1),
-                    "--save-registered-mri", mri_qc,
-                    "--save-ct-in-mni", ct_mni,
-                    "--save-mri-in-mni", mri_mni,
-                    "--registration-cache", regcache,
-                    "-o", out],
-        ]
+        # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
+        # bundled MNI atlases warp a template. The FastSurfer aseg the label step
+        # writes here also drives the parcellated brain surface (step 2).
+        fs_aseg = str(Path(regcache) / "fastsurfer" / "subject" / "mri"
+                      / "aparc.DKTatlas+aseg.deep.mgz")
+        if atlas == "fastsurfer":
+            label_step = base + ["label", str(contacts), "--fastsurfer",
+                                  "--target-volume", str(ct),
+                                  "--intermediate-volume", str(t1),
+                                  "--save-registered-mri", mri_qc,
+                                  "--registration-cache", regcache, "-o", out]
+        else:
+            label_step = base + ["label", str(contacts),
+                                 "--bundled-atlas", atlas,
+                                 "--target-volume", str(ct),
+                                 "--intermediate-volume", str(t1),
+                                 "--save-registered-mri", mri_qc,
+                                 "--save-ct-in-mni", ct_mni,
+                                 "--save-mri-in-mni", mri_mni,
+                                 "--registration-cache", regcache, "-o", out]
+        steps = [label_step]
         # The 3D viewer (brain surface + contacts) is atlas-independent, so it's
         # built ONCE per case (first label). Switching atlas only recomputes the
-        # labels — skip the viewer rebuild once the surface is cached.
+        # labels — skip the viewer rebuild once the surface is cached. FastSurfer
+        # additionally colors the surface by its parcellation.
         if not Path(brain_surface).is_file():
-            steps.append(
-                base + ["view-results", str(parent_dir), "--output", parent_viewer,
-                        "--ct", str(ct), "--contacts", str(contacts),
-                        "--trajectories", parent_traj,
-                        "--brain-native-volume", str(t1),
-                        "--brain-to-ct-transform", t1_to_ct,
-                        "--brain-mask-cache", brain_mask,
-                        "--brain-surface-cache", brain_surface])
+            view_step = base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                                "--ct", str(ct), "--contacts", str(contacts),
+                                "--trajectories", parent_traj,
+                                "--brain-native-volume", str(t1),
+                                "--brain-to-ct-transform", t1_to_ct,
+                                "--brain-mask-cache", brain_mask,
+                                "--brain-surface-cache", brain_surface]
+            if atlas == "fastsurfer":
+                view_step += ["--fastsurfer-aseg", fs_aseg]
+            steps.append(view_step)
         return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 

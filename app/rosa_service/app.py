@@ -200,10 +200,26 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
 
     @app.get(f"/api/{API_VERSION}/atlases")
     async def list_atlases() -> dict:
-        """Bundled atlases available for labeling (for the picker)."""
+        """Atlases available for labeling (for the picker). Prepends FastSurfer —
+        a subject-specific labeler (native aparc+aseg, no MNI warp) — when its
+        runtime is detected; otherwise it's greyed out (bundled MNI atlases are
+        the always-available path)."""
         try:
             from rosa_core import bundled_atlases
-            return {"atlases": bundled_atlases.list_atlases(),
+            atlases = list(bundled_atlases.list_atlases())
+            try:
+                from rosa_detect.services.fastsurfer_seg import find_fastsurfer
+                fs_available = find_fastsurfer()[0] is not None
+            except Exception:  # noqa: BLE001
+                fs_available = False
+            atlases.insert(0, {
+                "id": "fastsurfer", "name": "FastSurfer (native)",
+                "available": fs_available, "license_tier": "permissive",
+                "license": "Apache-2.0 (FastSurfer, no FreeSurfer license for seg-only)",
+                "coverage": "Whole-brain cortical (DKT) + subcortical, subject-specific",
+                "is_default": False,
+            })
+            return {"atlases": atlases,
                     "default": bundled_atlases.load_manifest()["default"]}
         except Exception as exc:  # noqa: BLE001 — engine/resources missing
             raise HTTPException(status_code=500, detail=f"atlas registry error: {exc}") from exc
