@@ -158,9 +158,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_viewer = str(parent_dir / "viewer")
         brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
         t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
-        # The brain surface is atlas-independent — mesh it once per case and
-        # cache it here, so labeling a 2nd/3rd atlas reuses it (no re-mesh).
-        brain_surface = str(Path(regcache) / "brain_surface.npz")
+        # The brain surface is atlas-independent within a segmentation backend,
+        # so it's meshed once per case and reused — but FastSurfer's surface
+        # (learned tissue + parcellation colors) differs from the Otsu one, so
+        # they cache separately (selecting FastSurfer rebuilds the parcellated
+        # surface; MNI atlases keep the Otsu surface).
+        brain_surface = str(Path(regcache) / (
+            "brain_surface_fs.npz" if atlas == "fastsurfer" else "brain_surface.npz"))
         base = [py, "-u", "-m", "rosa_agent"]
         # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
         # bundled MNI atlases warp a template. The FastSurfer aseg the label step
