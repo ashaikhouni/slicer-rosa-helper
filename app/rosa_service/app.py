@@ -295,7 +295,23 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         one image per plane.
         """
         job = _job_or_404(job_id)
-        if space == "mni":
+        if space == "atlas":
+            # Verify the MNI→T1 (atlas) registration: overlay the bundled MNI
+            # TEMPLATE the atlas is defined on against the patient MRI warped
+            # into MNI. Both live on the same template grid, so they composite
+            # directly. Alignment here = accurate atlas label placement.
+            from rosa_core import bundled_atlases
+            atlas = job.params.get("atlas") or "cerebra"
+            try:
+                assets = bundled_atlases.resolve(atlas)
+            except Exception as exc:  # noqa: BLE001
+                raise HTTPException(status_code=409,
+                                    detail=f"atlas template unavailable: {exc}") from exc
+            ct = str(assets.template_path)            # MNI template (shown as CT/magenta)
+            mri = job.workdir / "mri_in_mni.nii.gz"   # patient MRI in MNI (green)
+            if not mri.is_file() or not Path(ct).is_file():
+                raise HTTPException(status_code=409, detail="no atlas-registration QC for this job")
+        elif space == "mni":
             ct = str(job.workdir / "ct_in_mni.nii.gz")
             mri = job.workdir / "mri_in_mni.nii.gz"
             if not mri.is_file() or not Path(ct).is_file():

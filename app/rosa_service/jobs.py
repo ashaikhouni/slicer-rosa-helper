@@ -162,7 +162,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # cache it here, so labeling a 2nd/3rd atlas reuses it (no re-mesh).
         brain_surface = str(Path(regcache) / "brain_surface.npz")
         base = [py, "-u", "-m", "rosa_agent"]
-        return [
+        steps = [
             base + ["label", str(contacts),
                     "--bundled-atlas", atlas,
                     "--target-volume", str(ct),
@@ -172,14 +172,20 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                     "--save-mri-in-mni", mri_mni,
                     "--registration-cache", regcache,
                     "-o", out],
-            base + ["view-results", str(parent_dir), "--output", parent_viewer,
-                    "--ct", str(ct), "--contacts", str(contacts),
-                    "--trajectories", parent_traj,
-                    "--brain-native-volume", str(t1),
-                    "--brain-to-ct-transform", t1_to_ct,
-                    "--brain-mask-cache", brain_mask,
-                    "--brain-surface-cache", brain_surface],
         ]
+        # The 3D viewer (brain surface + contacts) is atlas-independent, so it's
+        # built ONCE per case (first label). Switching atlas only recomputes the
+        # labels — skip the viewer rebuild once the surface is cached.
+        if not Path(brain_surface).is_file():
+            steps.append(
+                base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                        "--ct", str(ct), "--contacts", str(contacts),
+                        "--trajectories", parent_traj,
+                        "--brain-native-volume", str(t1),
+                        "--brain-to-ct-transform", t1_to_ct,
+                        "--brain-mask-cache", brain_mask,
+                        "--brain-surface-cache", brain_surface])
+        return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

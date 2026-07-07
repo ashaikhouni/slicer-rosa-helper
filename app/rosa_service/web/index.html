@@ -91,6 +91,7 @@
             <span class="btnset" id="qcspace" hidden>
               <button data-space="mni" class="active">AC-PC</button>
               <button data-space="ct">Native</button>
+              <button data-space="atlas" title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
             </span>
             <span class="btnset" id="qcmodes">
               <button data-mode="opacity" class="active">Opacity</button>
@@ -106,7 +107,10 @@
           <div id="viewerqc" class="viewer-view" hidden>
             <div class="qc-planes" id="qcplanes"></div>
             <p class="qc-hint muted">Structures should line up across the wipe / read gray in
-              Color. Drag a plane's slider to scrub through it.</p>
+              Color. Drag a plane's slider to scrub through it.
+              <strong>Native</strong> = CT↔MRI (the per-case registration);
+              <strong>Atlas</strong> = MNI template↔your MRI (checks the atlas registration
+              that places the labels).</p>
           </div>
         </div>
       </div>
