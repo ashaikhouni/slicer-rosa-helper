@@ -327,24 +327,48 @@ async function runLabel() {
   }
 }
 
+// The newest label job for the current case (or null). /jobs is newest-first.
+async function latestLabelJob() {
+  try {
+    const jobs = await jget(`${API}/jobs`);
+    return jobs.find((j) => j.kind === "label" && j.parent === state.jobId) || null;
+  } catch { return null; }
+}
+
 function pollLabel(id, firstLabel) {
   clearInterval(state.labelPoll);
   state.labelPoll = setInterval(async () => {
     let st;
     try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
-    if (["succeeded", "failed", "cancelled"].includes(st.state)) {
-      clearInterval(state.labelPoll);
-      $("labelbtn").disabled = false;
-      if (st.state === "succeeded") {
+    if (!["succeeded", "failed", "cancelled"].includes(st.state)) return;
+    clearInterval(state.labelPoll);
+    $("labelbtn").disabled = false;
+    // Follow the LATEST label job for the case, not this fixed id — so a
+    // failed→retry→succeeded sequence advances the UI instead of sticking on
+    // the failed message (the retry is often a newer job).
+    const latest = await latestLabelJob();
+    if (latest && latest.id !== id) {
+      state.labelJobId = latest.id;
+      if (latest.state === "succeeded") {
         state.labeledOnce = true;
-        // Only the first label jumps to the registration screen (verify CT↔MRI
-        // once) and reloads the viewer (surface built); atlas switches just
-        // refresh the labels in place.
-        showProposed(id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
-      } else $("labelmsg").textContent =
-        `Labeling ${st.state}${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}`;
+        showProposed(latest.id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
+      } else if (["failed", "cancelled"].includes(latest.state)) {
+        _showLabelError(latest);
+      } else { pollLabel(latest.id, firstLabel); }   // a newer one is still running
+      return;
     }
+    if (st.state === "succeeded") {
+      state.labeledOnce = true;
+      showProposed(id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
+    } else { _showLabelError(st); }
   }, 1000);
+}
+
+function _showLabelError(st) {
+  $("labelmsg").innerHTML =
+    `Labeling <strong>${st.state}</strong>${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}. ` +
+    `Fix and click <em>Register MRI &amp; label</em> to retry.`;
+  $("labelbtn").disabled = false;
 }
 
 async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
@@ -556,17 +580,23 @@ async function boot() {
     if (done) {
       state.jobId = done.id;
       await loadResults(done.id);
-      // Restore this case's most recent label job so the Registration tab and
-      // the proposed labels come back on reload (loadResults cleared them).
-      const lj = jobs.find((j) => j.state === "succeeded" && j.kind === "label"
-                                  && j.parent === done.id);
-      if (lj) {
-        state.labelJobId = lj.id;
-        state.labeledOnce = true;   // registration already verified for this case
-        // Restore the MRI reference so switching atlases relabels (reusing the
-        // cached registration) without re-uploading.
-        if (lj.t1) { state.mri = { path: lj.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
-        showProposed(lj.id, { reloadViewer: false, jumpToQc: false });
+      // Restore this case's NEWEST label job (any state) so a reload reflects the
+      // last thing the user did — succeeded → labels/QC, failed → error+retry,
+      // running → keep polling. Registration counts as verified if ANY label
+      // succeeded (so a retry doesn't re-jump to QC).
+      const labelJobs = jobs.filter((j) => j.kind === "label" && j.parent === done.id);
+      const newest = labelJobs[0];   // /jobs is newest-first
+      if (newest) {
+        state.labeledOnce = labelJobs.some((j) => j.state === "succeeded");
+        state.labelJobId = newest.id;
+        // Restore the MRI ref + atlas so relabel/retry works without re-uploading.
+        if (newest.t1) { state.mri = { path: newest.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
+        if (newest.atlas) $("atlassel").value = newest.atlas;
+        if (newest.state === "succeeded") {
+          showProposed(newest.id, { reloadViewer: false, jumpToQc: false });
+        } else if (["failed", "cancelled"].includes(newest.state)) {
+          _showLabelError(newest);
+        } else { pollLabel(newest.id, !state.labeledOnce); }
       }
     }
   } catch (_e) { /* ignore */ }
