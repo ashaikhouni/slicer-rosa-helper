@@ -631,7 +631,14 @@ _HTML_TEMPLATE = """<!doctype html>
   #status-bar .warn {{ color: #f5b13b; }}
   #status-bar .err {{ color: #ff6464; }}
   #slices {{ background: #0d0d0d; border-left: 1px solid #2a2a2a; padding: 8px 8px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }}
+  #slices-head {{ display: flex; align-items: center; gap: 8px; font-size: 10px; color: #888; padding: 0 2px 6px; border-bottom: 1px solid #1d1d1d; flex-wrap: wrap; }}
+  #slices-head .ttl {{ font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #aaa; }}
+  #slices-head .hint {{ color: #666; flex: 1; min-width: 90px; }}
+  #slices-head .palpha {{ display: inline-flex; align-items: center; gap: 5px; color: #bbb; }}
+  #slices-head .palpha input[type="range"] {{ width: 70px; }}
   .slice-panel {{ position: relative; background: #000; border: 1px solid #1d1d1d; }}
+  .slice-3d {{ position: absolute; top: 4px; right: 6px; font-size: 10px; letter-spacing: 0.06em; color: #bfe9ff; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; background: rgba(0,0,0,0.5); padding: 1px 5px 1px 3px; border-radius: 3px; user-select: none; }}
+  .slice-3d input {{ margin: 0; accent-color: #22d0ff; }}
   .slice-panel canvas {{ display: block; width: 100%; height: auto; image-rendering: crisp-edges; }}
   .slice-label {{ position: absolute; top: 4px; left: 6px; font-size: 10px; color: #bbb; letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; }}
   .slice-coord {{ position: absolute; bottom: 4px; right: 6px; font-size: 10px; color: #888; pointer-events: none; font-family: ui-monospace, monospace; }}
@@ -730,21 +737,29 @@ _HTML_TEMPLATE = """<!doctype html>
     </div>
   </div>
   <div id="slices">
+    <div id="slices-head">
+      <span class="ttl">Slices</span>
+      <span class="hint">scroll = scrub · click = locate · 3D = show plane</span>
+      <label class="palpha" title="Opacity of the cut planes shown in 3D">&alpha;<input type="range" id="plane-alpha" min="0" max="1" step="0.05" value="0.9"></label>
+    </div>
     <div class="slice-panel" data-axis="axial">
       <canvas></canvas>
       <div class="slice-label">Axial</div>
+      <label class="slice-3d" title="Show this plane inside the 3D scene"><input type="checkbox" data-plane="axial">3D</label>
       <div class="slice-axes">R&rarr;  A&uarr;</div>
       <div class="slice-coord"></div>
     </div>
     <div class="slice-panel" data-axis="coronal">
       <canvas></canvas>
       <div class="slice-label">Coronal</div>
+      <label class="slice-3d" title="Show this plane inside the 3D scene"><input type="checkbox" data-plane="coronal">3D</label>
       <div class="slice-axes">R&rarr;  S&uarr;</div>
       <div class="slice-coord"></div>
     </div>
     <div class="slice-panel" data-axis="sagittal">
       <canvas></canvas>
       <div class="slice-label">Sagittal</div>
+      <label class="slice-3d" title="Show this plane inside the 3D scene"><input type="checkbox" data-plane="sagittal">3D</label>
       <div class="slice-axes">A&rarr;  S&uarr;</div>
       <div class="slice-coord"></div>
     </div>
@@ -1103,6 +1118,19 @@ let mriVoxCursor = [0, 0, 0]; // last selected vox indices
 // axis -> which voxel index is the through-plane (the one scroll steps).
 const _THROUGH_IDX = {{ axial: 2, coronal: 1, sagittal: 0 }};
 
+// In-scene cut planes (the textured slices that float in the 3D view). They're
+// kept — a slice you can see relative to the electrodes is the one thing the 2D
+// navigators can't show — but driven ENTIRELY from the side: each navigator
+// panel has a "3D" toggle, a shared α sets their opacity, and scrubbing/clicking
+// a navigator moves the matching plane. No slice controls overlay the canvas.
+const cutPlanes = {{}};     // axis -> THREE.Mesh
+const planeWanted = {{ axial: false, coronal: false, sagittal: false }};
+let planeAlpha = 0.9;
+function setPlaneVisible(axis, on) {{
+  planeWanted[axis] = on;
+  if (cutPlanes[axis]) cutPlanes[axis].visible = on;
+}}
+
 function _initSlicePanels() {{
   for (const panel of document.querySelectorAll(".slice-panel")) {{
     const axis = panel.dataset.axis;
@@ -1123,7 +1151,19 @@ function _initSlicePanels() {{
     // Wheel → scrub the through-plane slice, like a real navigator.
     canvas.addEventListener("wheel", (ev) => {{ ev.preventDefault(); _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1); }}, {{ passive: false }});
     canvas.style.cursor = "crosshair";
+    // Per-panel "3D" toggle → show/hide THIS axis's cut plane in the scene.
+    const plane3d = panel.querySelector('input[data-plane]');
+    if (plane3d) plane3d.addEventListener("change", () => setPlaneVisible(axis, plane3d.checked));
   }}
+  // Shared opacity for all three in-scene cut planes.
+  const pa = document.getElementById("plane-alpha");
+  if (pa) pa.addEventListener("input", () => {{
+    planeAlpha = parseFloat(pa.value);
+    for (const ax of Object.keys(cutPlanes)) {{
+      const u = cutPlanes[ax].material && cutPlanes[ax].material.uniforms;
+      if (u && u.uOpacity) u.uOpacity.value = planeAlpha;
+    }}
+  }});
 }}
 
 // Map a pointer event on a slice canvas to a RAS point and locate there.
@@ -1150,10 +1190,12 @@ function _sliceScroll(axis, step) {{
   locateAtRas(_apply4x4(mriVolume.affine, c));
 }}
 
-// Single entry point for "put the crosshair at this RAS point": scrub the
-// panels, drop the 3D locate beacon, and tell the parent frame.
+// Single entry point for "put the crosshair at this RAS point": scrub the 2D
+// panels, move the in-scene cut planes onto it, drop the 3D locate beacon, and
+// tell the parent frame.
 function locateAtRas(ras) {{
   snapSlicesToRas(ras);
+  snapCutPlanesToRas(ras);
   locateMarker.position.set(ras[0], ras[1], ras[2]);
   locateMarker.visible = true;
   emitLocated(ras);
@@ -1292,6 +1334,7 @@ async function loadMri(t1Meta) {{
     if (selectedContact) {{
       const pos = selectedContact.getWorldPosition(new THREE.Vector3());
       snapSlicesToRas([pos.x, pos.y, pos.z]);
+      snapCutPlanesToRas([pos.x, pos.y, pos.z]);
     }}
   }} catch (err) {{
     console.error("MRI load failed", err);
@@ -1306,17 +1349,14 @@ async function loadMri(t1Meta) {{
   }}
 }}
 
-// ---------- 3D volume overlays (MIP + DVR) -------------------------
+// ---------- 3D volume overlays (cut planes + MIP + DVR) ------------
 //
-// Once the NIfTI is parsed we upload it as a 3D texture, reused by two
-// rotatable volume renders: a maximum-intensity projection (metal reads
-// as bright streaks) and a gradient-shaded isosurface (DVR). Both are OFF
-// by default and toggled from the toolbar.
-//
-// The orthogonal SLICES no longer live in the 3D scene — they render in
-// the standalone axial/coronal/sagittal navigator panels beside the
-// canvas (see _initSlicePanels / renderSlice). This keeps the 3D view
-// uncluttered and the slices scrubbable like a real 2D navigator.
+// Once the NIfTI is parsed we upload it as a 3D texture, shared by: the three
+// orthogonal cut planes (textured slices that float in the scene), a rotatable
+// maximum-intensity projection (metal reads as bright streaks), and a
+// gradient-shaded isosurface (DVR). All are OFF by default. The cut planes are
+// driven from the side navigators (toggle + α + crosshair), NOT from a toolbar
+// overlaying the canvas; MIP + DVR toggle from the toolbar.
 
 let volumeBox = null;      // world-RAS bbox of the volume corners
 let mipMesh = null;        // rotatable maximum-intensity-projection of the volume
@@ -1358,6 +1398,96 @@ function _buildVolumeTexture(vol) {{
   tex.wrapT = THREE.ClampToEdgeWrapping;
   tex.needsUpdate = true;
   return tex;
+}}
+
+function _makeCutPlane(axis, bbox, volTex, vol) {{
+  // axis: "axial" (world Z), "coronal" (world Y), "sagittal" (world X).
+  // PlaneGeometry default is XY plane with +Z normal; we rotate as
+  // needed so the plane lies in the chosen RAS plane.
+  let width, height;
+  if (axis === "axial") {{ width = bbox.xmax - bbox.xmin; height = bbox.ymax - bbox.ymin; }}
+  else if (axis === "coronal") {{ width = bbox.xmax - bbox.xmin; height = bbox.zmax - bbox.zmin; }}
+  else {{ width = bbox.ymax - bbox.ymin; height = bbox.zmax - bbox.zmin; }}
+
+  const geo = new THREE.PlaneGeometry(width, height);
+
+  // Inverse affine: world RAS -> voxel index. mat4 stored row-major in
+  // affineInv; THREE.Matrix4 wants column-major (set() takes row-major
+  // and transposes for you).
+  const inv = vol.affineInv;
+  const rasToVox = new THREE.Matrix4().set(
+    inv[0][0], inv[0][1], inv[0][2], inv[0][3],
+    inv[1][0], inv[1][1], inv[1][2], inv[1][3],
+    inv[2][0], inv[2][1], inv[2][2], inv[2][3],
+    0, 0, 0, 1,
+  );
+
+  const mat = new THREE.ShaderMaterial({{
+    uniforms: {{
+      uVolume: {{ value: volTex }},
+      uRasToVox: {{ value: rasToVox }},
+      uVolumeSize: {{ value: new THREE.Vector3(vol.dim[0], vol.dim[1], vol.dim[2]) }},
+      uOpacity: {{ value: planeAlpha }},
+    }},
+    vertexShader: `
+      varying vec3 vWorldPos;
+      void main() {{
+        vec4 wp = modelMatrix * vec4(position, 1.0);
+        vWorldPos = wp.xyz;
+        gl_Position = projectionMatrix * viewMatrix * wp;
+      }}
+    `,
+    fragmentShader: `
+      precision highp float;
+      precision highp sampler3D;
+      uniform sampler3D uVolume;
+      uniform mat4 uRasToVox;
+      uniform vec3 uVolumeSize;
+      uniform float uOpacity;
+      varying vec3 vWorldPos;
+      void main() {{
+        vec3 vox = (uRasToVox * vec4(vWorldPos, 1.0)).xyz;
+        vec3 uvw = (vox + 0.5) / uVolumeSize;
+        if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) discard;
+        float intensity = texture(uVolume, uvw).r;
+        gl_FragColor = vec4(vec3(intensity), uOpacity);
+      }}
+    `,
+    side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
+  }});
+
+  const plane = new THREE.Mesh(geo, mat);
+  plane.userData.axis = axis;
+  // Rotate so the plane lies in the right RAS plane.
+  if (axis === "sagittal") plane.rotation.y = Math.PI / 2;          // normal = +X
+  else if (axis === "coronal") plane.rotation.x = -Math.PI / 2;     // normal = +Y
+  // axial keeps default normal = +Z
+  const cx = 0.5 * (bbox.xmin + bbox.xmax);
+  const cy = 0.5 * (bbox.ymin + bbox.ymax);
+  const cz = 0.5 * (bbox.zmin + bbox.zmax);
+  plane.position.set(cx, cy, cz);
+  plane.visible = false;
+  return plane;
+}}
+
+// Move one cut plane onto a RAS through-coordinate (no toolbar reflection — the
+// side navigators are the control surface now).
+function _setCutPlaneValue(axis, value) {{
+  const plane = cutPlanes[axis];
+  if (!plane) return;
+  if (axis === "axial") plane.position.z = value;
+  else if (axis === "coronal") plane.position.y = value;
+  else plane.position.x = value;
+}}
+
+function snapCutPlanesToRas(ras) {{
+  // All three planes pass through the crosshair point; visibility is unchanged
+  // (each is toggled from its navigator's "3D" checkbox).
+  _setCutPlaneValue("axial", ras[2]);
+  _setCutPlaneValue("coronal", ras[1]);
+  _setCutPlaneValue("sagittal", ras[0]);
 }}
 
 function _makeMipMesh(bbox, volTex, vol) {{
@@ -1550,11 +1680,23 @@ function _makeDvrMesh(bbox, volTex, vol) {{
 }}
 
 function initVolumeOverlays(vol) {{
-  // (Re)build the shared 3D texture and the two rotatable volume renders
-  // (MIP + DVR). Defensive — loadMri can fire twice / on volume switch.
+  // (Re)build the shared 3D texture, the three in-scene cut planes, and the two
+  // rotatable volume renders (MIP + DVR). Defensive — loadMri can fire twice /
+  // on volume switch.
   if (mipMesh) {{ scene.remove(mipMesh); mipMesh = null; }}
   volumeBox = _volumeRasBbox(vol);
   const tex = _buildVolumeTexture(vol);
+
+  // Cut planes — rebuilt on the new texture; visibility/opacity restored from
+  // the side controls, then positioned at the current crosshair.
+  for (const axis of Object.keys(cutPlanes)) {{ scene.remove(cutPlanes[axis]); delete cutPlanes[axis]; }}
+  for (const axis of ["axial", "coronal", "sagittal"]) {{
+    const plane = _makeCutPlane(axis, volumeBox, tex, vol);
+    plane.visible = planeWanted[axis];
+    cutPlanes[axis] = plane;
+    scene.add(plane);
+  }}
+  if (mriRasCursor) snapCutPlanesToRas(mriRasCursor);
 
   // Maximum-intensity projection (off by default), built on the volume +
   // 3D texture. Toggle + threshold/opacity wired from the toolbar.
@@ -1716,9 +1858,10 @@ function selectContact(label, shank) {{
     }}
     camera.position.copy(pos).addScaledVector(dir, targetDist);
     controls.update();
-    // Snap the axial/coronal/sagittal navigator panels to the contact's
+    // Snap the navigator panels + the in-scene cut planes to the contact's
     // RAS coordinate, and tell any parent frame where we landed.
     snapSlicesToRas([pos.x, pos.y, pos.z]);
+    snapCutPlanesToRas([pos.x, pos.y, pos.z]);
     emitSelected(label, shank, [pos.x, pos.y, pos.z]);
   }}
   // Toggle selection in sidebar UI
