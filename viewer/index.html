@@ -13,8 +13,10 @@
   #canvas-host canvas { display: block; }
   #toolbar { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
   /* Collapsed by default so the controls don't cover the 3D view — the toggle
-     button stays; everything else (sliders/checkboxes) hides until expanded. */
-  #toolbar.collapsed .plane-ctl { display: none; }
+     plus Show all / Fit view stay; the grouped controls hide until expanded. */
+  #toolbar.collapsed .tb-group, #toolbar.collapsed .tb-sep { display: none; }
+  .tb-group { display: inline-flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; }
+  .tb-sep { width: 1px; align-self: stretch; min-height: 20px; background: #3a3a3a; margin: 0 2px; }
   #btn-tools { font-weight: 600; }
   #toolbar button { background: rgba(40,40,40,0.85); color: #eee; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
   #toolbar button:hover { background: rgba(70,70,70,0.95); }
@@ -107,40 +109,47 @@
   <div id="canvas-host">
     <div id="toolbar" class="collapsed">
       <button id="btn-tools" title="Show/hide controls">Controls ▾</button>
-      <button id="btn-reset">Show all</button>
-      <button id="btn-fit">Fit view</button>
-      <label class="plane-ctl" data-control="volume">
-        <span class="axis">Volume</span>
-        <select id="vol-select"></select>
-      </label>
-      <label class="plane-ctl" data-control="brain-color">
-        <span class="axis">Surface</span>
-        <select>
-          <option value="skin">Skin</option>
-          <option value="parcellation" selected>Parcellation</option>
-          <option value="white">White</option>
-        </select>
-      </label>
-      <label class="plane-ctl" data-control="brain-alpha">
-        <span class="axis">Brain α</span>
-        <input type="range" min="0" max="1" step="0.05" value="0.45" />
-        <span class="coord">0.45</span>
-      </label>
-      <label class="plane-ctl" data-control="mip" title="Rotatable maximum-intensity projection of the volume — metal contacts read as bright streaks">
-        <input type="checkbox" /><span class="axis">CT MIP</span>
-        <input type="range" data-mip="threshold" min="0" max="1" step="0.02" value="0.32" title="MIP threshold (raise to drop soft tissue / isolate bone + metal)" />
-        <input type="range" data-mip="opacity" min="0" max="1" step="0.05" value="0.6" title="MIP opacity" />
-      </label>
-      <label class="plane-ctl" data-control="dvr" title="Volume-render the selected volume as a gradient-shaded isosurface (Curry/Medtronic look, no mesh). Pick the 'MRI (brain)' volume for a brain surface.">
-        <input type="checkbox" /><span class="axis">Volume 3D</span>
-        <input type="range" data-dvr="threshold" min="0.02" max="0.9" step="0.01" value="0.28" title="Isosurface level (raise to peel outer tissue)" />
-      </label>
+      <button id="btn-reset" title="Un-hide every electrode">Show all</button>
+      <button id="btn-fit" title="Frame the whole scene">Fit view</button>
+      <span class="tb-group" title="Anatomy shown in the 3D surface + slice navigators">
+        <label class="plane-ctl" data-control="brain-color">
+          <span class="axis">Brain surface</span>
+          <select>
+            <option value="parcellation" selected>Parcellation</option>
+            <option value="skin">Plain</option>
+            <option value="white">White</option>
+          </select>
+        </label>
+        <label class="plane-ctl" data-control="brain-alpha">
+          <span class="axis">Brain opacity</span>
+          <input type="range" min="0" max="1" step="0.05" value="0.45" />
+          <span class="coord">0.45</span>
+        </label>
+      </span>
+      <span class="tb-sep"></span>
+      <span class="tb-group" title="Slice-navigator volume (the axial/coronal/sagittal panels + any planes shown in 3D)">
+        <label class="plane-ctl" data-control="volume">
+          <span class="axis">Slice volume</span>
+          <select id="vol-select"></select>
+        </label>
+      </span>
+      <span class="tb-sep"></span>
+      <span class="tb-group">
+        <label class="plane-ctl" data-control="mip" title="Metal projection — a rotatable maximum-intensity projection of the CT; metal contacts read as bright streaks. Always from the CT.">
+          <input type="checkbox" /><span class="axis">Metal (CT)</span>
+          <input type="range" data-mip="threshold" min="0" max="1" step="0.02" value="0.32" title="Threshold — raise to drop soft tissue and isolate bone + metal" />
+          <input type="range" data-mip="opacity" min="0" max="1" step="0.05" value="0.6" title="Opacity" />
+        </label>
+        <label class="plane-ctl" data-control="dvr" title="Volume render — a gradient-shaded isosurface of the brain MRI (Curry/Medtronic look, no mesh). Always from the brain MRI.">
+          <input type="checkbox" /><span class="axis">Volume render</span>
+          <input type="range" data-dvr="threshold" min="0.02" max="0.9" step="0.01" value="0.28" title="Isosurface level — raise to peel outer tissue" />
+        </label>
+      </span>
     </div>
     <div id="status-bar">
-      <span><span class="lbl">MRI:</span><span id="dbg-mri">init</span></span>
-      <span><span class="lbl">GLB:</span><span id="dbg-glb">init</span></span>
-      <span><span class="lbl">Click:</span><span id="dbg-click">—</span></span>
-      <span><span class="lbl">Snap:</span><span id="dbg-snap">—</span></span>
+      <span><span class="lbl">Surface:</span><span id="info-surface">—</span></span>
+      <span><span class="lbl">Slices:</span><span id="info-slices">—</span></span>
+      <span><span class="lbl">MRI:</span><span id="info-mri" class="warn">—</span></span>
     </div>
   </div>
   <div id="slices">
@@ -227,7 +236,7 @@ const _kOff = new THREE.Vector3(), _fOff = new THREE.Vector3();
 const _camDir = new THREE.Vector3(), _right = new THREE.Vector3();
 // DVR mesh + its camera-following light dir — declared here (before the render
 // loop / updateLights) to avoid a temporal-dead-zone crash; assigned in
-// initVolumeOverlays / used by _makeDvrMesh.
+// buildDvr / used by _makeDvrMesh.
 let dvrMesh = null;
 const _dvrLightDir = new THREE.Vector3(0.4, 0.85, 0.55).normalize();
 function updateLights() {
@@ -525,6 +534,21 @@ let mriVoxCursor = [0, 0, 0]; // last selected vox indices
 // electrodes stay visible no matter which volume (CT or MRI) is displayed —
 // the metal only shows on CT, but the markers show everywhere.
 let allContacts = [];      // [{ label, shank, ras:[x,y,z] }]
+let sceneMeta = null;      // the loaded scene_meta.json (surface source, atlas…)
+let _sliceVolLabel = "—";  // label of the current slice-navigator volume
+let _mriAvailable = false; // whether a brain/MRI volume was exported
+
+// The clinician-facing info line (replaces the old dev status strip): what the
+// 3D surface is derived from, which volume the slices show, and MRI status.
+function updateInfoBar() {
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  const src = (sceneMeta && sceneMeta.surface_source) || "—";
+  set("info-surface", src);
+  set("info-slices", _sliceVolLabel);
+  const mri = document.getElementById("info-mri");
+  if (mri) { mri.textContent = _mriAvailable ? "loaded" : "not loaded";
+              mri.className = _mriAvailable ? "ok" : "warn"; }
+}
 
 // axis -> which voxel index is the through-plane (the one scroll steps).
 const _THROUGH_IDX = { axial: 2, coronal: 1, sagittal: 0 };
@@ -737,59 +761,57 @@ function snapSlicesToRas(ras) {
   renderSlice("sagittal");
 }
 
-async function loadMri(t1Meta) {
-  if (!t1Meta || !t1Meta.path) {
-    setDbg("mri", "not exported", "warn");
-    // No T1 was exported (no FS surfaces); leave the slice panels blank.
-    for (const axis of ["axial","coronal","sagittal"]) {
-      const p = slicePanels[axis]; if (!p) continue;
-      const ctx = p.ctx;
-      ctx.fillStyle = "#1a1a1a";
-      ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
-      ctx.fillStyle = "#666";
-      ctx.font = "11px ui-sans-serif";
-      ctx.fillText("No MRI available", 10, 20);
-    }
-    return;
+// Fetch + parse a NIfTI once, cached by path — the CT (MIP), brain MRI (DVR)
+// and the slice-navigator volume are now separate, so the same file can be
+// requested by more than one role without re-downloading.
+const _volCache = new Map();
+async function _fetchVolume(volMeta) {
+  if (!volMeta || !volMeta.path) return null;
+  if (_volCache.has(volMeta.path)) return _volCache.get(volMeta.path);
+  const resp = await fetch(volMeta.path);
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  const vol = new NiftiVolume(await _maybeInflate(await resp.arrayBuffer()));
+  _volCache.set(volMeta.path, vol);
+  return vol;
+}
+
+function _blankSlicePanels(msg, color) {
+  for (const axis of ["axial","coronal","sagittal"]) {
+    const p = slicePanels[axis]; if (!p) continue;
+    const ctx = p.ctx;
+    ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
+    ctx.fillStyle = color || "#666"; ctx.font = "11px ui-sans-serif";
+    ctx.fillText(msg, 8, 18);
   }
+}
+
+// Load the SLICE-navigator volume (also drives the cut planes). The MIP/DVR are
+// pinned to their own volumes (buildMip/buildDvr) and are NOT touched here.
+async function loadMri(volMeta) {
+  if (!volMeta || !volMeta.path) { _blankSlicePanels("No MRI available"); updateInfoBar(); return; }
   try {
-    setDbg("mri", "fetching…");
-    const resp = await fetch(t1Meta.path);
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    const raw = await resp.arrayBuffer();
-    const inflated = await _maybeInflate(raw);
-    mriVolume = new NiftiVolume(inflated);
-    // Default cursor: volume center.
-    mriVoxCursor = [
-      Math.floor(mriVolume.dim[0] / 2),
-      Math.floor(mriVolume.dim[1] / 2),
-      Math.floor(mriVolume.dim[2] / 2),
-    ];
-    mriRasCursor = _apply4x4(mriVolume.affine, mriVoxCursor);
+    mriVolume = await _fetchVolume(volMeta);
+    // Center the crosshair only the first time — keep it put across volume switches.
+    if (!mriRasCursor) {
+      mriVoxCursor = [Math.floor(mriVolume.dim[0]/2), Math.floor(mriVolume.dim[1]/2), Math.floor(mriVolume.dim[2]/2)];
+      mriRasCursor = _apply4x4(mriVolume.affine, mriVoxCursor);
+    } else {
+      const v = mriVolume.rasToVox(mriRasCursor);
+      mriVoxCursor = [Math.round(v[0]), Math.round(v[1]), Math.round(v[2])];
+    }
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
-    setDbg("mri", `loaded ${mriVolume.dim[0]}×${mriVolume.dim[1]}×${mriVolume.dim[2]}`, "ok");
-    // Build the 3D volume overlays (MIP + DVR) — they reuse the same
-    // parsed volume + 3D texture. The orthogonal slices render in the
-    // navigator panels, not the scene.
-    initVolumeOverlays(mriVolume);
-    // If the user clicked a contact while the 16MB T1 was still
-    // downloading, snapSlicesToRas silently no-oped (mriVolume was
-    // null). Retroactively snap now that the volume is ready.
+    buildCutPlanes(mriVolume);              // cut planes track the slice volume
+    _sliceVolLabel = volMeta.label || volMeta.id || "MRI";
+    updateInfoBar();
+    // If a contact was clicked while the volume was still downloading, snap now.
     if (selectedContact) {
       const pos = selectedContact.getWorldPosition(new THREE.Vector3());
       snapSlicesToRas([pos.x, pos.y, pos.z]);
       snapCutPlanesToRas([pos.x, pos.y, pos.z]);
     }
   } catch (err) {
-    console.error("MRI load failed", err);
-    setDbg("mri", "load failed: " + (err.message || err), "err");
-    for (const axis of ["axial","coronal","sagittal"]) {
-      const p = slicePanels[axis]; if (!p) continue;
-      const ctx = p.ctx;
-      ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, p.canvas.width, p.canvas.height);
-      ctx.fillStyle = "#c66"; ctx.font = "11px ui-sans-serif";
-      ctx.fillText("MRI load failed: " + err.message, 6, 18);
-    }
+    console.error("slice volume load failed", err);
+    _blankSlicePanels("Slice volume load failed: " + err.message, "#c66");
   }
 }
 
@@ -1123,52 +1145,62 @@ function _makeDvrMesh(bbox, volTex, vol) {
   return mesh;
 }
 
-function initVolumeOverlays(vol) {
-  // (Re)build the shared 3D texture, the three in-scene cut planes, and the two
-  // rotatable volume renders (MIP + DVR). Defensive — loadMri can fire twice /
-  // on volume switch.
-  if (mipMesh) { scene.remove(mipMesh); mipMesh = null; }
+// The three overlays are now driven by INDEPENDENT volumes, so switching the
+// slice-navigator volume never drags the MIP off the CT:
+//   • cut planes  → follow the slice navigator (buildCutPlanes, on volume switch)
+//   • MIP         → pinned to the CT   (metal projection is a CT concept)
+//   • DVR         → pinned to the brain MRI (isosurface = pial)
+function buildCutPlanes(vol) {
+  for (const axis of Object.keys(cutPlanes)) { scene.remove(cutPlanes[axis]); delete cutPlanes[axis]; }
   volumeBox = _volumeRasBbox(vol);
   const tex = _buildVolumeTexture(vol);
-
-  // Cut planes — rebuilt on the new texture; visibility/opacity restored from
-  // the side controls, then positioned at the current crosshair.
-  for (const axis of Object.keys(cutPlanes)) { scene.remove(cutPlanes[axis]); delete cutPlanes[axis]; }
   for (const axis of ["axial", "coronal", "sagittal"]) {
     const plane = _makeCutPlane(axis, volumeBox, tex, vol);
     plane.visible = planeWanted[axis];
+    plane.material.uniforms.uOpacity.value = planeAlpha;
     cutPlanes[axis] = plane;
     scene.add(plane);
   }
   if (mriRasCursor) snapCutPlanesToRas(mriRasCursor);
+}
 
-  // Maximum-intensity projection (off by default), built on the volume +
-  // 3D texture. Toggle + threshold/opacity wired from the toolbar.
-  mipMesh = _makeMipMesh(volumeBox, tex, vol);
+function buildMip(vol) {
+  if (mipMesh) { scene.remove(mipMesh); mipMesh = null; }
+  mipMesh = _makeMipMesh(_volumeRasBbox(vol), _buildVolumeTexture(vol), vol);
+  const cb = document.querySelector('.plane-ctl[data-control="mip"] input[type="checkbox"]');
+  mipMesh.visible = !!(cb && cb.checked);   // respect the current toggle
   scene.add(mipMesh);
+}
+
+function buildDvr(vol) {
+  if (dvrMesh) { scene.remove(dvrMesh); dvrMesh = null; }
+  dvrMesh = _makeDvrMesh(_volumeRasBbox(vol), _buildVolumeTexture(vol), vol);
+  const cb = document.querySelector('.plane-ctl[data-control="dvr"] input[type="checkbox"]');
+  dvrMesh.visible = !!(cb && cb.checked);
+  scene.add(dvrMesh);
+}
+
+// Wire the MIP/DVR toolbar controls ONCE — the handlers read the current
+// module-level mipMesh/dvrMesh, so rebuilding those meshes keeps them live.
+let _overlayControlsWired = false;
+function wireOverlayControls() {
+  if (_overlayControlsWired) return;
+  _overlayControlsWired = true;
   const mipCtl = document.querySelector('.plane-ctl[data-control="mip"]');
   if (mipCtl) {
     const mcb = mipCtl.querySelector('input[type="checkbox"]');
     const thr = mipCtl.querySelector('input[data-mip="threshold"]');
     const op = mipCtl.querySelector('input[data-mip="opacity"]');
-    mcb.checked = false;
     mcb.addEventListener("change", () => { if (mipMesh) mipMesh.visible = mcb.checked; });
     if (thr) thr.addEventListener("input", () => { if (mipMesh) mipMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); });
     if (op) op.addEventListener("input", () => { if (mipMesh) mipMesh.material.uniforms.uOpacity.value = parseFloat(op.value); });
   }
-
-  // Volume DVR (off by default), built on the same volume + 3D texture. Best on
-  // the "MRI (brain)" volume (isosurface = pial). Toggle + threshold from the toolbar.
-  if (dvrMesh) { scene.remove(dvrMesh); dvrMesh = null; }
-  dvrMesh = _makeDvrMesh(volumeBox, tex, vol);
-  scene.add(dvrMesh);
   const dvrCtl = document.querySelector('.plane-ctl[data-control="dvr"]');
   if (dvrCtl) {
     const cb = dvrCtl.querySelector('input[type="checkbox"]');
     const thr = dvrCtl.querySelector('input[data-dvr="threshold"]');
-    dvrMesh.visible = cb.checked;   // keep across volume switches
-    cb.onchange = () => { if (dvrMesh) dvrMesh.visible = cb.checked; };
-    if (thr) thr.oninput = () => { if (dvrMesh) dvrMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); };
+    cb.addEventListener("change", () => { if (dvrMesh) dvrMesh.visible = cb.checked; });
+    if (thr) thr.addEventListener("input", () => { if (dvrMesh) dvrMesh.material.uniforms.uThreshold.value = parseFloat(thr.value); });
   }
 }
 
@@ -1477,15 +1509,29 @@ function _applyInitialBrainAlpha() {
 function onMeta(meta) {
   renderSidebar(meta);
   // Contacts for the slice overlay (already in the CT/contact RAS frame).
+  sceneMeta = meta;
   allContacts = (meta.contacts || [])
     .map(c => ({ label: c.label, shank: c.trajectory, ras: c.position || [c.x, c.y, c.z] }))
     .filter(c => Array.isArray(c.ras) && c.ras.length === 3);
-  // Volume selector (CT / MRI (brain) / FreeSurfer T1). Additive + back-compat:
-  // the backend lists [MRI(brain), T1, CT]; falls back to legacy `t1_volume`.
+  // Volume roles (CT / MRI (brain) / FreeSurfer T1). Backend lists [MRI(brain),
+  // T1, CT]; falls back to legacy `t1_volume`.
   const volSel = document.getElementById("vol-select");
   const vols = (meta.volumes && meta.volumes.length)
     ? meta.volumes
     : (meta.t1_volume ? [meta.t1_volume] : []);
+  const isCt = v => (v.id || "").toLowerCase() === "ct" || /(^|[^a-z])ct($|[^a-z])/i.test(v.label || "");
+  const isBrain = v => /mri|brain|t1/i.test((v.id || "") + " " + (v.label || ""));
+  const ctMeta = vols.find(isCt) || vols[vols.length - 1] || null;
+  const brainMeta = vols.find(isBrain) || null;
+  _mriAvailable = !!brainMeta;
+  wireOverlayControls();
+  // Pinned volume overlays: MIP on the CT (metal projection), DVR on the brain
+  // MRI (isosurface = pial). Independent of the slice-navigator volume below, so
+  // changing the Volume dropdown never drags the MIP off the CT.
+  (async () => {
+    try { const c = await _fetchVolume(ctMeta); if (c) buildMip(c); } catch (e) { console.error("MIP volume", e); }
+    try { const b = await _fetchVolume(brainMeta || ctMeta); if (b) buildDvr(b); } catch (e) { console.error("DVR volume", e); }
+  })();
   if (volSel && vols.length) {
     volSel.innerHTML = "";
     vols.forEach((v, i) => {
@@ -1499,18 +1545,15 @@ function onMeta(meta) {
       if (v) loadMri(v);
     });
     if (vols.length < 2) volSel.parentElement.style.display = "none";
-    // Default the navigator to the CT — that's where the metal contacts are
-    // visible, so the slices are useful for verifying placement out of the box.
-    // (DVR/MIP follow this dropdown too; switch to "MRI (brain)" for the brain
-    // isosurface.) Fall back to the first volume when there's no CT.
-    let di = vols.findIndex(v =>
-      (v.id || "").toLowerCase() === "ct" || /(^|[^a-z])ct($|[^a-z])/i.test(v.label || ""));
+    // Slice navigator defaults to the CT — metal contacts are visible there.
+    let di = ctMeta ? vols.indexOf(ctMeta) : 0;
     if (di < 0) di = 0;
     volSel.value = String(di);
     loadMri(vols[di]);
   } else {
     loadMri(meta.t1_volume);
   }
+  updateInfoBar();
 }
 function onMetaErr(err) {
   console.error(err);
