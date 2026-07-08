@@ -168,6 +168,39 @@ class AtlasBaseRegistrationTests(unittest.TestCase):
         self.assertIn("registering", log_text)
         self.assertIn("resampled labelmap", log_text)
 
+    def test_registration_writes_mri_in_target_qc(self):
+        """The direct (atlas_base→target) path must ALSO write the base MRI
+        resampled into the target grid — the CT↔MRI registration QC the app's
+        Registration tab overlays. Regression guard for FastSurfer cases: the
+        FreeSurfer provider registers orig.mgz→CT but used to skip this save,
+        so ``mri_in_ct.nii.gz`` never appeared and the QC tab stayed disabled.
+        """
+        import SimpleITK as sitk
+        from rosa_agent.services.atlas_provider_headless import LabelmapAtlasProvider
+
+        qc_path = self.tmp / "mri_in_target.nii.gz"
+        log_lines: list[str] = []
+        LabelmapAtlasProvider(
+            source_id="freesurfer", display_name="FS",
+            label_path=self.parc_path,
+            label_names={17: "Left-Hippocampus", 18: "Left-Amygdala"},
+            atlas_base_path=self.t1_path,
+            target_volume_path=self.target_path,
+            save_intermediate_in_target=str(qc_path),
+            logger=log_lines.append,
+        )
+        self.assertTrue(
+            qc_path.is_file(),
+            f"direct-path registration must write the MRI-in-target QC. "
+            f"Log: {log_lines}",
+        )
+        # The QC volume must sit on the TARGET grid so it overlays the CT.
+        qc_img = sitk.ReadImage(str(qc_path))
+        tgt_img = sitk.ReadImage(str(self.target_path))
+        self.assertEqual(qc_img.GetSize(), tgt_img.GetSize())
+        self.assertEqual(qc_img.GetSpacing(), tgt_img.GetSpacing())
+        self.assertIn("MRI-in-CT QC", "\n".join(log_lines))
+
 
 @unittest.skipUnless(
     DEPS_AVAILABLE,

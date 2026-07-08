@@ -266,6 +266,20 @@ def _register_and_resample_labelmap_to_temp(
             reference=target_img,
             interp="nearest",
         )
+        if save_intermediate_in_target is not None:
+            # On the direct path the atlas base IS the patient MRI (e.g. the
+            # FreeSurfer/FastSurfer orig.mgz), so resampling it into the CT grid
+            # with the same registration gives the CT↔MRI overlay the app's
+            # Registration tab needs. (Without this, FastSurfer cases have no
+            # mri_in_ct.nii.gz and the QC tab never enables.)
+            base_in_target = resample_volume(
+                base_img, reg_result.transform,
+                reference=target_img,
+                interp="linear",
+            )
+            sitk.WriteImage(base_in_target, str(save_intermediate_in_target))
+            if logger is not None:
+                logger(f"[atlas-reg] wrote MRI-in-CT QC → {save_intermediate_in_target}")
     # NamedTemporaryFile delete=False so the path survives until the
     # caller (Provider.__init__) can read it back via nibabel; the
     # provider keeps a reference so the file is preserved for the

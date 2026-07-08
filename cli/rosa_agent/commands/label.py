@@ -138,6 +138,11 @@ def _build_providers(
                 lut_path=freesurfer_lut,
                 atlas_base_path=atlas_base_path,
                 target_volume_path=target_volume_path,
+                # When registering to the CT (FastSurfer/FreeSurfer path), also
+                # write the base MRI resampled into CT — the CT↔MRI registration
+                # QC the app's Registration tab overlays. No-op when the labels
+                # are already in the contact frame (no atlas_base → no register).
+                save_intermediate_in_target=save_registered_mri,
                 logger=_stderr,
             )
             _stderr(
