@@ -67,6 +67,7 @@ A tiny pub/sub bus does this — `postMessage` if panels stay in iframes, or a s
 ## Phases
 
 1. **Extract the 3D scene** into a self-contained module + finalize the message API (in/out above). Pure refactor of `export_view` — no behaviour change. *(the "separate the 3D out" ask)*
+   - **Partly landed:** the orthogonal slices were pulled out of the 3D scene (the in-canvas cut planes + their toolbar controls are gone); the standalone axial/coronal/sagittal panels are now the interactive navigators (wheel-scrub + click-to-locate). The message API gained `rosa:locate` (in) and `rosa:located` / `rosa:selected` (out) on top of the existing `rosa:select` / `rosa:visibility`. Still deferred: physically splitting the scene into its own module file (kept in-page for now — the postMessage bus already survives an iframe/module boundary) and consuming the outbound messages in the app shell.
 2. **NiiVue slice panels** replace the hand-rolled canvases; wire crosshair ↔ 3D via the bus. Validate sync on a real case.
 3. **Registration QC → NiiVue** two-volume overlay (opacity/colormap/scroll); delete `qc_render.py` + the server compositor + the Safari-repaint workarounds.
 4. Layout/resize/colormap polish; single-page vs iframe decision.
