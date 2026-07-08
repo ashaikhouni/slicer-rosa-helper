@@ -352,7 +352,10 @@ function pollLabel(id, firstLabel) {
       state.labelJobId = latest.id;
       if (latest.state === "succeeded") {
         state.labeledOnce = true;
-        showProposed(latest.id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
+        // Reload the viewer on every label — the brain surface is now recolored
+        // by the active atlas, so the 3D changes on an atlas switch, not just the
+        // first label. Only the first label jumps to the registration screen.
+        showProposed(latest.id, { reloadViewer: true, jumpToQc: firstLabel });
       } else if (["failed", "cancelled"].includes(latest.state)) {
         _showLabelError(latest);
       } else { pollLabel(latest.id, firstLabel); }   // a newer one is still running
@@ -360,7 +363,7 @@ function pollLabel(id, firstLabel) {
     }
     if (st.state === "succeeded") {
       state.labeledOnce = true;
-      showProposed(id, { reloadViewer: firstLabel, jumpToQc: firstLabel });
+      showProposed(id, { reloadViewer: true, jumpToQc: firstLabel });
     } else { _showLabelError(st); }
   }, 1000);
 }

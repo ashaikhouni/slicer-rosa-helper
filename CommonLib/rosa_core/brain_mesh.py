@@ -330,6 +330,56 @@ def aparc_vertex_colors(vertices_ras: np.ndarray, aseg: Any, lut: dict, *,
     return table[np.clip(labels, 0, maxl - 1)]
 
 
+def _label_hue_rgb(label: int) -> tuple:
+    """A stable, well-spread color for an integer region id (golden-ratio hue),
+    so the same label reads the same color across cases without needing an atlas
+    color table."""
+    import colorsys
+    h = (int(label) * 0.6180339887498949) % 1.0
+    r, g, b = colorsys.hsv_to_rgb(h, 0.55, 0.95)
+    return (int(r * 255), int(g * 255), int(b * 255))
+
+
+def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
+                        colors: dict | None = None,
+                        default: tuple = (150, 150, 150)) -> np.ndarray:
+    """Per-vertex RGBA (uint8, N×4) coloring a surface by ANY atlas labelmap that's
+    already warped into the surface's RAS frame — so the brain surface matches the
+    atlas that labeled the contacts, instead of always showing the recon parcellation.
+
+    Each region gets a distinct, deterministic color. Unlike ``aparc_vertex_colors``
+    there is **no nearest-region fill**: label 0 / voxels the atlas doesn't cover stay
+    neutral gray, so a subcortical-only atlas honestly leaves the cortex uncolored.
+
+    ``colors`` optionally supplies ``{label: (r, g, b)}`` (an atlas's own palette);
+    labels without an entry fall back to a stable hue from the label id.
+    """
+    import nibabel as nib
+
+    img = labelmap if hasattr(labelmap, "dataobj") else nib.load(str(labelmap))
+    lab = np.asanyarray(img.dataobj).astype(np.int32)
+    inv = np.linalg.inv(np.asarray(img.affine, dtype=float))
+    shp = np.array(lab.shape)
+
+    v = np.asarray(vertices_ras, dtype=float)
+    hom = np.concatenate([v, np.ones((v.shape[0], 1))], axis=1)
+    ijk = np.round((inv @ hom.T).T[:, :3]).astype(int)
+    inb = np.all((ijk >= 0) & (ijk < shp), axis=1)
+    labels = np.zeros(v.shape[0], dtype=np.int32)
+    good = ijk[inb]
+    labels[inb] = lab[good[:, 0], good[:, 1], good[:, 2]]
+
+    out = np.empty((v.shape[0], 4), dtype=np.uint8)
+    out[:] = (*default, 255)
+    palette = colors or {}
+    for lv in np.unique(labels):
+        if lv == 0:
+            continue
+        rgb = palette.get(int(lv)) or _label_hue_rgb(int(lv))
+        out[labels == lv] = (rgb[0], rgb[1], rgb[2], 255)
+    return out
+
+
 def gyral_surface_from_mri(
     volume: Any, brain_mask: Any, *,
     step_size: int = 1,
@@ -493,5 +543,5 @@ def surface_from_mask(
 __all__ = [
     "BrainSurface", "surface_from_mask", "gyral_mask_from_mri",
     "gyral_surface_from_mri", "brain_tissue_from_fastsurfer_aseg",
-    "aparc_vertex_colors", "transform_surface",
+    "aparc_vertex_colors", "atlas_vertex_colors", "transform_surface",
 ]

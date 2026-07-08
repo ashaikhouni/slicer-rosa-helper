@@ -22,11 +22,42 @@ try:
     import skimage  # noqa: F401  — the [mesh] extra
     from rosa_core.brain_mesh import (
         surface_from_mask, gyral_mask_from_mri, gyral_surface_from_mri,
-        transform_surface, BrainSurface,
+        transform_surface, BrainSurface, atlas_vertex_colors,
     )
     HAVE_DEPS = True
 except Exception:  # noqa: BLE001
     HAVE_DEPS = False
+
+
+@unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
+class AtlasVertexColorsTests(unittest.TestCase):
+    """Color a surface by a warped atlas labelmap: distinct color per region,
+    neutral gray where the atlas has no label (honest coverage, no fill)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        arr = np.zeros((20, 20, 20), np.int32)
+        arr[2:8, 2:8, 2:8] = 5
+        arr[12:18, 12:18, 12:18] = 42
+        self.lm = Path(self._tmp.name) / "atlas.nii.gz"
+        nib.save(nib.Nifti1Image(arr, np.eye(4)), str(self.lm))
+        # vertices: in region 5, in region 42, in unlabeled space.
+        self.verts = np.array([[4., 4., 4.], [15., 15., 15.], [10., 0., 0.]], float)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_distinct_colors_and_gray_where_uncovered(self):
+        cols = atlas_vertex_colors(self.verts, str(self.lm))
+        self.assertEqual(cols.shape, (3, 4))
+        self.assertEqual(cols.dtype, np.uint8)
+        self.assertEqual(tuple(cols[2][:3]), (150, 150, 150))  # uncovered → gray
+        self.assertFalse(np.array_equal(cols[0][:3], cols[1][:3]))  # regions differ
+        self.assertFalse(np.array_equal(cols[0][:3], (150, 150, 150)))  # labeled ≠ gray
+
+    def test_palette_override(self):
+        cols = atlas_vertex_colors(self.verts, str(self.lm), colors={5: (255, 0, 0)})
+        self.assertEqual(tuple(cols[0][:3]), (255, 0, 0))
 
 
 def _boundary_edge_count(faces):

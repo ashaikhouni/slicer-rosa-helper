@@ -2252,6 +2252,8 @@ def _assemble_viewer(
     fastsurfer_aseg_path: Path | None = None,
     fastsurfer: bool = False,
     drop_cerebellum: bool = True,
+    atlas_labelmap_path: Path | None = None,
+    atlas_name: str = "",
     parcellation,
     lut,
     annotation: str,
@@ -2474,6 +2476,27 @@ def _assemble_viewer(
     else:
         _stderr("[view] no FreeSurfer surfaces / brain volume; skipping brain mesh")
 
+    # Recolor the brain surface by the ACTIVE labeling atlas — its labelmap is
+    # warped into the CT frame by the labeler and the surface vertices are in the
+    # CT frame here, so we sample directly. This makes the surface match the
+    # contact labels instead of always showing the recon parcellation. Gray where
+    # the atlas doesn't cover (a subcortical-only atlas leaves the cortex neutral).
+    if atlas_labelmap_path is not None and Path(atlas_labelmap_path).is_file():
+        try:
+            from rosa_core.brain_mesh import atlas_vertex_colors
+            n_recolored = 0
+            for s in surfaces:
+                if getattr(s, "kind", "") == "brain":
+                    s.vertex_colors_rgba = atlas_vertex_colors(s.vertices_ras, str(atlas_labelmap_path))
+                    s.annotation_name = "atlas"
+                    n_recolored += 1
+            if n_recolored:
+                surface_source = f"MRI — {atlas_name or 'atlas'} regions"
+                _stderr(f"[view] recolored {n_recolored} surface(s) by atlas "
+                        f"labelmap {Path(atlas_labelmap_path).name}")
+        except Exception as exc:  # noqa: BLE001 — atlas coloring is optional
+            _stderr(f"[view] atlas surface coloring skipped ({exc})")
+
     # Always export the working CT as a windowed uint8 slice/MIP volume so the
     # viewer has anatomy even without a FreeSurfer recon. The CT already lives
     # in the contact frame, so no resampling is needed.
@@ -2675,6 +2698,8 @@ def run_view_results(
     fastsurfer_aseg: str | Path | None = None,
     fastsurfer: bool = False,
     drop_cerebellum: bool = True,
+    atlas_labelmap: str | Path | None = None,
+    atlas_name: str = "",
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2728,6 +2753,8 @@ def run_view_results(
         fastsurfer_aseg_path=(Path(fastsurfer_aseg) if fastsurfer_aseg else None),
         fastsurfer=fastsurfer,
         drop_cerebellum=drop_cerebellum,
+        atlas_labelmap_path=(Path(atlas_labelmap) if atlas_labelmap else None),
+        atlas_name=atlas_name,
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

@@ -120,6 +120,17 @@ def main(argv: list[str] | None = None) -> int:
         help="keep cerebellum + brainstem in the FastSurfer surface (default: "
              "cerebrum-only).",
     )
+    parser.add_argument(
+        "--atlas-labelmap", default="",
+        help="path to the active atlas labelmap warped into the CT/contact frame "
+             "(from `label --save-atlas-labelmap`); colors the brain surface by "
+             "that atlas so it matches the contact labels.",
+    )
+    parser.add_argument(
+        "--atlas-name", default="",
+        help="display name of the atlas used for --atlas-labelmap (shown in the "
+             "viewer's Surface info line).",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -180,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
             fastsurfer=bool(args.fastsurfer),
             fastsurfer_aseg=args.fastsurfer_aseg or None,
             drop_cerebellum=not bool(args.keep_cerebellum),
+            atlas_labelmap=args.atlas_labelmap or None,
+            atlas_name=args.atlas_name,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),

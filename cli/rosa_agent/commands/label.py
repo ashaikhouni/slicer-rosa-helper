@@ -282,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
              "atlas (MNI) grid here — pairs with --save-ct-in-mni for AC-PC QC.",
     )
     parser.add_argument(
+        "--save-atlas-labelmap", default="",
+        help="With --bundled-atlas, write the atlas labelmap warped into the "
+             "target (CT) frame here — so the 3D brain surface can be colored by "
+             "the SAME atlas that labels the contacts (view-results samples it).",
+    )
+    parser.add_argument(
         "--registration-cache", default="",
         help="Directory to cache registration transforms in. T1→CT is computed "
              "once per case; MNI→T1 once per template space — so labeling more "
@@ -355,6 +361,19 @@ def main(argv: list[str] | None = None) -> int:
         save_mri_in_mni=args.save_mri_in_mni or None,
         registration_cache=args.registration_cache or None,
     )
+    # Persist the active atlas's warped (CT-frame) labelmap so the viewer can
+    # color the brain surface by the same atlas that labels the contacts.
+    if args.save_atlas_labelmap and args.bundled_atlas:
+        prov = providers.get(args.bundled_atlas)
+        lm = getattr(prov, "_registered_labelmap_path", None) if prov is not None else None
+        if lm is not None and Path(lm).is_file():
+            import shutil
+            Path(args.save_atlas_labelmap).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(str(lm), args.save_atlas_labelmap)
+            _stderr(f"[label] saved warped atlas labelmap → {args.save_atlas_labelmap}")
+        else:
+            _stderr("[label] --save-atlas-labelmap requested but no warped labelmap "
+                    "(atlas not registered to the target?)")
     if not any(p is not None and p.is_ready() for p in providers.values()):
         # Distinguish "nothing requested" (fine — empty output) from
         # "requested but failed to load" (a hard error — silently writing an
