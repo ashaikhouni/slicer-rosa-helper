@@ -170,6 +170,7 @@ function resetLabelCard() {
   $("qcplanes").innerHTML = ""; state.qc = null;
   $("qcspace").hidden = true;
   $("tab-qc").disabled = true;
+  $("atlaschip").hidden = true;
   setViewerTab("electrodes");
 }
 
@@ -380,7 +381,11 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
       : `Labels from <strong>${p.atlas}</strong> ` +
         `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
     $("approvebtn").hidden = false;
-    if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
+    if (p.atlas) {
+      $("atlassel").value = p.atlas;   // reflect which atlas is shown
+      $("atlaschip").textContent = `Atlas: ${p.atlas}`;
+      $("atlaschip").hidden = false;   // show the active atlas beside the viewer tabs
+    }
     previewProposed(p.contacts);        // show the proposed regions per contact
     if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
     // The 3D viewer is (re)built only on the first label; reload the iframe then
