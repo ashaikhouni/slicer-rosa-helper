@@ -143,6 +143,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         mri_qc = str(workdir / "mri_in_ct.nii.gz")
         ct_mni = str(workdir / "ct_in_mni.nii.gz")
         mri_mni = str(workdir / "mri_in_mni.nii.gz")
+        atlas_in_ct = str(workdir / "atlas_in_ct.nii.gz")   # warped atlas → colors the surface
         # Per-case registration cache (in the parent pipeline job's dir) — T1→CT
         # once per case, MNI→T1 once per template space, so labeling more atlases
         # reuses the transforms instead of re-registering.
@@ -158,13 +159,18 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_viewer = str(parent_dir / "viewer")
         brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
         t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
-        # The brain surface is atlas-independent within a segmentation backend,
-        # so it's meshed once per case and reused — but FastSurfer's surface
-        # (learned tissue + parcellation colors) differs from the Otsu one, so
-        # they cache separately (selecting FastSurfer rebuilds the parcellated
-        # surface; MNI atlases keep the Otsu surface).
+        # The 3D brain MESH is the anatomic surface and is atlas-INDEPENDENT: use
+        # the FastSurfer recon (learned tissue, no dura) whenever FastSurfer is
+        # available — for EVERY atlas, not just the FastSurfer labeler — and only
+        # change the COLOR per atlas. Falls back to the Otsu surface when FastSurfer
+        # isn't installed. Meshed once per case (cached), recolored per label.
+        try:
+            from rosa_detect.services.fastsurfer_seg import find_fastsurfer
+            fs_available = find_fastsurfer()[0] is not None
+        except Exception:  # noqa: BLE001 — treat any import/probe failure as "no FastSurfer"
+            fs_available = False
         brain_surface = str(Path(regcache) / (
-            "brain_surface_fs.npz" if atlas == "fastsurfer" else "brain_surface.npz"))
+            "brain_surface_fs.npz" if fs_available else "brain_surface.npz"))
         base = [py, "-u", "-m", "rosa_agent"]
         # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
         # bundled MNI atlases warp a template. The FastSurfer aseg the label step
@@ -185,23 +191,31 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                  "--save-registered-mri", mri_qc,
                                  "--save-ct-in-mni", ct_mni,
                                  "--save-mri-in-mni", mri_mni,
+                                 # Warped atlas labelmap → colors the brain surface by
+                                 # this atlas (view-results samples it below).
+                                 "--save-atlas-labelmap", atlas_in_ct,
                                  "--registration-cache", regcache, "-o", out]
         steps = [label_step]
-        # The 3D viewer (brain surface + contacts) is atlas-independent, so it's
-        # built ONCE per case (first label). Switching atlas only recomputes the
-        # labels — skip the viewer rebuild once the surface is cached. FastSurfer
-        # additionally colors the surface by its parcellation.
-        if not Path(brain_surface).is_file():
-            view_step = base + ["view-results", str(parent_dir), "--output", parent_viewer,
-                                "--ct", str(ct), "--contacts", str(contacts),
-                                "--trajectories", parent_traj,
-                                "--brain-native-volume", str(t1),
-                                "--brain-to-ct-transform", t1_to_ct,
-                                "--brain-mask-cache", brain_mask,
-                                "--brain-surface-cache", brain_surface]
-            if atlas == "fastsurfer":
-                view_step += ["--fastsurfer-aseg", fs_aseg]
-            steps.append(view_step)
+        # view-results runs on EVERY label: it (re)builds or reuses the cached
+        # anatomic mesh, then colors it for the active atlas.
+        view_step = base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                            "--ct", str(ct), "--contacts", str(contacts),
+                            "--trajectories", parent_traj,
+                            "--brain-native-volume", str(t1),
+                            "--brain-to-ct-transform", t1_to_ct,
+                            "--brain-mask-cache", brain_mask,
+                            "--brain-surface-cache", brain_surface]
+        # MESH from the FastSurfer recon for ANY atlas (the label step only ran
+        # FastSurfer for the fastsurfer labeler, so build/cache it here otherwise).
+        # On a cache hit view-results loads the mesh and ignores these.
+        if fs_available:
+            view_step += (["--fastsurfer-aseg", fs_aseg] if Path(fs_aseg).is_file()
+                          else ["--fastsurfer"])
+        # COLOR: the FastSurfer labeler keeps its own DKT parcellation; every other
+        # atlas recolors that same mesh by its warped labelmap.
+        if atlas != "fastsurfer":
+            view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
+        steps.append(view_step)
         return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 
