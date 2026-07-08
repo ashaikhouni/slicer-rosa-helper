@@ -8,7 +8,7 @@
 <title>ROSA / SEEG viewer</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #111; color: #eee; overflow: hidden; }
-  #app { display: grid; grid-template-columns: 1fr 320px 320px; height: 100%; }
+  #app { display: grid; grid-template-columns: minmax(0, 1fr) clamp(260px, 22vw, 440px) clamp(240px, 18vw, 360px); height: 100%; }
   #canvas-host { position: relative; }
   #canvas-host canvas { display: block; }
   #toolbar { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 5; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
@@ -39,10 +39,14 @@
   #slices-head .hint { color: #666; flex: 1; min-width: 90px; }
   #slices-head .palpha { display: inline-flex; align-items: center; gap: 5px; color: #bbb; }
   #slices-head .palpha input[type="range"] { width: 70px; }
-  .slice-panel { position: relative; background: #000; border: 1px solid #1d1d1d; }
-  .slice-3d { position: absolute; top: 4px; right: 6px; font-size: 10px; letter-spacing: 0.06em; color: #bfe9ff; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; background: rgba(0,0,0,0.5); padding: 1px 5px 1px 3px; border-radius: 3px; user-select: none; }
+  /* Equal square panels: the canvas letterboxes (object-fit) inside a fixed
+     1:1 box, so axial (512²) and coronal/sagittal (512×192) read the same size
+     and the column resizes with the window instead of each panel picking its
+     own aspect-driven height. */
+  .slice-panel { position: relative; background: #000; border: 1px solid #1d1d1d; aspect-ratio: 1 / 1; overflow: hidden; }
+  .slice-panel canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; image-rendering: crisp-edges; }
+  .slice-3d { position: absolute; top: 4px; right: 6px; font-size: 10px; letter-spacing: 0.06em; color: #bfe9ff; display: inline-flex; align-items: center; gap: 3px; cursor: pointer; background: rgba(0,0,0,0.5); padding: 1px 5px 1px 3px; border-radius: 3px; user-select: none; z-index: 2; }
   .slice-3d input { margin: 0; accent-color: #22d0ff; }
-  .slice-panel canvas { display: block; width: 100%; height: auto; image-rendering: crisp-edges; }
   .slice-label { position: absolute; top: 4px; left: 6px; font-size: 10px; color: #bbb; letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; }
   .slice-coord { position: absolute; bottom: 4px; right: 6px; font-size: 10px; color: #888; pointer-events: none; font-family: ui-monospace, monospace; }
   .slice-axes { position: absolute; bottom: 4px; left: 6px; font-size: 9px; color: #555; pointer-events: none; font-family: ui-monospace, monospace; }
@@ -517,6 +521,10 @@ const slicePanels = {};   // axis -> { canvas, ctx, coordEl }
 let mriVolume = null;
 let mriRasCursor = null;   // last selected RAS point [x,y,z]
 let mriVoxCursor = [0, 0, 0]; // last selected vox indices
+// Contacts, in the shared CT/contact RAS frame, overlaid on every slice so the
+// electrodes stay visible no matter which volume (CT or MRI) is displayed —
+// the metal only shows on CT, but the markers show everywhere.
+let allContacts = [];      // [{ label, shank, ras:[x,y,z] }]
 
 // axis -> which voxel index is the through-plane (the one scroll steps).
 const _THROUGH_IDX = { axial: 2, coronal: 1, sagittal: 0 };
@@ -646,6 +654,10 @@ function renderSlice(axis) {
   }
   ctx.putImageData(img, 0, 0);
 
+  // Contacts near this slice — drawn under the crosshair so electrodes stay
+  // visible even on the MRI (where metal doesn't show).
+  _drawContactDots(ctx, axis, W, H, throughIdx);
+
   // Crosshair
   if (mriVoxCursor) {
     let cu, cv;
@@ -676,6 +688,35 @@ function renderSlice(axis) {
     const ras = mriRasCursor || [0, 0, 0];
     panel.coordEl.textContent =
       `${throughLabel}=${throughIdx|0} | RAS ${ras[0].toFixed(1)}, ${ras[1].toFixed(1)}, ${ras[2].toFixed(1)}`;
+  }
+}
+
+// Project the contacts within a thin slab of this slice onto the panel. Keeps
+// electrodes locatable on any volume (metal only shows on CT); the selected
+// contact reads red, the rest cyan. Same (u,v) mapping as the crosshair.
+function _drawContactDots(ctx, axis, W, H, throughIdx) {
+  if (!mriVolume || !allContacts.length) return;
+  const ax = _THROUGH_IDX[axis];
+  const slabVox = Math.max(1, Math.round(1.6 / (mriVolume.pixdim[ax] || 1)));
+  const selLabel = (selectedContact && selectedContact.userData) ? selectedContact.userData.label : null;
+  for (const c of allContacts) {
+    const vox = mriVolume.rasToVox(c.ras);
+    const ci = Math.round(vox[0]), cj = Math.round(vox[1]), ck = Math.round(vox[2]);
+    let through, u, vSrc;
+    if (axis === "axial") { through = ck; u = ci; vSrc = cj; }
+    else if (axis === "coronal") { through = cj; u = ci; vSrc = ck; }
+    else { through = ci; u = cj; vSrc = ck; }   // sagittal
+    if (Math.abs(through - throughIdx) > slabVox) continue;
+    const cu = u, cv = H - 1 - vSrc;
+    if (cu < 0 || cu >= W || cv < 0 || cv >= H) continue;
+    const sel = selLabel && c.label === selLabel;
+    ctx.beginPath();
+    ctx.arc(cu + 0.5, cv + 0.5, sel ? 5 : 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = sel ? "#ff3b30" : "rgba(90,200,255,0.92)";
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = sel ? "#fff" : "rgba(10,30,45,0.9)";
+    ctx.stroke();
   }
 }
 
@@ -1435,9 +1476,12 @@ function _applyInitialBrainAlpha() {
 // path-rewritten) scene_meta.json. Identical logic for served + picker.
 function onMeta(meta) {
   renderSidebar(meta);
-  // Volume selector (CT / FreeSurfer T1). Additive + back-compat: the backend
-  // orders volumes [T1, CT] in FS mode (so T1 stays the default) and [CT] when
-  // there's no recon. Falls back to the legacy `t1_volume` field.
+  // Contacts for the slice overlay (already in the CT/contact RAS frame).
+  allContacts = (meta.contacts || [])
+    .map(c => ({ label: c.label, shank: c.trajectory, ras: c.position || [c.x, c.y, c.z] }))
+    .filter(c => Array.isArray(c.ras) && c.ras.length === 3);
+  // Volume selector (CT / MRI (brain) / FreeSurfer T1). Additive + back-compat:
+  // the backend lists [MRI(brain), T1, CT]; falls back to legacy `t1_volume`.
   const volSel = document.getElementById("vol-select");
   const vols = (meta.volumes && meta.volumes.length)
     ? meta.volumes
@@ -1455,7 +1499,15 @@ function onMeta(meta) {
       if (v) loadMri(v);
     });
     if (vols.length < 2) volSel.parentElement.style.display = "none";
-    loadMri(vols[0]);
+    // Default the navigator to the CT — that's where the metal contacts are
+    // visible, so the slices are useful for verifying placement out of the box.
+    // (DVR/MIP follow this dropdown too; switch to "MRI (brain)" for the brain
+    // isosurface.) Fall back to the first volume when there's no CT.
+    let di = vols.findIndex(v =>
+      (v.id || "").toLowerCase() === "ct" || /(^|[^a-z])ct($|[^a-z])/i.test(v.label || ""));
+    if (di < 0) di = 0;
+    volSel.value = String(di);
+    loadMri(vols[di]);
   } else {
     loadMri(meta.t1_volume);
   }
