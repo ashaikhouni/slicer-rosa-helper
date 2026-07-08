@@ -121,6 +121,9 @@ button:disabled { opacity: .5; cursor: default; }
   background: transparent; color: #9fb0c0; }
 .viewer-tabs > button[data-tab].active { background: #1b2836; color: #eaf1f8; }
 .viewer-tabs > button[data-tab]:disabled { opacity: .45; cursor: default; }
+.atlaschip { font-size: 11px; color: #9fb0c0; background: #16202b; border: 1px solid #26333f;
+  border-radius: 10px; padding: 2px 9px; white-space: nowrap; }
+.atlaschip[hidden] { display: none; }
 .viewer-tools { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .viewer-tools[hidden] { display: none !important; }   /* hidden must beat inline-flex */
 .viewer-tools .qc-op { color: #9fb0c0; }
