@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -679,18 +680,7 @@ _HTML_TEMPLATE = """<!doctype html>
   .dz-sub {{ font-size: 13px; color: #9aa; line-height: 1.55; margin-bottom: 18px; }}
   .dz-inner code {{ color: #cdd; background: #222; padding: 1px 4px; border-radius: 3px; }}
 </style>
-<!-- es-module-shims polyfills <script type="importmap"> on browsers that
-     don't support it natively (older Safari/Firefox). Modern Chrome/Safari/
-     Firefox ignore it. -->
-<script async src="https://unpkg.com/es-module-shims@1.10.0/dist/es-module-shims.js"></script>
-<script type="importmap">
-{{
-  "imports": {{
-    "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
-  }}
-}}
-</script>
+{importmap}
 </head>
 <body>
 <div id="app">
@@ -2212,6 +2202,44 @@ if (VIEWER_MODE === "picker") {{
 """
 
 
+# three.js is loaded via an import map. Two flavours:
+#   * LOCAL  — vendored next to index.html (``three/``), so the viewer needs NO
+#     network. Used for the SERVED app + standalone export dirs, where the assets
+#     sit beside the HTML (a CDN block by an ad/privacy extension otherwise leaves
+#     three.js unloaded → static chrome over a black canvas, with no error the
+#     user can see). Import-map values MUST be relative URLs (``./three/…``); a
+#     bare ``three/…`` is itself a bare specifier and the map rejects it.
+#   * CDN    — unpkg, for the ``picker`` GitHub Pages app, whose single index.html
+#     is deployed without the vendored assets beside it.
+_IMPORTMAP_LOCAL = """\
+<script async src="./three/es-module-shims.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./three/three.module.js",
+    "three/addons/": "./three/addons/"
+  }
+}
+</script>"""
+
+_IMPORTMAP_CDN = """\
+<!-- es-module-shims polyfills <script type="importmap"> on browsers that
+     don't support it natively (older Safari/Firefox). -->
+<script async src="https://unpkg.com/es-module-shims@1.10.0/dist/es-module-shims.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+  }
+}
+</script>"""
+
+# Vendored three.js tree (three.module.js + addons + es-module-shims), copied
+# next to a served/export index.html so LOCAL import-map paths resolve offline.
+_VIEWER_ASSETS = Path(__file__).resolve().parent / "viewer_assets"
+
+
 def render_viewer_html(*, title: str, mode: str = "served") -> str:
     """Render the viewer index.html. ``mode`` is the JS VIEWER_MODE:
 
@@ -2220,13 +2248,27 @@ def render_viewer_html(*, title: str, mode: str = "served") -> str:
     * ``picker``  — no auto-load; shows a drag-and-drop zone and renders the
       user's own dropped files entirely client-side (the GitHub Pages app —
       nothing uploaded, no server). Reuses the exact same render engine.
+
+    ``served`` (and standalone export) uses the LOCAL vendored three.js so the
+    viewer works with no network; ``picker`` uses the CDN (its Pages deployment
+    ships the HTML without the vendored assets beside it).
     """
-    return _HTML_TEMPLATE.format(title=title, viewer_mode=mode)
+    importmap = _IMPORTMAP_CDN if mode == "picker" else _IMPORTMAP_LOCAL
+    return _HTML_TEMPLATE.format(title=title, viewer_mode=mode, importmap=importmap)
+
+
+def _copy_viewer_assets(out_dir: Path) -> None:
+    """Copy the vendored three.js tree into ``out_dir/three`` (served/export)."""
+    src = _VIEWER_ASSETS / "three"
+    if src.is_dir():
+        shutil.copytree(src, out_dir / "three", dirs_exist_ok=True)
 
 
 def _write_html(out_dir: Path, *, title: str, mode: str = "served") -> Path:
     p = out_dir / "index.html"
     p.write_text(render_viewer_html(title=title, mode=mode), encoding="utf-8")
+    if mode != "picker":
+        _copy_viewer_assets(out_dir)   # vendor three.js beside the HTML
     return p
 
 
