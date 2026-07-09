@@ -122,10 +122,11 @@ class LabelRequest(BaseModel):
 
     ``t1`` is the uploaded MRI path (from ``POST /uploads``); ``atlas`` is a
     bundled atlas id (see ``GET /atlases``). The CT + contacts come from the
-    parent pipeline job.
+    parent pipeline job. ``t1`` may be omitted when the case was created with an
+    MRI — the service falls back to the parent pipeline's ``t1``.
     """
 
-    t1: str
+    t1: str | None = None
     atlas: str = "cerebra"
 
 

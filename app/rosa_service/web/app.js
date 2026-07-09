@@ -6,7 +6,8 @@
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
 const state = { ct: null, jobId: null, es: null, poll: null,
-                mri: null, labelJobId: null, labelPoll: null, qc: null };
+                mri: null, labelJobId: null, labelPoll: null, qc: null,
+                creationMri: null };   // optional MRI (T1) picked at case creation
 
 async function jget(url) {
   const r = await fetch(url);
@@ -71,19 +72,50 @@ function wireDrop() {
     const p = ev.target.value.trim();
     setCt(p ? { path: p, name: p.split("/").pop() } : null);
   });
+  // Optional MRI (T1) at case creation — upload or point at a path.
+  $("mrifileinput").addEventListener("change", (ev) => {
+    const f = ev.target.files[0];
+    if (f) uploadCreationMri(f);
+  });
+  $("mripath").addEventListener("input", (ev) => {
+    const p = ev.target.value.trim();
+    setCreationMri(p ? { path: p, name: p.split("/").pop() } : null);
+  });
+}
+
+function setCreationMri(mri) {
+  state.creationMri = mri;
+  $("mricreateinfo").textContent = mri
+    ? `MRI: ${mri.name}${mri.bytes ? ` (${(mri.bytes / 1e6).toFixed(1)} MB)` : ""}`
+    : "";
+}
+
+async function uploadCreationMri(file) {
+  $("mricreateinfo").textContent = `Uploading ${file.name}…`;
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) { $("mricreateinfo").textContent = `Upload failed: ${await r.text()}`; return; }
+  setCreationMri(await r.json());
 }
 
 // ---- step 2: run ------------------------------------------------------
 
 async function run() {
   const label = $("label").value.trim() || "case";
+  const params = { ct: state.ct.path, label };
+  if (state.creationMri) params.t1 = state.creationMri.path;   // MRI from the start
   showStep("run");
   $("log").textContent = "";
   $("runstate").textContent = "Starting…";
+  // The MRI adds brain-strip + surface reconstruction to the run.
+  $("runsub").textContent = state.creationMri
+    ? "detect → place contacts → strip MRI + build surface → viewer"
+    : "detect → place contacts → build viewer (~2–3 min)";
   $("spinner").classList.remove("stopped");
   try {
     const job = await jsend(`${API}/jobs`, "POST",
-      { kind: "pipeline", params: { ct: state.ct.path, label } });
+      { kind: "pipeline", params });
     state.jobId = job.id;
     streamLogs(job.id);
     pollStatus(job.id);
@@ -153,8 +185,22 @@ async function loadResults(id) {
   frame.src = `${API}/jobs/${id}/viewer/`;
   showStep("results");
   resetLabelCard();
+  prefillLabelMriFromCase(id);   // MRI provided at creation → no re-upload to label
   try { renderReview(await jget(`${API}/jobs/${id}/review`)); }
   catch (e) { $("reviewlist").textContent = `Could not load review: ${e.message}`; }
+}
+
+// If the case was created with an MRI, the pipeline job carries its t1: pre-fill
+// the label card so labeling needs only an atlas pick (no second upload).
+async function prefillLabelMriFromCase(id) {
+  try {
+    const st = await jget(`${API}/jobs/${id}`);
+    if (st && st.t1) {
+      state.mri = { path: st.t1, name: "(MRI from case creation)" };
+      $("labelstatus").textContent = "· MRI from case creation";
+      $("labelbtn").disabled = false;
+    }
+  } catch (_e) { /* ignore */ }
 }
 
 // The label card is per-job: a fresh run starts with no MRI / no proposal.
@@ -270,6 +316,8 @@ function restart() {
   resetLabelCard();
   state.ct = null; state.jobId = null;
   $("ctpath").value = ""; $("fileinput").value = ""; $("exportmsg").textContent = "";
+  $("mripath").value = ""; $("mrifileinput").value = ""; $("mrioptional").open = false;
+  setCreationMri(null);
   $("viewerframe").src = "about:blank";
   setCt(null);
   showStep("drop");

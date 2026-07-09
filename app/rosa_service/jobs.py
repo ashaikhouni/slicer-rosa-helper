@@ -24,6 +24,7 @@ import json
 import sys
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 
 from .models import Artifact, JobSpec, JobState, JobStatus
@@ -31,6 +32,61 @@ from .models import Artifact, JobSpec, JobState, JobStatus
 
 class JobNotFound(KeyError):
     pass
+
+
+@lru_cache(maxsize=1)
+def _deepbet_available() -> bool:
+    """True when a deepbet-capable python is reachable (probed once per process).
+
+    deepbet is the fast MIT T1 strip; when present the pipeline pre-extracts the
+    native brain mask with it (vs SynthStrip). Memoised: the probe spawns a
+    subprocess, and this is called on the event loop while building a job.
+    """
+    try:
+        from rosa_detect.services.deepbet_strip import deepbet_available
+        return deepbet_available()
+    except Exception:  # noqa: BLE001 — no engine / probe failure → treat as absent
+        return False
+
+
+def _fastsurfer_available() -> bool:
+    """True when the FastSurfer seg runtime is detected (the anatomic mesh source)."""
+    try:
+        from rosa_detect.services.fastsurfer_seg import find_fastsurfer
+        return find_fastsurfer()[0] is not None
+    except Exception:  # noqa: BLE001 — treat any import/probe failure as "no FastSurfer"
+        return False
+
+
+def _brain_surface_view_flags(t1: str, regcache: Path, *,
+                              include_transform: bool) -> list[str]:
+    """``view-results`` flags that build/reuse the subject brain SURFACE from the
+    MRI, shared by the pipeline (case-creation) and label jobs so their caches
+    line up: the native brain mask, the T1→CT transform, and the meshed surface
+    all live in the same ``regcache`` and are produced once.
+
+    ``include_transform`` adds ``--brain-to-ct-transform`` (the label job runs the
+    ``label`` step first, which SAVES that transform); the pipeline omits it and
+    lets view-results register T1→CT ephemerally (the transform is saved later,
+    on the first label). The surface cache filename tracks whether FastSurfer is
+    used, so a non-FS preview never masquerades as the FS recon on a cache hit.
+    """
+    regcache = Path(regcache)
+    fs_available = _fastsurfer_available()
+    brain_mask = regcache / "brain_mask_native.nii.gz"
+    brain_surface = regcache / (
+        "brain_surface_fs.npz" if fs_available else "brain_surface.npz")
+    flags = ["--brain-native-volume", str(t1)]
+    if include_transform:
+        flags += ["--brain-to-ct-transform", str(regcache / "t1_to_ct.tfm")]
+    flags += ["--brain-mask-cache", str(brain_mask),
+              "--brain-surface-cache", str(brain_surface)]
+    if fs_available:
+        fs_aseg = (regcache / "fastsurfer" / "subject" / "mri"
+                   / "aparc.DKTatlas+aseg.deep.mgz")
+        flags += (["--fastsurfer-aseg", str(fs_aseg)] if fs_aseg.is_file()
+                  else ["--fastsurfer"])
+    return flags
 
 
 def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
@@ -110,24 +166,44 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             raise ValueError("pipeline job requires params.ct")
         ct = str(ct)
         label = str(spec.params.get("label") or "case")
+        # Optional patient MRI (T1) provided at case creation. When present, the
+        # pipeline brings it in from the start: extract the native brain mask and
+        # mesh the subject brain SURFACE so the electrode view shows anatomy
+        # immediately, and cache both (+ the T1→CT transform on first label) in
+        # ``regcache`` so a later label job reuses them instead of re-running.
+        t1 = spec.params.get("t1")
+        t1 = str(t1) if t1 else None
         traj = str(workdir / "trajectories.tsv")
         contacts = str(workdir / "contacts.tsv")
         viewer = str(workdir / "viewer")
+        regcache = workdir / "regcache"
         # `python -m rosa_agent` works whether the engine is pip-installed or on
         # PYTHONPATH; in the frozen app this becomes the frozen exe re-invoked.
         # detect (CT → trajectories) → contacts (+CT → contacts) → view-results
         # (→ served viewer dir: index.html + scene.glb + scene_meta.json + CT).
         base = [py, "-u", "-m", "rosa_agent"]
-        return [
+        steps: list[list[str]] = []
+        if t1 and _deepbet_available():
+            # Fast MIT T1 strip → the native brain mask view-results reuses
+            # (avoids its SynthStrip default). deepbet is T1-only; when it isn't
+            # installed we skip this and view-results extracts via its own auto
+            # backend (SynthStrip), same as before.
+            steps.append(base + ["brain-extract", t1, "-o",
+                                  str(regcache / "brain_mask_native.nii.gz"),
+                                  "--backend", "deepbet"])
+        steps += [
             base + ["detect", ct, "--out", traj],
             base + ["contacts", traj, ct, "--out", contacts],
-            # CT stays MIP-only here (fast). The subject brain SURFACE comes from
-            # the MRI, generated when the MRI is brought in for labeling (see the
-            # "label" kind's 2nd step), so the pipeline doesn't pay SynthStrip.
-            base + ["view-results", str(workdir), "--output", viewer,
-                    "--ct", ct, "--contacts", contacts, "--trajectories", traj,
-                    "--subject-label", label],
         ]
+        # Without an MRI the CT stays MIP-only (fast, no surface). With an MRI,
+        # add the brain-surface flags so view-results meshes the subject surface.
+        view = base + ["view-results", str(workdir), "--output", viewer,
+                       "--ct", ct, "--contacts", contacts, "--trajectories", traj,
+                       "--subject-label", label]
+        if t1:
+            view += _brain_surface_view_flags(t1, regcache, include_transform=False)
+        steps.append(view)
+        return steps
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
         # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a
@@ -157,26 +233,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_dir = Path(contacts).parent
         parent_traj = str(parent_dir / "trajectories.tsv")
         parent_viewer = str(parent_dir / "viewer")
-        brain_mask = str(Path(regcache) / "brain_mask_native.nii.gz")
-        t1_to_ct = str(Path(regcache) / "t1_to_ct.tfm")
-        # The 3D brain MESH is the anatomic surface and is atlas-INDEPENDENT: use
-        # the FastSurfer recon (learned tissue, no dura) whenever FastSurfer is
-        # available — for EVERY atlas, not just the FastSurfer labeler — and only
-        # change the COLOR per atlas. Falls back to the Otsu surface when FastSurfer
-        # isn't installed. Meshed once per case (cached), recolored per label.
-        try:
-            from rosa_detect.services.fastsurfer_seg import find_fastsurfer
-            fs_available = find_fastsurfer()[0] is not None
-        except Exception:  # noqa: BLE001 — treat any import/probe failure as "no FastSurfer"
-            fs_available = False
-        brain_surface = str(Path(regcache) / (
-            "brain_surface_fs.npz" if fs_available else "brain_surface.npz"))
         base = [py, "-u", "-m", "rosa_agent"]
         # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
-        # bundled MNI atlases warp a template. The FastSurfer aseg the label step
-        # writes here also drives the parcellated brain surface (step 2).
-        fs_aseg = str(Path(regcache) / "fastsurfer" / "subject" / "mri"
-                      / "aparc.DKTatlas+aseg.deep.mgz")
+        # bundled MNI atlases warp a template. The 3D brain MESH is atlas-INDEPENDENT
+        # (FastSurfer recon whenever available, else the Otsu surface) — meshed once
+        # per case (cached in regcache), recolored per atlas below. The surface,
+        # native brain mask and T1→CT transform caches are shared with the pipeline
+        # job via ``_brain_surface_view_flags`` so nothing is re-run per atlas.
         if atlas == "fastsurfer":
             label_step = base + ["label", str(contacts), "--fastsurfer",
                                   "--target-volume", str(ct),
@@ -200,17 +263,12 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # anatomic mesh, then colors it for the active atlas.
         view_step = base + ["view-results", str(parent_dir), "--output", parent_viewer,
                             "--ct", str(ct), "--contacts", str(contacts),
-                            "--trajectories", parent_traj,
-                            "--brain-native-volume", str(t1),
-                            "--brain-to-ct-transform", t1_to_ct,
-                            "--brain-mask-cache", brain_mask,
-                            "--brain-surface-cache", brain_surface]
-        # MESH from the FastSurfer recon for ANY atlas (the label step only ran
-        # FastSurfer for the fastsurfer labeler, so build/cache it here otherwise).
-        # On a cache hit view-results loads the mesh and ignores these.
-        if fs_available:
-            view_step += (["--fastsurfer-aseg", fs_aseg] if Path(fs_aseg).is_file()
-                          else ["--fastsurfer"])
+                            "--trajectories", parent_traj]
+        # Brain SURFACE flags (native volume + T1→CT transform the label step just
+        # saved + cached mask + cached mesh). On a cache hit view-results loads the
+        # mesh and ignores the FastSurfer flags. Shared with the pipeline job.
+        view_step += _brain_surface_view_flags(str(t1), Path(regcache),
+                                               include_transform=True)
         # COLOR: the FastSurfer labeler keeps its own DKT parcellation; every other
         # atlas recolors that same mesh by its warped labelmap.
         if atlas != "fastsurfer":
