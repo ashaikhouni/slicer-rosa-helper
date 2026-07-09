@@ -1,12 +1,17 @@
 """rosa-agent brain-extract — produce a brain mask from a CT or MRI volume.
 
-Two backends with different modality coverage — the user must pass the
+Three backends with different modality coverage — the user must pass the
 volume that matches the chosen backend:
 
 * **synthstrip** — FreeSurfer's deep-learning binary ``mri_synthstrip``.
   Works on **CT and MRI** (T1, T2, FLAIR, ...). Requires the
   binary on disk (auto-detected; see ``--synthstrip``). Ships with
-  FreeSurfer 7.3+.
+  FreeSurfer 7.3+. CUDA-or-CPU only (no Metal), so ~100 s on a Mac.
+* **deepbet** — fast MIT-licensed CNN skull-strip, **T1 MRI only**. Runs on
+  Apple Metal (MPS) in well under a second. Refuses nothing at the CLI
+  level, but is trained on T1 and does NOT reliably strip CT — pass a T1.
+  Needs a python that can ``import deepbet`` (see ``--deepbet-python`` /
+  ``$ROSA_DEEPBET_PYTHON``); runs as a subprocess (torch isolation).
 * **log-watershed** — pure-Python **CT-only** fallback. Calibrated on
   HU intensity (bone band, metal floor, hull distance from −500 HU).
   Refuses to run on MRI / PET / non-HU modalities. Validated on a
@@ -48,7 +53,7 @@ from rosa_detect.services.log_watershed import (
 )
 
 
-VALID_BACKENDS = ("auto", "synthstrip", "log-watershed")
+VALID_BACKENDS = ("auto", "synthstrip", "log-watershed", "deepbet")
 
 
 def _stderr(msg: str) -> None:
@@ -78,6 +83,32 @@ def _run_synthstrip_backend(args, input_path: Path, log) -> tuple[int, Path | No
         _stderr(f"error: mri_synthstrip failed (exit {exc.returncode}):")
         if exc.stderr:
             _stderr(exc.stderr.decode("utf-8", errors="replace"))
+        return 4, None
+
+
+def _run_deepbet_backend(args, input_path: Path, log) -> tuple[int, Path | None]:
+    """Returns (exit_code, mask_path_or_None). exit_code 3 = deepbet not found."""
+    from rosa_detect.services.deepbet_strip import run_deepbet, DeepbetNotFound
+    try:
+        mask = run_deepbet(
+            input_path=input_path,
+            mask_path=args.mask,
+            deepbet_python=args.deepbet_python,
+            no_gpu=args.deepbet_cpu,
+            timeout=args.timeout,
+            log=log,
+        )
+        return 0, mask
+    except DeepbetNotFound as exc:
+        _stderr(f"error: {exc}")
+        return 3, None
+    except subprocess.TimeoutExpired as exc:
+        _stderr(f"error: deepbet timed out after {exc.timeout:.0f}s")
+        return 4, None
+    except subprocess.CalledProcessError as exc:
+        _stderr(f"error: deepbet failed (exit {exc.returncode}):")
+        if exc.stderr:
+            _stderr(exc.stderr.decode("utf-8", errors="replace")[:800])
         return 4, None
 
 
@@ -115,6 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--backend", choices=VALID_BACKENDS, default="auto",
         help="which backend to use. 'synthstrip' handles CT and MRI; "
+             "'deepbet' is a fast T1-MRI-only CNN (Metal-capable); "
              "'log-watershed' handles CT only (refuses non-CT input). "
              "'auto' (default) uses synthstrip when available and falls "
              "through to log-watershed for CT volumes.",
@@ -140,7 +172,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--timeout", type=float, default=None,
-        help="seconds before killing the subprocess (SynthStrip backend only)",
+        help="seconds before killing the subprocess (SynthStrip / deepbet backends)",
+    )
+    parser.add_argument(
+        "--deepbet-python", default=None,
+        help="python interpreter that can `import deepbet` (deepbet backend); "
+             "otherwise probed via $ROSA_DEEPBET_PYTHON then the current python",
+    )
+    parser.add_argument(
+        "--deepbet-cpu", action="store_true",
+        help="force deepbet onto CPU instead of Metal/CUDA (deepbet backend only)",
     )
     parser.add_argument(
         "--check", action="store_true",
@@ -165,6 +206,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.backend == "log-watershed":
             print("log-watershed (always available)")
             return 0
+        if args.backend == "deepbet":
+            from rosa_detect.services.deepbet_strip import find_deepbet
+            py = find_deepbet(args.deepbet_python)
+            if py is None:
+                _stderr("deepbet not found (no python can `import deepbet`).")
+                return 3
+            print(py)
+            return 0
         # auto
         if binary is not None:
             print(f"auto -> synthstrip ({binary})")
@@ -188,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
         chosen = "synthstrip" if find_synthstrip(args.synthstrip) is not None else "log-watershed"
 
     log(f"[brain-extract] backend={chosen}  {input_path}  ->  {args.mask}")
+
+    if chosen == "deepbet":
+        code, mask = _run_deepbet_backend(args, input_path, log)
+        if code != 0:
+            return code
 
     if chosen == "synthstrip":
         code, mask = _run_synthstrip_backend(args, input_path, log)

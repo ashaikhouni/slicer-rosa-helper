@@ -112,5 +112,56 @@ class HullBackendTests(unittest.TestCase):
             self.assertTrue(bool(mask.any()))
 
 
+@unittest.skipUnless(HAVE_DEPS, "numpy / SimpleITK / rosa_detect unavailable")
+class DeepbetBackendTests(unittest.TestCase):
+    """The 'deepbet' backend is an explicit T1-only route through the shared
+    selector: success reports 'deepbet', a missing deepbet returns None
+    (unavailable, not a crash), and — because it's explicit — a failure through
+    compute_intracranial_mask raises rather than falling back to full-volume."""
+
+    def setUp(self):
+        self.img = sitk.GetImageFromArray(np.zeros((8, 8, 8), dtype=np.float32))
+
+    def test_select_routes_to_deepbet_and_reports_backend(self):
+        import tempfile
+        from rosa_detect.services import deepbet_strip as ds
+
+        def _fake_run_deepbet(*, input_path, mask_path, log=None, **_k):
+            m = sitk.GetImageFromArray(np.ones((8, 8, 8), dtype=np.uint8))
+            sitk.WriteImage(m, str(mask_path))
+            return Path(mask_path)
+
+        with tempfile.TemporaryDirectory() as td:
+            ct_p = Path(td) / "t1.nii.gz"
+            m_p = Path(td) / "mask.nii.gz"
+            sitk.WriteImage(self.img, str(ct_p))
+            with mock.patch.object(ds, "run_deepbet", _fake_run_deepbet):
+                used = mb.select_brain_mask_to_path(ct_p, m_p, backend="deepbet")
+            self.assertEqual(used, "deepbet")
+            self.assertTrue(m_p.exists())
+
+    def test_select_returns_none_when_deepbet_missing(self):
+        import tempfile
+        from rosa_detect.services import deepbet_strip as ds
+
+        def _raise_not_found(*_a, **_k):
+            raise ds.DeepbetNotFound("no deepbet")
+
+        with tempfile.TemporaryDirectory() as td:
+            ct_p = Path(td) / "t1.nii.gz"
+            m_p = Path(td) / "mask.nii.gz"
+            sitk.WriteImage(self.img, str(ct_p))
+            with mock.patch.object(ds, "run_deepbet", _raise_not_found):
+                used = mb.select_brain_mask_to_path(ct_p, m_p, backend="deepbet")
+        self.assertIsNone(used)
+
+    def test_compute_intracranial_explicit_deepbet_failure_raises(self):
+        # deepbet is an explicit backend → a failure must raise (strict), not
+        # silently fall back to a full-volume permissive mask.
+        with mock.patch.object(mb, "select_brain_mask_to_path", return_value=None):
+            with self.assertRaises(RuntimeError):
+                mb.compute_intracranial_mask(self.img, backend="deepbet")
+
+
 if __name__ == "__main__":
     unittest.main()
