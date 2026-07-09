@@ -88,6 +88,25 @@ def select_brain_mask_to_path(
             log(f"[mask] log-watershed failed: {exc}")
             return False
 
+    def _try_deepbet() -> bool:
+        # Fast MIT T1 strip (subprocess; torch isolated from SITK). T1-ONLY, so
+        # it's an explicit backend on an MRI — never part of 'auto' (which runs
+        # on the CT). Used by the MRI-derived mask route.
+        try:
+            from .deepbet_strip import run_deepbet, DeepbetNotFound
+            run_deepbet(input_path=ct_path, mask_path=mask_path, log=log)
+            return True
+        except DeepbetNotFound as exc:
+            log(f"[mask] deepbet unavailable: {exc}")
+            return False
+        except subprocess.CalledProcessError as exc:
+            log(f"[mask] deepbet exit {exc.returncode}; "
+                f"stderr: {(exc.stderr or b'').decode('utf-8', errors='replace')[:400]}")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            log(f"[mask] deepbet raised: {exc}")
+            return False
+
     def _try_hull() -> bool:
         # Poor-man's intracranial mask: cheap build_masks (head-distance ≥ 10 mm),
         # no external binary, never artifacts on metal. Coarse boundary.
@@ -104,6 +123,8 @@ def select_brain_mask_to_path(
             log(f"[mask] hull backend failed: {exc}")
             return False
 
+    if backend == "deepbet":
+        return "deepbet" if _try_deepbet() else None
     if backend == "hull":
         return "hull" if _try_hull() else None
     if backend == "synthstrip":
