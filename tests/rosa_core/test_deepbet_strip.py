@@ -40,6 +40,17 @@ class DeepbetStripTests(unittest.TestCase):
                 py = ds.find_deepbet()
         self.assertIsNotNone(py)
 
+    def test_find_deepbet_probe_sets_libomp_flag(self):
+        # The probe must pass KMP_DUPLICATE_LIB_OK=TRUE so a deepbet that shares
+        # an env with an MKL numpy (torch + numpy) doesn't abort on OMP Error #15
+        # and get mis-reported as unavailable.
+        with mock.patch.dict(os.environ, {"ROSA_DEEPBET_PYTHON": sys.executable}):
+            ok = mock.Mock(returncode=0)
+            with mock.patch.object(ds.subprocess, "run", return_value=ok) as m_run:
+                ds.find_deepbet()
+        env = m_run.call_args.kwargs.get("env") or {}
+        self.assertEqual(env.get("KMP_DUPLICATE_LIB_OK"), "TRUE")
+
     def test_run_deepbet_raises_when_not_found(self):
         with mock.patch.object(ds, "find_deepbet", return_value=None):
             with self.assertRaises(ds.DeepbetNotFound):
