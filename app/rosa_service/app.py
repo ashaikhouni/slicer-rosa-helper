@@ -240,9 +240,15 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         ct = parent.params.get("ct")
         if not ct:
             raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        # The MRI: the request's, else the one provided at case creation (parent
+        # pipeline's t1). Either lets labeling proceed without re-uploading.
+        t1 = req.t1 or parent.params.get("t1")
+        if not t1:
+            raise HTTPException(status_code=409,
+                                detail="no MRI (T1): provide one, or create the case with an MRI")
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
-            "t1": req.t1, "atlas": req.atlas,
+            "t1": t1, "atlas": req.atlas,
             # Cache registrations in the parent case dir so labeling more atlases
             # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
             "regcache": str(parent.workdir / "regcache")})

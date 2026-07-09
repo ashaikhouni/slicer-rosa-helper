@@ -34,6 +34,24 @@
       <input type="text" id="label" value="case" autocomplete="off">
     </label>
     <div id="ctinfo" class="muted"></div>
+
+    <details class="mri-optional" id="mrioptional">
+      <summary>Add a preop MRI (T1) — optional</summary>
+      <p class="muted">Brings the MRI in from the start: strips the brain, shows the
+        anatomic surface in the 3D view, and pre-fills it for labeling (no re-upload).
+        Adds brain-strip + surface time to the run. You can also add it later on the
+        results screen.</p>
+      <div class="labelrow">
+        <label class="field small">MRI (T1)
+          <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd">
+        </label>
+      </div>
+      <label class="field">— or MRI path
+        <input type="text" id="mripath" placeholder="/absolute/path/to/t1.nii.gz" autocomplete="off">
+      </label>
+      <div id="mricreateinfo" class="muted"></div>
+    </details>
+
     <button id="runbtn" class="primary" disabled>Run localization →</button>
   </section>
 
@@ -43,7 +61,7 @@
       <div class="spinner" id="spinner"></div>
       <div class="running-text">
         <div id="runstate" class="runstate">Starting…</div>
-        <div class="muted">detect → place contacts → build viewer (~2–3 min)</div>
+        <div id="runsub" class="muted">detect → place contacts → build viewer (~2–3 min)</div>
       </div>
       <button id="cancelbtn" class="ghost">Cancel</button>
     </div>

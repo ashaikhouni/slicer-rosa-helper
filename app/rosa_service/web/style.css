@@ -134,13 +134,17 @@ iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
 #viewerqc { overflow: auto; background: #0f1720; padding: 10px; }
 
 /* Anatomical-labels card */
-.labelcard { border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
-  margin: 6px 0 12px; padding: 0 12px; }
-.labelcard > summary { cursor: pointer; padding: 10px 2px; font-weight: 600; font-size: 14px;
-  list-style: none; }
-.labelcard > summary::-webkit-details-marker { display: none; }
-.labelcard > summary::before { content: "▸ "; color: var(--muted); }
-.labelcard[open] > summary::before { content: "▾ "; }
+.labelcard, .mri-optional { border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); margin: 6px 0 12px; padding: 0 12px; }
+.labelcard > summary, .mri-optional > summary { cursor: pointer; padding: 10px 2px;
+  font-weight: 600; font-size: 14px; list-style: none; }
+.labelcard > summary::-webkit-details-marker,
+.mri-optional > summary::-webkit-details-marker { display: none; }
+.labelcard > summary::before, .mri-optional > summary::before { content: "▸ "; color: var(--muted); }
+.labelcard[open] > summary::before, .mri-optional[open] > summary::before { content: "▾ "; }
+.mri-optional > p, .mri-optional > .or, .mri-optional > .field, .mri-optional > .labelrow,
+.mri-optional > #mricreateinfo { margin-left: 2px; margin-right: 2px; }
+.mri-optional[open] { padding-bottom: 10px; }
 .labelcard-body { padding: 2px 2px 12px; }
 .labelrow { display: flex; gap: 12px; flex-wrap: wrap; }
 .labelrow .field.small { flex: 1 1 140px; margin: 6px 0; }
