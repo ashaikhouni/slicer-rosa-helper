@@ -299,6 +299,17 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                   "--intermediate-volume", str(t1),
                                   "--save-registered-mri", mri_qc,
                                   "--registration-cache", regcache, "-o", out]
+        elif atlas.startswith("dmp:"):
+            # deepmriprep native-space atlas: labeled via a T1→CT rigid (no MNI),
+            # so no MNI-space QC volumes. Still saves the CT-frame labelmap for the
+            # surface coloring + the MRI-in-CT for the Native registration QC.
+            label_step = base + ["label", str(contacts),
+                                 "--deepmriprep-atlas", atlas[len("dmp:"):],
+                                 "--target-volume", str(ct),
+                                 "--intermediate-volume", str(t1),
+                                 "--save-registered-mri", mri_qc,
+                                 "--save-atlas-labelmap", atlas_in_ct,
+                                 "--registration-cache", regcache, "-o", out]
         else:
             label_step = base + ["label", str(contacts),
                                  "--bundled-atlas", atlas,

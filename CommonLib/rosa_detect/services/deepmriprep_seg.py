@@ -41,6 +41,58 @@ DEFAULT_ATLASES = (
     "thalamic_nuclei",
 )
 
+# Every atlas deepmriprep can warp to native space → (display name, coverage,
+# license tier). `license_tier` is informational (all fine for academic use with
+# citation); the picker shows it like the bundled atlases' non-commercial tag.
+DEEPMRIPREP_ATLAS_INFO: dict[str, tuple[str, str, str]] = {
+    "neuromorphometrics": ("Neuromorphometrics", "Whole-brain cortical + subcortical (≈ aparc+aseg)", "noncommercial"),
+    "Schaefer2018_100Parcels_17Networks_order": ("Schaefer-100 (17nw)", "Cortical networks, 100 parcels", "permissive"),
+    "Schaefer2018_200Parcels_17Networks_order": ("Schaefer-200 (17nw)", "Cortical networks, 200 parcels", "permissive"),
+    "Schaefer2018_400Parcels_17Networks_order": ("Schaefer-400 (17nw)", "Cortical networks, 400 parcels", "permissive"),
+    "Schaefer2018_600Parcels_17Networks_order": ("Schaefer-600 (17nw)", "Cortical networks, 600 parcels", "permissive"),
+    "aal3": ("AAL3", "Automated Anatomical Labeling v3", "noncommercial"),
+    "hammers": ("Hammers", "Hammersmith cortical + subcortical", "noncommercial"),
+    "julichbrain": ("Jülich-Brain", "Cytoarchitectonic probabilistic", "noncommercial"),
+    "anatomy3": ("SPM Anatomy v3", "Cytoarchitectonic maps", "noncommercial"),
+    "lpba40": ("LPBA40", "LONI Probabilistic Brain Atlas", "noncommercial"),
+    "mori": ("JHU (Mori)", "White-matter / deep GM", "permissive"),
+    "suit": ("SUIT", "Cerebellum", "noncommercial"),
+    "thalamic_nuclei": ("Thalamic nuclei", "Thalamic subnuclei", "noncommercial"),
+    "thalamus": ("Thalamus", "Thalamus", "noncommercial"),
+    "cobra": ("CoBrA", "Subcortical + cerebellar", "noncommercial"),
+    "ibsr": ("IBSR", "Internet Brain Segmentation Repository", "noncommercial"),
+}
+
+
+def parse_deepmriprep_lut(csv_path: str | Path) -> dict[int, str]:
+    """``{label_id: region_name}`` from a deepmriprep atlas CSV.
+
+    deepmriprep ships one CSV per atlas, semicolon-delimited, with ``ROIid`` +
+    ``ROIname`` columns (neuromorphometrics has a leading unnamed index column).
+    Reads pure text — safe in the SITK process (no torch import).
+    """
+    import csv as _csv
+    out: dict[int, str] = {}
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = _csv.reader(f, delimiter=";")
+        header = next(reader, None)
+        if not header:
+            return out
+        cols = [h.strip() for h in header]
+        try:
+            i_id, i_name = cols.index("ROIid"), cols.index("ROIname")
+        except ValueError:
+            return out
+        for row in reader:
+            if len(row) <= max(i_id, i_name):
+                continue
+            try:
+                lid = int(float(row[i_id]))
+            except (ValueError, TypeError):
+                continue
+            out[lid] = row[i_name].strip()
+    return out
+
 # Tissue maps always produced (p0 label drives the surface support).
 TISSUE_KEYS = ("p0", "p1", "p2", "p3")
 
@@ -140,15 +192,41 @@ def run_deepmriprep(
 # Subprocess body: run ONLY the steps needed for the requested outputs (run_all
 # =False → needed_steps(output_paths)); save_output writes them to the given
 # paths. skip_unprocessed=False so a real error surfaces (non-zero exit) instead
-# of being silently swallowed.
+# of being silently swallowed. Then copy each atlas's label CSV next to its
+# labelmap (deepmriprep ships them under data/templates/<name>.csv) so callers
+# have both the labelmap and its id→name LUT in one place.
 _RUNNER = (
+    "import os, shutil, numpy as np, deepmriprep, torch, nibabel as nib\n"
     "from deepmriprep.preprocess import Preprocess\n"
-    "Preprocess(no_gpu={no_gpu}).run({t1}, output_paths={outputs}, "
+    # MPS can't run the tissue 3D-UNet (unimplemented op, even with the fallback),
+    # so force CPU unless real CUDA is present; the caller's no_gpu still wins up.
+    "nog = {no_gpu} or not torch.cuda.is_available()\n"
+    "outs = {outputs}\n"
+    "res = Preprocess(no_gpu=nog).run({t1}, output_paths=outs, "
     "run_all=False, skip_unprocessed=False)\n"
+    # deepmriprep's save_output re-encodes labelmaps as lossy uint8 + a fractional
+    # scl_slope → boundary label artifacts (e.g. 42↔44 read back as an invalid 43).
+    # Re-save each from the in-memory result with a clean header: labelmaps (p0 +
+    # atlases) as int16, tissue probabilities (p1..p3) as float32.
+    "for name, p in outs.items():\n"
+    "    v = (res or {{}}).get(name)\n"
+    "    if v is None or not hasattr(v, 'affine'):\n"
+    "        continue\n"
+    "    arr = np.asanyarray(v.dataobj)\n"
+    "    if name in ('p1', 'p2', 'p3'):\n"
+    "        nib.save(nib.Nifti1Image(arr.astype('float32'), v.affine), p)\n"
+    "    else:\n"
+    "        nib.save(nib.Nifti1Image(np.rint(arr).astype('int16'), v.affine), p)\n"
+    "tdir = os.path.join(os.path.dirname(deepmriprep.__file__), 'data', 'templates')\n"
+    "for name, p in outs.items():\n"
+    "    csv = os.path.join(tdir, name + '.csv')\n"
+    "    if os.path.isfile(csv):\n"
+    "        shutil.copy(csv, (p[:-7] if p.endswith('.nii.gz') else p) + '.csv')\n"
 )
 
 
 __all__ = [
     "DeepmriprepNotFound", "find_deepmriprep", "deepmriprep_available",
-    "run_deepmriprep", "DEFAULT_ATLASES", "TISSUE_KEYS",
+    "run_deepmriprep", "parse_deepmriprep_lut",
+    "DEFAULT_ATLASES", "TISSUE_KEYS", "DEEPMRIPREP_ATLAS_INFO",
 ]

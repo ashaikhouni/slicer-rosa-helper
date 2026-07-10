@@ -219,6 +219,23 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 "coverage": "Whole-brain cortical (DKT) + subcortical, subject-specific",
                 "is_default": False,
             })
+            # deepmriprep native-space atlases (id "dmp:<name>"): already in the
+            # patient's T1 space, so labeled via a T1→CT rigid — no MNI warp. Only
+            # offered when a deepmriprep runtime is reachable.
+            try:
+                from rosa_detect.services.deepmriprep_seg import (
+                    deepmriprep_available, DEEPMRIPREP_ATLAS_INFO,
+                )
+                dmp_ok = deepmriprep_available()
+            except Exception:  # noqa: BLE001
+                dmp_ok, DEEPMRIPREP_ATLAS_INFO = False, {}
+            for name, (disp, coverage, tier) in DEEPMRIPREP_ATLAS_INFO.items():
+                atlases.append({
+                    "id": f"dmp:{name}", "name": f"{disp} (deepmriprep)",
+                    "available": dmp_ok, "license_tier": tier,
+                    "license": "deepmriprep code MIT; atlas data academic — cite the source atlas",
+                    "coverage": coverage, "is_default": False,
+                })
             return {"atlases": atlases,
                     "default": bundled_atlases.load_manifest()["default"]}
         except Exception as exc:  # noqa: BLE001 — engine/resources missing

@@ -61,6 +61,9 @@ def _build_providers(
     atlas_base_path: str | None = None,
     target_volume_path: str | None = None,
     bundled_atlas_id: str | None = None,
+    deepmriprep_atlas_id: str | None = None,
+    deepmriprep_labelmap_path: str | None = None,
+    deepmriprep_label_names: dict[int, str] | None = None,
     atlas_resource_root: str | None = None,
     intermediate_volume_path: str | None = None,
     save_registered_mri: str | None = None,
@@ -118,6 +121,31 @@ def _build_providers(
         except Exception as exc:
             _stderr(f"[label] bundled atlas {bundled_atlas_id!r} failed: {exc}")
             providers[bundled_atlas_id] = None
+
+    if deepmriprep_atlas_id and deepmriprep_labelmap_path:
+        # deepmriprep's parcellation is already in the patient's NATIVE T1 space
+        # (it did the MNI→native nonlinear warp internally). So treat the T1 as the
+        # atlas base and rigidly register T1→CT — no MNI step. Same provider, same
+        # sampling as everything else.
+        try:
+            providers[deepmriprep_atlas_id] = LabelmapAtlasProvider(
+                source_id=deepmriprep_atlas_id,
+                display_name=deepmriprep_atlas_id,
+                label_path=deepmriprep_labelmap_path,
+                label_names=deepmriprep_label_names or {},
+                atlas_base_path=intermediate_volume_path,   # deepmriprep atlas ⟂ T1 grid
+                target_volume_path=target_volume_path,       # → register T1→CT + warp
+                save_intermediate_in_target=save_registered_mri,
+                cache_dir=registration_cache,
+                logger=_stderr,
+            )
+            _stderr(
+                f"[label] deepmriprep:{deepmriprep_atlas_id}: ready "
+                f"({len(providers[deepmriprep_atlas_id]._labels)} voxels, T1→CT)"
+            )
+        except Exception as exc:
+            _stderr(f"[label] deepmriprep atlas {deepmriprep_atlas_id!r} failed: {exc}")
+            providers[deepmriprep_atlas_id] = None
 
     if thomas_dir:
         try:
@@ -261,6 +289,14 @@ def main(argv: list[str] | None = None) -> int:
              "labelmap warped onto that grid. See `--list-atlases`.",
     )
     parser.add_argument(
+        "--deepmriprep-atlas", default="",
+        help="Id of a deepmriprep native-space atlas to label with (e.g. "
+             "'neuromorphometrics', 'Schaefer2018_200Parcels_17Networks_order'). "
+             "deepmriprep runs on --intermediate-volume (T1), producing the atlas "
+             "already in native space; it's then rigidly registered T1→CT — no MNI "
+             "warp. Requires --intermediate-volume (T1) + --target-volume (CT).",
+    )
+    parser.add_argument(
         "--intermediate-volume", default="",
         help="Patient T1 (MRI). With --bundled-atlas, routes registration "
              "through it: MNI--affine-->T1--rigid-->CT (more accurate than "
@@ -314,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out/-o is required")
 
     if bool(args.atlas_base) != bool(args.target_volume) and not args.bundled_atlas \
-            and not args.fastsurfer:
+            and not args.fastsurfer and not args.deepmriprep_atlas:
         parser.error("--atlas-base and --target-volume must be passed together")
     if args.bundled_atlas and not args.target_volume:
         parser.error("--bundled-atlas requires --target-volume "
@@ -340,6 +376,35 @@ def main(argv: list[str] | None = None) -> int:
             Path(rosa_core.__file__).parent / "resources" / "freesurfer"
             / "FreeSurferColorLUT20120827.txt")
 
+    dmp_labelmap: str | None = None
+    dmp_lut: dict[int, str] | None = None
+    if args.deepmriprep_atlas:
+        # Produce the deepmriprep atlas in NATIVE T1 space (+ its id→name CSV),
+        # then let _build_providers register T1→CT and sample. Only that one atlas
+        # is warped (tissue=False), so this is the cheap incremental path.
+        if not args.intermediate_volume or not args.target_volume:
+            parser.error("--deepmriprep-atlas requires --intermediate-volume (T1) and --target-volume (CT)")
+        from rosa_detect.services.deepmriprep_seg import (
+            run_deepmriprep, parse_deepmriprep_lut, DeepmriprepNotFound,
+        )
+        dmdir = (Path(args.registration_cache) / "deepmriprep"
+                 if args.registration_cache else Path(tempfile.mkdtemp()) / "deepmriprep")
+        try:
+            produced = run_deepmriprep(
+                args.intermediate_volume, dmdir, atlases=[args.deepmriprep_atlas],
+                tissue=False, log=_stderr)
+        except DeepmriprepNotFound as exc:
+            _stderr(f"error: {exc}")
+            return 2
+        lm = produced.get(args.deepmriprep_atlas)
+        if lm is None:
+            _stderr(f"error: deepmriprep did not produce atlas {args.deepmriprep_atlas!r}")
+            return 2
+        dmp_labelmap = str(lm)
+        csv = Path(dmp_labelmap[:-7] + ".csv") if dmp_labelmap.endswith(".nii.gz") \
+            else Path(dmp_labelmap).with_suffix(".csv")
+        dmp_lut = parse_deepmriprep_lut(csv) if csv.is_file() else {}
+
     contacts = read_tsv_rows(args.contacts_tsv)
     if not contacts:
         _stderr("[label] no contacts to label")
@@ -355,6 +420,9 @@ def main(argv: list[str] | None = None) -> int:
         atlas_base_path=args.atlas_base or None,
         target_volume_path=args.target_volume or None,
         bundled_atlas_id=args.bundled_atlas or None,
+        deepmriprep_atlas_id=args.deepmriprep_atlas or None,
+        deepmriprep_labelmap_path=dmp_labelmap,
+        deepmriprep_label_names=dmp_lut,
         intermediate_volume_path=args.intermediate_volume or None,
         save_registered_mri=args.save_registered_mri or None,
         save_ct_in_mni=args.save_ct_in_mni or None,
@@ -363,8 +431,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     # Persist the active atlas's warped (CT-frame) labelmap so the viewer can
     # color the brain surface by the same atlas that labels the contacts.
-    if args.save_atlas_labelmap and args.bundled_atlas:
-        prov = providers.get(args.bundled_atlas)
+    active_atlas = args.bundled_atlas or args.deepmriprep_atlas
+    if args.save_atlas_labelmap and active_atlas:
+        prov = providers.get(active_atlas)
         lm = getattr(prov, "_registered_labelmap_path", None) if prov is not None else None
         if lm is not None and Path(lm).is_file():
             import shutil
@@ -382,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
         requested = [
             ("--thomas", args.thomas), ("--freesurfer", args.freesurfer),
             ("--wm", args.wm), ("--bundled-atlas", args.bundled_atlas),
+            ("--deepmriprep-atlas", args.deepmriprep_atlas),
         ]
         named = [flag for flag, val in requested if val]
         if named:

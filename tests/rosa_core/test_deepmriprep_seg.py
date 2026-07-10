@@ -59,6 +59,24 @@ class DeepmriprepSegTests(unittest.TestCase):
             with self.assertRaises(dm.DeepmriprepNotFound):
                 dm.run_deepmriprep("t1.nii.gz", "/out")
 
+    def test_parse_deepmriprep_lut(self):
+        import tempfile, os
+        # neuromorphometrics-style (leading unnamed index col) + Schaefer-style.
+        with tempfile.TemporaryDirectory() as td:
+            nmm = os.path.join(td, "nmm.csv")
+            with open(nmm, "w") as f:
+                f.write(";ROIid;ROIname;Vgm\n0;4;3rd Ventricle;0\n1;31;Right Amygdala;1\n")
+            lut = dm.parse_deepmriprep_lut(nmm)
+            self.assertEqual(lut, {4: "3rd Ventricle", 31: "Right Amygdala"})
+            sch = os.path.join(td, "sch.csv")
+            with open(sch, "w") as f:
+                f.write("ROIid;ROIabbr;ROIname;ROIcolor\n1;lVis;17Networks_LH_Vis_1;120 18 134\n")
+            self.assertEqual(dm.parse_deepmriprep_lut(sch), {1: "17Networks_LH_Vis_1"})
+
+    def test_atlas_info_present(self):
+        self.assertIn("neuromorphometrics", dm.DEEPMRIPREP_ATLAS_INFO)
+        self.assertIn("Schaefer2018_200Parcels_17Networks_order", dm.DEEPMRIPREP_ATLAS_INFO)
+
 
 if __name__ == "__main__":
     unittest.main()
