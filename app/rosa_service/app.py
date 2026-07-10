@@ -249,6 +249,9 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
             "t1": t1, "atlas": req.atlas,
+            # Reuse the parent pipeline's surface backend so labeling meshes/loads
+            # the SAME brain_surface_*.npz rather than a different one.
+            "surface": parent.params.get("surface", "auto"),
             # Cache registrations in the parent case dir so labeling more atlases
             # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
             "regcache": str(parent.workdir / "regcache")})

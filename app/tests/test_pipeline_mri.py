@@ -66,7 +66,8 @@ class PipelineMriBuildTests(unittest.TestCase):
         spec = JobSpec(kind="pipeline",
                        params={"ct": "/d/ct.nii.gz", "label": "case", "t1": "/d/t1.nii.gz"})
         with mock.patch.object(J, "_deepbet_available", return_value=True), \
-             mock.patch.object(J, "_fastsurfer_available", return_value=False):
+             mock.patch.object(J, "_fastsurfer_available", return_value=False), \
+             mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
         # brain-extract (deepbet) → detect → contacts → view-results
         self.assertEqual(len(steps), 4)
@@ -107,6 +108,34 @@ class PipelineMriBuildTests(unittest.TestCase):
                                     str(self.regcache / "brain_surface_fs.npz")]))
         self.assertIn("--fastsurfer", view)
 
+    def test_pipeline_surface_source_deepmriprep(self):
+        # Explicit surface=deepmriprep wins even when FastSurfer is available.
+        spec = JobSpec(kind="pipeline", params={
+            "ct": "/d/ct.nii.gz", "t1": "/d/t1.nii.gz", "surface": "deepmriprep"})
+        with mock.patch.object(J, "_deepbet_available", return_value=False), \
+             mock.patch.object(J, "_fastsurfer_available", return_value=True), \
+             mock.patch.object(J, "_deepmriprep_available", return_value=True):
+            steps = J.build_command(spec, self.wd)
+        view = steps[-1]
+        self.assertTrue(_sub(view, ["--brain-surface-cache",
+                                    str(self.regcache / "brain_surface_dm.npz")]))
+        self.assertIn("--deepmriprep", view)
+        self.assertNotIn("--fastsurfer", view)
+
+    def test_pipeline_surface_source_falls_back_when_unavailable(self):
+        # surface=deepmriprep but it isn't installed → degrade to auto → FastSurfer.
+        spec = JobSpec(kind="pipeline", params={
+            "ct": "/d/ct.nii.gz", "t1": "/d/t1.nii.gz", "surface": "deepmriprep"})
+        with mock.patch.object(J, "_deepbet_available", return_value=False), \
+             mock.patch.object(J, "_fastsurfer_available", return_value=True), \
+             mock.patch.object(J, "_deepmriprep_available", return_value=False):
+            steps = J.build_command(spec, self.wd)
+        view = steps[-1]
+        self.assertTrue(_sub(view, ["--brain-surface-cache",
+                                    str(self.regcache / "brain_surface_fs.npz")]))
+        self.assertIn("--fastsurfer", view)
+        self.assertNotIn("--deepmriprep", view)
+
     # ---- label job: surface flags unchanged after the refactor ----------
 
     def test_label_view_step_surface_flags_include_transform(self):
@@ -115,7 +144,8 @@ class PipelineMriBuildTests(unittest.TestCase):
             "parent": "parent", "contacts": contacts, "ct": "/cases/parent/ct.nii.gz",
             "t1": "/d/t1.nii.gz", "atlas": "cerebra",
             "regcache": "/cases/parent/regcache"})
-        with mock.patch.object(J, "_fastsurfer_available", return_value=False):
+        with mock.patch.object(J, "_fastsurfer_available", return_value=False), \
+             mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
         rc = Path("/cases/parent/regcache")
         view = steps[-1]
