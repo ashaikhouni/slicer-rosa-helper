@@ -49,6 +49,14 @@
       <label class="field">— or MRI path
         <input type="text" id="mripath" placeholder="/absolute/path/to/t1.nii.gz" autocomplete="off">
       </label>
+      <label class="field small">Brain surface
+        <select id="surfacesel">
+          <option value="auto" selected>Auto (FastSurfer if available)</option>
+          <option value="fastsurfer">FastSurfer recon</option>
+          <option value="deepmriprep">deepmriprep tissue</option>
+        </select>
+      </label>
+      <div class="muted" style="font-size:12px">Both run at case creation (~minutes on CPU). Labeling reuses the chosen surface.</div>
       <div id="mricreateinfo" class="muted"></div>
     </details>
 

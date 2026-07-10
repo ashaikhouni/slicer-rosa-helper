@@ -104,7 +104,10 @@ async function uploadCreationMri(file) {
 async function run() {
   const label = $("label").value.trim() || "case";
   const params = { ct: state.ct.path, label };
-  if (state.creationMri) params.t1 = state.creationMri.path;   // MRI from the start
+  if (state.creationMri) {
+    params.t1 = state.creationMri.path;                        // MRI from the start
+    params.surface = $("surfacesel").value;                    // brain-surface backend
+  }
   showStep("run");
   $("log").textContent = "";
   $("runstate").textContent = "Starting…";
