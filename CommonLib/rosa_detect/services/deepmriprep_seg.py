@@ -88,18 +88,24 @@ def run_deepmriprep(
     out_dir: str | Path,
     *,
     deepmriprep_python: str | Path | None = None,
-    atlases: Iterable[str] = DEFAULT_ATLASES,
+    atlases: Iterable[str] = (),
+    tissue: bool = True,
     no_gpu: bool = False,
     timeout: float | None = None,
     log: Callable[[str], None] = lambda _m: None,
 ) -> dict[str, Path]:
-    """Run deepmriprep on a **T1** and write the tissue maps (``p0``..``p3``) plus
-    the requested native-space ``atlases`` into ``out_dir`` as NIfTI.
+    """Run deepmriprep on a **T1** and write only the requested native-space
+    outputs into ``out_dir``: the tissue maps (``p0``..``p3``) when ``tissue`` is
+    set, plus each atlas in ``atlases``.
 
-    Returns a dict ``{name: path}`` of every native-space output written (matched
-    to the T1 grid). Runs in a subprocess (torch isolation) with the MPS-fallback
-    + libomp flags. Raises :class:`DeepmriprepNotFound` when no capable python
-    exists, or ``CalledProcessError`` / ``TimeoutExpired``.
+    Only the pipeline steps NEEDED for those outputs run (deepmriprep's
+    ``run(output_paths=…, run_all=False)`` gates on ``needed_steps`` and warps
+    only the requested atlases) — so the surface path (``tissue`` only, no
+    ``atlases``) skips the nonlinear warp + all 14 atlas registrations, and
+    labeling warps just the one atlas asked for. Returns ``{name: path}`` for
+    every output written. Subprocess (torch isolation) + MPS-fallback/libomp
+    flags. Raises :class:`DeepmriprepNotFound` / ``CalledProcessError`` /
+    ``TimeoutExpired``.
     """
     py = find_deepmriprep(deepmriprep_python)
     if py is None:
@@ -110,35 +116,35 @@ def run_deepmriprep(
     t1_path = Path(t1_path).expanduser().resolve()
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    keep = sorted(set(TISSUE_KEYS) | set(atlases))
 
-    code = _RUNNER.format(t1=repr(str(t1_path)), out=repr(str(out_dir)),
-                          keep=repr(keep), no_gpu=bool(no_gpu))
+    wanted: dict[str, str] = {}
+    if tissue:
+        for k in TISSUE_KEYS:            # p0 drives the surface; p1..p3 are cheap extras
+            wanted[k] = str(out_dir / f"{k}.nii.gz")
+    for a in atlases:
+        wanted[a] = str(out_dir / f"{a}.nii.gz")
+    if not wanted:                       # never a no-op; at least the tissue label
+        wanted["p0"] = str(out_dir / "p0.nii.gz")
+
+    code = _RUNNER.format(t1=repr(str(t1_path)), outputs=repr(wanted),
+                          no_gpu=bool(no_gpu))
     env = {**os.environ, **_PROBE_ENV}
-    log(f"[deepmriprep] segmenting {t1_path.name} (no_gpu={no_gpu}, CPU tissue seg — minutes)…")
+    what = "tissue" + (f"+{len(atlases)} atlas(es)" if atlases else " only")
+    log(f"[deepmriprep] {what} on {t1_path.name} (no_gpu={no_gpu}, CPU seg — minutes)…")
     subprocess.run([py, "-c", code], check=True, timeout=timeout, env=env,
                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    written: dict[str, Path] = {}
-    for name in keep:
-        p = out_dir / f"{name}.nii.gz"
-        if p.is_file():
-            written[name] = p
-    return written
+    return {name: Path(p) for name, p in wanted.items() if Path(p).is_file()}
 
 
-# Subprocess body: run the full deepmriprep pipeline, save only the wanted
-# native-grid outputs. skip_unprocessed=False so a real error surfaces (non-zero
-# exit) instead of being silently swallowed.
+# Subprocess body: run ONLY the steps needed for the requested outputs (run_all
+# =False → needed_steps(output_paths)); save_output writes them to the given
+# paths. skip_unprocessed=False so a real error surfaces (non-zero exit) instead
+# of being silently swallowed.
 _RUNNER = (
-    "import nibabel as nib\n"
     "from deepmriprep.preprocess import Preprocess\n"
-    "t1, out, keep = {t1}, {out}, set({keep})\n"
-    "ref = nib.load(t1).shape\n"
-    "res = Preprocess(no_gpu={no_gpu}).run(t1, output_paths=None, run_all=True, skip_unprocessed=False)\n"
-    "for k, v in (res or {{}}).items():\n"
-    "    if k in keep and hasattr(v, 'affine') and getattr(v, 'shape', None) == ref:\n"
-    "        nib.save(v, f'{{out}}/{{k}}.nii.gz')\n"
+    "Preprocess(no_gpu={no_gpu}).run({t1}, output_paths={outputs}, "
+    "run_all=False, skip_unprocessed=False)\n"
 )
 
 

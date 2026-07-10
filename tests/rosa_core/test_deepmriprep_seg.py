@@ -26,9 +26,12 @@ except Exception:  # noqa: BLE001
 class DeepmriprepSegTests(unittest.TestCase):
     def test_embedded_runner_formats_to_valid_python(self):
         code = dm._RUNNER.format(
-            t1=repr("/x/t1.nii.gz"), out=repr("/x/out"),
-            keep=repr(["p0", "neuromorphometrics"]), no_gpu=True)
+            t1=repr("/x/t1.nii.gz"),
+            outputs=repr({"p0": "/x/out/p0.nii.gz",
+                          "neuromorphometrics": "/x/out/neuromorphometrics.nii.gz"}),
+            no_gpu=True)
         compile(code, "<runner>", "exec")   # raises SyntaxError if malformed
+        self.assertIn("run_all=False", code)              # only the needed steps run
         self.assertIn("PYTORCH", "".join(dm._PROBE_ENV))  # sanity: fallback flag key present
 
     def test_find_probe_sets_libomp_and_mps_flags(self):
