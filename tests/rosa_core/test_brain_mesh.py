@@ -273,6 +273,29 @@ class GyralMaskTests(unittest.TestCase):
         present = {tuple(c) for c in cols[:, :3].tolist()}
         self.assertTrue((160, 100, 50) in present or (245, 245, 245) in present)
 
+    def test_deepmriprep_tissue_support(self):
+        # deepmriprep p0 tissue label (0=bg,1=CSF,2=GM,3=WM) → GM+WM support, the
+        # same brain_tissue hook the FastSurfer aseg feeds.
+        from rosa_core.brain_mesh import brain_tissue_from_tissue_labelmap
+        n = 48
+        zz, yy, xx = np.mgrid[0:n, 0:n, 0:n]
+        r = np.sqrt((xx - 24) ** 2 + (yy - 24) ** 2 + (zz - 24) ** 2)
+        p0 = np.zeros((n, n, n), np.float32)
+        p0[r <= 20] = 1.0    # CSF
+        p0[r <= 17] = 2.0    # GM
+        p0[r <= 10] = 3.0    # WM
+        aff = np.diag([1.0, 1.0, 1.0, 1.0]); aff[:3, 3] = [-24, -24, -24]
+        pimg = nib.Nifti1Image(p0, aff)
+        tissue = brain_tissue_from_tissue_labelmap(pimg, pimg)   # default gm_wm_min=1.5
+        self.assertTrue(tissue[p0 == 3.0].all() and tissue[p0 == 2.0].all())  # GM+WM kept
+        self.assertFalse(tissue[p0 == 1.0].any())                            # CSF dropped
+        self.assertFalse(tissue[p0 == 0.0].any())                            # bg dropped
+        # Resamples onto a differing reference grid without error.
+        ref = nib.Nifti1Image(np.zeros((n, n, n), np.uint8),
+                              np.diag([1.0, 1.0, 1.0, 1.0]))
+        t2 = brain_tissue_from_tissue_labelmap(pimg, ref)
+        self.assertEqual(t2.shape, (n, n, n))
+
 
 @unittest.skipUnless(HAVE_DEPS, "numpy/nibabel/scikit-image (the [mesh] extra) unavailable")
 class TransformSurfaceTests(unittest.TestCase):

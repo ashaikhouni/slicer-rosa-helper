@@ -55,7 +55,15 @@ def _pick_device(device: str) -> str:
     process — the parent uses SimpleITK, and torch + SITK both load libomp,
     which segfaults on a double-init. torch lives only in the FastSurfer
     subprocess, which validates the device itself; here we just guess by
-    platform (Apple Silicon → mps, else cpu — override with device=)."""
+    platform (Apple Silicon → mps, else cpu — override with device=).
+
+    ``ROSA_FASTSURFER_DEVICE`` forces the choice, which is required when the
+    FastSurfer env is a CPU-only torch build (e.g. the ``fastsurfer_cpu`` env
+    from FastSurfer's ``*_env_cpu.yml``): the parent may be arm64 and would
+    otherwise pick ``mps``, but ``find_device('mps')`` *raises* on a build
+    without an MPS backend rather than falling back to CPU."""
+    if device == "auto":
+        device = os.environ.get("ROSA_FASTSURFER_DEVICE", "auto")
     if device != "auto":
         return device
     import platform
@@ -93,7 +101,12 @@ def run_fastsurfer_seg(
     dev = _pick_device(device)
     cmd = [str(py), str(fdir / "FastSurferCNN" / "run_prediction.py"),
            "--t1", str(t1_path), "--sid", sid, "--sd", str(out_dir), "--device", dev]
-    env = {**os.environ, "PYTHONPATH": str(fdir), "KMP_DUPLICATE_LIB_OK": "TRUE"}
+    # A few ops FastSurfer uses (view-aggregation) have no MPS kernel; let torch
+    # fall those back to CPU instead of raising. Harmless on cpu/cuda. Without
+    # this, an mps run dies partway; with it, mps matches cpu to ~7 voxels and
+    # runs ~15x faster (verified: 100% overall label agreement).
+    env = {**os.environ, "PYTHONPATH": str(fdir), "KMP_DUPLICATE_LIB_OK": "TRUE",
+           "PYTORCH_ENABLE_MPS_FALLBACK": "1"}
     log(f"[fastsurfer] VINN seg-only on {Path(t1_path).name} (device={dev})…")
     try:
         subprocess.run(cmd, check=True, env=env, timeout=timeout_s,

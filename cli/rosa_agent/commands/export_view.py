@@ -2294,6 +2294,8 @@ def _assemble_viewer(
     fastsurfer_aseg_path: Path | None = None,
     fastsurfer: bool = False,
     drop_cerebellum: bool = True,
+    deepmriprep: bool = False,
+    deepmriprep_tissue_path: Path | None = None,
     atlas_labelmap_path: Path | None = None,
     atlas_name: str = "",
     parcellation,
@@ -2375,7 +2377,8 @@ def _assemble_viewer(
             else:
                 from rosa_detect.services.mask_backend import select_brain_mask_to_path
                 from rosa_core.brain_mesh import (
-                    gyral_surface_from_mri, brain_tissue_from_fastsurfer_aseg, transform_surface)
+                    gyral_surface_from_mri, brain_tissue_from_fastsurfer_aseg,
+                    brain_tissue_from_tissue_labelmap, transform_surface)
                 from rosa_core.registration import transform_to_4x4_ras, load_transform
                 # Native brain mask (SynthStrip), cached once per case.
                 cache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
@@ -2400,12 +2403,28 @@ def _assemble_viewer(
                         brain_native_volume_path,
                         (scache.parent if scache is not None else Path(tempfile.mkdtemp())) / "fastsurfer",
                         sid="subject", log=_stderr)
+                # deepmriprep tissue support (p0: 0=bg,1=CSF,2=GM,3=WM): an explicit
+                # path, or run the seg here (its native atlases are saved alongside
+                # for labeling). Used only when FastSurfer isn't the chosen source.
+                dm_tissue = Path(deepmriprep_tissue_path) if deepmriprep_tissue_path else None
+                if dm_tissue is None and deepmriprep and aseg is None:
+                    from rosa_detect.services.deepmriprep_seg import run_deepmriprep
+                    dmdir = (scache.parent if scache is not None
+                             else Path(tempfile.mkdtemp())) / "deepmriprep"
+                    dm_tissue = run_deepmriprep(
+                        brain_native_volume_path, dmdir, log=_stderr).get("p0")
                 if aseg is not None and aseg.is_file():
                     tissue = brain_tissue_from_fastsurfer_aseg(
                         aseg, brain_native_volume_path, drop_cerebellum=drop_cerebellum)
                     bs = gyral_surface_from_mri(
                         brain_native_volume_path, nmask, step_size=1, brain_tissue=tissue)
                     backend = f"{backend}+fastsurfer"
+                elif dm_tissue is not None and Path(dm_tissue).is_file():
+                    tissue = brain_tissue_from_tissue_labelmap(
+                        dm_tissue, brain_native_volume_path)
+                    bs = gyral_surface_from_mri(
+                        brain_native_volume_path, nmask, step_size=1, brain_tissue=tissue)
+                    backend = f"{backend}+deepmriprep"
                 else:
                     bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
                 # aparc surface coloring (when a FastSurfer/FS aseg is available):
@@ -2740,6 +2759,8 @@ def run_view_results(
     fastsurfer_aseg: str | Path | None = None,
     fastsurfer: bool = False,
     drop_cerebellum: bool = True,
+    deepmriprep: bool = False,
+    deepmriprep_tissue: str | Path | None = None,
     atlas_labelmap: str | Path | None = None,
     atlas_name: str = "",
     surface_kinds: tuple[str, ...] = ("pial",),
@@ -2795,6 +2816,8 @@ def run_view_results(
         fastsurfer_aseg_path=(Path(fastsurfer_aseg) if fastsurfer_aseg else None),
         fastsurfer=fastsurfer,
         drop_cerebellum=drop_cerebellum,
+        deepmriprep=deepmriprep,
+        deepmriprep_tissue_path=(Path(deepmriprep_tissue) if deepmriprep_tissue else None),
         atlas_labelmap_path=(Path(atlas_labelmap) if atlas_labelmap else None),
         atlas_name=atlas_name,
         parcellation=parcellation,

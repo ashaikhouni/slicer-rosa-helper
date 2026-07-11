@@ -271,6 +271,29 @@ def brain_tissue_from_fastsurfer_aseg(aseg: Any, reference: Any, *,
     return np.isin(lab, list(exclude), invert=True) & (lab > 0)
 
 
+def brain_tissue_from_tissue_labelmap(labelmap: Any, reference: Any, *,
+                                      gm_wm_min: float = 1.5) -> np.ndarray:
+    """Binary GM+WM support from a **tissue label map** (e.g. deepmriprep ``p0``:
+    0=bg, 1=CSF, 2=GM, 3=WM) on the ``reference`` grid — the same "learned tissue
+    support" role :func:`brain_tissue_from_fastsurfer_aseg` fills, but from a
+    3-class tissue map instead of an aparc+aseg. Everything ``>= gm_wm_min`` is
+    kept (the GM+WM cortical ribbon; the 1.5 default catches the GM/CSF partial
+    boundary while dropping CSF≈1 and background≈0), so
+    :func:`gyral_surface_from_mri`'s ``brain_tissue`` hook meshes the T1
+    isocontour inside deepmriprep's learned tissue — no dura. Nearest-neighbour
+    resampled onto the reference grid when they differ.
+    """
+    import nibabel as nib
+    import nibabel.processing
+
+    limg = labelmap if hasattr(labelmap, "dataobj") else nib.load(str(labelmap))
+    rimg = reference if hasattr(reference, "dataobj") else nib.load(str(reference))
+    if limg.shape != rimg.shape or not np.allclose(limg.affine, rimg.affine, atol=1e-3):
+        limg = nib.processing.resample_from_to(limg, (rimg.shape, rimg.affine), order=0)
+    lab = np.asanyarray(limg.dataobj).astype(np.float32)
+    return lab >= float(gm_wm_min)
+
+
 # Subcortical GM / brainstem structures to keep as their own color when a
 # vertex lands directly on one (rare on a pial surface — medial wall/exposures);
 # everything else that isn't cortex is filled with the nearest cortex region.

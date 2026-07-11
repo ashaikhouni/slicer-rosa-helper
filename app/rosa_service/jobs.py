@@ -58,34 +58,79 @@ def _fastsurfer_available() -> bool:
         return False
 
 
+@lru_cache(maxsize=1)
+def _deepmriprep_available() -> bool:
+    """True when a deepmriprep-capable python is reachable (memoised subprocess probe)."""
+    try:
+        from rosa_detect.services.deepmriprep_seg import deepmriprep_available
+        return deepmriprep_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# Which surface backend each source name maps to a cache filename.
+_SURFACE_CACHE_NAME = {
+    "fastsurfer": "brain_surface_fs.npz",
+    "deepmriprep": "brain_surface_dm.npz",
+    "otsu": "brain_surface.npz",
+}
+
+
+def _resolve_surface_source(surface_source: str | None) -> str:
+    """Resolve the requested surface source to a concrete backend, degrading
+    gracefully to what's installed. ``auto`` = FastSurfer if available, else
+    deepmriprep if available, else Otsu. An explicit choice that isn't reachable
+    falls back to ``auto`` rather than failing the run mid-mesh.
+    """
+    src = (surface_source or "auto").lower()
+    if src == "fastsurfer":
+        return "fastsurfer" if _fastsurfer_available() else _resolve_surface_source("auto")
+    if src == "deepmriprep":
+        return "deepmriprep" if _deepmriprep_available() else _resolve_surface_source("auto")
+    if src == "otsu":
+        return "otsu"
+    # auto
+    if _fastsurfer_available():
+        return "fastsurfer"
+    if _deepmriprep_available():
+        return "deepmriprep"
+    return "otsu"
+
+
 def _brain_surface_view_flags(t1: str, regcache: Path, *,
-                              include_transform: bool) -> list[str]:
+                              include_transform: bool,
+                              surface_source: str | None = "auto") -> list[str]:
     """``view-results`` flags that build/reuse the subject brain SURFACE from the
     MRI, shared by the pipeline (case-creation) and label jobs so their caches
     line up: the native brain mask, the T1→CT transform, and the meshed surface
     all live in the same ``regcache`` and are produced once.
 
+    ``surface_source`` picks the mesh backend (``fastsurfer`` / ``deepmriprep`` /
+    ``otsu`` / ``auto``), resolved against what's installed. The cache filename
+    tracks the backend so one source never masquerades as another on a cache hit.
+
     ``include_transform`` adds ``--brain-to-ct-transform`` (the label job runs the
     ``label`` step first, which SAVES that transform); the pipeline omits it and
-    lets view-results register T1→CT ephemerally (the transform is saved later,
-    on the first label). The surface cache filename tracks whether FastSurfer is
-    used, so a non-FS preview never masquerades as the FS recon on a cache hit.
+    lets view-results register T1→CT ephemerally (saved later, on the first label).
     """
     regcache = Path(regcache)
-    fs_available = _fastsurfer_available()
+    src = _resolve_surface_source(surface_source)
     brain_mask = regcache / "brain_mask_native.nii.gz"
-    brain_surface = regcache / (
-        "brain_surface_fs.npz" if fs_available else "brain_surface.npz")
+    brain_surface = regcache / _SURFACE_CACHE_NAME[src]
     flags = ["--brain-native-volume", str(t1)]
     if include_transform:
         flags += ["--brain-to-ct-transform", str(regcache / "t1_to_ct.tfm")]
     flags += ["--brain-mask-cache", str(brain_mask),
               "--brain-surface-cache", str(brain_surface)]
-    if fs_available:
+    if src == "fastsurfer":
         fs_aseg = (regcache / "fastsurfer" / "subject" / "mri"
                    / "aparc.DKTatlas+aseg.deep.mgz")
         flags += (["--fastsurfer-aseg", str(fs_aseg)] if fs_aseg.is_file()
                   else ["--fastsurfer"])
+    elif src == "deepmriprep":
+        dm_p0 = regcache / "deepmriprep" / "p0.nii.gz"
+        flags += (["--deepmriprep-tissue", str(dm_p0)] if dm_p0.is_file()
+                  else ["--deepmriprep"])
     return flags
 
 
@@ -173,6 +218,10 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # ``regcache`` so a later label job reuses them instead of re-running.
         t1 = spec.params.get("t1")
         t1 = str(t1) if t1 else None
+        # Surface backend the MRI mesh uses: 'auto' (FastSurfer→deepmriprep→Otsu),
+        # 'fastsurfer', 'deepmriprep', or 'otsu'. Recorded on the job so the later
+        # label job reuses the SAME cache (see create_label_job).
+        surface = str(spec.params.get("surface") or "auto")
         traj = str(workdir / "trajectories.tsv")
         contacts = str(workdir / "contacts.tsv")
         viewer = str(workdir / "viewer")
@@ -220,7 +269,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                        "--subject-label", label]
         if t1:
             view += _brain_surface_view_flags(t1, regcache,
-                                              include_transform=use_mri_mask)
+                                              include_transform=use_mri_mask,
+                                              surface_source=surface)
         steps.append(view)
         return steps
     if kind == "label":
@@ -234,6 +284,9 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if not (contacts and ct and t1):
             raise ValueError("label job requires params.contacts, params.ct, params.t1")
         atlas = str(spec.params.get("atlas") or "cerebra")
+        # Same surface backend the parent pipeline chose, so this label reuses the
+        # already-built brain_surface_*.npz instead of meshing a different one.
+        surface = str(spec.params.get("surface") or "auto")
         out = str(workdir / "contacts_labeled.tsv")
         mri_qc = str(workdir / "mri_in_ct.nii.gz")
         ct_mni = str(workdir / "ct_in_mni.nii.gz")
@@ -265,6 +318,17 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                   "--intermediate-volume", str(t1),
                                   "--save-registered-mri", mri_qc,
                                   "--registration-cache", regcache, "-o", out]
+        elif atlas.startswith("dmp:"):
+            # deepmriprep native-space atlas: labeled via a T1→CT rigid (no MNI),
+            # so no MNI-space QC volumes. Still saves the CT-frame labelmap for the
+            # surface coloring + the MRI-in-CT for the Native registration QC.
+            label_step = base + ["label", str(contacts),
+                                 "--deepmriprep-atlas", atlas[len("dmp:"):],
+                                 "--target-volume", str(ct),
+                                 "--intermediate-volume", str(t1),
+                                 "--save-registered-mri", mri_qc,
+                                 "--save-atlas-labelmap", atlas_in_ct,
+                                 "--registration-cache", regcache, "-o", out]
         else:
             label_step = base + ["label", str(contacts),
                                  "--bundled-atlas", atlas,
@@ -287,7 +351,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # saved + cached mask + cached mesh). On a cache hit view-results loads the
         # mesh and ignores the FastSurfer flags. Shared with the pipeline job.
         view_step += _brain_surface_view_flags(str(t1), Path(regcache),
-                                               include_transform=True)
+                                               include_transform=True,
+                                               surface_source=surface)
         # COLOR: the FastSurfer labeler keeps its own DKT parcellation; every other
         # atlas recolors that same mesh by its warped labelmap.
         if atlas != "fastsurfer":

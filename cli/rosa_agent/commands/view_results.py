@@ -116,6 +116,18 @@ def main(argv: list[str] | None = None) -> int:
              "surface support (skips running FastSurfer).",
     )
     parser.add_argument(
+        "--deepmriprep", action="store_true",
+        help="run deepmriprep tissue seg (if available) and mesh the surface inside "
+             "its learned GM+WM tissue — an alternative to FastSurfer. Used only "
+             "when --fastsurfer/--fastsurfer-aseg is not the chosen source. "
+             "CPU-bound (~min) on Apple hardware.",
+    )
+    parser.add_argument(
+        "--deepmriprep-tissue", default="",
+        help="path to a precomputed deepmriprep tissue label map (p0) to use as the "
+             "surface support (skips running deepmriprep).",
+    )
+    parser.add_argument(
         "--keep-cerebellum", action="store_true",
         help="keep cerebellum + brainstem in the FastSurfer surface (default: "
              "cerebrum-only).",
@@ -191,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
             fastsurfer=bool(args.fastsurfer),
             fastsurfer_aseg=args.fastsurfer_aseg or None,
             drop_cerebellum=not bool(args.keep_cerebellum),
+            deepmriprep=bool(args.deepmriprep),
+            deepmriprep_tissue=args.deepmriprep_tissue or None,
             atlas_labelmap=args.atlas_labelmap or None,
             atlas_name=args.atlas_name,
             ct_window=_parse_window(args.ct_window),
