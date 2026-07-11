@@ -366,12 +366,19 @@ def _label_hue_rgb(label: int) -> tuple:
 def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
                         colors: dict | None = None,
                         default: tuple = (150, 150, 150),
-                        fill_within_mm: float = 2.0) -> np.ndarray:
+                        fill_within_mm: float = 5.0) -> np.ndarray:
     """Per-vertex RGBA (uint8, N×4) coloring a surface by ANY atlas labelmap that's
     already warped into the surface's RAS frame — so the brain surface matches the
     atlas that labeled the contacts, instead of always showing the recon parcellation.
 
     Each region gets a distinct, deterministic color.
+
+    **Palette (``colors``).** ``{label: (r, g, b)}`` — an atlas's meaningful palette
+    (publisher LUT / Yeo-network families / FreeSurfer colors; see
+    ``rosa_core.atlas_palette``). Labels without an entry fall back to a stable hue
+    from the id. When ``colors`` is None and ``labelmap`` is a path, a sibling
+    ``<labelmap>.colors.json`` (written by the labeler) is auto-loaded, so the surface
+    matches the contact-label colors without the caller threading the palette through.
 
     **Bounded nearest-label fill (``fill_within_mm``).** The subject's surface rides
     along the *edge* of the warped atlas ribbon, so a vertex on the boundary samples
@@ -380,13 +387,23 @@ def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
     nearest label (killing the crack); farther vertices stay gray, so genuinely
     uncovered anatomy — the medial wall, or a subcortical-only atlas over cortex — is
     left **honestly** uncolored. Set ``fill_within_mm=0`` to disable (raw nearest-voxel).
-    This mirrors the (unbounded) fill in ``aparc_vertex_colors``, bounded here because
-    a general atlas need not cover the whole surface.
-
-    ``colors`` optionally supplies ``{label: (r, g, b)}`` (an atlas's own palette);
-    labels without an entry fall back to a stable hue from the label id.
+    The default (5 mm) errs toward a filled cosmetic surface; the coloring never
+    affects contact labels (those sample the atlas at the contact coordinate).
     """
     import nibabel as nib
+
+    if colors is None and not hasattr(labelmap, "dataobj"):
+        # Auto-load the labeler's palette sidecar so the surface colors match the
+        # contact labels (JSON: {"<id>": [r, g, b]}). Best-effort — golden hues else.
+        import json
+        import os
+        sidecar = str(labelmap) + ".colors.json"
+        if os.path.isfile(sidecar):
+            try:
+                with open(sidecar) as _f:
+                    colors = {int(k): tuple(v) for k, v in json.load(_f).items()}
+            except Exception:  # noqa: BLE001 — a bad sidecar just means golden hues
+                colors = None
 
     img = labelmap if hasattr(labelmap, "dataobj") else nib.load(str(labelmap))
     lab = np.asanyarray(img.dataobj).astype(np.int32)
