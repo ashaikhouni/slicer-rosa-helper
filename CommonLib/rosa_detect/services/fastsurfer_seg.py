@@ -55,7 +55,15 @@ def _pick_device(device: str) -> str:
     process — the parent uses SimpleITK, and torch + SITK both load libomp,
     which segfaults on a double-init. torch lives only in the FastSurfer
     subprocess, which validates the device itself; here we just guess by
-    platform (Apple Silicon → mps, else cpu — override with device=)."""
+    platform (Apple Silicon → mps, else cpu — override with device=).
+
+    ``ROSA_FASTSURFER_DEVICE`` forces the choice, which is required when the
+    FastSurfer env is a CPU-only torch build (e.g. the ``fastsurfer_cpu`` env
+    from FastSurfer's ``*_env_cpu.yml``): the parent may be arm64 and would
+    otherwise pick ``mps``, but ``find_device('mps')`` *raises* on a build
+    without an MPS backend rather than falling back to CPU."""
+    if device == "auto":
+        device = os.environ.get("ROSA_FASTSURFER_DEVICE", "auto")
     if device != "auto":
         return device
     import platform
