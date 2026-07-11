@@ -41,8 +41,9 @@ class AtlasVertexColorsTests(unittest.TestCase):
         arr[12:18, 12:18, 12:18] = 42
         self.lm = Path(self._tmp.name) / "atlas.nii.gz"
         nib.save(nib.Nifti1Image(arr, np.eye(4)), str(self.lm))
-        # vertices: in region 5, in region 42, in unlabeled space.
-        self.verts = np.array([[4., 4., 4.], [15., 15., 15.], [10., 0., 0.]], float)
+        # vertices: in region 5, in region 42, in far unlabeled space (~12 mm from
+        # any label, so it stays gray even at the 5 mm default fill).
+        self.verts = np.array([[4., 4., 4.], [15., 15., 15.], [10., 0., 19.]], float)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -65,20 +66,31 @@ class AtlasVertexColorsTests(unittest.TestCase):
         # bounded fill should adopt region 5's color; disabling it leaves gray.
         near = np.array([[8., 4., 4.]], float)          # 1 mm past region 5 in x
         red = {5: (255, 0, 0)}
-        filled = atlas_vertex_colors(near, str(self.lm), colors=red)   # fill_within_mm=2 default
+        filled = atlas_vertex_colors(near, str(self.lm), colors=red)   # 5 mm default fill
         self.assertEqual(tuple(filled[0][:3]), (255, 0, 0))            # crack filled
         raw = atlas_vertex_colors(near, str(self.lm), colors=red, fill_within_mm=0)
         self.assertEqual(tuple(raw[0][:3]), (150, 150, 150))          # disabled → gray
 
     def test_far_vertex_stays_gray_even_with_fill(self):
-        # ~4 mm from any label (> the 2 mm default): genuinely uncovered, must NOT
+        # ~12 mm from any label (> the 5 mm default): genuinely uncovered, must NOT
         # be flooded — the medial-wall / subcortical-only-atlas honesty guarantee.
-        far = np.array([[10., 0., 0.]], float)
+        far = np.array([[10., 0., 19.]], float)
         cols = atlas_vertex_colors(far, str(self.lm))                 # default fill on
         self.assertEqual(tuple(cols[0][:3]), (150, 150, 150))
         # A generous threshold does reach it (sanity: the fill mechanism works).
-        reach = atlas_vertex_colors(far, str(self.lm), fill_within_mm=10.0)
+        reach = atlas_vertex_colors(far, str(self.lm), fill_within_mm=20.0)
         self.assertNotEqual(tuple(reach[0][:3]), (150, 150, 150))
+
+    def test_loads_colors_sidecar_when_present(self):
+        # A <labelmap>.colors.json sidecar (written by the labeler) is auto-loaded
+        # when no explicit palette is passed — surface colors match the contacts.
+        import json
+        sidecar = str(self.lm) + ".colors.json"
+        with open(sidecar, "w") as f:
+            json.dump({"5": [10, 20, 30], "42": [200, 100, 0]}, f)
+        cols = atlas_vertex_colors(self.verts, str(self.lm))          # no colors= arg
+        self.assertEqual(tuple(cols[0][:3]), (10, 20, 30))            # region 5
+        self.assertEqual(tuple(cols[1][:3]), (200, 100, 0))          # region 42
 
 
 def _boundary_edge_count(faces):

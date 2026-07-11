@@ -51,6 +51,39 @@ def _stderr(msg: str) -> None:
     print(msg, file=sys.stderr)
 
 
+def _write_atlas_palette_sidecar(args: Any, atlas_id: str,
+                                 dmp_lut: dict[int, str] | None) -> None:
+    """Write ``<save_atlas_labelmap>.colors.json`` — the atlas's meaningful region
+    palette (publisher LUT / Yeo networks / FreeSurfer colors), so the viewer colors
+    the brain surface to match the contact labels instead of arbitrary hues. Purely
+    cosmetic and best-effort: any failure just leaves the viewer's golden-hue fallback.
+    """
+    try:
+        import json
+        from rosa_core.atlas_palette import build_atlas_palette, parse_color_lut
+        publisher = None
+        if args.deepmriprep_atlas:
+            names = dmp_lut or {}
+        else:
+            assets = bundled_atlases.resolve(atlas_id)
+            names = bundled_atlases.parse_lut(assets.lut_path, assets.lut_format)
+            # A "freesurfer"-format LUT carries RGB (e.g. thalamus_mial ColorLUT).
+            if assets.lut_format == "freesurfer":
+                publisher = parse_color_lut(assets.lut_path)
+        fs_lut = None
+        if args.freesurfer_lut and Path(args.freesurfer_lut).is_file():
+            fs_lut = parse_color_lut(args.freesurfer_lut)
+        palette = build_atlas_palette(names, publisher_lut=publisher, freesurfer_lut=fs_lut)
+        if palette:
+            sidecar = args.save_atlas_labelmap + ".colors.json"
+            with open(sidecar, "w") as f:
+                json.dump({str(k): list(v) for k, v in palette.items()}, f)
+            _stderr(f"[label] wrote atlas color palette → {Path(sidecar).name} "
+                    f"({len(palette)} regions)")
+    except Exception as exc:  # noqa: BLE001 — palette is cosmetic; never fail the job
+        _stderr(f"[label] atlas palette sidecar skipped ({exc})")
+
+
 def _build_providers(
     *,
     thomas_dir: str | None,
@@ -440,6 +473,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.save_atlas_labelmap).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(str(lm), args.save_atlas_labelmap)
             _stderr(f"[label] saved warped atlas labelmap → {args.save_atlas_labelmap}")
+            _write_atlas_palette_sidecar(args, active_atlas, dmp_lut)
         else:
             _stderr("[label] --save-atlas-labelmap requested but no warped labelmap "
                     "(atlas not registered to the target?)")
