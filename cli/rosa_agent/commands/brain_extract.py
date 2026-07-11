@@ -129,6 +129,53 @@ def _run_log_watershed_backend(args, input_path: Path, log) -> tuple[int, Path |
         return 4, None
 
 
+def _register_and_emit(args, input_path: Path, mask: Path, log) -> int:
+    """When ``--register-to`` is set, register the INPUT to that target (rigid MI)
+    and emit the ``--save-transform`` (.tfm) and/or ``--mask-in-target`` (mask
+    resampled into the target's grid). Returns 0 on success / nothing to do, or a
+    non-zero exit code on error. Runs in-process (SITK); deepbet's torch stays in
+    its own subprocess, so there's no libomp clash here.
+    """
+    if not args.register_to:
+        if args.save_transform or args.mask_in_target:
+            _stderr("error: --save-transform / --mask-in-target require --register-to")
+            return 2
+        return 0
+    target = Path(args.register_to).expanduser()
+    if not target.is_file():
+        _stderr(f"error: --register-to volume not found: {target}")
+        return 2
+    try:
+        import SimpleITK as sitk
+        from rosa_core.registration import (
+            register_rigid_mi, resample_volume, save_transform,
+        )
+        fixed = sitk.ReadImage(str(target))        # target frame (e.g. the CT)
+        moving = sitk.ReadImage(str(input_path))   # what we stripped (e.g. the T1)
+        log(f"[brain-extract] registering {input_path.name} → {target.name} (rigid MI)…")
+        reg = register_rigid_mi(fixed=fixed, moving=moving, logger=log)
+        if args.save_transform:
+            tp = Path(args.save_transform).expanduser()
+            tp.parent.mkdir(parents=True, exist_ok=True)
+            save_transform(reg.transform, str(tp))
+            log(f"[brain-extract] wrote transform {tp}")
+        if args.mask_in_target:
+            mp = Path(args.mask_in_target).expanduser()
+            mp.parent.mkdir(parents=True, exist_ok=True)
+            # The native mask shares the input's grid, so resample it through the
+            # input→target transform onto the target grid (nearest = keep 0/1).
+            warped = resample_volume(
+                sitk.ReadImage(str(mask)), reg.transform,
+                reference=fixed, interp="nearest",
+            )
+            sitk.WriteImage(warped, str(mp))
+            log(f"[brain-extract] wrote mask in target frame {mp}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        _stderr(f"error: register/warp failed: {exc!r}")
+        return 4
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="rosa-agent brain-extract",
@@ -182,6 +229,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--deepbet-cpu", action="store_true",
         help="force deepbet onto CPU instead of Metal/CUDA (deepbet backend only)",
+    )
+    # --- optional: register the input to a target and emit the mask in its frame ---
+    parser.add_argument(
+        "--register-to", default=None,
+        help="after extracting the mask, rigidly register the INPUT to this target "
+             "volume (Mattes MI) so the mask can be expressed in the target's frame. "
+             "Enables --save-transform / --mask-in-target. Typical use: T1 mask "
+             "-> CT frame for the placement anchor.",
+    )
+    parser.add_argument(
+        "--save-transform", default=None,
+        help="write the input->target rigid transform here (.tfm); requires "
+             "--register-to. Reusable downstream (e.g. view-results "
+             "--brain-to-ct-transform) so the registration runs once per case.",
+    )
+    parser.add_argument(
+        "--mask-in-target", default=None,
+        help="write the brain mask resampled into the target's grid here "
+             "(nearest-neighbour); requires --register-to.",
     )
     parser.add_argument(
         "--check", action="store_true",
@@ -259,6 +325,10 @@ def main(argv: list[str] | None = None) -> int:
             return code
 
     log(f"[brain-extract] wrote {mask}")
+    # Optional: register the input to a target and emit the transform / mask-in-frame.
+    rc = _register_and_emit(args, input_path, Path(mask), log)
+    if rc != 0:
+        return rc
     print(mask)
     return 0
 

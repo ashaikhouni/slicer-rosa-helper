@@ -182,26 +182,45 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # detect (CT → trajectories) → contacts (+CT → contacts) → view-results
         # (→ served viewer dir: index.html + scene.glb + scene_meta.json + CT).
         base = [py, "-u", "-m", "rosa_agent"]
+        native_mask = regcache / "brain_mask_native.nii.gz"
+        mask_in_ct = regcache / "brain_mask_in_ct.nii.gz"
+        t1_to_ct = regcache / "t1_to_ct.tfm"
         steps: list[list[str]] = []
-        if t1 and _deepbet_available():
-            # Fast MIT T1 strip → the native brain mask view-results reuses
-            # (avoids its SynthStrip default). deepbet is T1-only; when it isn't
-            # installed we skip this and view-results extracts via its own auto
-            # backend (SynthStrip), same as before.
-            steps.append(base + ["brain-extract", t1, "-o",
-                                  str(regcache / "brain_mask_native.nii.gz"),
-                                  "--backend", "deepbet"])
+        # When a T1 is present AND deepbet is reachable, one brain-extract step
+        # extracts the native brain mask (for the surface) AND registers it into
+        # the CT frame:
+        #   * --mask-in-target → the CT-frame mask the CONTACTS placement anchor
+        #     consumes (fast + MRI-accurate, replacing its SynthStrip-or-hull
+        #     default), and
+        #   * --save-transform → the T1→CT transform view-results reuses, so the
+        #     surface (and any later label) don't re-register.
+        # deepbet is T1-only; without it we skip this and everything below falls
+        # back to the CT-only behaviour (contacts uses its own mask default;
+        # view-results extracts + registers on its own).
+        use_mri_mask = bool(t1 and _deepbet_available())
+        if use_mri_mask:
+            steps.append(base + ["brain-extract", t1, "-o", str(native_mask),
+                                  "--backend", "deepbet",
+                                  "--register-to", ct,
+                                  "--save-transform", str(t1_to_ct),
+                                  "--mask-in-target", str(mask_in_ct)])
+        contacts_step = base + ["contacts", traj, ct, "--out", contacts]
+        if use_mri_mask:
+            # Feed the MRI-derived intracranial mask to the placement anchor.
+            contacts_step += ["--brain-mask", str(mask_in_ct)]
         steps += [
             base + ["detect", ct, "--out", traj],
-            base + ["contacts", traj, ct, "--out", contacts],
+            contacts_step,
         ]
         # Without an MRI the CT stays MIP-only (fast, no surface). With an MRI,
-        # add the brain-surface flags so view-results meshes the subject surface.
+        # add the brain-surface flags so view-results meshes the subject surface;
+        # reuse the cached T1→CT transform when brain-extract already saved it.
         view = base + ["view-results", str(workdir), "--output", viewer,
                        "--ct", ct, "--contacts", contacts, "--trajectories", traj,
                        "--subject-label", label]
         if t1:
-            view += _brain_surface_view_flags(t1, regcache, include_transform=False)
+            view += _brain_surface_view_flags(t1, regcache,
+                                              include_transform=use_mri_mask)
         steps.append(view)
         return steps
     if kind == "label":
