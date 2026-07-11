@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import platform
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -45,6 +46,21 @@ class FastsurferDeviceTests(unittest.TestCase):
             with mock.patch.object(platform, "system", return_value="Linux"), \
                  mock.patch.object(platform, "machine", return_value="x86_64"):
                 self.assertEqual(fs._pick_device("auto"), "cpu")
+
+    def test_subprocess_env_enables_mps_fallback(self):
+        # The FastSurfer subprocess must carry PYTORCH_ENABLE_MPS_FALLBACK — an
+        # mps run dies partway without it (an op lacks an mps kernel).
+        with tempfile.TemporaryDirectory() as td:
+            fdir = Path(td) / "FastSurfer"
+            (fdir / "FastSurferCNN").mkdir(parents=True)
+            (fdir / "FastSurferCNN" / "run_prediction.py").write_text("# stub\n")
+            with mock.patch.dict(os.environ, {"ROSA_FASTSURFER_DIR": str(fdir),
+                                              "ROSA_FASTSURFER_PYTHON": sys.executable}):
+                with mock.patch.object(fs.subprocess, "run") as m_run:
+                    fs.run_fastsurfer_seg("/x/t1.nii.gz", td, sid="s")
+        env = m_run.call_args.kwargs.get("env") or {}
+        self.assertEqual(env.get("PYTORCH_ENABLE_MPS_FALLBACK"), "1")
+        self.assertEqual(env.get("KMP_DUPLICATE_LIB_OK"), "TRUE")
 
 
 if __name__ == "__main__":
