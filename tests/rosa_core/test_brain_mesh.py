@@ -59,6 +59,27 @@ class AtlasVertexColorsTests(unittest.TestCase):
         cols = atlas_vertex_colors(self.verts, str(self.lm), colors={5: (255, 0, 0)})
         self.assertEqual(tuple(cols[0][:3]), (255, 0, 0))
 
+    def test_boundary_crack_is_filled_within_threshold(self):
+        # Region 5 occupies voxels [2,7]³. A vertex 1 mm outside it samples the
+        # label-0 voxel just beyond the ribbon — the "gray crack" case. The default
+        # bounded fill should adopt region 5's color; disabling it leaves gray.
+        near = np.array([[8., 4., 4.]], float)          # 1 mm past region 5 in x
+        red = {5: (255, 0, 0)}
+        filled = atlas_vertex_colors(near, str(self.lm), colors=red)   # fill_within_mm=2 default
+        self.assertEqual(tuple(filled[0][:3]), (255, 0, 0))            # crack filled
+        raw = atlas_vertex_colors(near, str(self.lm), colors=red, fill_within_mm=0)
+        self.assertEqual(tuple(raw[0][:3]), (150, 150, 150))          # disabled → gray
+
+    def test_far_vertex_stays_gray_even_with_fill(self):
+        # ~4 mm from any label (> the 2 mm default): genuinely uncovered, must NOT
+        # be flooded — the medial-wall / subcortical-only-atlas honesty guarantee.
+        far = np.array([[10., 0., 0.]], float)
+        cols = atlas_vertex_colors(far, str(self.lm))                 # default fill on
+        self.assertEqual(tuple(cols[0][:3]), (150, 150, 150))
+        # A generous threshold does reach it (sanity: the fill mechanism works).
+        reach = atlas_vertex_colors(far, str(self.lm), fill_within_mm=10.0)
+        self.assertNotEqual(tuple(reach[0][:3]), (150, 150, 150))
+
 
 def _boundary_edge_count(faces):
     """0 for a closed (watertight) surface: every edge shared by exactly 2 faces."""
