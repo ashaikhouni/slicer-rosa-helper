@@ -59,30 +59,45 @@ class PipelineMriBuildTests(unittest.TestCase):
         flat = [tok for s in steps for tok in s]
         self.assertNotIn("--brain-native-volume", flat)
         self.assertNotIn("brain-extract", flat)
+        # CT-only localization path is untouched: no MRI mask, no registration.
+        self.assertNotIn("--brain-mask", flat)
+        self.assertNotIn("--register-to", flat)
+        self.assertNotIn("--brain-to-ct-transform", flat)
 
     # ---- pipeline WITH an MRI: deepbet mask + surface flags --------------
 
-    def test_pipeline_with_mri_prepends_deepbet_and_surface_flags(self):
+    def test_pipeline_with_mri_extracts_registers_and_feeds_localization(self):
         spec = JobSpec(kind="pipeline",
                        params={"ct": "/d/ct.nii.gz", "label": "case", "t1": "/d/t1.nii.gz"})
         with mock.patch.object(J, "_deepbet_available", return_value=True), \
              mock.patch.object(J, "_fastsurfer_available", return_value=False), \
              mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
-        # brain-extract (deepbet) → detect → contacts → view-results
+        # brain-extract (deepbet + register) → detect → contacts → view-results
         self.assertEqual(len(steps), 4)
-        self.assertIn("brain-extract", steps[0])
-        self.assertTrue(_sub(steps[0], ["--backend", "deepbet"]))
-        self.assertTrue(_sub(steps[0], ["-o", str(self.regcache / "brain_mask_native.nii.gz")]))
+        native = str(self.regcache / "brain_mask_native.nii.gz")
+        in_ct = str(self.regcache / "brain_mask_in_ct.nii.gz")
+        tfm = str(self.regcache / "t1_to_ct.tfm")
+        # 1) brain-extract makes the native mask AND registers it into the CT frame.
+        be = steps[0]
+        self.assertIn("brain-extract", be)
+        self.assertTrue(_sub(be, ["--backend", "deepbet"]))
+        self.assertTrue(_sub(be, ["-o", native]))
+        self.assertTrue(_sub(be, ["--register-to", "/d/ct.nii.gz"]))
+        self.assertTrue(_sub(be, ["--save-transform", tfm]))
+        self.assertTrue(_sub(be, ["--mask-in-target", in_ct]))
+        # 2) the CONTACTS step consumes the CT-frame MRI mask as the placement anchor.
+        contacts = next(s for s in steps if "contacts" in s and "view-results" not in s)
+        self.assertTrue(_sub(contacts, ["--brain-mask", in_ct]))
+        # 3) view-results meshes the surface from the NATIVE mask and REUSES the
+        #    saved transform (no redundant registration).
         view = steps[-1]
         self.assertIn("view-results", view)
         self.assertTrue(_sub(view, ["--brain-native-volume", "/d/t1.nii.gz"]))
-        self.assertTrue(_sub(view, ["--brain-mask-cache",
-                                    str(self.regcache / "brain_mask_native.nii.gz")]))
+        self.assertTrue(_sub(view, ["--brain-mask-cache", native]))
         self.assertTrue(_sub(view, ["--brain-surface-cache",
                                     str(self.regcache / "brain_surface.npz")]))
-        # pipeline does NOT save the transform (registers ephemerally)
-        self.assertNotIn("--brain-to-ct-transform", view)
+        self.assertTrue(_sub(view, ["--brain-to-ct-transform", tfm]))
 
     def test_pipeline_with_mri_skips_deepbet_when_unavailable(self):
         # No deepbet → no pre-extract step; view-results still gets surface flags
@@ -93,8 +108,13 @@ class PipelineMriBuildTests(unittest.TestCase):
              mock.patch.object(J, "_fastsurfer_available", return_value=False):
             steps = J.build_command(spec, self.wd)
         self.assertEqual(len(steps), 3)                      # no brain-extract step
-        self.assertNotIn("brain-extract", [tok for s in steps for tok in s])
+        flat = [tok for s in steps for tok in s]
+        self.assertNotIn("brain-extract", flat)
         self.assertTrue(_sub(steps[-1], ["--brain-native-volume", "/d/t1.nii.gz"]))
+        # No deepbet mask → no CT-frame mask to feed localization, and view-results
+        # registers on its own (no reused transform).
+        self.assertNotIn("--brain-mask", flat)
+        self.assertNotIn("--brain-to-ct-transform", flat)
 
     def test_pipeline_with_mri_fastsurfer_surface_name_and_flag(self):
         spec = JobSpec(kind="pipeline",

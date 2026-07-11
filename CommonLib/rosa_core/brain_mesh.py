@@ -365,14 +365,23 @@ def _label_hue_rgb(label: int) -> tuple:
 
 def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
                         colors: dict | None = None,
-                        default: tuple = (150, 150, 150)) -> np.ndarray:
+                        default: tuple = (150, 150, 150),
+                        fill_within_mm: float = 2.0) -> np.ndarray:
     """Per-vertex RGBA (uint8, N×4) coloring a surface by ANY atlas labelmap that's
     already warped into the surface's RAS frame — so the brain surface matches the
     atlas that labeled the contacts, instead of always showing the recon parcellation.
 
-    Each region gets a distinct, deterministic color. Unlike ``aparc_vertex_colors``
-    there is **no nearest-region fill**: label 0 / voxels the atlas doesn't cover stay
-    neutral gray, so a subcortical-only atlas honestly leaves the cortex uncolored.
+    Each region gets a distinct, deterministic color.
+
+    **Bounded nearest-label fill (``fill_within_mm``).** The subject's surface rides
+    along the *edge* of the warped atlas ribbon, so a vertex on the boundary samples
+    the label-0 voxel just outside it — a thin gray crack even though a real label sits
+    ~1 mm away. A label-0 vertex within ``fill_within_mm`` of a real label adopts that
+    nearest label (killing the crack); farther vertices stay gray, so genuinely
+    uncovered anatomy — the medial wall, or a subcortical-only atlas over cortex — is
+    left **honestly** uncolored. Set ``fill_within_mm=0`` to disable (raw nearest-voxel).
+    This mirrors the (unbounded) fill in ``aparc_vertex_colors``, bounded here because
+    a general atlas need not cover the whole surface.
 
     ``colors`` optionally supplies ``{label: (r, g, b)}`` (an atlas's own palette);
     labels without an entry fall back to a stable hue from the label id.
@@ -381,7 +390,8 @@ def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
 
     img = labelmap if hasattr(labelmap, "dataobj") else nib.load(str(labelmap))
     lab = np.asanyarray(img.dataobj).astype(np.int32)
-    inv = np.linalg.inv(np.asarray(img.affine, dtype=float))
+    aff = np.asarray(img.affine, dtype=float)
+    inv = np.linalg.inv(aff)
     shp = np.array(lab.shape)
 
     v = np.asarray(vertices_ras, dtype=float)
@@ -391,6 +401,29 @@ def atlas_vertex_colors(vertices_ras: np.ndarray, labelmap: Any, *,
     labels = np.zeros(v.shape[0], dtype=np.int32)
     good = ijk[inb]
     labels[inb] = lab[good[:, 0], good[:, 1], good[:, 2]]
+
+    # Bounded nearest-label fill for boundary cracks (see docstring). Crop the EDT
+    # to the label bounding box + a margin so it stays cheap on CT-resolution atlases.
+    fill = (labels == 0) & inb
+    if fill_within_mm and fill.any() and (lab != 0).any():
+        from scipy import ndimage
+        spacing = np.linalg.norm(aff[:3, :3], axis=0)
+        nz = np.argwhere(lab != 0)
+        margin = int(np.ceil(fill_within_mm / spacing.min())) + 1
+        lo = np.maximum(nz.min(0) - margin, 0)
+        hi = np.minimum(nz.max(0) + margin + 1, shp)
+        sub = lab[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        dist_mm, idx = ndimage.distance_transform_edt(
+            sub == 0, sampling=spacing, return_indices=True)
+        nearest = sub[tuple(idx)]                       # nearest nonzero label per voxel
+        fi = np.where(fill)[0]
+        sij = ijk[fi] - lo                              # gray-vertex ijk in sub-volume
+        keep = np.all((sij >= 0) & (sij < np.array(sub.shape)), axis=1)
+        fi, sij = fi[keep], sij[keep]
+        d = dist_mm[sij[:, 0], sij[:, 1], sij[:, 2]]
+        nl = nearest[sij[:, 0], sij[:, 1], sij[:, 2]]
+        take = d <= fill_within_mm
+        labels[fi[take]] = nl[take]
 
     out = np.empty((v.shape[0], 4), dtype=np.uint8)
     out[:] = (*default, 255)

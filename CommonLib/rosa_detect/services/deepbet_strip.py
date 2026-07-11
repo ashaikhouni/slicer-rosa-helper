@@ -39,7 +39,14 @@ def find_deepbet(deepbet_python: str | Path | None = None) -> Optional[str]:
     Checks, in order: the explicit ``deepbet_python`` arg, ``$ROSA_DEEPBET_PYTHON``,
     then the current ``sys.executable``. Each candidate is probed in a subprocess
     (``python -c "import deepbet"``) so we never import torch in *this* process.
+
+    The probe sets ``KMP_DUPLICATE_LIB_OK=TRUE`` (as :func:`run_deepbet` does):
+    when deepbet lives in an env that also has an MKL numpy (e.g. torch + numpy in
+    one conda env), a bare ``import deepbet`` → ``import torch`` aborts with
+    "OMP: Error #15 … libomp.dylib already initialized". Without the flag the
+    probe would report a perfectly usable interpreter as unavailable.
     """
+    probe_env = {**os.environ, "KMP_DUPLICATE_LIB_OK": "TRUE"}
     seen: set[str] = set()
     for cand in (deepbet_python, os.environ.get("ROSA_DEEPBET_PYTHON"), sys.executable):
         if not cand:
@@ -50,7 +57,7 @@ def find_deepbet(deepbet_python: str | Path | None = None) -> Optional[str]:
         seen.add(py)
         try:
             r = subprocess.run([py, "-c", "import deepbet"],
-                               capture_output=True, timeout=120)
+                               capture_output=True, timeout=120, env=probe_env)
             if r.returncode == 0:
                 return py
         except Exception:  # noqa: BLE001 — a bad candidate just isn't it
