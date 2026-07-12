@@ -23,15 +23,24 @@
   <section id="panel-cases" class="panel active">
     <div class="cases">
       <div class="cases-head">
-        <h2>Cases</h2>
+        <h2>Cases <span id="casescount" class="muted"></span></h2>
         <div class="cases-actions">
           <button id="newcasebtn" class="primary">+ New case</button>
           <button id="importbtn" class="ghost">Import localization</button>
         </div>
       </div>
+      <div class="cases-toolbar">
+        <input type="search" id="casesearch" class="casesearch" placeholder="Search by name or id…" autocomplete="off">
+        <div class="btnset" id="casesfilter">
+          <button data-f="all" class="active">All</button>
+          <button data-f="pipeline">Detected</button>
+          <button data-f="import">Imported</button>
+        </div>
+      </div>
       <div id="caseslist" class="caseslist"></div>
       <p id="casesempty" class="muted" hidden>No cases yet — start one from a post-op
         CT, or import a localization from a batch CLI run.</p>
+      <p id="casesnoresults" class="muted" hidden>No cases match your search.</p>
     </div>
   </section>
 

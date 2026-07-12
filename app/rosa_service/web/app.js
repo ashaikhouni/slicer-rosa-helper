@@ -641,28 +641,49 @@ function el(tag, attrs, text) {
 
 async function showCases() {
   showStep("cases");
+  try { state.cases = await jget(`${API}/cases`); }   // enriched: counts, MRI, labels
+  catch (e) { $("caseslist").textContent = `Could not load cases: ${e.message}`; return; }
+  renderCases();
+}
+
+// Client-side filter (search + type) over the fetched cases — instant, no refetch.
+function renderCases() {
+  const all = state.cases || [];
+  const q = (state.caseSearch || "").trim().toLowerCase();
+  const f = state.caseFilter || "all";
+  const shown = all.filter((c) =>
+    (f === "all" || c.kind === f) &&
+    (!q || (c.label || "").toLowerCase().includes(q) || c.id.toLowerCase().includes(q)));
+  $("casescount").textContent = all.length ? `· ${all.length}` : "";
+  $("casesempty").hidden = all.length > 0;
+  $("casesnoresults").hidden = !(all.length > 0 && shown.length === 0);
   const list = $("caseslist");
   list.innerHTML = "";
-  let jobs = [];
-  try { jobs = await jget(`${API}/jobs`); }
-  catch (e) { list.textContent = `Could not load cases: ${e.message}`; return; }
-  // A "case" is a reviewable localization: a pipeline (detected here) or an
-  // import (computed elsewhere) that finished. Label/selftest jobs aren't cases.
-  const cases = jobs.filter((j) => ["pipeline", "import"].includes(j.kind) && j.state === "succeeded");
-  $("casesempty").hidden = cases.length > 0;
-  for (const j of cases) {
-    const card = el("button", { class: "casecard", type: "button" });
-    card.onclick = () => openCase(j.id);
-    const when = j.created_at ? new Date(j.created_at * 1000).toLocaleDateString(
-      undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
-    const badge = el("span", { class: `cc-badge ${j.kind}` }, j.kind === "import" ? "imported" : "detected");
-    card.append(
-      el("div", { class: "cc-title" }, j.label || j.id.slice(0, 8)),
-      (() => { const m = el("div", { class: "cc-meta" }); m.append(
-        badge, el("span", { class: "muted" }, [j.t1 ? "MRI" : "CT-only", when].filter(Boolean).join(" · "))); return m; })(),
-    );
-    list.append(card);
-  }
+  for (const c of shown) list.append(caseCard(c));
+}
+
+function ccNum(n, one, many) {
+  const s = el("span", { class: "cc-n" });
+  s.append(el("b", {}, String(n)), " " + (n === 1 ? one : many));
+  return s;
+}
+
+function caseCard(c) {
+  const card = el("button", { class: "casecard", type: "button" });
+  card.onclick = () => openCase(c.id);
+  const when = c.created_at ? new Date(c.created_at * 1000).toLocaleDateString(
+    undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  const stats = el("div", { class: "cc-stats" });
+  stats.append(
+    el("span", { class: `cc-badge ${c.kind}` }, c.kind === "import" ? "imported" : "detected"),
+    ccNum(c.n_shanks, "electrode", "electrodes"),
+    ccNum(c.n_contacts, "contact", "contacts"));
+  const sub = [c.has_mri ? "MRI" : "CT-only", c.labeled ? "labeled" : null, when]
+    .filter(Boolean).join(" · ");
+  const subEl = el("div", { class: "cc-sub muted" }, sub + " · ");
+  subEl.append(el("span", { class: "cc-id" }, c.id.slice(0, 8)));   // distinguishes same-named cases
+  card.append(el("div", { class: "cc-title" }, c.label || c.id.slice(0, 8)), stats, subEl);
+  return card;
 }
 
 // Open an existing case: load its results, then restore its newest label job
@@ -764,6 +785,11 @@ async function boot() {
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
   $("importbtn").onclick = () => showStep("import");
   $("importback").onclick = showCases;
+  $("casesearch").addEventListener("input", (ev) => { state.caseSearch = ev.target.value; renderCases(); });
+  $("casesfilter").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button"); if (!b) return;
+    state.caseFilter = b.dataset.f; setActive("casesfilter", b); renderCases();
+  });
   $("imp-run").onclick = runImport;
   [["imp-ct-file", "imp-ct"], ["imp-contacts-file", "imp-contacts"],
    ["imp-traj-file", "imp-traj"], ["imp-t1-file", "imp-t1"]].forEach(([f, p]) =>
