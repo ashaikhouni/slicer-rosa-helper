@@ -76,14 +76,31 @@
     <pre id="log" class="log"></pre>
   </section>
 
-  <!-- Step 3: Results -->
+  <!-- Step 3: the workspace (Case inputs · Edit / Review · Export) -->
   <section id="panel-results" class="panel">
-    <div class="results">
+   <div class="workspace">
+    <div class="ws-bar">
+      <div class="casectl">
+        <span class="slot on" id="slot-ct"><span class="dot"></span><span class="k">CT</span><span class="fn">post-op</span></span>
+        <span class="slot off" id="slot-mri"><span class="dot"></span><span class="k">T1&nbsp;MRI</span><span class="fn">add</span></span>
+        <span class="slot reg" id="slot-reg" hidden><span class="dot"></span><span class="k">Reg</span><span class="fn">CT↔T1</span></span>
+      </div>
+      <div class="spacer"></div>
+      <div class="flow" id="wsflow" role="tablist" aria-label="Workspace">
+        <button role="tab" data-ws="edit"><span class="t">Edit</span><span class="n">geometry</span></button><span class="sep">›</span>
+        <button role="tab" data-ws="review" aria-selected="true"><span class="t">Review</span><span class="n">label + accept</span></button>
+      </div>
+      <div class="spacer"></div>
+      <button id="restartbtn" class="ghost">◀ New case</button>
+    </div>
+    <div class="ws-body">
+      <div class="wsview" id="ws-edit"><iframe id="editframe" title="Trajectory editor" allow="fullscreen"></iframe></div>
+      <div class="wsview on" id="ws-review">
+        <div class="results">
       <div class="review">
         <div class="review-head">
           <h2>Contacts <span id="summary" class="muted"></span></h2>
           <div class="review-actions">
-            <button id="editbtn" class="ghost" title="Add/fix trajectories on the CT (multiplanar editor)">Edit trajectories ↗</button>
             <button id="exportbtn" class="primary">Export corrected TSV</button>
           </div>
         </div>
@@ -144,8 +161,10 @@
           </div>
         </div>
       </div>
+        </div>
+      </div>
     </div>
-    <button id="restartbtn" class="ghost">◀ New case</button>
+   </div>
   </section>
 </main>
 
