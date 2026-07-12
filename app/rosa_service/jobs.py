@@ -273,6 +273,54 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                               surface_source=surface)
         steps.append(view)
         return steps
+    if kind == "import":
+        # Import a localization computed elsewhere (a batch CLI run) for review:
+        # skip detect + contacts (the TSVs already exist) and run ONLY
+        # view-results against the provided CT + TSVs. Everything downstream
+        # (review doc, editor payload) reads workdir/contacts.tsv +
+        # trajectories.tsv, so we stage the provided files there first — the same
+        # loader/paths as a pipeline job, so an import reviews identically.
+        ct = spec.params.get("ct")
+        contacts_src = spec.params.get("contacts")
+        traj_src = spec.params.get("trajectories")
+        if not (ct and contacts_src and traj_src):
+            raise ValueError(
+                "import job requires params.ct, params.contacts, params.trajectories")
+        ct, contacts_src, traj_src = str(ct), str(contacts_src), str(traj_src)
+        label = str(spec.params.get("label") or "case")
+        t1 = spec.params.get("t1")
+        t1 = str(t1) if t1 else None
+        surface = str(spec.params.get("surface") or "auto")
+        traj = str(workdir / "trajectories.tsv")
+        contacts = str(workdir / "contacts.tsv")
+        viewer = str(workdir / "viewer")
+        regcache = workdir / "regcache"
+        base = [py, "-u", "-m", "rosa_agent"]
+        steps = []
+        # 1) stage the provided TSVs into the job dir (steps run cwd=workdir).
+        stage = ("import shutil, sys\n"
+                 "shutil.copyfile(sys.argv[1], 'contacts.tsv')\n"
+                 "shutil.copyfile(sys.argv[2], 'trajectories.tsv')\n"
+                 "print('staged import TSVs', flush=True)\n")
+        steps.append([py, "-u", "-c", stage, contacts_src, traj_src])
+        # 2) optional MRI brain-extract (surface + CT-frame mask), as in pipeline.
+        use_mri_mask = bool(t1 and _deepbet_available())
+        if use_mri_mask:
+            steps.append(base + ["brain-extract", t1,
+                                  "-o", str(regcache / "brain_mask_native.nii.gz"),
+                                  "--backend", "deepbet", "--register-to", ct,
+                                  "--save-transform", str(regcache / "t1_to_ct.tfm"),
+                                  "--mask-in-target", str(regcache / "brain_mask_in_ct.nii.gz")])
+        # 3) build the 3D viewer from the imported localization.
+        view = base + ["view-results", str(workdir), "--output", viewer,
+                       "--ct", ct, "--contacts", contacts, "--trajectories", traj,
+                       "--subject-label", label]
+        if t1:
+            view += _brain_surface_view_flags(t1, regcache,
+                                              include_transform=use_mri_mask,
+                                              surface_source=surface)
+        steps.append(view)
+        return steps
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
         # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a
@@ -409,7 +457,7 @@ class _Job:
             ended_at=self.ended_at, exit_code=self.exit_code, error=self.error,
             artifacts=self.artifacts(),
             parent=self.params.get("parent"), atlas=self.params.get("atlas"),
-            t1=self.params.get("t1"),
+            t1=self.params.get("t1"), label=self.params.get("label"),
         )
 
     def _write_manifest(self) -> None:
