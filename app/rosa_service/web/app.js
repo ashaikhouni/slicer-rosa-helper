@@ -251,57 +251,63 @@ function resetLabelCard() {
   setViewerTab("electrodes");
 }
 
+// The review list is a per-electrode NAVIGATOR: one collapsible row per shank
+// (12, not 176), expand to see its contacts + labels. Editing geometry lives in
+// the Edit view — so no keep/reject checkboxes here; Review is read + label +
+// accept. Contact rows keep their data-* hooks + .region input so the labeling
+// preview, 3D selection, and relabel all still bind to them.
 function renderReview(doc) {
   state.doc = doc;
   const nShanks = doc.shanks.length;
   const nContacts = doc.shanks.reduce((a, s) => a + s.contacts.length, 0);
-  const nKept = doc.shanks.filter((s) => s.accepted)
-    .reduce((a, s) => a + s.contacts.filter((c) => c.accepted).length, 0);
-  $("summary").textContent = `— ${nShanks} shanks, ${nKept}/${nContacts} kept`;
+  $("summary").textContent = `· ${nShanks} electrodes · ${nContacts} contacts`;
 
   const list = $("reviewlist");
   list.innerHTML = "";
   for (const shank of doc.shanks) {
-    const box = document.createElement("div");
-    box.className = "shank" + (shank.accepted ? "" : " rejected");
+    const box = el("div", { class: "shank" });
+    box.dataset.shank = shank.name;
+    const labeled = shank.contacts.some((c) => c.region);
 
-    const head = document.createElement("div");
-    head.className = "shank-head";
-    const sacc = el("input", { type: "checkbox" });
-    sacc.className = "sacc"; sacc.checked = shank.accepted;
-    sacc.onchange = () => patch([{ op: sacc.checked ? "accept_shank" : "reject_shank", shank: shank.name }]);
-    head.append(sacc, el("strong", {}, shank.name),
-      el("span", { class: "muted" }, `${shank.model || "—"} · ${shank.contacts.length} contacts`));
+    const head = el("div", { class: "shank-head" });
+    const dot = el("span", { class: "shank-dot" + (labeled ? " on" : "") });
+    dot.title = labeled ? "labeled" : "not labeled";
+    head.append(el("span", { class: "caret" }, "▸"), el("strong", {}, shank.name),
+      el("span", { class: "muted shank-meta" }, `${shank.model || "—"} · ${shank.contacts.length}`), dot);
+    head.onclick = () => toggleShank(box, shank);
     box.append(head);
 
-    const cs = document.createElement("div");
-    cs.className = "contacts";
+    const cs = el("div", { class: "contacts" });
     for (const c of shank.contacts) {
-      const row = document.createElement("div");
-      row.className = "contact" + (c.accepted ? "" : " rejected");
-      row.dataset.label = c.name;
-      row.dataset.shank = shank.name;
-      row.dataset.cindex = c.index;
-      // Click anywhere on the row (except the checkbox / region field) → show
-      // the contact in the 3D viewer.
+      const row = el("div", { class: "contact" });
+      row.dataset.label = c.name; row.dataset.shank = shank.name; row.dataset.cindex = c.index;
       row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
-      const acc = el("input", { type: "checkbox" });
-      acc.checked = c.accepted; acc.disabled = !shank.accepted;
-      acc.onchange = () => patch([{ op: acc.checked ? "accept_contact" : "reject_contact", shank: shank.name, index: c.index }]);
-      const name = el("span", { class: "cname", title: "show in 3D" }, c.name);
       const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: "—" });
-      region.disabled = !shank.accepted;
       region.onchange = () => {
         if (region.value.trim())
           patch([{ op: "relabel_contact", shank: shank.name, index: c.index, region: region.value.trim() }]);
       };
-      row.append(acc, name, region);
+      row.append(el("span", { class: "cname", title: "show in 3D" }, c.name), region);
       cs.append(row);
     }
     box.append(cs);
     list.append(box);
   }
+  // Keep the open shank open across re-renders (labeling/relabel re-render the list).
+  if (state.openShank) {
+    const b = list.querySelector(`.shank[data-shank="${CSS.escape(state.openShank)}"]`);
+    if (b) b.classList.add("open");
+  }
   syncVisibility(doc);
+}
+
+// Accordion: one shank open at a time; opening one snaps the 3D view to it.
+function toggleShank(box, shank) {
+  const open = !box.classList.contains("open");
+  box.parentElement.querySelectorAll(".shank.open").forEach((b) => b.classList.remove("open"));
+  box.classList.toggle("open", open);
+  state.openShank = open ? shank.name : null;
+  if (open && shank.contacts[0]) selectInViewer(shank.contacts[0].name, shank.name);
 }
 
 // Hide rejected shanks/contacts in the 3D viewer; re-accepting brings them back.
@@ -811,5 +817,8 @@ async function boot() {
   // Land on the case list (the front door). Opening a case restores its viewer,
   // reviewed contacts, and newest label job — see openCase().
   await showCases();
+  // Deep-link: /#case=<id> opens that case directly (bookmark / Electron link).
+  const m = location.hash.match(/case=([a-z0-9]+)/i);
+  if (m && (state.cases || []).some((c) => c.id === m[1])) openCase(m[1]);
 }
 boot();
