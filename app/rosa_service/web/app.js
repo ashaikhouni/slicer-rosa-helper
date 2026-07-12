@@ -186,6 +186,7 @@ async function loadResults(id) {
     syncVisibility(state.doc);   // apply reject-hiding once the viewer is ready
   };
   frame.src = `${API}/jobs/${id}/viewer/`;
+  state.jobId = id;
   showStep("results");
   resetLabelCard();
   prefillLabelMriFromCase(id);   // MRI provided at creation → no re-upload to label
@@ -615,6 +616,9 @@ async function boot() {
   $("runbtn").onclick = run;
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
+  $("editbtn").onclick = () => {
+    if (state.jobId) window.open(`${API}/jobs/${state.jobId}/editor/`, "_blank");
+  };
   $("restartbtn").onclick = restart;
   $("mriinput").addEventListener("change", (ev) => {
     const f = ev.target.files[0]; if (f) uploadMri(f);

@@ -37,6 +37,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
+from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner
 from .models import (
     JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch,
@@ -408,6 +409,40 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         if not target.is_file():
             raise HTTPException(status_code=404, detail=f"not found: {path or 'index.html'}")
         return FileResponse(target)
+
+    # ---- trajectory editor (client-side reslicer; CT + plan served locally) ----
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/editor")
+    async def editor_root(job_id: str) -> RedirectResponse:
+        _job_or_404(job_id)
+        return RedirectResponse(
+            url=f"/api/{API_VERSION}/jobs/{job_id}/editor/", status_code=307)
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/")
+    async def editor_index(job_id: str) -> FileResponse:
+        _job_or_404(job_id)
+        page = Path(__file__).resolve().parent / "web" / "editor" / "index.html"
+        if not page.is_file():
+            raise HTTPException(status_code=404, detail="editor asset missing")
+        return FileResponse(page)
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/plan")
+    async def editor_plan(job_id: str) -> FileResponse:
+        job = _job_or_404(job_id)
+        try:
+            ensure_cache(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return FileResponse(job.workdir / "editor_plan.json", media_type="application/json")
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/volume")
+    async def editor_volume(job_id: str) -> FileResponse:
+        job = _job_or_404(job_id)
+        try:
+            ensure_cache(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return FileResponse(job.workdir / "editor_ct.i16", media_type="application/octet-stream")
 
     # ---- uploads (browser drag-drop → a local path a job can consume) ----
 
