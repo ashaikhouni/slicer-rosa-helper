@@ -57,6 +57,25 @@ class JobStatus(BaseModel):
     parent: str | None = None
     atlas: str | None = None
     t1: str | None = None
+    # The human case label (params.label), so the Cases list can name a case
+    # without opening it.
+    label: str | None = None
+
+
+class ImportRequest(BaseModel):
+    """Import a localization computed elsewhere (batch CLI run) for review.
+
+    ``ct`` + ``contacts`` + ``trajectories`` are absolute paths already on this
+    machine (uploaded via ``/uploads`` or typed). The service validates that the
+    contacts actually fit the CT before creating the (view-results-only) job.
+    """
+
+    ct: str
+    contacts: str
+    trajectories: str
+    t1: str | None = None
+    label: str | None = None
+    surface: str | None = None
 
 
 # ---------------------------------------------------------------------

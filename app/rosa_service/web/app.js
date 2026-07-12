@@ -25,6 +25,9 @@ async function jsend(url, method, body) {
 
 function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
+  // The step bar tracks the new-case wizard (drop → run → review); it's noise on
+  // the case list, the import form, and the workspace (which has its own flow).
+  document.body.classList.toggle("nosteps", ["cases", "import", "results"].includes(name));
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -634,6 +637,117 @@ function el(tag, attrs, text) {
   return n;
 }
 
+// ---- home: the case list ---------------------------------------------
+
+async function showCases() {
+  showStep("cases");
+  const list = $("caseslist");
+  list.innerHTML = "";
+  let jobs = [];
+  try { jobs = await jget(`${API}/jobs`); }
+  catch (e) { list.textContent = `Could not load cases: ${e.message}`; return; }
+  // A "case" is a reviewable localization: a pipeline (detected here) or an
+  // import (computed elsewhere) that finished. Label/selftest jobs aren't cases.
+  const cases = jobs.filter((j) => ["pipeline", "import"].includes(j.kind) && j.state === "succeeded");
+  $("casesempty").hidden = cases.length > 0;
+  for (const j of cases) {
+    const card = el("button", { class: "casecard", type: "button" });
+    card.onclick = () => openCase(j.id);
+    const when = j.created_at ? new Date(j.created_at * 1000).toLocaleDateString(
+      undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+    const badge = el("span", { class: `cc-badge ${j.kind}` }, j.kind === "import" ? "imported" : "detected");
+    card.append(
+      el("div", { class: "cc-title" }, j.label || j.id.slice(0, 8)),
+      (() => { const m = el("div", { class: "cc-meta" }); m.append(
+        badge, el("span", { class: "muted" }, [j.t1 ? "MRI" : "CT-only", when].filter(Boolean).join(" · "))); return m; })(),
+    );
+    list.append(card);
+  }
+}
+
+// Open an existing case: load its results, then restore its newest label job
+// (labels/QC) so the case comes back exactly as it was left.
+async function openCase(id) {
+  await loadResults(id);
+  try {
+    const jobs = await jget(`${API}/jobs`);
+    const labelJobs = jobs.filter((j) => j.kind === "label" && j.parent === id);
+    const newest = labelJobs[0];   // /jobs is newest-first
+    if (!newest) return;
+    state.labeledOnce = labelJobs.some((j) => j.state === "succeeded");
+    state.labelJobId = newest.id;
+    if (newest.t1) { state.mri = { path: newest.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
+    if (newest.atlas) $("atlassel").value = newest.atlas;
+    if (newest.state === "succeeded") showProposed(newest.id, { reloadViewer: false, jumpToQc: false });
+    else if (["failed", "cancelled"].includes(newest.state)) _showLabelError(newest);
+    else pollLabel(newest.id, !state.labeledOnce);
+  } catch (_e) { /* a case with no label job is fine */ }
+}
+
+// ---- import a localization computed elsewhere ------------------------
+
+// browse → upload → fill the paired path field (reuses the /uploads endpoint).
+async function importBrowse(fileInputId, pathId) {
+  const f = $(fileInputId).files[0];
+  if (!f) return;
+  $("imp-msg").textContent = `Uploading ${f.name}…`;
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) { $("imp-msg").textContent = `Upload failed: ${await r.text()}`; return; }
+  $(pathId).value = (await r.json()).path;
+  $("imp-msg").textContent = "";
+}
+
+function showImportCheck(check, isError, message) {
+  const c = $("imp-check");
+  c.hidden = false;
+  const v = (check && check.verdict) || (isError ? "red" : "");
+  c.className = "check " + v;
+  c.innerHTML = "";
+  c.append(el("span", { class: "check-pill" }, v || "error"),
+           el("span", { class: "check-reason" }, message || (check && check.reason) || ""));
+  if (check) c.append(el("span", { class: "check-stat" },
+    `${check.n_on_metal}/${check.n} on metal · ${check.n_in_bounds}/${check.n} in bounds`));
+}
+
+async function runImport() {
+  const ct = $("imp-ct").value.trim(), contacts = $("imp-contacts").value.trim(),
+        traj = $("imp-traj").value.trim(), t1 = $("imp-t1").value.trim(),
+        label = $("imp-label").value.trim() || "imported";
+  if (!ct || !contacts || !traj) {
+    $("imp-msg").textContent = "CT, contacts TSV, and trajectories TSV are all required.";
+    return;
+  }
+  $("imp-msg").textContent = "Checking the CT ↔ TSV match…";
+  $("imp-check").hidden = true;
+  let r, body;
+  try {
+    r = await fetch(`${API}/jobs/import`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ct, contacts, trajectories: traj, label, ...(t1 ? { t1 } : {}) }),
+    });
+    body = await r.json().catch(() => ({}));
+  } catch (e) { $("imp-msg").textContent = `Import failed: ${e.message}`; return; }
+  $("imp-msg").textContent = "";
+  if (!r.ok) {
+    const d = body.detail;
+    if (d && typeof d === "object" && d.check) showImportCheck(d.check, true, d.message);
+    else showImportCheck(null, true, typeof d === "string" ? d : "Import failed.");
+    return;
+  }
+  // green/yellow: show the match, then run the (view-results) job like a pipeline.
+  showImportCheck(body.check, false);
+  const job = body.job;
+  state.jobId = job.id;
+  showStep("run");
+  $("log").textContent = "";
+  $("runstate").textContent = "Importing…";
+  $("runsub").textContent = "build viewer" + (t1 ? " + strip MRI + surface" : "") + " from imported localization";
+  $("spinner").classList.remove("stopped");
+  streamLogs(job.id);
+  pollStatus(job.id);
+}
+
 // ---- boot -------------------------------------------------------------
 
 async function boot() {
@@ -646,7 +760,14 @@ async function boot() {
     if (!state.mri) { showWs("review"); const lc = $("labelcard"); lc.open = true; lc.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
   };
   $("slot-reg").onclick = () => { showWs("review"); setViewerTab("qc"); };
-  $("restartbtn").onclick = restart;
+  $("restartbtn").onclick = showCases;          // workspace → back to the case list
+  $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
+  $("importbtn").onclick = () => showStep("import");
+  $("importback").onclick = showCases;
+  $("imp-run").onclick = runImport;
+  [["imp-ct-file", "imp-ct"], ["imp-contacts-file", "imp-contacts"],
+   ["imp-traj-file", "imp-traj"], ["imp-t1-file", "imp-t1"]].forEach(([f, p]) =>
+    $(f).addEventListener("change", () => importBrowse(f, p)));
   $("mriinput").addEventListener("change", (ev) => {
     const f = ev.target.files[0]; if (f) uploadMri(f);
   });
@@ -661,34 +782,8 @@ async function boot() {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
   } catch { $("engine").textContent = "service unreachable"; }
-  // Resume the most recent completed PIPELINE run so a reload lands on results
-  // (with its viewer + reviewed contacts), not a blank form or a label job that
-  // has no viewer. Label/selftest jobs are skipped here.
-  try {
-    const jobs = await jget(`${API}/jobs`);        // newest first
-    const done = jobs.find((j) => j.state === "succeeded" && j.kind === "pipeline");
-    if (done) {
-      state.jobId = done.id;
-      await loadResults(done.id);
-      // Restore this case's NEWEST label job (any state) so a reload reflects the
-      // last thing the user did — succeeded → labels/QC, failed → error+retry,
-      // running → keep polling. Registration counts as verified if ANY label
-      // succeeded (so a retry doesn't re-jump to QC).
-      const labelJobs = jobs.filter((j) => j.kind === "label" && j.parent === done.id);
-      const newest = labelJobs[0];   // /jobs is newest-first
-      if (newest) {
-        state.labeledOnce = labelJobs.some((j) => j.state === "succeeded");
-        state.labelJobId = newest.id;
-        // Restore the MRI ref + atlas so relabel/retry works without re-uploading.
-        if (newest.t1) { state.mri = { path: newest.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
-        if (newest.atlas) $("atlassel").value = newest.atlas;
-        if (newest.state === "succeeded") {
-          showProposed(newest.id, { reloadViewer: false, jumpToQc: false });
-        } else if (["failed", "cancelled"].includes(newest.state)) {
-          _showLabelError(newest);
-        } else { pollLabel(newest.id, !state.labeledOnce); }
-      }
-    }
-  } catch (_e) { /* ignore */ }
+  // Land on the case list (the front door). Opening a case restores its viewer,
+  // reviewed contacts, and newest label job — see openCase().
+  await showCases();
 }
 boot();

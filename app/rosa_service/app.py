@@ -40,7 +40,8 @@ from fastapi.staticfiles import StaticFiles
 from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner
 from .models import (
-    JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch,
+    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
+    ReviewOp, ReviewPatch,
 )
 from .review import ReviewStore, export_contacts
 
@@ -132,6 +133,37 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except ValueError as exc:            # unknown kind / bad params
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return job.status()
+
+    @app.post(f"/api/{API_VERSION}/jobs/import", status_code=201)
+    async def import_localization(req: ImportRequest) -> dict:
+        """Create a reviewable case from a localization computed elsewhere.
+
+        Validates that the contacts actually fit the CT (parity content check)
+        before creating a view-results-only job. A clearly-wrong CT/TSV pairing
+        (contacts outside the volume / off metal) is rejected with 422; a weak
+        but usable match returns a ``check`` the UI can ask the user to confirm.
+        """
+        from .import_check import check_localization
+        for what, p in (("CT", req.ct), ("contacts TSV", req.contacts),
+                        ("trajectories TSV", req.trajectories)):
+            if not p or not Path(p).is_file():
+                raise HTTPException(status_code=422, detail=f"{what} not found: {p!r}")
+        try:
+            check = check_localization(req.ct, req.contacts)
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if check["verdict"] == "red":
+            raise HTTPException(status_code=422,
+                                detail={"message": check["reason"], "check": check})
+        spec = JobSpec(kind="import", params={
+            "ct": req.ct, "contacts": req.contacts, "trajectories": req.trajectories,
+            "label": req.label or "case", "surface": req.surface or "auto",
+            **({"t1": req.t1} if req.t1 else {})})
+        try:
+            job = runner.create(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"job": job.status().model_dump(), "check": check}
 
     @app.get(f"/api/{API_VERSION}/jobs", response_model=list[JobStatus])
     async def list_jobs() -> list[JobStatus]:

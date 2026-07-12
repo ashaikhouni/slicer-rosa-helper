@@ -19,8 +19,75 @@
 </ol>
 
 <main>
+  <!-- Home: the case list (the app's front door) -->
+  <section id="panel-cases" class="panel active">
+    <div class="cases">
+      <div class="cases-head">
+        <h2>Cases</h2>
+        <div class="cases-actions">
+          <button id="newcasebtn" class="primary">+ New case</button>
+          <button id="importbtn" class="ghost">Import localization</button>
+        </div>
+      </div>
+      <div id="caseslist" class="caseslist"></div>
+      <p id="casesempty" class="muted" hidden>No cases yet — start one from a post-op
+        CT, or import a localization from a batch CLI run.</p>
+    </div>
+  </section>
+
+  <!-- Import an existing localization (CT + TSVs from a CLI run) -->
+  <section id="panel-import" class="panel">
+    <div class="importform">
+      <div class="import-head">
+        <button id="importback" class="ghost small">◀ Cases</button>
+        <h2>Import a localization</h2>
+      </div>
+      <p class="muted">Review a localization computed elsewhere — e.g. a batch CLI
+        run. Point at the post-op CT and that run's <code>contacts.tsv</code> and
+        <code>trajectories.tsv</code>. Nothing leaves this machine.</p>
+
+      <div class="importrow">
+        <label class="field">Post-op CT
+          <input type="text" id="imp-ct" placeholder="/path/to/ct.nii.gz" autocomplete="off">
+        </label>
+        <label class="link browse">browse<input type="file" id="imp-ct-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+      </div>
+      <div class="importrow">
+        <label class="field">Contacts TSV
+          <input type="text" id="imp-contacts" placeholder="/path/to/contacts.tsv" autocomplete="off">
+        </label>
+        <label class="link browse">browse<input type="file" id="imp-contacts-file" accept=".tsv,.txt" hidden></label>
+      </div>
+      <div class="importrow">
+        <label class="field">Trajectories TSV
+          <input type="text" id="imp-traj" placeholder="/path/to/trajectories.tsv" autocomplete="off">
+        </label>
+        <label class="link browse">browse<input type="file" id="imp-traj-file" accept=".tsv,.txt" hidden></label>
+      </div>
+
+      <details class="mri-optional">
+        <summary>Add a preop MRI (T1) — optional</summary>
+        <div class="importrow">
+          <label class="field">MRI (T1)
+            <input type="text" id="imp-t1" placeholder="/path/to/t1.nii.gz" autocomplete="off">
+          </label>
+          <label class="link browse">browse<input type="file" id="imp-t1-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+        </div>
+        <p class="muted" style="font-size:12px">Enables the anatomic surface + labeling, same as a new case.</p>
+      </details>
+
+      <label class="field">Case label
+        <input type="text" id="imp-label" value="imported" autocomplete="off">
+      </label>
+
+      <div id="imp-check" class="check" hidden></div>
+      <button id="imp-run" class="primary">Check &amp; import →</button>
+      <div id="imp-msg" class="muted"></div>
+    </div>
+  </section>
+
   <!-- Step 1: Drop -->
-  <section id="panel-drop" class="panel active">
+  <section id="panel-drop" class="panel">
     <div id="dropzone" class="dropzone">
       <p><strong>Drop a postop CT</strong> (.nii / .nii.gz) here, or
         <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,application/gzip,application/octet-stream" hidden></label>.</p>
@@ -91,7 +158,7 @@
         <button role="tab" data-ws="review" aria-selected="true"><span class="t">Review</span><span class="n">label + accept</span></button>
       </div>
       <div class="spacer"></div>
-      <button id="restartbtn" class="ghost">◀ New case</button>
+      <button id="restartbtn" class="ghost">◀ Cases</button>
     </div>
     <div class="ws-body">
       <div class="wsview" id="ws-edit"><iframe id="editframe" title="Trajectory editor" allow="fullscreen"></iframe></div>
