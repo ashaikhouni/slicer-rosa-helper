@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sys
 import time
 import uuid
@@ -519,6 +520,21 @@ class JobRunner:
     def list(self) -> list[JobStatus]:
         return [j.status() for j in
                 sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)]
+
+    def delete(self, job_id: str) -> None:
+        """Delete a finished case: drop it (and any child label jobs) from the
+        registry and remove their workdirs. Refuses a job that's still
+        running/queued — cancel it first."""
+        job = self.get(job_id)
+        if not job.state.terminal:
+            raise ValueError(f"job {job_id} is {job.state.value}; cancel it before deleting")
+        # A case's label jobs are children (params.parent == job_id) — remove them too.
+        victims = [job_id] + [jid for jid, j in self._jobs.items()
+                              if j.params.get("parent") == job_id]
+        for jid in victims:
+            j = self._jobs.pop(jid, None)
+            if j is not None:
+                shutil.rmtree(j.workdir, ignore_errors=True)
 
     # ---- create / run ----------------------------------------------
 

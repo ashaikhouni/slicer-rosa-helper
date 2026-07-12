@@ -119,6 +119,23 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except JobNotFound as exc:
             raise HTTPException(status_code=404, detail=f"no job {job_id!r}") from exc
 
+    def _dedup_or_hash(ct_path: str, force: bool) -> str | None:
+        """Fingerprint the CT; unless ``force``, 409 if a finished case already
+        uses the same CT (so the UI can offer to open it). Returns the hash to
+        stamp on the new case's params (enables future dedup)."""
+        from .cases import ct_fingerprint
+        ct_hash = ct_fingerprint(ct_path)
+        if ct_hash and not force:
+            for st in runner.list():                 # newest-first
+                if st.kind in ("pipeline", "import") and st.state == "succeeded" \
+                        and runner.get(st.id).params.get("ct_hash") == ct_hash:
+                    raise HTTPException(status_code=409, detail={
+                        "message": f"This CT already has a case "
+                                   f"({st.label or st.id[:8]}).",
+                        "existing": {"id": st.id, "label": st.label,
+                                     "created_at": st.created_at}})
+        return ct_hash
+
     @app.get("/healthz")
     def healthz() -> dict:
         return {"status": "ok", "api": API_VERSION, **_engine_info()}
@@ -128,11 +145,27 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     # runner state access) must happen on the loop thread.
     @app.post(f"/api/{API_VERSION}/jobs", response_model=JobStatus, status_code=201)
     async def create_job(spec: JobSpec) -> JobStatus:
+        # A new pipeline case: refuse a duplicate CT (unless params.force) and
+        # stamp the CT hash so future runs can spot the duplicate.
+        if spec.kind == "pipeline" and spec.params.get("ct"):
+            spec.params["ct_hash"] = _dedup_or_hash(
+                spec.params["ct"], bool(spec.params.get("force")))
         try:
             job = runner.create(spec)
         except ValueError as exc:            # unknown kind / bad params
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return job.status()
+
+    @app.delete(f"/api/{API_VERSION}/cases/{{job_id}}", status_code=204)
+    async def delete_case(job_id: str) -> Response:
+        """Delete a finished case (and its label jobs + workdirs)."""
+        try:
+            runner.delete(job_id)
+        except JobNotFound as exc:
+            raise HTTPException(status_code=404, detail=f"no case {job_id!r}") from exc
+        except ValueError as exc:            # still running
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     @app.post(f"/api/{API_VERSION}/jobs/import", status_code=201)
     async def import_localization(req: ImportRequest) -> dict:
@@ -155,10 +188,12 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         if check["verdict"] == "red":
             raise HTTPException(status_code=422,
                                 detail={"message": check["reason"], "check": check})
+        # Valid pairing — now refuse a duplicate CT (unless force) and stamp the hash.
+        ct_hash = _dedup_or_hash(req.ct, req.force)
         spec = JobSpec(kind="import", params={
             "ct": req.ct, "contacts": req.contacts, "trajectories": req.trajectories,
             "label": req.label or "case", "surface": req.surface or "auto",
-            **({"t1": req.t1} if req.t1 else {})})
+            "ct_hash": ct_hash, **({"t1": req.t1} if req.t1 else {})})
         try:
             job = runner.create(spec)
         except ValueError as exc:

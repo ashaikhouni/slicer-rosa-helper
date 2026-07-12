@@ -93,5 +93,63 @@ class CasesListTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in cases], ["dddd4444"])
 
 
+@unittest.skipUnless(HAVE, "fastapi unavailable")
+class CaseManageTests(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        os.environ["ROSA_APP_WORKDIR"] = str(self.root)
+
+    def tearDown(self):
+        self._td.cleanup()
+        os.environ.pop("ROSA_APP_WORKDIR", None)
+
+    def _client(self, stub_run=False):
+        from rosa_service.app import create_app
+        app = create_app()
+        if stub_run:                          # don't spawn the real engine on force-create
+            async def _noop(job):
+                from rosa_service.models import JobState
+                job.state = JobState.succeeded
+            app.state.runner._run = _noop
+        return TestClient(app)
+
+    def _stamp_ct(self, jid, ct_path, ct_hash):
+        m = json.loads((self.root / jid / "manifest.json").read_text())
+        m["params"]["ct"] = str(ct_path)
+        m["params"]["ct_hash"] = ct_hash
+        (self.root / jid / "manifest.json").write_text(json.dumps(m))
+
+    def test_delete_removes_case_and_workdir(self):
+        _make_case(self.root, "del11111")
+        c = self._client()
+        self.assertEqual(len(c.get("/api/v1/cases").json()), 1)
+        self.assertEqual(c.delete("/api/v1/cases/del11111").status_code, 204)
+        self.assertEqual(c.get("/api/v1/cases").json(), [])
+        self.assertFalse((self.root / "del11111").exists())     # workdir gone
+
+    def test_delete_unknown_is_404(self):
+        self.assertEqual(self._client().delete("/api/v1/cases/nope").status_code, 404)
+
+    def test_dedup_blocks_same_ct(self):
+        from rosa_service.cases import ct_fingerprint
+        ct = self.root / "scan.nii.gz"; ct.write_bytes(b"CT-DATA" * 2000)
+        _make_case(self.root, "exist111", label="prior")
+        self._stamp_ct("exist111", ct, ct_fingerprint(ct))
+        r = self._client(stub_run=True).post("/api/v1/jobs", json={
+            "kind": "pipeline", "params": {"ct": str(ct), "label": "dup"}})
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["detail"]["existing"]["id"], "exist111")
+
+    def test_force_bypasses_dedup(self):
+        from rosa_service.cases import ct_fingerprint
+        ct = self.root / "scan.nii.gz"; ct.write_bytes(b"CT-DATA" * 2000)
+        _make_case(self.root, "exist222", label="prior")
+        self._stamp_ct("exist222", ct, ct_fingerprint(ct))
+        r = self._client(stub_run=True).post("/api/v1/jobs", json={
+            "kind": "pipeline", "params": {"ct": str(ct), "label": "dup", "force": True}})
+        self.assertEqual(r.status_code, 201)
+
+
 if __name__ == "__main__":
     unittest.main()
