@@ -88,6 +88,7 @@
 </style>
 
 <div class="topbar">
+  <button class="btn" id="backbtn" title="Return to the case review">← Back</button>
   <div class="brand">ROSA <span class="tag">SEEG</span></div>
   <div class="case">case <b id="caseName">-</b> &middot; post-op CT &middot; <span id="caseDims" class="mono"></span></div>
   <div class="spacer"></div>
@@ -330,6 +331,7 @@ $("#ww").oninput=e=>{setWin(winWL,+e.target.value);$$(".wbtn").forEach(x=>x.setA
 $("#snap").onclick=()=>snapActive(dz=>toast("Snapped &middot; <span class='mono'>&Delta;"+dz.toFixed(1)+" mm</span>"));
 $("#reset").onclick=()=>{const t=active();if(t.entry0){t.tipOffset=0;t.model=t.model0;t.entry=t.entry0.slice();t.target=t.target0.slice();}selectTraj(t.name);toast("Reset "+t.name);};
 $("#save").onclick=()=>toast("Plan saved locally &middot; <span class='mono'>"+CASE.trajectories.length+" shanks</span>");
+$("#backbtn").onclick=()=>{ if(window.opener&&!window.opener.closed)window.close(); else location.href="/"; };  // opened via window.open -> close the tab; direct -> app root
 
 // in-line endpoint drag: freeze image, move handle, re-slice on release
 function hitInline(sx,sy){const t=active(),v=inlineCache?.view;if(!v)return null;
@@ -383,7 +385,7 @@ window.addEventListener("keydown",e=>{if(e.key==="Escape"&&addMode)setAdd(false)
 
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";
-  setWin(40,120);$$(".wbtn").forEach(b=>b.setAttribute("aria-pressed",b.dataset.win==="brain"));
+  setWin(700,2200);$$(".wbtn").forEach(b=>b.setAttribute("aria-pressed",b.dataset.win==="metal"));  // metal default (electrode-first)
   initModels();renderList();syncInspector();resliceAll();
   new ResizeObserver(()=>resliceAll()).observe(document.querySelector(".viewport"));
 }
