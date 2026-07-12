@@ -200,9 +200,14 @@ iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
   border: 1px solid var(--line2); border-radius: 8px; background: #0e161d; }
 .casesearch:focus { border-color: var(--accent); outline: none; }
 .caseslist { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
-.casecard { display: block; text-align: left; padding: 13px 14px; border: 1px solid var(--line);
-  border-radius: 10px; background: var(--panel); font-weight: 400; }
+.casecard { position: relative; display: block; text-align: left; padding: 13px 14px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-weight: 400; }
 .casecard:hover { border-color: var(--accent-dim); background: #10202a; }
+.cc-del { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; padding: 0;
+  line-height: 1; font-size: 15px; border: none; border-radius: 6px; background: transparent;
+  color: var(--faint); opacity: 0; transition: opacity .12s; }
+.casecard:hover .cc-del { opacity: 1; }
+.cc-del:hover { background: #3a1e1e; color: var(--bad); border: none; }
 .cc-title { font-size: 14px; font-weight: 600; color: var(--ink); margin-bottom: 9px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cc-stats { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-bottom: 7px; }

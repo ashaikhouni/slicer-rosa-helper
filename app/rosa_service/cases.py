@@ -9,8 +9,27 @@ case's TSVs + review.json.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 from pathlib import Path
+
+
+def ct_fingerprint(ct_path: str | Path) -> str | None:
+    """SHA-256 of the CT file's bytes, or None if it's missing.
+
+    Identity of the scan: two cases built from the same CT file share this, so
+    the New-case / Import flows can spot "you already have a case for this CT"
+    (re-uploading the same file yields identical bytes → identical hash). Cheap,
+    streamed — read once at case creation, stored in the manifest.
+    """
+    ct_path = Path(ct_path)
+    if not ct_path.is_file():
+        return None
+    h = hashlib.sha256()
+    with open(ct_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _count_data_rows(path: Path) -> int:
@@ -64,4 +83,4 @@ def summarize_case(status, job_dir: str | Path) -> dict:
     }
 
 
-__all__ = ["summarize_case"]
+__all__ = ["summarize_case", "ct_fingerprint"]

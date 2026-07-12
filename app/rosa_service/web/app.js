@@ -105,13 +105,26 @@ async function uploadCreationMri(file) {
 
 // ---- step 2: run ------------------------------------------------------
 
-async function run() {
+async function run(force = false) {
   const label = $("label").value.trim() || "case";
   const params = { ct: state.ct.path, label };
+  if (force) params.force = true;
   if (state.creationMri) {
     params.t1 = state.creationMri.path;                        // MRI from the start
     params.surface = $("surfacesel").value;                    // brain-surface backend
   }
+  // POST first — a duplicate CT (409) is caught here, before we leave the form.
+  let r, body;
+  try {
+    r = await fetch(`${API}/jobs`, { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "pipeline", params }) });
+    body = await r.json().catch(() => ({}));
+  } catch (e) { $("ctinfo").textContent = `Could not start: ${e.message}`; return; }
+  if (r.status === 409 && body.detail && body.detail.existing)
+    return promptDuplicate(body.detail, () => run(true));
+  if (!r.ok) { $("ctinfo").textContent = `Could not start: ${body.detail || r.status}`; return; }
+  state.jobId = body.id;
   showStep("run");
   $("log").textContent = "";
   $("runstate").textContent = "Starting…";
@@ -120,17 +133,19 @@ async function run() {
     ? "detect → place contacts → strip MRI + build surface → viewer"
     : "detect → place contacts → build viewer (~2–3 min)";
   $("spinner").classList.remove("stopped");
-  try {
-    const job = await jsend(`${API}/jobs`, "POST",
-      { kind: "pipeline", params });
-    state.jobId = job.id;
-    streamLogs(job.id);
-    pollStatus(job.id);
-  } catch (e) {
-    appendLog(`error: ${e.message}`, "err");
-    $("runstate").textContent = "Failed to start";
-    $("spinner").classList.add("stopped");
-  }
+  streamLogs(body.id);
+  pollStatus(body.id);
+}
+
+// A New-case / Import hit an existing case for the same CT. Offer to open it, or
+// run anyway (force). Keeps accidental re-runs of the same scan out of the list.
+function promptDuplicate(detail, onForce) {
+  const ex = detail.existing || {};
+  const when = ex.created_at ? new Date(ex.created_at * 1000).toLocaleDateString() : "";
+  const msg = `${detail.message}${when ? ` Created ${when}.` : ""}\n\n` +
+    "OK → open the existing case.\nCancel → create another anyway.";
+  if (window.confirm(msg)) openCase(ex.id);
+  else onForce();
 }
 
 function appendLog(line, cls) {
@@ -688,8 +703,21 @@ function caseCard(c) {
     .filter(Boolean).join(" · ");
   const subEl = el("div", { class: "cc-sub muted" }, sub + " · ");
   subEl.append(el("span", { class: "cc-id" }, c.id.slice(0, 8)));   // distinguishes same-named cases
-  card.append(el("div", { class: "cc-title" }, c.label || c.id.slice(0, 8)), stats, subEl);
+  const del = el("button", { class: "cc-del", type: "button", title: "Delete case" }, "×");
+  del.onclick = (ev) => { ev.stopPropagation(); deleteCase(c); };   // don't open the card
+  card.append(del, el("div", { class: "cc-title" }, c.label || c.id.slice(0, 8)), stats, subEl);
   return card;
+}
+
+async function deleteCase(c) {
+  if (!window.confirm(`Delete case "${c.label || c.id.slice(0, 8)}"? This removes its files — it can't be undone.`))
+    return;
+  try {
+    const r = await fetch(`${API}/cases/${c.id}`, { method: "DELETE" });
+    if (!r.ok && r.status !== 204) throw new Error(await r.text());
+  } catch (e) { window.alert(`Delete failed: ${e.message}`); return; }
+  state.cases = (state.cases || []).filter((x) => x.id !== c.id);
+  renderCases();
 }
 
 // Open an existing case: load its results, then restore its newest label job
@@ -737,7 +765,7 @@ function showImportCheck(check, isError, message) {
     `${check.n_on_metal}/${check.n} on metal · ${check.n_in_bounds}/${check.n} in bounds`));
 }
 
-async function runImport() {
+async function runImport(force = false) {
   const ct = $("imp-ct").value.trim(), contacts = $("imp-contacts").value.trim(),
         traj = $("imp-traj").value.trim(), t1 = $("imp-t1").value.trim(),
         label = $("imp-label").value.trim() || "imported";
@@ -751,13 +779,15 @@ async function runImport() {
   try {
     r = await fetch(`${API}/jobs/import`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ct, contacts, trajectories: traj, label, ...(t1 ? { t1 } : {}) }),
+      body: JSON.stringify({ ct, contacts, trajectories: traj, label, force, ...(t1 ? { t1 } : {}) }),
     });
     body = await r.json().catch(() => ({}));
   } catch (e) { $("imp-msg").textContent = `Import failed: ${e.message}`; return; }
   $("imp-msg").textContent = "";
   if (!r.ok) {
     const d = body.detail;
+    if (d && typeof d === "object" && d.existing)          // duplicate CT
+      return promptDuplicate(d, () => runImport(true));
     if (d && typeof d === "object" && d.check) showImportCheck(d.check, true, d.message);
     else showImportCheck(null, true, typeof d === "string" ? d : "Import failed.");
     return;

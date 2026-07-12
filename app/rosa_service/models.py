@@ -76,6 +76,8 @@ class ImportRequest(BaseModel):
     t1: str | None = None
     label: str | None = None
     surface: str | None = None
+    # Bypass the "this CT already has a case" duplicate check (import anyway).
+    force: bool = False
 
 
 # ---------------------------------------------------------------------
