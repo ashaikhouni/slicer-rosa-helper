@@ -169,6 +169,18 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     async def list_jobs() -> list[JobStatus]:
         return runner.list()
 
+    @app.get(f"/api/{API_VERSION}/cases")
+    async def list_cases() -> list[dict]:
+        """Reviewable cases for the home screen — pipeline/import runs that
+        finished, each enriched with electrode/contact counts + MRI/label state
+        so the list is informative without opening a case. Newest first."""
+        from .cases import summarize_case
+        out = []
+        for st in runner.list():                 # newest-first
+            if st.kind in ("pipeline", "import") and st.state == "succeeded":
+                out.append(summarize_case(st, runner.get(st.id).workdir))
+        return out
+
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}", response_model=JobStatus)
     async def get_job(job_id: str) -> JobStatus:
         try:

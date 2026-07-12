@@ -1,0 +1,67 @@
+"""Per-case summaries for the Cases list.
+
+The Cases home shows enough to tell cases apart without opening them — how many
+electrodes and contacts, whether an MRI/labels are in, when it was made. Those
+counts aren't on JobStatus (they'd cost a file read on every status poll), so we
+compute them here, only for the (infrequently-fetched) case list, by reading the
+case's TSVs + review.json.
+"""
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+
+
+def _count_data_rows(path: Path) -> int:
+    """Row count minus the header, 0 if the file is missing."""
+    if not path.is_file():
+        return 0
+    with open(path, encoding="utf-8", errors="replace") as f:
+        n = sum(1 for _ in f)
+    return max(n - 1, 0)
+
+
+def _distinct_trajectories(contacts: Path) -> int:
+    """Shank count from contacts.tsv when trajectories.tsv is absent."""
+    if not contacts.is_file():
+        return 0
+    seen: set[str] = set()
+    with open(contacts, encoding="utf-8", errors="replace") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            t = (row.get("trajectory") or "").strip()
+            if t:
+                seen.add(t)
+    return len(seen)
+
+
+def _is_labeled(job_dir: Path) -> bool:
+    """True once any contact carries an anatomical region in the saved review."""
+    rj = job_dir / "review.json"
+    if not rj.is_file():
+        return False
+    try:
+        doc = json.loads(rj.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a partial review.json isn't "labeled"
+        return False
+    return any(c.get("region")
+               for s in doc.get("shanks", []) for c in s.get("contacts", []))
+
+
+def summarize_case(status, job_dir: str | Path) -> dict:
+    """A Cases-list row: identity + electrode/contact counts + MRI/label state."""
+    job_dir = Path(job_dir)
+    contacts = job_dir / "contacts.tsv"
+    return {
+        "id": status.id,
+        "label": status.label,
+        "kind": status.kind,
+        "created_at": status.created_at,
+        "has_mri": bool(status.t1),
+        "n_contacts": _count_data_rows(contacts),
+        "n_shanks": _count_data_rows(job_dir / "trajectories.tsv") or _distinct_trajectories(contacts),
+        "labeled": _is_labeled(job_dir),
+    }
+
+
+__all__ = ["summarize_case"]
