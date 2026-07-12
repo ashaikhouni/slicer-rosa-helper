@@ -24,6 +24,7 @@ async function jsend(url, method, body) {
 }
 
 function showStep(name) {
+  document.body.classList.toggle("results-active", name === "results");
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -192,6 +193,28 @@ async function loadResults(id) {
   prefillLabelMriFromCase(id);   // MRI provided at creation → no re-upload to label
   try { renderReview(await jget(`${API}/jobs/${id}/review`)); }
   catch (e) { $("reviewlist").textContent = `Could not load review: ${e.message}`; }
+  setCaseSlots();
+  showWs("review");   // land in Review; the Edit view lazy-loads the editor on demand
+}
+
+// ---- workspace: Edit / Review views + the case-input control ----------
+
+function showWs(v) {
+  document.querySelectorAll("#wsflow button").forEach((b) => b.setAttribute("aria-selected", b.dataset.ws === v));
+  $("ws-edit").classList.toggle("on", v === "edit");
+  $("ws-review").classList.toggle("on", v === "review");
+  if (v === "edit" && state.jobId) {
+    const f = $("editframe"), want = `${API}/jobs/${state.jobId}/editor/`;
+    if (f.getAttribute("src") !== want) f.src = want;   // load the editor once, on first open
+  }
+}
+
+function setCaseSlots() {
+  const mriOn = !!state.mri;
+  const m = $("slot-mri");
+  m.className = "slot " + (mriOn ? "on" : "off");
+  m.querySelector(".fn").textContent = mriOn ? "loaded" : "add";
+  $("slot-reg").hidden = !mriOn;
 }
 
 // If the case was created with an MRI, the pipeline job carries its t1: pre-fill
@@ -203,6 +226,7 @@ async function prefillLabelMriFromCase(id) {
       state.mri = { path: st.t1, name: "(MRI from case creation)" };
       $("labelstatus").textContent = "· MRI from case creation";
       $("labelbtn").disabled = false;
+      setCaseSlots();
     }
   } catch (_e) { /* ignore */ }
 }
@@ -355,6 +379,7 @@ async function uploadMri(file) {
   state.mri = await r.json();
   $("labelstatus").textContent = `· MRI ${state.mri.name}`;
   $("labelbtn").disabled = false;
+  setCaseSlots();
 }
 
 async function runLabel() {
@@ -616,9 +641,11 @@ async function boot() {
   $("runbtn").onclick = run;
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
-  $("editbtn").onclick = () => {
-    if (state.jobId) window.open(`${API}/jobs/${state.jobId}/editor/`, "_blank");
+  document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
+  $("slot-mri").onclick = () => {
+    if (!state.mri) { showWs("review"); const lc = $("labelcard"); lc.open = true; lc.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
   };
+  $("slot-reg").onclick = () => { showWs("review"); setViewerTab("qc"); };
   $("restartbtn").onclick = restart;
   $("mriinput").addEventListener("change", (ev) => {
     const f = ev.target.files[0]; if (f) uploadMri(f);
