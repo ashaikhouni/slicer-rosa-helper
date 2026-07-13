@@ -196,6 +196,18 @@
             <button id="labelbtn" class="ghost" disabled>Register MRI &amp; label</button>
             <pre id="labellog" class="log mini" hidden></pre>
             <div id="labelmsg" class="muted"></div>
+            <hr class="soft">
+            <p class="muted">Or import a <b>THOMAS</b> thalamic segmentation done
+              outside the app: its nuclei are registered into this case's CT and
+              shown as colored deep structures in the 3D view + on the slices.</p>
+            <div class="labelrow">
+              <label class="field small" style="flex:1">THOMAS output dir
+                <input type="text" id="thomasdir" placeholder="/path/to/THOMAS (has left/ + right/)" autocomplete="off">
+              </label>
+            </div>
+            <button id="thomasbtn" class="ghost" disabled>Import THOMAS deep structures</button>
+            <pre id="thomaslog" class="log mini" hidden></pre>
+            <div id="thomasmsg" class="muted"></div>
           </div>
         </details>
 

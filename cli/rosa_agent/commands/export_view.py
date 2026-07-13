@@ -264,6 +264,16 @@ def _write_ct_slice_volume(
     )
 
 
+def _write_structure_slice_volume(structure_labelmap_path, out_path: Path) -> dict[str, Any]:
+    """Write the deep-structure labelmap as an int16 NIfTI so the 2D slice panels
+    can tint each nucleus by its atlas color. Shipped on its OWN grid (not the
+    CT's) — the viewer samples it by world-RAS, so it overlays correctly on any
+    slice volume (CT or MRI) regardless of grid, and stays small for a big CT."""
+    import SimpleITK as sitk
+    lab = sitk.Cast(sitk.ReadImage(str(structure_labelmap_path)), sitk.sitkInt16)
+    return _slice_volume_meta(lab, out_path, vid="structures", label="Atlas structures")
+
+
 def _write_t1_resampled_to_ct(
     fixed_ct, moving_t1, sitk_transform, out_path: Path,
 ) -> dict[str, Any]:
@@ -396,6 +406,44 @@ def _color_for_label_value(
     return (r / 255.0, g / 255.0, b / 255.0, 1.0)
 
 
+def _structure_surfaces(labelmap_path, lut=None):
+    """Mesh EVERY labeled structure in a warped labelmap into a colored surface
+    (RAS / contact frame) — the deep anatomy (thalamic nuclei, subcortical) a
+    cortical atlas can't paint on the ribbon. ``lut`` maps int label -> (name,
+    (r,g,b) in 0..1); missing labels get a stable hashed color.
+
+    No size filtering: which superficial vs deep structures are SHOWN is entirely
+    the viewer's depth slider's job (hide by distance from the cortical surface).
+    Only sub-voxel noise (<50 vox) is skipped."""
+    import colorsys
+    import hashlib
+    import nibabel as nib
+    from rosa_core.brain_mesh import surface_from_mask
+    img = nib.load(str(labelmap_path))
+    arr = np.asanyarray(img.dataobj)
+    out = []
+    for label in sorted(int(v) for v in np.unique(arr) if int(v) != 0):
+        mask = arr == label
+        if int(mask.sum()) < 50:       # noise floor only
+            continue
+        try:
+            surf = surface_from_mask(
+                nib.Nifti1Image(mask.astype(np.uint8), img.affine),
+                smooth_sigma=1.0, taubin_iterations=12)
+        except Exception:  # noqa: BLE001 — skip a structure that won't mesh
+            continue
+        if lut and label in lut:
+            name, rgb = str(lut[label][0]), tuple(float(c) for c in lut[label][1])
+        else:
+            h = int(hashlib.sha1(str(label).encode()).hexdigest()[:6], 16)
+            rgb = colorsys.hsv_to_rgb((h % 360) / 360.0, 0.55, 0.9)
+            name = f"structure_{label}"
+        out.append({"name": name, "label": label,
+                    "vertices_ras": surf.vertices_ras, "faces": surf.faces,
+                    "normals": surf.vertex_normals, "color": rgb})
+    return out
+
+
 def _build_scene(
     *,
     surfaces,
@@ -403,6 +451,7 @@ def _build_scene(
     contacts,
     contact_labels,
     lut_index,
+    structures=None,
     shaft_radius_mm: float = 0.35,
     contact_band_radius_mm: float = 0.55,
     contact_band_length_mm: float = 2.0,
@@ -462,6 +511,23 @@ def _build_scene(
                 "n_vertices": int(surf.vertices_ras.shape[0]),
             },
         )
+
+    # Deep-structure meshes (thalamic nuclei / subcortical) — solid colored
+    # surfaces that sit INSIDE the translucent cortex, so fading the brain (α
+    # slider) reveals them + the electrodes threading through. Each carries
+    # extras.kind="structure" so the viewer can list / toggle / auto-fade them.
+    for st in (structures or []):
+        r, g, b = st["color"]
+        mat = scene.add_material(
+            f"struct_{st['label']}", (r, g, b, 1.0),   # opaque by default (clean, no transparency sort artifacts)
+            metallic=0.0, roughness=0.6, double_sided=True)
+        scene.add_surface(
+            name=f"structure/{st['name']}",
+            positions=st["vertices_ras"], faces=st["faces"], material_index=mat,
+            normals=st.get("normals"),
+            extras={"kind": "structure", "structure": st["name"],
+                    "label": int(st["label"]), "color": [r, g, b],
+                    "depth_mm": float(st.get("depth_mm", 0.0))})
 
     # Per-shank shaft colors. Static viewers (Preview, QuickLook,
     # online glTF viewers) don't run our JS, so a single-material
@@ -712,6 +778,19 @@ _HTML_TEMPLATE = """<!doctype html>
           <input type="range" min="0" max="1" step="0.05" value="0.45" />
           <span class="coord">0.45</span>
         </label>
+        <label class="plane-ctl" data-control="struct-alpha" id="structalpha-ctl" style="display:none" title="Atlas structure opacity — opaque by default (clean); lower it to see electrodes pass through a structure (some transparency artifacts are unavoidable in 3D)">
+          <span class="axis">Structure opacity</span>
+          <input type="range" min="0" max="1" step="0.05" value="1" />
+          <span class="coord">1.00</span>
+        </label>
+        <label class="plane-ctl" data-control="depth" id="depth-ctl" style="display:none" title="Reveal depth — hide structures within this many mm of the cortical surface, peeling superficial tissue to expose the deep nuclei">
+          <span class="axis">Reveal depth</span>
+          <input type="range" min="0" max="40" step="1" value="0" />
+          <span class="coord">0 mm</span>
+        </label>
+        <label class="plane-ctl" data-control="struct-slices" id="structslices-ctl" style="display:none" title="Tint the deep nuclei on the 2D slice panels by their atlas color (same colors as the 3D meshes)">
+          <input type="checkbox" checked /><span class="axis">Atlas on slices</span>
+        </label>
       </span>
       <span class="tb-sep"></span>
       <span class="tb-group" title="Slice-navigator volume (the axial/coronal/sagittal panels + any planes shown in 3D)">
@@ -902,6 +981,86 @@ resize();
 const nodesByName = new Map();           // node.name -> outer Object3D
 const shankNodes = new Map();            // shank id -> [Object3D, ...]
 const surfaceNodes = [];                 // FS pial Object3D nodes
+const structureNodes = [];               // deep-structure nodes (kind="structure")
+
+// "Reveal depth" slider: hide structures whose shallowest point is within N mm
+// of the cortical surface — peels superficial tissue (which touches the cortex,
+// depth ~0) away first, exposing the truly-deep nuclei. Populated once the GLB
+// is indexed (see onGltfLoad).
+function _setupDepthSlider() {{
+  const ctl = document.getElementById("depth-ctl");
+  if (!ctl || !structureNodes.length) return;
+  const depths = structureNodes.map(n => (n.userData && n.userData.depth_mm) || 0);
+  // "Reveal depth" peels by distance from the CORTICAL surface. A deep-only atlas
+  // (THOMAS, subcortical) ships without a cortex, so every depth is ~0 and the
+  // peel is meaningless — hide the control rather than show a slider that blanks
+  // everything at the first notch.
+  if (Math.max.apply(null, depths) < 0.5) {{ ctl.style.display = "none"; return; }}
+  const inp = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  inp.max = String(Math.max(5, Math.ceil(Math.max.apply(null, depths))));
+  inp.value = "0";   // show all atlas structures by default; user peels inward
+  ctl.style.display = "";
+  const apply = () => {{
+    const t = Number(inp.value);
+    for (const n of structureNodes) n.visible = (((n.userData && n.userData.depth_mm) || 0) >= t);
+    if (coord) coord.textContent = t + " mm";
+  }};
+  inp.addEventListener("input", apply);
+  apply();
+}}
+
+// Atlas-structure opacity. Deep nuclei are SEPARATED solids (they don't
+// interpenetrate), so the correct translucency is the painter's algorithm:
+// transparent=true + depthWrite=FALSE, letting three.js sort them back-to-front
+// by centroid EVERY frame and blend in order. That's stable under rotation.
+// (An earlier build forced depthWrite=true to stop flicker, but that flicker was
+// the enclosing cortex HULL tying with the nuclei in the sort — a hull problem,
+// handled separately via renderOrder — not the nuclei themselves. depthWrite=true
+// hard-culls one translucent nucleus against another, and since draw order is
+// fixed while depth changes with the camera, THAT is what pops/recolors on
+// rotation.) We also cull back faces when translucent (FrontSide) so a single
+// nucleus reads as one tinted shell, not a double-walled blob. Opaque stays
+// double-sided + depth-writing (the clean, artifact-free default).
+function _applyStructureAlpha(v) {{
+  const transp = v < 0.999;
+  for (const node of structureNodes) {{
+    const mesh = node.userData && node.userData._mesh;
+    if (!mesh || !mesh.material) continue;
+    mesh.material.opacity = v;
+    mesh.material.transparent = transp;
+    mesh.material.depthWrite = !transp;                       // opaque writes; translucent sorts
+    mesh.material.side = transp ? THREE.FrontSide : THREE.DoubleSide;
+    mesh.renderOrder = 0;                                     // below the cortex hull (renderOrder 1)
+    mesh.material.needsUpdate = true;
+  }}
+}}
+function _setupStructureAlpha() {{
+  const ctl = document.getElementById("structalpha-ctl");
+  if (!ctl || !structureNodes.length) return;
+  const inp = ctl.querySelector('input[type="range"]');
+  const coord = ctl.querySelector(".coord");
+  ctl.style.display = "";
+  const apply = () => {{
+    _applyStructureAlpha(Number(inp.value));
+    if (coord) coord.textContent = parseFloat(inp.value).toFixed(2);
+  }};
+  inp.addEventListener("input", apply);
+  apply();
+}}
+// "Atlas on slices" checkbox — tints the 2D panels by the labelmap. Wired once
+// the structure volume finishes loading (see onMeta).
+function _setupStructOverlayToggle() {{
+  const ctl = document.getElementById("structslices-ctl");
+  if (!ctl || !structureSliceVolume) return;
+  const cb = ctl.querySelector('input[type="checkbox"]');
+  ctl.style.display = "";
+  cb.checked = structOverlayOn;
+  cb.addEventListener("change", () => {{
+    structOverlayOn = cb.checked;
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }});
+}}
 const originalMaterials = new Map();     // outer Object3D -> child Mesh's original material
 let gltfRoot = null;
 
@@ -983,6 +1142,14 @@ const onGltf = gltf => {{
       // dialed back to 1.0 — the source of the "fractured cortex at
       // α=1" report.
       surfaceNodes.push(obj);
+    }} else if (kind === "structure") {{
+      structureNodes.push(obj);
+      // Structure meshes hide at some camera angles because their GLB bounding
+      // volume is mis-derived -> frustum culling drops them. Recompute the
+      // bounds and turn culling off (cheap for a dozen meshes) so they're stable.
+      obj.traverse(c => {{
+        if (c.isMesh) {{ c.frustumCulled = false; if (c.geometry) c.geometry.computeBoundingSphere(); }}
+      }});
     }} else if (extras.shank) {{
       if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
       shankNodes.get(extras.shank).push(obj);
@@ -995,6 +1162,18 @@ const onGltf = gltf => {{
   // slider — even though both controls have non-default initial
   // positions in the toolbar. The result was a counter-intuitive
   // "slider says 0.45 but brain is solid" boot state.
+  if (structureNodes.length) {{
+    // Deep-atlas view: ONE color system (the atlas structures). The cortex
+    // becomes a neutral GLASS hull (not parcellation-black), its color-mode
+    // dropdown is hidden, and structures are translucent (electrodes show
+    // through). Reveal-depth peels them by distance from the surface.
+    const ba = document.querySelector('[data-control="brain-alpha"] input[type="range"]');
+    if (ba) {{ ba.value = "0.25"; const c = ba.parentElement.querySelector(".coord"); if (c) c.textContent = "0.25"; }}
+    const bc = document.querySelector('.plane-ctl[data-control="brain-color"]');
+    if (bc) {{ const sel = bc.querySelector("select"); if (sel) sel.value = "white"; bc.style.display = "none"; }}
+    _setupStructureAlpha();
+    _setupDepthSlider();
+  }}
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
   if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
   fitToObject(gltfRoot);
@@ -1049,6 +1228,14 @@ function _apply4x4(m, v) {{
     m[1][0]*v[0] + m[1][1]*v[1] + m[1][2]*v[2] + m[1][3],
     m[2][0]*v[0] + m[2][1]*v[1] + m[2][2]*v[2] + m[2][3],
   ];
+}}
+
+function _mul4x4(a, b) {{
+  const o = [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];
+  for (let r = 0; r < 4; r++)
+    for (let c = 0; c < 4; c++)
+      o[r][c] = a[r][0]*b[0][c] + a[r][1]*b[1][c] + a[r][2]*b[2][c] + a[r][3]*b[3][c];
+  return o;
 }}
 
 async function _maybeInflate(buffer) {{
@@ -1115,6 +1302,13 @@ class NiftiVolume {{
 
 const slicePanels = {{}};   // axis -> {{ canvas, ctx, coordEl }}
 let mriVolume = null;
+// Deep-structure labelmap overlaid on the 2D panels: each nucleus tinted by its
+// atlas color (same colors as the 3D meshes), sampled by world-RAS so it aligns
+// on any slice volume. structColor255: label -> [r,g,b] 0..255.
+let structureSliceVolume = null;
+let structOverlayOn = true;
+let structOverlayAlpha = 0.5;
+const structColor255 = new Map();
 let mriRasCursor = null;   // last selected RAS point [x,y,z]
 let mriVoxCursor = [0, 0, 0]; // last selected vox indices
 // Contacts, in the shared CT/contact RAS frame, overlaid on every slice so the
@@ -1248,6 +1442,12 @@ function renderSlice(axis) {{
   const img = ctx.createImageData(W, H);
   const range = Math.max(1e-6, mriVolume.displayMax - mriVolume.displayMin);
   const lo = mriVolume.displayMin;
+  // Atlas overlay: precompute the (this-volume voxel) -> (labelmap voxel)
+  // transform ONCE per slice (composition of two affines), then it's one matrix
+  // apply per pixel. Sampling by world-RAS means it lines up on CT or MRI alike.
+  const ov = structOverlayOn && structureSliceVolume && structColor255.size;
+  const M = ov ? _mul4x4(structureSliceVolume.affineInv, mriVolume.affine) : null;
+  const OA = structOverlayAlpha, OB = 1 - OA;
   for (let v = 0; v < H; v++) {{
     // Flip the vertical axis so anatomically "up" (anterior/superior)
     // appears at the top of the canvas.
@@ -1259,8 +1459,19 @@ function renderSlice(axis) {{
       else {{ i = throughIdx; j = u; k = vSrc; }}
       const raw = mriVolume.voxel(i, j, k);
       const g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
+      let r = g, gg = g, bb = g;
+      if (ov) {{
+        const li = Math.round(M[0][0]*i + M[0][1]*j + M[0][2]*k + M[0][3]);
+        const lj = Math.round(M[1][0]*i + M[1][1]*j + M[1][2]*k + M[1][3]);
+        const lk = Math.round(M[2][0]*i + M[2][1]*j + M[2][2]*k + M[2][3]);
+        const lbl = structureSliceVolume.voxel(li, lj, lk);
+        if (lbl > 0) {{
+          const col = structColor255.get(lbl | 0);
+          if (col) {{ r = g*OB + col[0]*OA; gg = g*OB + col[1]*OA; bb = g*OB + col[2]*OA; }}
+        }}
+      }}
       const px = (v * W + u) * 4;
-      img.data[px] = g; img.data[px+1] = g; img.data[px+2] = g; img.data[px+3] = 255;
+      img.data[px] = r; img.data[px+1] = gg; img.data[px+2] = bb; img.data[px+3] = 255;
     }}
   }}
   ctx.putImageData(img, 0, 0);
@@ -2068,6 +2279,12 @@ function _applyBrainAlpha(v) {{
     // Trade-off: the back of the brain is occluded by the front (which
     // is what the user wants — they're looking from outside).
     mesh.material.depthWrite = true;
+    // Draw the cortex hull AFTER the deep nuclei (renderOrder 0). Otherwise the
+    // translucent glass hull, drawn first with depthWrite=true, writes depth at
+    // its near face and depth-culls the nuclei sitting inside it — the classic
+    // "deep structures vanish behind the glass brain" bug. Last-drawn, it just
+    // hazes over them as the outer shell.
+    mesh.renderOrder = 1;
     mesh.material.needsUpdate = true;
   }}
 }}
@@ -2100,6 +2317,19 @@ function onMeta(meta) {{
   allContacts = (meta.contacts || [])
     .map(c => ({{ label: c.label, shank: c.trajectory, ras: c.position || [c.x, c.y, c.z] }}))
     .filter(c => Array.isArray(c.ras) && c.ras.length === 3);
+  // Atlas-structure colors (for the 2D slice tint) + the labelmap volume itself.
+  structColor255.clear();
+  for (const s of (meta.structures || [])) {{
+    const c = s.color || [1, 1, 1];
+    structColor255.set(s.label | 0,
+      [Math.round(c[0]*255), Math.round(c[1]*255), Math.round(c[2]*255)]);
+  }}
+  if (meta.structure_volume && structColor255.size) {{
+    _fetchVolume(meta.structure_volume)
+      .then(v => {{ structureSliceVolume = v; _setupStructOverlayToggle();
+                   renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); }})
+      .catch(e => console.error("structure overlay volume", e));
+  }}
   // Volume roles (CT / MRI (brain) / FreeSurfer T1). Backend lists [MRI(brain),
   // T1, CT]; falls back to legacy `t1_volume`.
   const volSel = document.getElementById("vol-select");
@@ -2174,6 +2404,7 @@ function __initPicker() {{
         ? Object.assign({{}}, v, {{ path: blobByName[v.path] }}) : v;
       if (Array.isArray(meta.volumes)) meta.volumes = meta.volumes.map(fix);
       if (meta.t1_volume) meta.t1_volume = fix(meta.t1_volume);
+      if (meta.structure_volume) meta.structure_volume = fix(meta.structure_volume);
       if (dz) dz.style.display = "none";
       onMeta(meta);
       const glbUrl = blobByName["scene.glb"];
@@ -2298,6 +2529,8 @@ def _assemble_viewer(
     deepmriprep_tissue_path: Path | None = None,
     atlas_labelmap_path: Path | None = None,
     atlas_name: str = "",
+    structure_labelmap_path: Path | None = None,
+    structure_lut: dict | None = None,
     parcellation,
     lut,
     annotation: str,
@@ -2591,12 +2824,42 @@ def _assemble_viewer(
             _stderr(f"[view] DVR volume export failed ({exc})")
     volumes.append(ct_slice_meta)
 
+    structures = []
+    if structure_labelmap_path is not None and Path(structure_labelmap_path).is_file():
+        structures = _structure_surfaces(structure_labelmap_path, structure_lut)
+        _stderr(f"[view] meshed {len(structures)} deep structures from "
+                f"{Path(structure_labelmap_path).name}")
+        # Depth of each structure below the cortical surface — the viewer's
+        # "reveal depth" slider hides anything shallower than its threshold, so a
+        # tissue class that TOUCHES the cortex (depth ~0) peels away first while
+        # the truly-deep nuclei (a real gap to the surface) stay.
+        if structures and surfaces:
+            import numpy as np
+            from scipy.spatial import cKDTree
+            surf_pts = np.vstack([np.asarray(s.vertices_ras, dtype=float) for s in surfaces])
+            tree = cKDTree(surf_pts)
+            for st in structures:
+                d, _ = tree.query(np.asarray(st["vertices_ras"], dtype=float))
+                st["depth_mm"] = float(np.percentile(d, 5))   # shallowest point's depth
+
+    # Ship the labelmap itself so the 2D slice panels can tint each nucleus by its
+    # atlas color (the same colors as the 3D meshes), sampled by world-RAS.
+    structure_volume_meta = None
+    if structures and structure_labelmap_path is not None and Path(structure_labelmap_path).is_file():
+        try:
+            structure_volume_meta = _write_structure_slice_volume(
+                structure_labelmap_path, out / "structures_in_view.nii.gz")
+            _stderr("[view] wrote structures_in_view.nii.gz (atlas labels for slice overlay)")
+        except Exception as exc:  # noqa: BLE001 — slice overlay is optional
+            _stderr(f"[view] structure slice-overlay volume skipped ({exc})")
+
     scene, contact_meta = _build_scene(
         surfaces=surfaces,
         trajectories=trajectories,
         contacts=contacts,
         contact_labels=contact_labels,
         lut_index=lut_index,
+        structures=structures,
         shaft_radius_mm=shaft_radius_mm,
         contact_band_radius_mm=contact_band_radius_mm,
         contact_band_length_mm=contact_band_length_mm,
@@ -2615,6 +2878,10 @@ def _assemble_viewer(
         "annotation": annotation if fs is not None else "",
         "trajectories": trajectories,
         "contacts": contact_meta,
+        "structures": [{"name": s["name"], "label": int(s["label"]),
+                        "color": [float(c) for c in s["color"]],
+                        "depth_mm": float(s.get("depth_mm", 0.0))} for s in structures],
+        "structure_volume": structure_volume_meta,
         "volumes": volumes,
         # Back-compat: the original viewer reads `t1_volume`. Point it at the
         # default volume (T1 in FS mode, CT otherwise) so old behavior holds.
@@ -2763,6 +3030,8 @@ def run_view_results(
     deepmriprep_tissue: str | Path | None = None,
     atlas_labelmap: str | Path | None = None,
     atlas_name: str = "",
+    structure_meshes: str | Path | None = None,
+    structure_lut: dict | None = None,
     surface_kinds: tuple[str, ...] = ("pial",),
     annotation: str = "aparc",
     shaft_radius_mm: float = 0.35,
@@ -2820,6 +3089,8 @@ def run_view_results(
         deepmriprep_tissue_path=(Path(deepmriprep_tissue) if deepmriprep_tissue else None),
         atlas_labelmap_path=(Path(atlas_labelmap) if atlas_labelmap else None),
         atlas_name=atlas_name,
+        structure_labelmap_path=(Path(structure_meshes) if structure_meshes else None),
+        structure_lut=structure_lut,
         parcellation=parcellation,
         lut=lut,
         annotation=annotation,

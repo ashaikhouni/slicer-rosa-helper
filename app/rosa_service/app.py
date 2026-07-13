@@ -41,7 +41,7 @@ from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner
 from .models import (
     ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
-    ReviewOp, ReviewPatch,
+    ReviewOp, ReviewPatch, ThomasImportRequest,
 )
 from .review import ReviewStore, export_contacts
 
@@ -351,6 +351,37 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             "surface": parent.params.get("surface", "auto"),
             # Cache registrations in the parent case dir so labeling more atlases
             # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
+            "regcache": str(parent.workdir / "regcache")})
+        try:
+            job = runner.create(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return job.status()
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/import-thomas",
+              response_model=JobStatus, status_code=201)
+    async def create_thomas_import_job(job_id: str, req: ThomasImportRequest) -> JobStatus:
+        """Import an external THOMAS thalamic segmentation onto a case as deep
+        meshes: warp the nuclei into the CT frame and re-render the viewer with
+        --structure-meshes. Uses the case's CT + contacts; needs no re-upload."""
+        parent = _job_or_404(job_id)
+        contacts = parent.workdir / "contacts.tsv"
+        if not contacts.is_file():
+            raise HTTPException(status_code=409,
+                                detail="parent job has no contacts.tsv (run a pipeline job first)")
+        ct = parent.params.get("ct")
+        if not ct:
+            raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        thomas_dir = Path(req.thomas_dir).expanduser()
+        if not thomas_dir.is_dir():
+            raise HTTPException(status_code=422,
+                                detail=f"THOMAS dir not found on server: {thomas_dir}")
+        spec = JobSpec(kind="import-thomas", params={
+            "parent": job_id, "thomas_dir": str(thomas_dir),
+            "contacts": str(contacts), "ct": ct,
+            # Case MRI (if any) keeps the cortex surface around the nuclei.
+            "t1": parent.params.get("t1"),
+            "surface": parent.params.get("surface", "auto"),
             "regcache": str(parent.workdir / "regcache")})
         try:
             job = runner.create(spec)

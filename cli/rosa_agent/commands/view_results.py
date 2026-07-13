@@ -27,6 +27,7 @@ register or re-detect; it displays what you give it.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -133,6 +134,14 @@ def main(argv: list[str] | None = None) -> int:
              "cerebrum-only).",
     )
     parser.add_argument(
+        "--structure-meshes", default="",
+        help="path to a deep-structure labelmap in the CT/contact frame (thalamic "
+             "nuclei / subcortical / THOMAS); each label is meshed into a colored "
+             "solid inside the translucent cortex so it's visible in 3D.")
+    parser.add_argument(
+        "--structure-lut", default="",
+        help="optional JSON {label: [name, [r,g,b]]} naming/coloring the structures.")
+    parser.add_argument(
         "--atlas-labelmap", default="",
         help="path to the active atlas labelmap warped into the CT/contact frame "
              "(from `label --save-atlas-labelmap`); colors the brain surface by "
@@ -207,6 +216,10 @@ def main(argv: list[str] | None = None) -> int:
             deepmriprep_tissue=args.deepmriprep_tissue or None,
             atlas_labelmap=args.atlas_labelmap or None,
             atlas_name=args.atlas_name,
+            structure_meshes=args.structure_meshes or None,
+            structure_lut=({int(k): v for k, v in
+                            json.loads(Path(args.structure_lut).read_text()).items()}
+                           if args.structure_lut else None),
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),

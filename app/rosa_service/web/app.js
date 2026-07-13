@@ -260,6 +260,10 @@ function resetLabelCard() {
   $("labelstatus").textContent = "";
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
+  state.thomasJobId = null;
+  $("thomasbtn").disabled = true;
+  $("thomasmsg").textContent = "";
+  const tl = $("thomaslog"); if (tl) { tl.hidden = true; tl.textContent = ""; }
   $("qcplanes").innerHTML = ""; state.qc = null;
   $("qcspace").hidden = true;
   $("tab-qc").disabled = true;
@@ -378,6 +382,48 @@ function restart() {
 }
 
 // ---- anatomical labeling (MRI → register → propose → approve) --------
+
+// Import an external THOMAS thalamic segmentation onto the current case: warp
+// the nuclei into the CT frame and re-render the 3D view + slices with them.
+// Mirrors the label flow (POST → stream log → poll → reload the viewer).
+async function runThomasImport() {
+  const dir = $("thomasdir").value.trim();
+  if (!dir || !state.jobId) return;
+  $("thomasbtn").disabled = true;
+  const tl = $("thomaslog"); tl.hidden = false; tl.textContent = "";
+  $("thomasmsg").innerHTML =
+    "Registering THOMAS T1 → CT and warping the nuclei (~30 s) — the 3D updates when done…";
+  try {
+    const job = await jsend(`${API}/jobs/${state.jobId}/import-thomas`, "POST",
+      { thomas_dir: dir });
+    state.thomasJobId = job.id;
+    streamInto(job.id, "thomaslog");
+    pollThomas(job.id);
+  } catch (e) {
+    $("thomasmsg").textContent = `Failed to start: ${e.message}`;
+    $("thomasbtn").disabled = false;
+  }
+}
+
+function pollThomas(id) {
+  clearInterval(state.thomasPoll);
+  state.thomasPoll = setInterval(async () => {
+    let st;
+    try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
+    if (!["succeeded", "failed", "cancelled"].includes(st.state)) return;
+    clearInterval(state.thomasPoll);
+    $("thomasbtn").disabled = false;
+    if (st.state === "succeeded") {
+      $("thomasmsg").textContent = "Deep structures imported — reloading the 3D view.";
+      const f = $("viewerframe");
+      if (f && state.jobId) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
+    } else {
+      $("thomasmsg").innerHTML =
+        `Import <strong>${st.state}</strong>` +
+        `${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}.`;
+    }
+  }, 1000);
+}
 
 async function loadAtlases() {
   try {
@@ -850,6 +896,11 @@ async function boot() {
   });
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
+  // THOMAS import: enable once a case is loaded and a dir is typed.
+  $("thomasdir").addEventListener("input", () => {
+    $("thomasbtn").disabled = !(state.jobId && $("thomasdir").value.trim());
+  });
+  $("thomasbtn").onclick = runThomasImport;
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
   $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });

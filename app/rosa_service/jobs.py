@@ -408,6 +408,51 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
         steps.append(view_step)
         return steps
+    if kind == "import-thomas":
+        # Import an EXTERNAL THOMAS thalamic segmentation onto an existing case as
+        # DEEP-structure meshes: warp its per-nucleus masks into the CT frame, then
+        # re-render the case viewer with --structure-meshes (a deep-only atlas —
+        # the viewer hides the cortical "reveal depth" peel for it). Mirrors the
+        # label flow, but the labelmap comes from external masks, not an MNI atlas,
+        # and it drives structure meshes rather than surface coloring.
+        thomas_dir = spec.params.get("thomas_dir")
+        contacts = spec.params.get("contacts")
+        ct = spec.params.get("ct")
+        if not (thomas_dir and contacts and ct):
+            raise ValueError("import-thomas job requires params.thomas_dir, "
+                             "params.contacts, params.ct")
+        thomas_dir, contacts, ct = str(thomas_dir), str(contacts), str(ct)
+        t1 = spec.params.get("t1")
+        t1 = str(t1) if t1 else None
+        surface = str(spec.params.get("surface") or "auto")
+        parent_dir = Path(contacts).parent
+        parent_traj = str(parent_dir / "trajectories.tsv")
+        parent_viewer = str(parent_dir / "viewer")
+        regcache = Path(spec.params.get("regcache") or (parent_dir / "regcache"))
+        base = [py, "-u", "-m", "rosa_agent"]
+        labelmap = str(workdir / "thomas_in_ct.nii.gz")
+        lut = str(workdir / "thomas_lut.json")
+        # THOMAS ships its OWN T1, distinct from the case T1, so this registration
+        # is separate from the label flow's t1_to_ct — cache it under its own name
+        # so a re-import (or another THOMAS run) reuses it.
+        thomas_tfm = regcache / "thomas_t1_to_ct.tfm"
+        import_step = base + ["import-thomas", thomas_dir, "--ct", ct,
+                              "-o", labelmap, "--lut-out", lut]
+        if thomas_tfm.is_file():
+            import_step += ["--t1-to-ct", str(thomas_tfm)]
+        else:
+            import_step += ["--save-transform", str(thomas_tfm)]
+        view_step = base + ["view-results", str(parent_dir), "--output", parent_viewer,
+                            "--ct", ct, "--contacts", contacts, "--trajectories", parent_traj,
+                            "--structure-meshes", labelmap, "--structure-lut", lut]
+        # Keep the subject brain surface (from the case MRI) so the deep nuclei sit
+        # inside the cortex, exactly as in a normal case render.
+        if t1:
+            view_step += _brain_surface_view_flags(
+                t1, regcache,
+                include_transform=(regcache / "t1_to_ct.tfm").is_file(),
+                surface_source=surface)
+        return [import_step, view_step]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

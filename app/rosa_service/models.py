@@ -151,8 +151,22 @@ class LabelRequest(BaseModel):
     atlas: str = "cerebra"
 
 
+class ThomasImportRequest(BaseModel):
+    """Import an external THOMAS thalamic segmentation onto a case as deep meshes.
+
+    ``thomas_dir`` is a server-side path to the THOMAS output dir (with ``left/``
+    + ``right/`` per-nucleus masks + ``T1.nii.gz``). ``t1`` optionally overrides
+    the reference T1 used to register into the CT; by default the THOMAS dir's own
+    ``T1.nii.gz`` is used.
+    """
+
+    thomas_dir: str
+    t1: str | None = None
+
+
 __all__ = [
     "JobState", "JobSpec", "Artifact", "JobStatus",
     "ReviewContact", "ReviewShank", "ReviewDoc",
     "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest",
+    "ThomasImportRequest",
 ]
