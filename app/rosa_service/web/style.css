@@ -150,10 +150,25 @@ button:disabled { opacity: .45; cursor: default; }
 .atlasctl select { font: inherit; font-size: 12px; color: var(--ink); background: #0e161d;
   border: 1px solid var(--line2); border-radius: 7px; padding: 4px 7px; max-width: 150px; }
 button.small { padding: 4px 9px; font-size: 12px; }
+.atlasbusy { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--warn); }
+.atlasbusy[hidden] { display: none; }
+.atlasbusy .spin { width: 11px; height: 11px; border: 2px solid #3a3320; border-top-color: var(--warn);
+  border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
 .viewer-tools { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .viewer-tools[hidden] { display: none !important; }
 .viewer-tools .qc-op { color: var(--muted); }
 .viewer-body { position: relative; flex: 1; min-height: 0; }
+
+/* labeling console — sits below the 3D view */
+.labelbar { flex: 0 0 auto; border-top: 1px solid var(--line); background: #0b1017;
+  padding: 8px 12px; max-height: 32%; overflow: auto; }
+.labelbar-mri { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.labelbar-mri[hidden] { display: none; }
+.field.small.inline { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+.field.small.inline input { display: inline-block; width: auto; margin: 0; padding: 3px; font-size: 12px; }
+#labelmsg { font-size: 12.5px; line-height: 1.5; }
+#labelmsg:empty { display: none; }
+.labelbar .log.mini { max-height: 92px; margin: 6px 0 0; font-size: 11px; }
 .viewer-view { position: absolute; inset: 0; }
 iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
 .viewer-view[hidden] { display: none !important; }

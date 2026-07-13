@@ -181,24 +181,6 @@
           </div>
         </div>
         <div id="exportmsg" class="muted"></div>
-
-        <details id="labelcard" class="labelcard">
-          <summary>Anatomical MRI <span id="labelstatus" class="muted"></span></summary>
-          <div class="labelcard-body">
-            <p class="muted">Bring in the patient MRI (T1); it's registered to the CT
-              and warped to a bundled atlas to label each contact. Pick the atlas
-              and approve from the 3D view's toolbar on the right.</p>
-            <div class="labelrow">
-              <label class="field small">MRI (T1)
-                <input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd">
-              </label>
-            </div>
-            <button id="labelbtn" class="ghost" disabled>Register MRI &amp; label</button>
-            <pre id="labellog" class="log mini" hidden></pre>
-            <div id="labelmsg" class="muted"></div>
-          </div>
-        </details>
-
         <div id="reviewlist"></div>
       </div>
       <div class="viewer">
@@ -208,6 +190,7 @@
           <span class="atlasctl" id="atlasctl" hidden>
             <span class="al muted">Atlas</span>
             <select id="atlassel"></select>
+            <span class="atlasbusy" id="atlasbusy" hidden><span class="spin"></span>registering…</span>
             <button id="approvebtn" class="primary small" hidden>Approve</button>
             <button id="atlascheckbtn" class="ghost small" hidden title="Check this atlas's registration (MNI template ↔ MRI)">check reg</button>
           </span>
@@ -236,6 +219,17 @@
               <strong>Atlas</strong> = MNI template↔your MRI (checks the atlas registration
               that places the labels).</p>
           </div>
+        </div>
+        <!-- labeling console: MRI upload (if none) + registration progress/log -->
+        <div class="labelbar" id="labelbar">
+          <div class="labelbar-mri" id="labelbarMri" hidden>
+            <span class="muted">Add a patient MRI (T1) to label contacts →</span>
+            <label class="field small inline">MRI<input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd"></label>
+            <button id="labelbtn" class="ghost small" disabled>Register &amp; label</button>
+            <span id="labelstatus" class="muted"></span>
+          </div>
+          <div id="labelmsg" class="muted"></div>
+          <pre id="labellog" class="log mini" hidden></pre>
         </div>
       </div>
         </div>
