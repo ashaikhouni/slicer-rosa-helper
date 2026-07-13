@@ -322,6 +322,31 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                               surface_source=surface)
         steps.append(view)
         return steps
+    if kind == "rebuild":
+        # Rebuild a case's 3D viewer in place from its (edited) TSVs — view-results
+        # only. Geometry changed but the brain surface didn't, so reuse the cached
+        # surface + T1→CT transform (no re-strip / re-mesh).
+        case_dir = spec.params.get("case_dir")
+        ct = spec.params.get("ct")
+        if not (case_dir and ct):
+            raise ValueError("rebuild job requires params.case_dir and params.ct")
+        case_dir, ct = str(case_dir), str(ct)
+        label = str(spec.params.get("label") or "case")
+        t1 = spec.params.get("t1")
+        t1 = str(t1) if t1 else None
+        surface = str(spec.params.get("surface") or "auto")
+        cd = Path(case_dir)
+        view = [py, "-u", "-m", "rosa_agent", "view-results", case_dir,
+                "--output", str(cd / "viewer"), "--ct", ct,
+                "--contacts", str(cd / "contacts.tsv"),
+                "--trajectories", str(cd / "trajectories.tsv"),
+                "--subject-label", label]
+        if t1:
+            view += _brain_surface_view_flags(
+                t1, cd / "regcache",
+                include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
+                surface_source=surface)
+        return [view]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
         # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a

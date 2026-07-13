@@ -29,6 +29,8 @@
   .btn{background:#18222c;border:1px solid var(--line2);border-radius:7px;padding:6px 12px;font-size:12.5px;font-weight:600}
   .btn:hover{border-color:#3a4b5b}.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
   .btn.add[aria-pressed="true"]{background:var(--add);border-color:var(--add);color:#2a2413}
+  .btn.danger{color:var(--bad);border-color:#5f2c2c}.btn.danger:hover{background:#2a1414;border-color:var(--bad)}
+  .iconbtn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px}.iconbtn:hover{background:#18222c;color:var(--ink)}
   .console{flex:1;display:grid;grid-template-columns:200px 1fr 272px;min-height:0}
   .rail,.inspector{background:var(--rail);min-height:0;display:flex;flex-direction:column}
   .rail{border-right:1px solid var(--line)}.inspector{border-left:1px solid var(--line)}
@@ -132,6 +134,7 @@
     <div class="insp-head"><span class="lbl">Inspector</span><span class="qc-sum" id="statusPill"></span></div>
     <div class="insp-body">
       <div class="isel"><span class="swatch" id="iSwatch"></span><span class="nm" id="iName"></span>
+        <button class="iconbtn" id="renameBtn" title="Rename electrode">&#9998;</button>
         <span class="qc-sum mono" id="iLen" style="margin-left:auto"></span></div>
       <div class="field">
         <label class="lbl" for="model">Electrode model</label>
@@ -151,7 +154,7 @@
         <div class="qc-head"><span class="lbl">Contacts on metal</span><span class="qc-sum" id="qcSum"></span></div>
         <div class="qc" id="qc"></div>
       </div>
-      <div class="actions"><button class="btn primary" id="snap">&#9678; Snap to metal</button><button class="btn" id="reset">Reset</button></div>
+      <div class="actions"><button class="btn primary" id="snap">&#9678; Snap to metal</button><button class="btn" id="reset">Reset</button><button class="btn danger" id="removeBtn">Remove</button></div>
       <div class="qc-sum" style="text-align:center">on-metal = peak HU within 1.5 mm of each contact</div>
     </div>
   </aside>
@@ -330,7 +333,26 @@ $("#wl").oninput=e=>{setWin(+e.target.value,winWW);$$(".wbtn").forEach(x=>x.setA
 $("#ww").oninput=e=>{setWin(winWL,+e.target.value);$$(".wbtn").forEach(x=>x.setAttribute("aria-pressed",false));resliceInline();drawProbe();};
 $("#snap").onclick=()=>snapActive(dz=>toast("Snapped &middot; <span class='mono'>&Delta;"+dz.toFixed(1)+" mm</span>"));
 $("#reset").onclick=()=>{const t=active();if(t.entry0){t.tipOffset=0;t.model=t.model0;t.entry=t.entry0.slice();t.target=t.target0.slice();}selectTraj(t.name);toast("Reset "+t.name);};
-$("#save").onclick=()=>toast("Plan saved locally &middot; <span class='mono'>"+CASE.trajectories.length+" shanks</span>");
+$("#save").onclick=async()=>{
+  const btn=$("#save"),base=location.pathname.replace(/\/+$/,"");btn.disabled=true;
+  try{
+    const r=await fetch(base+"/plan",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(CASE)});
+    if(!r.ok)throw new Error((await r.text()).slice(0,160));
+    const d=await r.json();
+    toast("Saved &middot; <span class='mono'>"+d.n_trajectories+" shanks, "+d.n_contacts+" contacts</span> &middot; rebuilding 3D&hellip;");
+    if(window.parent&&window.parent!==window)window.parent.postMessage({type:"rosa:edited",rebuild:d.rebuild_job},"*");
+  }catch(e){toast("<span style='color:var(--bad)'>Save failed: "+e.message+"</span>");}
+  btn.disabled=false;
+};
+$("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.name)||"").trim();
+  if(!nm||nm===t.name)return;
+  if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
+  t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
+$("#removeBtn").onclick=()=>{const t=active();
+  if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}
+  if(!confirm("Remove electrode "+t.name+"? It will be dropped when you Save."))return;
+  CASE.trajectories=CASE.trajectories.filter(x=>x!==t);
+  activeId=CASE.trajectories[0].name;renderList();syncInspector();resliceAll();drawMIP();toast("Removed "+t.name);};
 $("#backbtn").onclick=()=>{ if(window.opener&&!window.opener.closed)window.close(); else location.href="/"; };  // opened via window.open -> close the tab; direct -> app root
 
 // in-line endpoint drag: freeze image, move handle, re-slice on release
