@@ -168,6 +168,33 @@ class ReviewStore:
         self._persist(job_id, job_dir)
         return doc
 
+    def rebuild_preserving_labels(self, job_id: str, job_dir: str | Path,
+                                  renames: dict[str, str] | None = None) -> ReviewDoc:
+        """After a geometry edit rewrote contacts.tsv: rebuild the doc from the
+        new contacts, carrying over anatomical labels by (shank, contact_index).
+        ``renames`` maps new→old shank name so labels follow a rename. Removed
+        shanks / contacts drop out; added ones start unlabeled."""
+        job_dir = Path(job_dir)
+        renames = renames or {}
+        prev = self._docs.get(job_id)
+        if prev is None and (job_dir / "review.json").is_file():
+            try:
+                prev = ReviewDoc.model_validate_json((job_dir / "review.json").read_text())
+            except Exception:  # noqa: BLE001
+                prev = None
+        regions = {(s.name, c.index): c.region
+                   for s in (prev.shanks if prev else []) for c in s.contacts if c.region}
+        doc = build_review_doc(job_dir)                 # from the NEW contacts.tsv
+        for s in doc.shanks:
+            src = renames.get(s.name, s.name)           # follow a rename to old labels
+            for c in s.contacts:
+                r = regions.get((src, c.index))
+                if r:
+                    c.region = r
+        self._docs[job_id] = doc
+        self._persist(job_id, job_dir)
+        return doc
+
     def _persist(self, job_id: str, job_dir: str | Path) -> None:
         try:
             (Path(job_dir) / "review.json").write_text(

@@ -127,8 +127,10 @@ def _build(job_dir: Path) -> dict:
     def idx(p):
         return [round(float(p[k] - lo[k]), 2) for k in range(3)]
     plan = dict(
-        name=job_dir.name[:8], dims=[nx, ny, nz], models=models,
-        trajectories=[dict(name=s["name"], model=s["model"], color=PALETTE[k % len(PALETTE)],
+        name=job_dir.name[:8], dims=[nx, ny, nz],
+        origin=[round(float(lo[k]), 4) for k in range(3)],   # crop origin in RAS world: world = crop_index + origin
+        models=models,
+        trajectories=[dict(name=s["name"], name0=s["name"], model=s["model"], color=PALETTE[k % len(PALETTE)],
                            entry=idx(s["entry"]), target=idx(s["target"]),
                            entry0=idx(s["entry"]), target0=idx(s["target"]), model0=s["model"],
                            tipOffset=0.0, length_mm=s["length_mm"], confidence_label=s["confidence_label"])

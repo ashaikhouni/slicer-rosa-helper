@@ -523,6 +523,32 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=404, detail=str(exc))
         return FileResponse(job.workdir / "editor_ct.i16", media_type="application/octet-stream")
 
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/plan")
+    async def save_editor_plan(job_id: str, plan: dict) -> dict:
+        """Persist an edited plan: rewrite trajectories.tsv + regenerate
+        contacts.tsv from the combs, carry labels onto the new contacts, and
+        kick off a viewer rebuild so Review reflects the edit."""
+        from .editor_writeback import write_plan
+        job = _job_or_404(job_id)
+        try:
+            summary = write_plan(job.workdir, plan)
+        except (ValueError, KeyError) as exc:
+            raise HTTPException(status_code=422, detail=f"bad plan: {exc}") from exc
+        reviews.rebuild_preserving_labels(job_id, job.workdir, renames=summary.get("renames"))
+        ct = job.params.get("ct")
+        rebuild = None
+        if ct:                              # rebuild the 3D scene from the new TSVs
+            spec = JobSpec(kind="rebuild", params={
+                "case_dir": str(job.workdir), "ct": ct,
+                "label": job.params.get("label", "case"),
+                "surface": job.params.get("surface", "auto"),
+                **({"t1": job.params["t1"]} if job.params.get("t1") else {})})
+            try:
+                rebuild = runner.create(spec).status().model_dump()
+            except ValueError:
+                rebuild = None
+        return {**summary, "rebuild_job": rebuild}
+
     # ---- uploads (browser drag-drop → a local path a job can consume) ----
 
     @app.post(f"/api/{API_VERSION}/uploads")

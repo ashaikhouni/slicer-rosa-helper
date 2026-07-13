@@ -99,5 +99,54 @@ class EditorRouteTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v1/jobs/nope/editor/plan").status_code, 404)
 
 
+@unittest.skipUnless(HAVE, "numpy/nibabel/scipy/fastapi unavailable")
+class EditorWritebackTests(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.root = Path(self._td.name)
+        self.jid = _make_case(self.root)
+        os.environ["ROSA_APP_WORKDIR"] = str(self.root)
+        from rosa_service.app import create_app
+        app = create_app()
+        async def _noop(job):                      # don't spawn the rebuild engine
+            from rosa_service.models import JobState
+            job.state = JobState.succeeded
+        app.state.runner._run = _noop
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self._td.cleanup()
+        os.environ.pop("ROSA_APP_WORKDIR", None)
+
+    def test_save_rewrites_tsvs_and_regenerates_contacts(self):
+        import csv
+        plan = self.client.get(f"/api/v1/jobs/{self.jid}/editor/plan").json()
+        self.assertIn("origin", plan)               # needed to invert index→world
+        t = plan["trajectories"][0]
+        t["name"] = "RENAMED"; t["tipOffset"] = 1.0
+        r = self.client.post(f"/api/v1/jobs/{self.jid}/editor/plan", json=plan)
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["n_trajectories"], 1)
+        self.assertIsNotNone(body["rebuild_job"])   # viewer rebuild kicked off
+        traj = (self.root / self.jid / "trajectories.tsv").read_text()
+        self.assertIn("RENAMED", traj)
+        con = list(csv.DictReader(open(self.root / self.jid / "contacts.tsv"), delimiter="\t"))
+        self.assertTrue(con and all(c["trajectory"] == "RENAMED" for c in con))
+        self.assertEqual(len(con), plan["models"][t["model"]]["n"])   # contacts == comb length
+
+    def test_removed_shank_drops_from_tsv(self):
+        plan = self.client.get(f"/api/v1/jobs/{self.jid}/editor/plan").json()
+        plan["trajectories"] = []                   # remove everything
+        r = self.client.post(f"/api/v1/jobs/{self.jid}/editor/plan", json=plan)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["n_contacts"], 0)
+
+    def test_bad_plan_is_422(self):
+        r = self.client.post(f"/api/v1/jobs/{self.jid}/editor/plan",
+                             json={"trajectories": []})   # no origin/models
+        self.assertEqual(r.status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

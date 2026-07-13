@@ -227,6 +227,24 @@ function showWs(v) {
   }
 }
 
+// The embedded editor saved a geometry edit (postMessage) → a viewer rebuild is
+// running. Poll it, then refresh Review's contacts + 3D and land back on Review.
+async function onEdited(rebuildJob) {
+  const refresh = async () => {
+    try { renderReview(await jget(`${API}/jobs/${state.jobId}/review`)); } catch (_e) {}
+    $("viewerframe").src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
+    $("editframe").removeAttribute("src");   // reload the editor's plan next open (geometry changed)
+    showWs("review");
+  };
+  const id = rebuildJob && rebuildJob.id;
+  if (!id) return refresh();
+  clearInterval(state.rebuildPoll);
+  state.rebuildPoll = setInterval(async () => {
+    let st; try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
+    if (["succeeded", "failed", "cancelled"].includes(st.state)) { clearInterval(state.rebuildPoll); refresh(); }
+  }, 1000);
+}
+
 function setCaseSlots() {
   const mriOn = !!state.mri;
   const m = $("slot-mri");
@@ -827,6 +845,9 @@ async function boot() {
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
+  window.addEventListener("message", (ev) => {   // editor iframe → geometry saved
+    if (ev.data && ev.data.type === "rosa:edited") onEdited(ev.data.rebuild);
+  });
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); const lc = $("labelcard"); lc.open = true; lc.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
   };
