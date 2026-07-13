@@ -252,6 +252,7 @@ function setCaseSlots() {
   m.querySelector(".fn").textContent = mriOn ? "loaded" : "add";
   $("slot-reg").hidden = !mriOn;
   $("atlasctl").hidden = !mriOn;        // atlas picker appears once an MRI is in
+  $("labelbarMri").hidden = mriOn;      // MRI upload row shows only when there's no MRI
 }
 
 // If the case was created with an MRI, the pipeline job carries its t1: pre-fill
@@ -426,17 +427,32 @@ async function uploadMri(file) {
   setCaseSlots();
 }
 
+// Busy state during registration/labeling: a spinner beside the atlas picker.
+// The picker stays ENABLED so you can switch atlas mid-run (see runLabel — it
+// cancels the in-flight job so the new atlas takes over instead of queuing).
+function setLabelBusy(on) {
+  $("atlasbusy").hidden = !on;
+}
+
 async function runLabel() {
   if (!state.mri || !state.jobId) return;
+  // Cancel any in-flight label for this case first — otherwise max_concurrent=1
+  // would queue the new atlas behind the old (slow) one and it'd look stuck.
+  if (state.labelJobId) {
+    try { await fetch(`${API}/jobs/${state.labelJobId}`, { method: "DELETE" }); } catch (_e) {}
+  }
+  clearInterval(state.labelPoll);
   // First label of a case registers CT↔MRI (verify once); later atlas switches
   // reuse that registration and only recompute labels.
   const firstLabel = !state.labeledOnce;
+  setLabelBusy(true);
   $("labelbtn").disabled = true;
   $("approvebtn").hidden = true;
   const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
-  $("labelmsg").textContent = firstLabel
-    ? "Registering MRI → CT and warping atlas (~30 s)…"
-    : `Relabeling with ${$("atlassel").value} — CT↔MRI registration is cached…`;
+  const atlas = $("atlassel").options[$("atlassel").selectedIndex]?.textContent || $("atlassel").value;
+  $("labelmsg").innerHTML = firstLabel
+    ? `Registering MRI → CT and warping <b>${atlas}</b> (~30 s) — the 3D recolors when done…`
+    : `Relabeling with <b>${atlas}</b> — CT↔MRI registration is cached…`;
   try {
     const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
       { t1: state.mri.path, atlas: $("atlassel").value });
@@ -444,6 +460,7 @@ async function runLabel() {
     streamInto(job.id, "labellog");     // shows the registration metrics (QC)
     pollLabel(job.id, firstLabel);
   } catch (e) {
+    setLabelBusy(false);
     $("labelmsg").textContent = `Failed to start: ${e.message}`;
     $("labelbtn").disabled = false;
   }
@@ -490,13 +507,15 @@ function pollLabel(id, firstLabel) {
 }
 
 function _showLabelError(st) {
+  setLabelBusy(false);
   $("labelmsg").innerHTML =
     `Labeling <strong>${st.state}</strong>${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}. ` +
-    `Fix and click <em>Register MRI &amp; label</em> to retry.`;
+    `Pick the atlas again to retry.`;
   $("labelbtn").disabled = false;
 }
 
 async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
+  setLabelBusy(false);
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
     $("labelmsg").innerHTML = jumpToQc
@@ -602,7 +621,12 @@ function showQc(hasMni, jumpToQc = true) {
 // AC-PC); the atlas "check reg" opens atlas(MNI-template)↔MRI. Both land in the
 // QC pane, pre-set to the right space. No label yet → nudge to the MRI card.
 function openQc(kind) {
-  if ($("tab-qc").disabled || !state.qc) { $("labelcard").open = true; return; }
+  if ($("tab-qc").disabled || !state.qc) {   // no registration yet → nudge via the console
+    $("labelmsg").textContent = state.mri
+      ? "Pick an atlas to register the MRI first — then the check is available."
+      : "Add a patient MRI below to enable the registration check.";
+    return;
+  }
   const space = kind === "atlas" ? "atlas" : (state.qc._hasMni ? "mni" : "ct");
   state.qc.space = space;
   const btn = $("qcspace").querySelector(`[data-space="${space}"]`);
@@ -849,7 +873,7 @@ async function boot() {
     if (ev.data && ev.data.type === "rosa:edited") onEdited(ev.data.rebuild);
   });
   $("slot-mri").onclick = () => {
-    if (!state.mri) { showWs("review"); const lc = $("labelcard"); lc.open = true; lc.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
+    if (!state.mri) { showWs("review"); $("labelbar").scrollIntoView({ behavior: "smooth", block: "nearest" }); $("mriinput").focus(); }
   };
   $("slot-reg").onclick = () => { showWs("review"); openQc("reg"); };   // CT↔MRI QC
   $("atlascheckbtn").onclick = () => openQc("atlas");                    // atlas↔MRI QC
