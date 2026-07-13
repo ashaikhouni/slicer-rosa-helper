@@ -233,6 +233,7 @@ function setCaseSlots() {
   m.className = "slot " + (mriOn ? "on" : "off");
   m.querySelector(".fn").textContent = mriOn ? "loaded" : "add";
   $("slot-reg").hidden = !mriOn;
+  $("atlasctl").hidden = !mriOn;        // atlas picker appears once an MRI is in
 }
 
 // If the case was created with an MRI, the pipeline job carries its t1: pre-fill
@@ -262,7 +263,8 @@ function resetLabelCard() {
   $("qcplanes").innerHTML = ""; state.qc = null;
   $("qcspace").hidden = true;
   $("tab-qc").disabled = true;
-  $("atlaschip").hidden = true;
+  $("atlasctl").hidden = true;
+  $("atlascheckbtn").hidden = true;
   setViewerTab("electrodes");
 }
 
@@ -485,11 +487,10 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
       : `Labels from <strong>${p.atlas}</strong> ` +
         `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
     $("approvebtn").hidden = false;
-    if (p.atlas) {
-      $("atlassel").value = p.atlas;   // reflect which atlas is shown
-      $("atlaschip").textContent = `Atlas: ${p.atlas}`;
-      $("atlaschip").hidden = false;   // show the active atlas beside the viewer tabs
-    }
+    $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
+    if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
+    $("atlascheckbtn").hidden = false;   // per-atlas "check reg" → atlas↔MRI QC
+    $("atlascheckbtn").disabled = !p.has_mni_qc;
     previewProposed(p.contacts);        // show the proposed regions per contact
     if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
     // The 3D viewer is (re)built only on the first label; reload the iframe then
@@ -555,7 +556,7 @@ function showQc(hasMni, jumpToQc = true) {
   if (!state.qc) {
     // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
     // when available; otherwise slice the CT's native frame.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", panes: [] };
+    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", _hasMni: hasMni, panes: [] };
     $("qcspace").hidden = !hasMni;
     if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
     const wrap = $("qcplanes");
@@ -577,6 +578,19 @@ function showQc(hasMni, jumpToQc = true) {
   $("tab-qc").disabled = false;
   if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
   else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
+}
+
+// Two registrations, two entry points: the Reg chip opens CT↔MRI (native /
+// AC-PC); the atlas "check reg" opens atlas(MNI-template)↔MRI. Both land in the
+// QC pane, pre-set to the right space. No label yet → nudge to the MRI card.
+function openQc(kind) {
+  if ($("tab-qc").disabled || !state.qc) { $("labelcard").open = true; return; }
+  const space = kind === "atlas" ? "atlas" : (state.qc._hasMni ? "mni" : "ct");
+  state.qc.space = space;
+  const btn = $("qcspace").querySelector(`[data-space="${space}"]`);
+  if (btn) setActive("qcspace", btn);
+  setViewerTab("qc");
+  refreshAllPanes();
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC.
@@ -816,7 +830,8 @@ async function boot() {
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); const lc = $("labelcard"); lc.open = true; lc.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
   };
-  $("slot-reg").onclick = () => { showWs("review"); setViewerTab("qc"); };
+  $("slot-reg").onclick = () => { showWs("review"); openQc("reg"); };   // CT↔MRI QC
+  $("atlascheckbtn").onclick = () => openQc("atlas");                    // atlas↔MRI QC
   $("restartbtn").onclick = showCases;          // workspace → back to the case list
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
   $("importbtn").onclick = () => showStep("import");
