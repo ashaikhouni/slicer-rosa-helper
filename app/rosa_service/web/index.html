@@ -197,11 +197,10 @@
             <button id="approvebtn" class="primary small" hidden>Approve</button>
             <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, or CT↔MRI for native ones (FastSurfer / deepmriprep)">check reg</button>
           </span>
-          <span class="thomasctl" id="thomasctl" hidden title="Import a THOMAS thalamic segmentation as deep-structure meshes — registers its T1 to this case's CT so the electrodes thread through the nuclei">
-            <input type="text" id="thomasdir" class="thomaspath" placeholder="THOMAS output dir…" autocomplete="off">
-            <label class="link browse small">browse<input type="file" id="thomasdir-file" webkitdirectory directory hidden></label>
+          <span class="thomasctl" id="thomasctl" hidden title="Import a THOMAS thalamic segmentation as deep-structure meshes — registers its T1 to this case's CT so the electrodes thread through the nuclei. Paste a path and press Enter, or click Import to pick the folder.">
+            <input type="text" id="thomasdir" class="thomaspath" placeholder="THOMAS dir — paste, or click Import ▸" autocomplete="off">
             <button id="thomasbtn" class="ghost small">Import THOMAS</button>
-            <span class="thomasbusy" id="thomasbusy" hidden><span class="spin"></span>importing…</span>
+            <input type="file" id="thomasdir-file" webkitdirectory directory hidden>
           </span>
           <span class="sliceovctl" id="sliceovctl" hidden>
             <label class="sliceov-fade" id="slicefade-item" hidden title="Fade the 2D slice panels between the CT (metal) and the MRI (anatomy)"><span class="al muted">CT</span><input type="range" id="app-slice-fade" min="0" max="1" step="0.05" value="0"><span class="al muted">MRI</span></label>

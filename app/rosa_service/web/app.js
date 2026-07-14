@@ -592,14 +592,17 @@ function _showLabelError(st) {
 // Registers a THOMAS segmentation's T1 → the case CT, warps the nuclei in, and
 // rebuilds the 3D view with them (electrodes thread through the nuclei). No MRI
 // needed — THOMAS ships its own reference T1.
+// Busy state swaps the button's OWN label (no extra sibling that would widen the
+// toolbar and force it to re-wrap — a re-wrap resizes the 3D canvas mid-import).
 function setThomasBusy(on) {
-  $("thomasbusy").hidden = !on;
-  $("thomasbtn").disabled = on;
+  const b = $("thomasbtn");
+  b.disabled = on;
+  b.textContent = on ? "Importing…" : "Import THOMAS";
 }
 
-// Directory pick → upload the THOMAS files → fill the path field with the saved
-// server-side root. Filters to just what build_thomas_labelmap reads (left/ +
-// right/ nucleus masks + a root-level reference nifti).
+// Directory pick → upload the THOMAS files → import straight away (one action, no
+// second press). Filters to just what build_thomas_labelmap reads (left/ + right/
+// nucleus masks + a root-level reference nifti).
 async function uploadThomasDir(e) {
   const all = Array.from(e.target.files || []);
   e.target.value = "";                      // allow re-picking the same folder
@@ -623,24 +626,23 @@ async function uploadThomasDir(e) {
     if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
     const { path } = await r.json();
     $("thomasdir").value = path;
-    $("labelmsg").innerHTML = "THOMAS folder ready — click <b>Import THOMAS</b>.";
+    importThomas();                         // pick → upload → import, no extra click
   } catch (err) {
-    $("labelmsg").textContent = `Upload failed: ${err.message}`;
-  } finally {
     setThomasBusy(false);
+    $("labelmsg").textContent = `Upload failed: ${err.message}`;
   }
 }
 
 async function importThomas() {
   if (!state.jobId) return;
   const dir = $("thomasdir").value.trim();
-  if (!dir) { $("labelmsg").textContent = "Enter a THOMAS output directory first (has left/ + right/)."; return; }
+  if (!dir) { $("thomasdir-file").click(); return; }   // nothing typed → open the folder picker
   setThomasBusy(true);
-  const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
+  // Status goes in the muted line only — NOT the streaming log panel, whose
+  // expansion would shrink (and reflow) the 3D viewport during the import.
   $("labelmsg").innerHTML = "Registering THOMAS → CT and warping the nuclei (~30–60 s) — the 3D updates when done…";
   try {
     const job = await jsend(`${API}/jobs/${state.jobId}/import-thomas`, "POST", { thomas_dir: dir });
-    streamInto(job.id, "labellog");     // shows the registration metrics
     pollThomas(job.id);
   } catch (e) {
     setThomasBusy(false);

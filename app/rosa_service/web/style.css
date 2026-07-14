@@ -161,17 +161,16 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .sliceov-chk input { accent-color: var(--accent, #22d0ff); }
 .probemodectl { display: inline-flex; align-items: center; margin-left: 8px; }
 .probemodectl[hidden] { display: none; }
-/* THOMAS import: a path field + browse + import button, in the viewer toolbar. */
+/* THOMAS import: a path field + one import button, in the viewer toolbar.
+   The button has a fixed width so its "Import THOMAS" / "Importing…" swap doesn't
+   change the control's width — a width change could re-wrap the toolbar and resize
+   the 3D canvas mid-import. */
 .thomasctl { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px;
   padding-left: 10px; border-left: 1px solid var(--line2); }
 .thomasctl[hidden] { display: none; }
 .thomasctl .thomaspath { font: inherit; font-size: 12px; color: var(--ink); background: #0e161d;
-  border: 1px solid var(--line2); border-radius: 7px; padding: 4px 7px; width: 170px; }
-.thomasctl .browse { font-size: 11px; padding-bottom: 0; }
-.thomasbusy { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--warn); }
-.thomasbusy[hidden] { display: none; }
-.thomasbusy .spin { width: 11px; height: 11px; border: 2px solid #3a3320; border-top-color: var(--warn);
-  border-radius: 50%; animation: spin .8s linear infinite; display: inline-block; }
+  border: 1px solid var(--line2); border-radius: 7px; padding: 4px 7px; width: 150px; }
+.thomasctl button { min-width: 112px; white-space: nowrap; }
 .btnset.small button { font-size: 11px; padding: 3px 9px; }
 .atlasbusy { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--warn); }
 .atlasbusy[hidden] { display: none; }
