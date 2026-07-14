@@ -346,6 +346,21 @@ function toggleShank(box, shank) {
   else if (!open) showAllInViewer();   // collapsing the electrode → un-isolate the 3D
 }
 
+function _postViewer(msg) {
+  try { $("viewerframe").contentWindow.postMessage(msg, "*"); } catch (_e) { /* not loaded */ }
+}
+
+// The embedded viewer reports which slice-display controls apply for this case
+// (has a warped atlas? has an MRI to fade to?). Host them in the top row and
+// reset to the viewer's defaults (atlas on, fade at CT) on each (re)load.
+function _onSliceCaps({ atlas, fade }) {
+  $("slicefade-item").hidden = !fade;
+  $("atlasov-item").hidden = !atlas;
+  $("sliceovctl").hidden = !(fade || atlas);
+  $("app-atlas-ov").checked = true;
+  $("app-slice-fade").value = 0;
+}
+
 // Un-isolate the 3D view: show every electrode again + clear the selection.
 // Send BOTH messages: newer viewers handle rosa:showall (full reset); any viewer
 // (incl. ones rendered before this change) handles rosa:visibility with empty
@@ -805,6 +820,7 @@ async function deleteCase(c) {
 // (labels/QC) so the case comes back exactly as it was left.
 async function openCase(id) {
   $("showallbtn").hidden = true;   // fresh case: viewer loads with all electrodes shown
+  $("sliceovctl").hidden = true;   // re-shown when the viewer reports its slice caps
   await loadResults(id);
   try {
     const jobs = await jget(`${API}/jobs`);
@@ -895,8 +911,10 @@ async function boot() {
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
-  window.addEventListener("message", (ev) => {   // editor iframe → geometry saved
-    if (ev.data && ev.data.type === "rosa:edited") onEdited(ev.data.rebuild);
+  window.addEventListener("message", (ev) => {   // viewer/editor iframe → app
+    const d = ev.data; if (!d) return;
+    if (d.type === "rosa:edited") onEdited(d.rebuild);
+    else if (d.type === "rosa:slice-caps") _onSliceCaps(d);
   });
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); $("labelbar").scrollIntoView({ behavior: "smooth", block: "nearest" }); $("mriinput").focus(); }
@@ -922,6 +940,11 @@ async function boot() {
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
   $("showallbtn").onclick = showAllInViewer;
+  // Slice-display controls hosted in the top row → drive the embedded viewer.
+  $("app-slice-fade").addEventListener("input", (e) =>
+    _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
+  $("app-atlas-ov").addEventListener("change", (e) =>
+    _postViewer({ type: "rosa:atlas-overlay", on: e.target.checked }));
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
   $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
