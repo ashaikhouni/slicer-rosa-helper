@@ -98,6 +98,24 @@ def _resolve_surface_source(surface_source: str | None) -> str:
     return "otsu"
 
 
+def _structure_dir(case_dir: Path) -> Path:
+    """Canonical, persistent home for a case's imported deep-structure meshes
+    (THOMAS nuclei) — in the CASE dir, not a job dir, so it survives across
+    viewer rebuilds."""
+    return Path(case_dir) / "structures"
+
+
+def _structure_view_flags(case_dir: Path) -> list[str]:
+    """``view-results`` flags that re-attach a case's imported THOMAS structures,
+    so EVERY viewer rebuild (label / atlas switch / geometry edit) keeps the deep
+    nuclei instead of dropping them. Empty when the case has none imported."""
+    d = _structure_dir(case_dir)
+    sm, lut = d / "thomas_in_ct.nii.gz", d / "thomas_lut.json"
+    if sm.is_file() and lut.is_file():
+        return ["--structure-meshes", str(sm), "--structure-lut", str(lut)]
+    return []
+
+
 def _brain_surface_view_flags(t1: str, regcache: Path, *,
                               include_transform: bool,
                               surface_source: str | None = "auto") -> list[str]:
@@ -346,6 +364,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                 t1, cd / "regcache",
                 include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
                 surface_source=surface)
+        view += _structure_view_flags(cd)   # keep imported THOMAS nuclei on edit-rebuild
         return [view]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
@@ -431,6 +450,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # atlas recolors that same mesh by its warped labelmap.
         if atlas != "fastsurfer":
             view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
+        # Keep any imported THOMAS nuclei when this atlas relabel rebuilds the 3D.
+        view_step += _structure_view_flags(parent_dir)
         steps.append(view_step)
         return steps
     if kind == "import-thomas":
@@ -453,8 +474,10 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         t1 = str(t1) if t1 else None
         surface = str(spec.params.get("surface") or "auto")
         regcache = Path(spec.params.get("regcache") or (cd / "regcache"))
-        struct_map = str(workdir / "thomas_in_ct.nii.gz")
-        struct_lut = str(workdir / "thomas_lut.json")
+        # Persist the warped labelmap + LUT in the CASE dir (not this job dir) so
+        # later rebuilds (atlas switch, geometry edit) can re-attach them.
+        struct_map = str(_structure_dir(cd) / "thomas_in_ct.nii.gz")
+        struct_lut = str(_structure_dir(cd) / "thomas_lut.json")
         base = [py, "-u", "-m", "rosa_agent"]
         # 1) register + warp THOMAS into the CT frame (caches the THOMAS-T1→CT
         #    transform so a re-import skips registration).
