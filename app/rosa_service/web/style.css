@@ -159,6 +159,9 @@ button.small { padding: 4px 9px; font-size: 12px; }
 .sliceov-fade .al { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .sliceov-fade input[type="range"] { width: 88px; accent-color: var(--accent, #22d0ff); }
 .sliceov-chk input { accent-color: var(--accent, #22d0ff); }
+.probemodectl { display: inline-flex; align-items: center; margin-left: 8px; }
+.probemodectl[hidden] { display: none; }
+.btnset.small button { font-size: 11px; padding: 3px 9px; }
 .atlasbusy { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--warn); }
 .atlasbusy[hidden] { display: none; }
 .atlasbusy .spin { width: 11px; height: 11px; border: 2px solid #3a3320; border-top-color: var(--warn);
@@ -206,6 +209,7 @@ iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
 .btnset button { border: 0; border-right: 1px solid var(--line2); background: #12202b; color: var(--muted); font: inherit; font-size: 12px; padding: 5px 10px; }
 .btnset button:last-child { border-right: 0; }
 .btnset button.active { background: var(--accent); color: var(--accent-ink); }
+.btnset button:disabled { opacity: .38; cursor: default; }
 .qc-op { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
 .qc-op input[type=range] { width: 110px; accent-color: var(--accent); }
 .ghost.small { padding: 4px 9px; font-size: 12px; }

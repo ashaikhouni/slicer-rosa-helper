@@ -7,7 +7,8 @@ const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
 const state = { ct: null, jobId: null, es: null, poll: null,
                 mri: null, labelJobId: null, labelPoll: null, qc: null,
-                creationMri: null };   // optional MRI (T1) picked at case creation
+                creationMri: null,     // optional MRI (T1) picked at case creation
+                probePref: "ortho" };  // remembered Ortho/Probe slice-rail choice
 
 async function jget(url) {
   const r = await fetch(url);
@@ -359,6 +360,44 @@ function _onSliceCaps({ atlas, fade }) {
   $("sliceovctl").hidden = !(fade || atlas);
   $("app-atlas-ov").checked = true;
   $("app-slice-fade").value = 0;
+}
+
+function _setAppSliceMode(mode) {
+  for (const b of $("app-slice-mode").querySelectorAll("button"))
+    b.classList.toggle("active", b.dataset.smode === mode);
+}
+// The Ortho|Probe toggle is ALWAYS shown for a case with electrodes; Probe is
+// greyed until an electrode (≥2 contacts) is selected — so the switch is
+// predictable and the disabled state explains why it's on Ortho. We also
+// remember the user's choice: re-selecting an electrode returns to Probe if
+// that's what they were using (no surprise flip back to Ortho).
+function _onProbeAvail({ present, available }) {
+  $("probemodectl").hidden = !present;
+  const probeBtn = $("app-slice-mode").querySelector('[data-smode="probe"]');
+  probeBtn.disabled = !available;
+  probeBtn.title = available ? "Along the selected electrode + probe's-eye"
+                             : "Select an electrode to enable the probe view";
+  if (available && state.probePref === "probe") {
+    _setAppSliceMode("probe"); _postViewer({ type: "rosa:slice-mode", mode: "probe" });
+  } else if (!available) {
+    _setAppSliceMode("ortho");
+  }
+}
+// The viewer selected a contact (3D click, or arrow-stepping the probe) → mirror
+// it in the left navigator: open the shank, highlight + scroll to the row.
+function _onViewerSelected({ label, shank }) {
+  if (shank) {
+    const box = document.querySelector(`#reviewlist .shank[data-shank="${CSS.escape(shank)}"]`);
+    if (box && !box.classList.contains("open")) {
+      document.querySelectorAll("#reviewlist .shank.open").forEach((b) => b.classList.remove("open"));
+      box.classList.add("open"); state.openShank = shank;
+    }
+  }
+  document.querySelectorAll("#reviewlist .contact.selected").forEach((r) => r.classList.remove("selected"));
+  const sel = window.CSS && CSS.escape ? CSS.escape(label) : label;
+  const row = document.querySelector(`#reviewlist .contact[data-label="${sel}"]`);
+  if (row) { row.classList.add("selected"); row.scrollIntoView({ block: "nearest" }); }
+  $("showallbtn").hidden = false;
 }
 
 // Un-isolate the 3D view: show every electrode again + clear the selection.
@@ -821,6 +860,8 @@ async function deleteCase(c) {
 async function openCase(id) {
   $("showallbtn").hidden = true;   // fresh case: viewer loads with all electrodes shown
   $("sliceovctl").hidden = true;   // re-shown when the viewer reports its slice caps
+  $("probemodectl").hidden = true; // re-shown (Ortho) once the viewer loads
+  state.probePref = "ortho";
   await loadResults(id);
   try {
     const jobs = await jget(`${API}/jobs`);
@@ -915,6 +956,8 @@ async function boot() {
     const d = ev.data; if (!d) return;
     if (d.type === "rosa:edited") onEdited(d.rebuild);
     else if (d.type === "rosa:slice-caps") _onSliceCaps(d);
+    else if (d.type === "rosa:probe-avail") _onProbeAvail(d);
+    else if (d.type === "rosa:selected") _onViewerSelected(d);
   });
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); $("labelbar").scrollIntoView({ behavior: "smooth", block: "nearest" }); $("mriinput").focus(); }
@@ -945,6 +988,27 @@ async function boot() {
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
   $("app-atlas-ov").addEventListener("change", (e) =>
     _postViewer({ type: "rosa:atlas-overlay", on: e.target.checked }));
+  $("app-slice-mode").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-smode]"); if (!b || b.disabled) return;
+    state.probePref = b.dataset.smode;   // remember the choice
+    _setAppSliceMode(b.dataset.smode);
+    _postViewer({ type: "rosa:slice-mode", mode: b.dataset.smode });
+  });
+  // ↑/↓ step contacts within the selected shank from anywhere in the app (the
+  // viewer handles them when it has focus; this covers the left navigator).
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    const tag = e.target && e.target.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    const cur = document.querySelector("#reviewlist .contact.selected");
+    if (!cur) return;
+    const rows = [...(cur.closest(".shank")?.querySelectorAll(".contact") || [])];
+    const i = rows.indexOf(cur);
+    const j = Math.max(0, Math.min(rows.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
+    if (i < 0 || j === i) return;
+    e.preventDefault();
+    selectInViewer(rows[j].dataset.label, rows[j].dataset.shank);
+  });
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
   $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
