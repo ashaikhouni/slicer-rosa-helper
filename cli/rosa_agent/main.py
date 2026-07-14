@@ -78,6 +78,7 @@ SUBCOMMANDS = {
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
     "view-results":  "rosa_agent.commands.view_results",
+    "import-thomas": "rosa_agent.commands.import_thomas",
     "brain-extract": "rosa_agent.commands.brain_extract",
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
 }
