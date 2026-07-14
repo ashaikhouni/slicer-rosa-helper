@@ -177,6 +177,7 @@
         <div class="review-head">
           <h2>Electrodes <span id="summary" class="muted"></span></h2>
           <div class="review-actions">
+            <button id="showallbtn" class="ghost small" hidden title="Un-isolate — show every electrode in the 3D view">Show all</button>
             <button id="exportbtn" class="primary">Export corrected TSV</button>
           </div>
         </div>
@@ -186,13 +187,12 @@
       <div class="viewer">
         <div class="viewer-tabs" id="viewertabs">
           <button data-tab="electrodes" class="active">Electrodes (3D)</button>
-          <button data-tab="qc" id="tab-qc" disabled title="Add an MRI and label to enable the CT↔MRI registration check">Registration</button>
           <span class="atlasctl" id="atlasctl" hidden>
             <span class="al muted">Atlas</span>
             <select id="atlassel"></select>
             <span class="atlasbusy" id="atlasbusy" hidden><span class="spin"></span>registering…</span>
             <button id="approvebtn" class="primary small" hidden>Approve</button>
-            <button id="atlascheckbtn" class="ghost small" hidden title="Check this atlas's registration (MNI template ↔ MRI)">check reg</button>
+            <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, or CT↔MRI for native ones (FastSurfer / deepmriprep)">check reg</button>
           </span>
           <span class="viewer-tools" id="qctools" hidden>
             <span class="btnset" id="qcspace" hidden>
