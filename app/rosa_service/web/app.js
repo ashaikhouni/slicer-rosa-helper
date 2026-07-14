@@ -499,7 +499,16 @@ async function loadAtlases() {
       if (a.id === def) o.selected = true;
       sel.append(o);
     }
+    _syncThomasLoadBtn();
   } catch (_e) { $("labelstatus").textContent = "· atlas list unavailable"; }
+}
+
+// THOMAS is a BYO atlas, so it needs a "load folder" trigger EVERY time it's the
+// selection — the dropdown's `change` doesn't fire when THOMAS is already picked
+// (case reopened, or re-importing a new folder). This chip, shown whenever THOMAS
+// is selected, is that reliable trigger.
+function _syncThomasLoadBtn() {
+  $("thomasload").hidden = !String($("atlassel").value || "").startsWith("thomas");
 }
 
 async function uploadMri(file) {
@@ -661,6 +670,7 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
     $("approvebtn").hidden = false;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
+    _syncThomasLoadBtn();
     $("atlascheckbtn").hidden = true;    // the [Registration] tab is the entry now
     previewProposed(p.contacts);        // show the proposed regions per contact
     // showQc reveals the [Registration] tab + auto-jumps on the first label so the
@@ -956,7 +966,7 @@ async function openCase(id) {
     state.labeledOnce = labelJobs.some((j) => j.state === "succeeded");
     state.labelJobId = newest.id;
     if (newest.t1) { state.mri = { path: newest.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
-    if (newest.atlas) $("atlassel").value = newest.atlas;
+    if (newest.atlas) { $("atlassel").value = newest.atlas; _syncThomasLoadBtn(); }
     if (newest.state === "succeeded") showProposed(newest.id, { reloadViewer: false, jumpToQc: false });
     else if (["failed", "cancelled"].includes(newest.state)) _showLabelError(newest);
     else pollLabel(newest.id, !state.labeledOnce);
@@ -1100,12 +1110,16 @@ async function boot() {
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
   $("atlassel").addEventListener("change", () => {
+    _syncThomasLoadBtn();                 // show/hide the "Load folder…" chip
     if (!state.jobId) return;
     // THOMAS: prompt for the folder first; the picker's change handler uploads
     // then labels. Every other atlas labels immediately (needs the patient MRI).
     if ($("atlassel").value.startsWith("thomas")) { $("thomasdir-file").click(); return; }
     if (state.mri) runLabel();
   });
+  // The "Load folder…" chip: works even when THOMAS is already the selected atlas
+  // (re-open / re-import), where the dropdown's change never fires.
+  $("thomasload").onclick = () => $("thomasdir-file").click();
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
   try {
