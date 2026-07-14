@@ -417,6 +417,7 @@ def _structure_surfaces(labelmap_path, lut=None):
     by distance from the cortical surface)."""
     import colorsys
     import hashlib
+    import warnings
     import nibabel as nib
     from rosa_core.brain_mesh import surface_from_mask
     img = nib.load(str(labelmap_path))
@@ -424,13 +425,20 @@ def _structure_surfaces(labelmap_path, lut=None):
     out = []
     for label in sorted(int(v) for v in np.unique(arr) if int(v) != 0):
         mask = arr == label
-        if int(mask.sum()) < 50:       # noise floor only
+        nvox = int(mask.sum())
+        if nvox < 50:       # noise floor only
             continue
         try:
             surf = surface_from_mask(
                 nib.Nifti1Image(mask.astype(np.uint8), img.affine),
                 smooth_sigma=1.0, taubin_iterations=12)
-        except Exception:  # noqa: BLE001 — skip a structure that won't mesh
+        except Exception as exc:  # noqa: BLE001 — skip a structure that won't mesh
+            # Don't swallow silently: a nucleus that fails to mesh (too small /
+            # too thin for marching cubes at this stride) should be visible, not
+            # vanish without a trace.
+            warnings.warn(
+                f"structure label {label} ({nvox} vox) did not mesh: {exc}",
+                RuntimeWarning, stacklevel=2)
             continue
         if lut and label in lut:
             name, rgb = str(lut[label][0]), tuple(float(c) for c in lut[label][1])

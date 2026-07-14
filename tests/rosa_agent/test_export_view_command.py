@@ -421,10 +421,12 @@ class ViewResultsTests(unittest.TestCase):
             "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
             "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
         )
-        # Two solid blobs (>50 vox each) on the CT's 16³ grid → two meshes.
-        lab = np.zeros((16, 16, 16), dtype=np.int16)
-        lab[2:8, 4:9, 4:9] = 11     # 6*5*5 = 150 vox
-        lab[9:15, 4:9, 4:9] = 111
+        # Two solid 12³ blobs on a 32³ grid — large enough that marching cubes
+        # meshes them robustly across skimage versions (surface_from_mask samples
+        # at step_size=2, so a marginal 5-voxel box is version-sensitive).
+        lab = np.zeros((32, 32, 32), dtype=np.int16)
+        lab[4:16, 8:20, 8:20] = 11      # 12*12*12 = 1728 vox
+        lab[18:30, 8:20, 8:20] = 111
         img = sitk.GetImageFromArray(lab)
         img.SetSpacing((1.0, 1.0, 1.0))
         sm = self.tmp / "struct.nii.gz"
