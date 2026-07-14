@@ -66,6 +66,34 @@ def _hemi_masks(hemi_dir: Path) -> dict[int, Path]:
     return out
 
 
+def _hemi_binary_masks(hemi_dir: Path, nib, np):
+    """Return ``({custom_label: bool_mask_3d}, affine)`` for one hemisphere.
+
+    Prefers the single combined ``thomasfull_{L,R}.nii.gz`` labelmap when THOMAS
+    dropped one — it carries the *documented* custom nucleus codes (AV=2, Pul=8,
+    CM=11, Cla=28 …), so we read the whole hemisphere from one file instead of
+    ~20 per-nucleus masks. Falls back to the individual masks otherwise.
+    """
+    combined = None
+    for nm in ("thomasfull_L.nii.gz", "thomasfull_R.nii.gz",
+               "thomasfull_l.nii.gz", "thomasfull_r.nii.gz"):
+        p = hemi_dir / nm
+        if p.is_file():
+            combined = nib.load(str(p))
+            break
+    if combined is not None:
+        arr = np.asanyarray(combined.dataobj)
+        masks = {int(v): (arr == v) for v in np.unique(arr)
+                 if int(v) in THOMAS_NUCLEI}
+        return masks, combined.affine
+    masks, affine = {}, None
+    for num, path in _hemi_masks(hemi_dir).items():
+        im = nib.load(str(path))
+        affine = im.affine
+        masks[num] = np.asanyarray(im.dataobj) > 0
+    return masks, affine
+
+
 def find_reference_t1(thomas_dir: Path) -> Path | None:
     """The intensity T1 the segmentation lives in — used to register into CT.
     THOMAS drops it at the top of the output dir as ``T1.nii.gz``."""
@@ -91,29 +119,28 @@ def build_thomas_labelmap(thomas_dir: str | Path) -> tuple[Any, dict[int, list],
     import nibabel as nib
 
     thomas_dir = Path(thomas_dir)
-    left = _hemi_masks(thomas_dir / "left")
-    right = _hemi_masks(thomas_dir / "right")
+    # Prefer the combined per-hemisphere labelmap (thomasfull_{L,R}); fall back
+    # to the individual per-nucleus masks. Both use the documented custom codes.
+    left, left_aff = _hemi_binary_masks(thomas_dir / "left", nib, np)
+    right, right_aff = _hemi_binary_masks(thomas_dir / "right", nib, np)
     if not left and not right:
         raise FileNotFoundError(
-            f"no THOMAS nucleus masks under {thomas_dir}/left or /right "
-            "(expected files like '12-MD-Pf.nii.gz')")
+            f"no THOMAS nuclei under {thomas_dir}/left or /right "
+            "(expected a thomasfull_{L,R}.nii.gz or masks like '12-MD-Pf.nii.gz')")
 
-    ref_img = None
-    for num, path in (list(left.items()) + list(right.items())):
-        ref_img = nib.load(str(path))
-        break
-    lab = np.zeros(ref_img.shape, dtype=np.int16)
+    affine = left_aff if left_aff is not None else right_aff
+    shape = next(iter((left or right).values())).shape
+    lab = np.zeros(shape, dtype=np.int16)
     lut: dict[int, list] = {}
 
-    def _stamp(masks: dict[int, Path], offset: int, suffix: str) -> None:
-        for num, path in masks.items():
-            m = np.asanyarray(nib.load(str(path)).dataobj) > 0
-            lab[m] = num + offset
+    def _stamp(masks: dict[int, Any], offset: int, suffix: str) -> None:
+        for num, mask in masks.items():
+            lab[mask] = num + offset
             name, rgb = THOMAS_NUCLEI[num]
             lut[num + offset] = [f"{name}-{suffix}", [float(c) for c in rgb]]
 
     _stamp(left, 0, "L")
     _stamp(right, RIGHT_OFFSET, "R")
 
-    labelmap_img = nib.Nifti1Image(lab, ref_img.affine)
+    labelmap_img = nib.Nifti1Image(lab, affine)
     return labelmap_img, lut, find_reference_t1(thomas_dir)

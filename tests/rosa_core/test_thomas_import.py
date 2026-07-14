@@ -61,6 +61,29 @@ class BuildThomasLabelmapTests(unittest.TestCase):
             self.assertIsNotNone(t1)
             self.assertEqual(Path(t1).name, "T1.nii.gz")
 
+    def test_prefers_thomasfull_combined(self):
+        """When a hemisphere has a combined ``thomasfull_{L,R}.nii.gz`` (the
+        documented custom codes), it's read from that ONE file instead of the
+        per-nucleus masks — and takes precedence when both are present."""
+        import nibabel as nib
+        from rosa_core.thomas_import import build_thomas_labelmap
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._synthetic_dir(root)   # individual masks (should be ignored)
+            aff = np.diag([1.0, 1.0, 1.0, 1.0])
+            # combined per-hemi labelmap: CM(11) + Pul(8). Left at low x, right at
+            # high x so the two hemispheres don't overwrite each other.
+            for hemi, fn, x0 in (("left", "thomasfull_L", 1), ("right", "thomasfull_R", 10)):
+                a = np.zeros((16, 10, 10), dtype=np.int16)
+                a[x0:x0 + 2, 1:3, 1:3] = 11
+                a[x0:x0 + 2, 5:7, 1:3] = 8
+                nib.save(nib.Nifti1Image(a, aff), str(root / hemi / f"{fn}.nii.gz"))
+            img, lut, _ = build_thomas_labelmap(root)
+            labels = {int(v) for v in np.unique(np.asanyarray(img.dataobj)) if v}
+            self.assertEqual(labels, {8, 11, 108, 111})
+            self.assertEqual(lut[11][0], "CM-L")
+            self.assertEqual(lut[108][0], "Pul-R")
+
     def test_missing_masks_raises(self):
         from rosa_core.thomas_import import build_thomas_labelmap
         with tempfile.TemporaryDirectory() as td:

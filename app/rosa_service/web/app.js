@@ -606,13 +606,17 @@ async function uploadThomasDir(e) {
   const all = Array.from(e.target.files || []);
   e.target.value = "";                      // allow re-picking the same folder
   if (!all.length) return;
-  const files = all.filter((f) => {
-    const seg = (f.webkitRelativePath || f.name).split("/");
-    if (seg.includes("left") || seg.includes("right")) return true;   // nucleus masks
-    if (seg.length === 2 && /\.nii(\.gz)?$/i.test(seg[1])) return true; // ref MRI at root
-    return false;
-  });
-  if (!files.length) { $("labelmsg").textContent = "That folder isn't a THOMAS output (needs left/ + right/)."; return; }
+  // Prefer the 2 combined per-hemisphere labelmaps (thomasfull_{L,R}) — the whole
+  // segmentation in 2 files instead of ~40 per-nucleus masks. Fall back to the
+  // individual masks when THOMAS didn't emit the combined files.
+  const rel = (f) => f.webkitRelativePath || f.name;
+  const isFull = (f) => /thomasfull_[lr]\.nii(\.gz)?$/i.test(rel(f));
+  const isRootNifti = (f) => { const s = rel(f).split("/"); return s.length === 2 && /\.nii(\.gz)?$/i.test(s[1]); };
+  const hasFull = all.some(isFull);
+  const files = all.filter((f) =>
+    isRootNifti(f) || (hasFull ? isFull(f)
+                               : rel(f).split("/").some((p) => p === "left" || p === "right")));
+  if (!files.length) { $("labelmsg").textContent = "That folder isn't a THOMAS output (needs thomasfull_{L,R} or left/ + right/)."; return; }
   setLabelBusy(true);
   $("labelmsg").textContent = `Uploading ${files.length} THOMAS files…`;
   try {
