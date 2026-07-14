@@ -3157,6 +3157,7 @@ def _assemble_viewer(
         # truly-deep nuclei stay. No cortex (deep-only import) → all depths ~0 and
         # the slider hides itself.
         if structures and surfaces:
+            import numpy as np   # _assemble_viewer binds np locally elsewhere
             from scipy.spatial import cKDTree
             surf_pts = np.vstack([np.asarray(s.vertices_ras, dtype=float) for s in surfaces])
             tree = cKDTree(surf_pts)
