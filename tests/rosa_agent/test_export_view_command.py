@@ -43,6 +43,19 @@ def _try_imports():
 DEPS_AVAILABLE = _try_imports()
 
 
+def _skimage_available() -> bool:
+    # surface_from_mask (marching cubes) needs scikit-image, the [mesh] extra.
+    # The minimal CI env skips it; the app env installs it.
+    try:
+        import skimage  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+SKIMAGE_AVAILABLE = _skimage_available()
+
+
 def _write_synthetic_analyze(path: Path, *, size=(20, 20, 20)) -> None:
     import numpy as np
     import SimpleITK as sitk
@@ -406,6 +419,117 @@ class ViewResultsTests(unittest.TestCase):
         empty.mkdir()
         rc = vr_main([str(empty), "-o", str(self.tmp / "o1")])
         self.assertEqual(rc, 2)
+
+    @unittest.skipUnless(SKIMAGE_AVAILABLE, "scikit-image ([mesh] extra) not installed")
+    def test_structure_meshes_rendered(self):
+        """`--structure-meshes` (+ `--structure-lut`) meshes each label into a
+        colored surface and records it in scene_meta (the THOMAS viewer path)."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.view_results import main as vr_main
+
+        rd = self.tmp / "case"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "contacts.tsv").write_text(
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+        )
+        # Two solid 12³ blobs on a 32³ grid — large enough that marching cubes
+        # meshes them robustly across skimage versions (surface_from_mask samples
+        # at step_size=2, so a marginal 5-voxel box is version-sensitive).
+        lab = np.zeros((32, 32, 32), dtype=np.int16)
+        lab[4:16, 8:20, 8:20] = 11      # 12*12*12 = 1728 vox
+        lab[18:30, 8:20, 8:20] = 111
+        img = sitk.GetImageFromArray(lab)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        sm = self.tmp / "struct.nii.gz"
+        sitk.WriteImage(img, str(sm))
+        lut = self.tmp / "struct_lut.json"
+        lut.write_text(json.dumps({"11": ["CM-L", [0.2, 0.9, 0.32]],
+                                   "111": ["CM-R", [0.2, 0.9, 0.32]]}))
+
+        out = self.tmp / "view"
+        rc = vr_main([str(rd), "-o", str(out),
+                      "--structure-meshes", str(sm), "--structure-lut", str(lut)])
+        self.assertEqual(rc, 0)
+        self.assertTrue((out / "scene.glb").exists())
+        meta = json.loads((out / "scene_meta.json").read_text())
+        structs = {s["name"]: s for s in meta.get("structures", [])}
+        self.assertEqual(set(structs), {"CM-L", "CM-R"})
+        self.assertEqual(structs["CM-L"]["label"], 11)
+        self.assertEqual(structs["CM-R"]["label"], 111)
+        # LUT colors carried through (0..1); left/right share the color.
+        self.assertEqual(structs["CM-L"]["color"], structs["CM-R"]["color"])
+        self.assertAlmostEqual(structs["CM-L"]["color"][1], 0.9, places=5)
+
+    @unittest.skipUnless(SKIMAGE_AVAILABLE, "scikit-image ([mesh] extra) not installed")
+    def test_structure_depth_with_cortex(self):
+        """With a cortical surface present, each structure gets a depth-below-cortex
+        (for the Reveal-depth slider). Regression: the depth block referenced numpy
+        via a name bound locally later in the function → UnboundLocalError only when
+        structures AND surfaces coexisted (the mesh-only test never hit it).
+
+        Uses --brain-mask-cache (surface a mask directly, no registration) so a
+        cortex is present cheaply."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.view_results import main as vr_main
+
+        rd = self.tmp / "case_cx"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "contacts.tsv").write_text(
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+        )
+
+        def _write_box(path, box):
+            v = np.zeros((40, 40, 40), dtype=np.uint8)
+            v[box] = 1
+            im = sitk.GetImageFromArray(v)
+            im.SetSpacing((1.0, 1.0, 1.0))
+            sitk.WriteImage(im, str(path))
+
+        # Brain-mask envelope (surfaced directly via --brain-mask-cache) + a
+        # deep structure box sitting inside it.
+        mask = self.tmp / "brainmask.nii.gz"
+        _write_box(mask, np.s_[4:36, 4:36, 4:36])
+        sm = self.tmp / "s.nii.gz"
+        lab = np.zeros((40, 40, 40), dtype=np.int16)
+        lab[14:26, 14:26, 14:26] = 11
+        im = sitk.GetImageFromArray(lab)
+        im.SetSpacing((1.0, 1.0, 1.0))
+        sitk.WriteImage(im, str(sm))
+
+        out = self.tmp / "view_cx"
+        rc = vr_main([str(rd), "-o", str(out),
+                      "--brain-mask-cache", str(mask),
+                      "--structure-meshes", str(sm)])
+        self.assertEqual(rc, 0, "view-results must not crash with structures + a cortex")
+        meta = json.loads((out / "scene_meta.json").read_text())
+        self.assertTrue(meta.get("structures"), "structure must be meshed")
+        # Depth field populated + numeric, and > 0 (structure sits inside the
+        # envelope, not on its surface). The crash produced no output at all.
+        for s in meta["structures"]:
+            self.assertIsInstance(s["depth_mm"], float)
+        self.assertGreater(meta["structures"][0]["depth_mm"], 0.0)
+
+    def test_no_structure_meshes_empty_list(self):
+        """Without `--structure-meshes`, scene_meta.structures is an empty list
+        (every existing case renders unchanged)."""
+        from rosa_agent.commands.view_results import main as vr_main
+        rd = self.tmp / "plain"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "contacts.tsv").write_text(
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+        )
+        out = self.tmp / "view2"
+        self.assertEqual(vr_main([str(rd), "-o", str(out)]), 0)
+        meta = json.loads((out / "scene_meta.json").read_text())
+        self.assertEqual(meta.get("structures"), [])
 
 
 if __name__ == "__main__":

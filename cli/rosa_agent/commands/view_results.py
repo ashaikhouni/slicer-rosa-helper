@@ -143,6 +143,18 @@ def main(argv: list[str] | None = None) -> int:
         help="display name of the atlas used for --atlas-labelmap (shown in the "
              "viewer's Surface info line).",
     )
+    parser.add_argument(
+        "--structure-meshes", default="",
+        help="path to a deep-structure labelmap warped into the CT/contact frame "
+             "(e.g. THOMAS thalamic nuclei from `import-thomas`); each label is "
+             "meshed into a colored 3D surface with opacity + reveal-depth controls.",
+    )
+    parser.add_argument(
+        "--structure-lut", default="",
+        help="path to the labelmap's color LUT JSON {label:[name,[r,g,b]]} (0..1 "
+             "colors) written alongside --structure-meshes (from `import-thomas "
+             "--lut-out`); missing labels fall back to a stable hashed color.",
+    )
     parser.add_argument("--ct-window", default="",
                         help="HU window 'lo,hi' for the CT volume (default '-150,1500')")
     parser.add_argument("--subject-label", default="", help="label shown in the viewer header")
@@ -186,6 +198,16 @@ def main(argv: list[str] | None = None) -> int:
         _stderr(f"error: CT not found: {ct}")
         return 2
 
+    structure_lut = None
+    if args.structure_lut:
+        lp = Path(args.structure_lut)
+        if lp.is_file():
+            import json
+            try:
+                structure_lut = {int(k): v for k, v in json.loads(lp.read_text()).items()}
+            except (ValueError, OSError) as exc:
+                _stderr(f"warning: could not read --structure-lut {lp} ({exc}); using hashed colors")
+
     try:
         run_view_results(
             args.output,
@@ -207,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
             deepmriprep_tissue=args.deepmriprep_tissue or None,
             atlas_labelmap=args.atlas_labelmap or None,
             atlas_name=args.atlas_name,
+            structure_meshes=args.structure_meshes or None,
+            structure_lut=structure_lut,
             ct_window=_parse_window(args.ct_window),
             subject_label=args.subject_label,
             shaft_radius_mm=float(args.shaft_radius_mm),
