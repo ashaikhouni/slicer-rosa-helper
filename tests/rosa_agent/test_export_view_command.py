@@ -407,6 +407,62 @@ class ViewResultsTests(unittest.TestCase):
         rc = vr_main([str(empty), "-o", str(self.tmp / "o1")])
         self.assertEqual(rc, 2)
 
+    def test_structure_meshes_rendered(self):
+        """`--structure-meshes` (+ `--structure-lut`) meshes each label into a
+        colored surface and records it in scene_meta (the THOMAS viewer path)."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_agent.commands.view_results import main as vr_main
+
+        rd = self.tmp / "case"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "contacts.tsv").write_text(
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+        )
+        # Two solid blobs (>50 vox each) on the CT's 16³ grid → two meshes.
+        lab = np.zeros((16, 16, 16), dtype=np.int16)
+        lab[2:8, 4:9, 4:9] = 11     # 6*5*5 = 150 vox
+        lab[9:15, 4:9, 4:9] = 111
+        img = sitk.GetImageFromArray(lab)
+        img.SetSpacing((1.0, 1.0, 1.0))
+        sm = self.tmp / "struct.nii.gz"
+        sitk.WriteImage(img, str(sm))
+        lut = self.tmp / "struct_lut.json"
+        lut.write_text(json.dumps({"11": ["CM-L", [0.2, 0.9, 0.32]],
+                                   "111": ["CM-R", [0.2, 0.9, 0.32]]}))
+
+        out = self.tmp / "view"
+        rc = vr_main([str(rd), "-o", str(out),
+                      "--structure-meshes", str(sm), "--structure-lut", str(lut)])
+        self.assertEqual(rc, 0)
+        self.assertTrue((out / "scene.glb").exists())
+        meta = json.loads((out / "scene_meta.json").read_text())
+        structs = {s["name"]: s for s in meta.get("structures", [])}
+        self.assertEqual(set(structs), {"CM-L", "CM-R"})
+        self.assertEqual(structs["CM-L"]["label"], 11)
+        self.assertEqual(structs["CM-R"]["label"], 111)
+        # LUT colors carried through (0..1); left/right share the color.
+        self.assertEqual(structs["CM-L"]["color"], structs["CM-R"]["color"])
+        self.assertAlmostEqual(structs["CM-L"]["color"][1], 0.9, places=5)
+
+    def test_no_structure_meshes_empty_list(self):
+        """Without `--structure-meshes`, scene_meta.structures is an empty list
+        (every existing case renders unchanged)."""
+        from rosa_agent.commands.view_results import main as vr_main
+        rd = self.tmp / "plain"
+        (rd / "work").mkdir(parents=True)
+        self._write_ct(rd / "work" / "postop_ct.nii.gz")
+        (rd / "contacts.tsv").write_text(
+            "trajectory\tlabel\tcontact_index\tx\ty\tz\tpeak_detected\telectrode_model\n"
+            "LAM\tLAM1\t1\t0\t0\t2\t1\tDIXI-8AM\n"
+        )
+        out = self.tmp / "view2"
+        self.assertEqual(vr_main([str(rd), "-o", str(out)]), 0)
+        meta = json.loads((out / "scene_meta.json").read_text())
+        self.assertEqual(meta.get("structures"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
