@@ -149,6 +149,9 @@ class LabelRequest(BaseModel):
 
     t1: str | None = None
     atlas: str = "cerebra"
+    # THOMAS is a BYO atlas (``atlas="thomas"``): the uploaded folder of nucleus
+    # masks + a reference MRI. Ignored for every other atlas.
+    thomas_dir: str | None = None
 
 
 __all__ = [

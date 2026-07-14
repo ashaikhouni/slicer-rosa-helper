@@ -316,6 +316,17 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "license": "deepmriprep code MIT; atlas data academic — cite the source atlas",
                     "coverage": coverage, "is_default": False,
                 })
+            # THOMAS: a BYO deep-structure atlas. The user loads a THOMAS output
+            # folder; its reference MRI is registered → the CT and the nuclei are
+            # labeled + rendered as 3-D meshes. Always offered (needs no runtime),
+            # flagged byo so the UI knows to prompt for the folder.
+            atlases.append({
+                "id": "thomas", "name": "THOMAS thalamic nuclei (load folder…)",
+                "available": True, "byo": True, "license_tier": "byo",
+                "license": "your own THOMAS segmentation output",
+                "coverage": "Deep: thalamic + subcortical nuclei (per hemisphere)",
+                "is_default": False,
+            })
             return {"atlases": atlases,
                     "default": bundled_atlases.load_manifest()["default"]}
         except Exception as exc:  # noqa: BLE001 — engine/resources missing
@@ -337,15 +348,30 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         ct = parent.params.get("ct")
         if not ct:
             raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        is_thomas = str(req.atlas or "").startswith("thomas")
+        # THOMAS is a BYO atlas: it brings its own reference MRI (registered → CT),
+        # so a patient T1 is optional (it only adds the cortical Ghost surface). It
+        # needs the uploaded folder instead.
+        thomas_dir = None
+        if is_thomas:
+            if not req.thomas_dir:
+                raise HTTPException(status_code=422,
+                                    detail="THOMAS atlas needs a folder (thomas_dir)")
+            tdir = Path(req.thomas_dir).expanduser()
+            if not ((tdir / "left").is_dir() or (tdir / "right").is_dir()):
+                raise HTTPException(
+                    status_code=422,
+                    detail="not a THOMAS output dir — expected a left/ or right/ subfolder")
+            thomas_dir = str(tdir)
         # The MRI: the request's, else the one provided at case creation (parent
         # pipeline's t1). Either lets labeling proceed without re-uploading.
         t1 = req.t1 or parent.params.get("t1")
-        if not t1:
+        if not t1 and not is_thomas:
             raise HTTPException(status_code=409,
                                 detail="no MRI (T1): provide one, or create the case with an MRI")
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
-            "t1": t1, "atlas": req.atlas,
+            "t1": t1, "atlas": req.atlas, "thomas_dir": thomas_dir,
             # Reuse the parent pipeline's surface backend so labeling meshes/loads
             # the SAME brain_surface_*.npz rather than a different one.
             "surface": parent.params.get("surface", "auto"),
@@ -560,6 +586,38 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         with open(dest, "wb") as out:
             shutil.copyfileobj(file.file, out)
         return {"path": str(dest), "name": name, "bytes": dest.stat().st_size}
+
+    @app.post(f"/api/{API_VERSION}/uploads/dir")
+    async def upload_dir(files: list[UploadFile] = File(...)) -> dict:
+        """Upload a folder tree (browser directory pick) and return its root path.
+
+        Each file's *filename* carries its relative path (the browser sends
+        ``webkitRelativePath`` there, e.g. ``T1/left/11-CM.nii.gz``); we rebuild
+        the tree under ``_uploads/<uuid>/`` so a directory-consuming job
+        (import-thomas) can point at the root. The browser side sends only the
+        files that job needs, so this stays lean.
+        """
+        if not files:
+            raise HTTPException(status_code=400, detail="no files uploaded")
+        base = Path(work_root) / "_uploads" / uuid.uuid4().hex[:8]
+        roots: set[str] = set()
+        n = 0
+        for f in files:
+            # The filename IS the relative path; drop traversal/absolute segments.
+            parts = [p for p in Path(str(f.filename or "")).parts if p not in ("..", "/", "")]
+            if not parts:
+                continue
+            roots.add(parts[0])
+            dest = base.joinpath(*parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(f.file, out)
+            n += 1
+        if not n:
+            raise HTTPException(status_code=400, detail="no usable files in upload")
+        # Single common top folder → return it; otherwise the upload root.
+        root = base / next(iter(roots)) if len(roots) == 1 else base
+        return {"path": str(root), "n_files": n}
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

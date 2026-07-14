@@ -355,9 +355,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         contacts = spec.params.get("contacts")
         ct = spec.params.get("ct")
         t1 = spec.params.get("t1")
-        if not (contacts and ct and t1):
-            raise ValueError("label job requires params.contacts, params.ct, params.t1")
         atlas = str(spec.params.get("atlas") or "cerebra")
+        is_thomas = atlas.startswith("thomas")
+        # THOMAS brings its OWN reference MRI (it registers that → the CT), so a
+        # patient T1 is optional — it only adds the cortical Ghost surface for
+        # context. Every other atlas needs the patient T1 to route registration.
+        if not (contacts and ct) or (not t1 and not is_thomas):
+            raise ValueError("label job requires params.contacts, params.ct, params.t1")
         # Same surface backend the parent pipeline chose, so this label reuses the
         # already-built brain_surface_*.npz instead of meshing a different one.
         surface = str(spec.params.get("surface") or "auto")
@@ -386,7 +390,21 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # per case (cached in regcache), recolored per atlas below. The surface,
         # native brain mask and T1→CT transform caches are shared with the pipeline
         # job via ``_brain_surface_view_flags`` so nothing is re-run per atlas.
-        if atlas == "fastsurfer":
+        thomas_lut = str(workdir / "atlas_in_ct.nii.gz.lut.json")  # THOMAS mesh LUT
+        if is_thomas:
+            # THOMAS = a BYO deep-structure atlas: register its own reference T1 →
+            # the CT (no patient-T1 route), warp the nuclei labelmap in, label the
+            # contacts by nucleus, and save the MRI-in-CT QC for the reg check.
+            thomas_dir = spec.params.get("thomas_dir")
+            if not thomas_dir:
+                raise ValueError("thomas atlas requires params.thomas_dir")
+            label_step = base + ["label", str(contacts),
+                                 "--thomas", str(thomas_dir),
+                                 "--target-volume", str(ct),
+                                 "--save-registered-mri", mri_qc,
+                                 "--save-atlas-labelmap", atlas_in_ct,
+                                 "--registration-cache", regcache, "-o", out]
+        elif atlas == "fastsurfer":
             label_step = base + ["label", str(contacts), "--fastsurfer",
                                   "--target-volume", str(ct),
                                   "--intermediate-volume", str(t1),
@@ -424,13 +442,20 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # Brain SURFACE flags (native volume + T1→CT transform the label step just
         # saved + cached mask + cached mesh). On a cache hit view-results loads the
         # mesh and ignores the FastSurfer flags. Shared with the pipeline job.
-        view_step += _brain_surface_view_flags(str(t1), Path(regcache),
-                                               include_transform=True,
-                                               surface_source=surface)
+        # THOMAS may run without a patient MRI → then there's no cortex surface.
+        if t1:
+            view_step += _brain_surface_view_flags(str(t1), Path(regcache),
+                                                   include_transform=True,
+                                                   surface_source=surface)
         # COLOR: the FastSurfer labeler keeps its own DKT parcellation; every other
-        # atlas recolors that same mesh by its warped labelmap.
+        # atlas recolors that same mesh (+ tints the slices) by its warped labelmap.
         if atlas != "fastsurfer":
-            view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
+            view_step += ["--atlas-labelmap", atlas_in_ct,
+                          "--atlas-name", ("THOMAS" if is_thomas else atlas)]
+        # THOMAS additionally renders its nuclei as 3-D meshes (the deep anatomy a
+        # cortical atlas can't paint), colored by the same LUT that tints the slices.
+        if is_thomas:
+            view_step += ["--structure-meshes", atlas_in_ct, "--structure-lut", thomas_lut]
         steps.append(view_step)
         return steps
     raise ValueError(f"unknown job kind: {kind!r}")

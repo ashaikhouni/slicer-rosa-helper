@@ -84,6 +84,41 @@ def _write_atlas_palette_sidecar(args: Any, atlas_id: str,
         _stderr(f"[label] atlas palette sidecar skipped ({exc})")
 
 
+def _write_thomas_lut(save_atlas_labelmap: str,
+                      lut: dict[int, list] | None) -> None:
+    """Write ``<save_atlas_labelmap>.lut.json`` = ``{label:[name,[r,g,b] 0..1]}``
+    so the viewer's ``--structure-lut`` names + colors the 3-D nuclei meshes to
+    match the slice tint. Best effort."""
+    if not lut:
+        return
+    try:
+        import json
+        out = save_atlas_labelmap + ".lut.json"
+        with open(out, "w") as f:
+            json.dump({str(k): v for k, v in lut.items()}, f)
+        _stderr(f"[label] wrote THOMAS mesh LUT → {Path(out).name} ({len(lut)} nuclei)")
+    except Exception as exc:  # noqa: BLE001 — cosmetic; never fail the job
+        _stderr(f"[label] THOMAS mesh LUT skipped ({exc})")
+
+
+def _write_thomas_palette_sidecar(save_atlas_labelmap: str,
+                                  colors: dict[int, list] | None) -> None:
+    """Write ``<save_atlas_labelmap>.colors.json`` from the THOMAS LUT (0..255
+    RGB per nucleus) so the 2-D slice tint matches the 3-D nuclei meshes. Best
+    effort — a failure just leaves the viewer's fallback hues."""
+    if not colors:
+        return
+    try:
+        import json
+        sidecar = save_atlas_labelmap + ".colors.json"
+        with open(sidecar, "w") as f:
+            json.dump({str(k): list(v) for k, v in colors.items()}, f)
+        _stderr(f"[label] wrote THOMAS color palette → {Path(sidecar).name} "
+                f"({len(colors)} nuclei)")
+    except Exception as exc:  # noqa: BLE001 — palette is cosmetic; never fail
+        _stderr(f"[label] THOMAS palette sidecar skipped ({exc})")
+
+
 def _build_providers(
     *,
     thomas_dir: str | None,
@@ -182,8 +217,45 @@ def _build_providers(
 
     if thomas_dir:
         try:
-            providers["thomas"] = ThomasAtlasProvider(thomas_dir)
-            _stderr(f"[label] thomas: ready ({len(providers['thomas']._labels)} voxels)")
+            # THOMAS is a BYO labelmap atlas: build the combined nuclei labelmap
+            # from the left/ + right/ masks, then register its OWN reference T1 →
+            # the CT and warp it in — exactly like the deepmriprep native atlas,
+            # so contacts get a nucleus label, the warped map colors the slices,
+            # and the MRI-in-CT QC lets the user check the registration + approve.
+            if target_volume_path:
+                import nibabel as nib
+                from rosa_core.thomas_import import build_thomas_labelmap
+                img, tlut, ref_t1 = build_thomas_labelmap(thomas_dir)
+                base = Path(registration_cache) if registration_cache else Path(tempfile.mkdtemp())
+                base.mkdir(parents=True, exist_ok=True)
+                combined = base / "thomas_combined.nii.gz"
+                nib.save(img, str(combined))
+                prov = LabelmapAtlasProvider(
+                    source_id="thomas",
+                    display_name="THOMAS thalamic nuclei",
+                    label_path=str(combined),
+                    label_names={int(k): v[0] for k, v in tlut.items()},
+                    atlas_base_path=str(ref_t1) if ref_t1 else None,  # THOMAS T1 → CT
+                    target_volume_path=target_volume_path,
+                    transform_kind="rigid",                            # MR↔CT, same subject
+                    save_intermediate_in_target=save_registered_mri,   # MRI-in-CT QC
+                    cache_dir=registration_cache,
+                    logger=_stderr,
+                )
+                # 0..255 region colors (from the THOMAS LUT) for the slice-tint
+                # sidecar — the SAME palette as the 3-D nuclei meshes.
+                prov._thomas_colors = {
+                    int(k): [int(round(c * 255)) for c in v[1]] for k, v in tlut.items()}
+                # Full LUT {label:[name,[r,g,b] 0..1]} → the viewer's --structure-lut
+                # so the 3-D nuclei meshes carry names + colors matching the slices.
+                prov._thomas_lut = {int(k): list(v) for k, v in tlut.items()}
+                providers["thomas"] = prov
+                _stderr(f"[label] thomas: ready ({len(prov._labels)} voxels, T1→CT)")
+            else:
+                # No target volume (CLI without --target-volume): fall back to the
+                # same-frame KD-tree provider (masks already in the contact frame).
+                providers["thomas"] = ThomasAtlasProvider(thomas_dir)
+                _stderr(f"[label] thomas: ready ({len(providers['thomas']._labels)} voxels, same-frame)")
         except Exception as exc:
             _stderr(f"[label] thomas provider failed: {exc}")
             providers["thomas"] = None
@@ -383,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--out/-o is required")
 
     if bool(args.atlas_base) != bool(args.target_volume) and not args.bundled_atlas \
-            and not args.fastsurfer and not args.deepmriprep_atlas:
+            and not args.fastsurfer and not args.deepmriprep_atlas and not args.thomas:
         parser.error("--atlas-base and --target-volume must be passed together")
     if args.bundled_atlas and not args.target_volume:
         parser.error("--bundled-atlas requires --target-volume "
@@ -463,8 +535,8 @@ def main(argv: list[str] | None = None) -> int:
         registration_cache=args.registration_cache or None,
     )
     # Persist the active atlas's warped (CT-frame) labelmap so the viewer can
-    # color the brain surface by the same atlas that labels the contacts.
-    active_atlas = args.bundled_atlas or args.deepmriprep_atlas
+    # color the brain surface + slices by the same atlas that labels the contacts.
+    active_atlas = args.bundled_atlas or args.deepmriprep_atlas or (args.thomas and "thomas")
     if args.save_atlas_labelmap and active_atlas:
         prov = providers.get(active_atlas)
         lm = getattr(prov, "_registered_labelmap_path", None) if prov is not None else None
@@ -473,7 +545,13 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.save_atlas_labelmap).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(str(lm), args.save_atlas_labelmap)
             _stderr(f"[label] saved warped atlas labelmap → {args.save_atlas_labelmap}")
-            _write_atlas_palette_sidecar(args, active_atlas, dmp_lut)
+            if active_atlas == "thomas":
+                _write_thomas_palette_sidecar(
+                    args.save_atlas_labelmap, getattr(prov, "_thomas_colors", None))
+                _write_thomas_lut(
+                    args.save_atlas_labelmap, getattr(prov, "_thomas_lut", None))
+            else:
+                _write_atlas_palette_sidecar(args, active_atlas, dmp_lut)
         else:
             _stderr("[label] --save-atlas-labelmap requested but no warped labelmap "
                     "(atlas not registered to the target?)")

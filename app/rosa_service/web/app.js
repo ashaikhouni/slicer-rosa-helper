@@ -281,9 +281,10 @@ function resetLabelCard() {
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
   $("qcplanes").innerHTML = ""; state.qc = null;
-  $("qcspace").hidden = true;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
+  $("regtab").hidden = true;              // no registration to check until an atlas runs
+  state.thomasDir = null;
   setViewerTab("electrodes");
 }
 
@@ -355,11 +356,25 @@ function _postViewer(msg) {
 // (has a warped atlas? has an MRI to fade to?). Host them in the top row and
 // reset to the viewer's defaults (atlas on, fade at CT) on each (re)load.
 function _onSliceCaps({ atlas, fade }) {
-  $("slicefade-item").hidden = !fade;
-  $("atlasov-item").hidden = !atlas;
-  $("sliceovctl").hidden = !(fade || atlas);
+  state.sliceCaps = { atlas: !!atlas, fade: !!fade };
   $("app-atlas-ov").checked = true;
   $("app-slice-fade").value = 0;
+  _syncModeControls();
+}
+
+// Contextual top bar: the 3-D-view controls (Ortho/Probe, slice-fade, atlas-on-
+// slices) and the registration-check controls (space + blend + slider) never show
+// at the same time — the bar SWAPS with the view, so there's one CT—MRI slider at
+// a time. Availability (probe present, slice caps) still gates the 3-D controls.
+function _syncModeControls() {
+  const is3d = (state.viewMode || "electrodes") !== "qc";
+  const caps = state.sliceCaps || {};
+  const probe = state.probeCaps || {};
+  $("probemodectl").hidden = !(is3d && probe.present);
+  $("slicefade-item").hidden = !(is3d && caps.fade);
+  $("atlasov-item").hidden = !(is3d && caps.atlas);
+  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas));
+  $("qctools").hidden = is3d;
 }
 
 function _setAppSliceMode(mode) {
@@ -372,7 +387,7 @@ function _setAppSliceMode(mode) {
 // remember the user's choice: re-selecting an electrode returns to Probe if
 // that's what they were using (no surprise flip back to Ortho).
 function _onProbeAvail({ present, available }) {
-  $("probemodectl").hidden = !present;
+  state.probeCaps = { present: !!present, available: !!available };
   const probeBtn = $("app-slice-mode").querySelector('[data-smode="probe"]');
   probeBtn.disabled = !available;
   probeBtn.title = available ? "Along the selected electrode + probe's-eye"
@@ -382,6 +397,7 @@ function _onProbeAvail({ present, available }) {
   } else if (!available) {
     _setAppSliceMode("ortho");
   }
+  _syncModeControls();
 }
 // The viewer selected a contact (3D click, or arrow-stepping the probe) → mirror
 // it in the left navigator: open the shank, highlight + scroll to the row.
@@ -483,7 +499,16 @@ async function loadAtlases() {
       if (a.id === def) o.selected = true;
       sel.append(o);
     }
+    _syncThomasLoadBtn();
   } catch (_e) { $("labelstatus").textContent = "· atlas list unavailable"; }
+}
+
+// THOMAS is a BYO atlas, so it needs a "load folder" trigger EVERY time it's the
+// selection — the dropdown's `change` doesn't fire when THOMAS is already picked
+// (case reopened, or re-importing a new folder). This chip, shown whenever THOMAS
+// is selected, is that reliable trigger.
+function _syncThomasLoadBtn() {
+  $("thomasload").hidden = !String($("atlassel").value || "").startsWith("thomas");
 }
 
 async function uploadMri(file) {
@@ -506,7 +531,13 @@ function setLabelBusy(on) {
 }
 
 async function runLabel() {
-  if (!state.mri || !state.jobId) return;
+  if (!state.jobId) return;
+  const atlasId = $("atlassel").value;
+  const isThomas = atlasId.startsWith("thomas");
+  // THOMAS brings its own reference MRI, so it labels without a patient MRI — but
+  // it needs the uploaded folder. Every other atlas needs the patient MRI.
+  if (isThomas) { if (!state.thomasDir) return; }
+  else if (!state.mri) return;
   // Cancel any in-flight label for this case first — otherwise max_concurrent=1
   // would queue the new atlas behind the old (slow) one and it'd look stuck.
   if (state.labelJobId) {
@@ -520,13 +551,17 @@ async function runLabel() {
   $("labelbtn").disabled = true;
   $("approvebtn").hidden = true;
   const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
-  const atlas = $("atlassel").options[$("atlassel").selectedIndex]?.textContent || $("atlassel").value;
-  $("labelmsg").innerHTML = firstLabel
-    ? `Registering MRI → CT and warping <b>${atlas}</b> (~30 s) — the 3D recolors when done…`
-    : `Relabeling with <b>${atlas}</b> — CT↔MRI registration is cached…`;
+  const atlas = $("atlassel").options[$("atlassel").selectedIndex]?.textContent || atlasId;
+  $("labelmsg").innerHTML = isThomas
+    ? `Registering THOMAS MRI → CT and warping the nuclei (~30–60 s) — the 3D + slices update when done…`
+    : firstLabel
+      ? `Registering MRI → CT and warping <b>${atlas}</b> (~30 s) — the 3D recolors when done…`
+      : `Relabeling with <b>${atlas}</b> — CT↔MRI registration is cached…`;
   try {
-    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
-      { t1: state.mri.path, atlas: $("atlassel").value });
+    const body = { atlas: atlasId };
+    if (state.mri) body.t1 = state.mri.path;
+    if (isThomas) body.thomas_dir = state.thomasDir;
+    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST", body);
     state.labelJobId = job.id;
     streamInto(job.id, "labellog");     // shows the registration metrics (QC)
     pollLabel(job.id, firstLabel);
@@ -585,6 +620,44 @@ function _showLabelError(st) {
   $("labelbtn").disabled = false;
 }
 
+// ---- THOMAS: a BYO atlas (load a folder) --------------------------------
+// THOMAS is picked from the atlas dropdown like any other atlas; the only
+// difference is it prompts for a THOMAS output folder. We upload the masks, then
+// run the NORMAL label flow against them (register its MRI → CT, warp the nuclei,
+// tint the slices + render the 3-D meshes + label contacts, with check-reg +
+// approve). Only the files build_thomas_labelmap reads are uploaded.
+async function uploadThomasDir(e) {
+  const all = Array.from(e.target.files || []);
+  e.target.value = "";                      // allow re-picking the same folder
+  if (!all.length) return;
+  // Prefer the 2 combined per-hemisphere labelmaps (thomasfull_{L,R}) — the whole
+  // segmentation in 2 files instead of ~40 per-nucleus masks. Fall back to the
+  // individual masks when THOMAS didn't emit the combined files.
+  const rel = (f) => f.webkitRelativePath || f.name;
+  const isFull = (f) => /thomasfull_[lr]\.nii(\.gz)?$/i.test(rel(f));
+  const isRootNifti = (f) => { const s = rel(f).split("/"); return s.length === 2 && /\.nii(\.gz)?$/i.test(s[1]); };
+  const hasFull = all.some(isFull);
+  const files = all.filter((f) =>
+    isRootNifti(f) || (hasFull ? isFull(f)
+                               : rel(f).split("/").some((p) => p === "left" || p === "right")));
+  if (!files.length) { $("labelmsg").textContent = "That folder isn't a THOMAS output (needs thomasfull_{L,R} or left/ + right/)."; return; }
+  setLabelBusy(true);
+  $("labelmsg").textContent = `Uploading ${files.length} THOMAS files…`;
+  try {
+    const fd = new FormData();
+    // Carry each file's relative path AS its filename so the server rebuilds the
+    // tree — one clean `files` list, no parallel path array.
+    for (const f of files) fd.append("files", f, f.webkitRelativePath || f.name);
+    const r = await fetch(`${API}/uploads/dir`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+    state.thomasDir = (await r.json()).path;
+    runLabel();                             // label against THOMAS, like any atlas
+  } catch (err) {
+    setLabelBusy(false);
+    $("labelmsg").textContent = `THOMAS upload failed: ${err.message}`;
+  }
+}
+
 async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   setLabelBusy(false);
   try {
@@ -597,13 +670,11 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
     $("approvebtn").hidden = false;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
-    // "check reg" opens the registration used for this atlas: atlas↔MRI for MNI
-    // atlases, else the CT↔MRI (Native) reg that native atlases (FastSurfer /
-    // deepmriprep) rely on. Enabled whenever there's ANY registration to verify
-    // — so it's not a dead grey button on native atlases.
-    $("atlascheckbtn").hidden = false;
-    $("atlascheckbtn").disabled = !p.has_mri_qc;
+    _syncThomasLoadBtn();
+    $("atlascheckbtn").hidden = true;    // the [Registration] tab is the entry now
     previewProposed(p.contacts);        // show the proposed regions per contact
+    // showQc reveals the [Registration] tab + auto-jumps on the first label so the
+    // registration gets verified; later atlas switches just refresh it in place.
     if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
     // The 3D viewer is (re)built only on the first label; reload the iframe then
     // so the brain surface shows. Atlas switches leave the viewer untouched.
@@ -662,17 +733,26 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
+// Which registration spaces an atlas produced: Native (CT↔MRI) whenever it
+// registered; AC-PC + Atlas need the MNI-template volumes (bundled atlases only).
+// Greys the rest per atlas, and moves off a space that's no longer available
+// (e.g. after switching from an MNI atlas to THOMAS).
+function _setQcSpaces(hasCt, hasMni) {
+  const avail = { ct: !!hasCt, mni: !!hasMni, atlas: !!hasMni };
+  for (const b of $("qcspace").querySelectorAll("button")) b.disabled = !avail[b.dataset.space];
+  if (state.qc && !avail[state.qc.space])
+    state.qc.space = avail.ct ? "ct" : (Object.keys(avail).find((k) => avail[k]) || "ct");
+  const cur = $("qcspace").querySelector(`[data-space="${state.qc ? state.qc.space : "ct"}"]`);
+  if (cur) setActive("qcspace", cur);
+}
+
 function showQc(hasMni, jumpToQc = true) {
   // Build the QC panes ONCE per case (registration is per-case). Atlas switches
   // re-enter here but keep the existing panes + the user's mode/slice settings.
   if (!state.qc) {
-    // Selecting an atlas is what brings the user here, so open on the ATLAS
-    // registration check (atlas template ↔ MRI) — the thing they just set up.
-    // AC-PC / Native remain one click away for the CT↔MRI check. Native-space
-    // atlases (no MNI warp) have no atlas-template pane, so fall back to Native.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", _hasMni: hasMni, panes: [] };
-    $("qcspace").hidden = !hasMni;
-    if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="atlas"]'));
+    // Default to the ATLAS check for MNI atlases (the thing just set up), else
+    // Native (CT↔MRI). _setQcSpaces below greys whatever this atlas can't show.
+    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", panes: [] };
     const wrap = $("qcplanes");
     wrap.innerHTML = "";
     for (const [axis, name] of QC_PLANES) {
@@ -689,6 +769,9 @@ function showQc(hasMni, jumpToQc = true) {
     $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
     $("qcdir").hidden = true;
   }
+  state.qc._hasMni = hasMni;
+  _setQcSpaces(true, hasMni);        // recompute availability for THIS atlas
+  $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
   if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
   else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
 }
@@ -714,14 +797,16 @@ function openQc(kind) {
   refreshAllPanes();
 }
 
-// Switch the big pane between the 3D electrode view and the registration QC.
+// Switch the big pane between the 3D electrode view and the registration QC, and
+// SWAP the top-bar controls to match (via _syncModeControls) so only one set shows.
 function setViewerTab(tab) {
   const qc = tab === "qc";
+  state.viewMode = qc ? "qc" : "electrodes";
   $("viewerframe").hidden = qc;
   $("viewerqc").hidden = !qc;
-  $("qctools").hidden = !qc;
   for (const b of $("viewertabs").querySelectorAll("button[data-tab]"))
     b.classList.toggle("active", b.dataset.tab === tab);
+  _syncModeControls();
   if (qc) refreshAllPanes();      // (re)load images every time the QC is shown
 }
 
@@ -731,7 +816,7 @@ function wireQc() {
     if (b && !b.disabled) setViewerTab(b.dataset.tab);
   });
   $("qcspace").addEventListener("click", (ev) => {
-    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    const b = ev.target.closest("button"); if (!b || b.disabled || !state.qc) return;
     state.qc.space = b.dataset.space;
     setActive("qcspace", b);
     refreshAllPanes();
@@ -763,13 +848,23 @@ function setActive(groupId, btn) {
 }
 
 async function approveLabels() {
-  if (!state.labelJobId) return;
+  if (!state.labelJobId) {
+    $("labelmsg").textContent = "No proposed labels to apply — pick an atlas first.";
+    return;
+  }
+  $("approvebtn").disabled = true;
   try {
     const doc = await jsend(`${API}/jobs/${state.labelJobId}/labels/approve`, "POST");
     renderReview(doc);   // regions now populated → visible per contact + in export
-    $("labelmsg").textContent = "Labels applied — shown per contact and included in the export.";
+    const n = doc.shanks.reduce((a, s) => a + s.contacts.filter((c) => c.region).length, 0);
+    $("labelmsg").textContent = `✓ Applied ${n} labels — shown per contact and included in the export.`;
     $("approvebtn").hidden = true;
-  } catch (e) { $("labelmsg").textContent = `Approve failed: ${e.message}`; }
+    setViewerTab("electrodes");   // back to the 3-D view so the labeled contacts are visible
+  } catch (e) {
+    $("labelmsg").textContent = `Approve failed: ${e.message}`;
+  } finally {
+    $("approvebtn").disabled = false;
+  }
 }
 
 // Stream a job's logs into a <pre> by id (used for the label job's reg metrics).
@@ -871,7 +966,7 @@ async function openCase(id) {
     state.labeledOnce = labelJobs.some((j) => j.state === "succeeded");
     state.labelJobId = newest.id;
     if (newest.t1) { state.mri = { path: newest.t1, name: "(uploaded MRI)" }; $("labelbtn").disabled = false; }
-    if (newest.atlas) $("atlassel").value = newest.atlas;
+    if (newest.atlas) { $("atlassel").value = newest.atlas; _syncThomasLoadBtn(); }
     if (newest.state === "succeeded") showProposed(newest.id, { reloadViewer: false, jumpToQc: false });
     else if (["failed", "cancelled"].includes(newest.state)) _showLabelError(newest);
     else pollLabel(newest.id, !state.labeledOnce);
@@ -983,6 +1078,9 @@ async function boot() {
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
   $("showallbtn").onclick = showAllInViewer;
+  // THOMAS is a BYO atlas: selecting it in the dropdown opens the folder picker
+  // (below), which uploads the masks and labels against them via runLabel.
+  $("thomasdir-file").addEventListener("change", uploadThomasDir);
   // Slice-display controls hosted in the top row → drive the embedded viewer.
   $("app-slice-fade").addEventListener("input", (e) =>
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
@@ -1011,7 +1109,17 @@ async function boot() {
   });
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
-  $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
+  $("atlassel").addEventListener("change", () => {
+    _syncThomasLoadBtn();                 // show/hide the "Load folder…" chip
+    if (!state.jobId) return;
+    // THOMAS: prompt for the folder first; the picker's change handler uploads
+    // then labels. Every other atlas labels immediately (needs the patient MRI).
+    if ($("atlassel").value.startsWith("thomas")) { $("thomasdir-file").click(); return; }
+    if (state.mri) runLabel();
+  });
+  // The "Load folder…" chip: works even when THOMAS is already the selected atlas
+  // (re-open / re-import), where the dropdown's change never fires.
+  $("thomasload").onclick = () => $("thomasdir-file").click();
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
   try {

@@ -186,25 +186,31 @@
       </div>
       <div class="viewer">
         <div class="viewer-tabs" id="viewertabs">
-          <button data-tab="electrodes" class="active">Electrodes (3D)</button>
+          <span class="btnset small viewmode" id="viewmode">
+            <button data-tab="electrodes" class="active">⊞ 3D</button>
+            <button data-tab="qc" id="regtab" hidden title="Check the registration behind the current atlas's labels">◫ Registration</button>
+          </span>
           <span class="probemodectl" id="probemodectl" hidden title="Ortho = axial/coronal/sagittal · Probe = along the selected electrode + probe's-eye">
             <span class="btnset small" id="app-slice-mode"><button data-smode="ortho" class="active">⊞ Ortho</button><button data-smode="probe">⤢ Probe</button></span>
           </span>
           <span class="atlasctl" id="atlasctl" hidden>
             <span class="al muted">Atlas</span>
             <select id="atlassel"></select>
+            <button id="thomasload" class="ghost small" hidden title="Load / re-load the THOMAS segmentation folder">Load folder…</button>
             <span class="atlasbusy" id="atlasbusy" hidden><span class="spin"></span>registering…</span>
             <button id="approvebtn" class="primary small" hidden>Approve</button>
-            <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, or CT↔MRI for native ones (FastSurfer / deepmriprep)">check reg</button>
+            <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, CT↔MRI for native ones (FastSurfer / deepmriprep), or THOMAS-MRI↔CT for THOMAS">check reg</button>
+            <!-- BYO folder picker for the THOMAS atlas (opened when it's selected) -->
+            <input type="file" id="thomasdir-file" webkitdirectory directory hidden>
           </span>
           <span class="sliceovctl" id="sliceovctl" hidden>
             <label class="sliceov-fade" id="slicefade-item" hidden title="Fade the 2D slice panels between the CT (metal) and the MRI (anatomy)"><span class="al muted">CT</span><input type="range" id="app-slice-fade" min="0" max="1" step="0.05" value="0"><span class="al muted">MRI</span></label>
             <label class="sliceov-chk" id="atlasov-item" hidden title="Tint each atlas region on the 2D slice panels — same colors as the 3D surface"><input type="checkbox" id="app-atlas-ov" checked><span class="al">atlas on slices</span></label>
           </span>
           <span class="viewer-tools" id="qctools" hidden>
-            <span class="btnset" id="qcspace" hidden>
-              <button data-space="mni" class="active">AC-PC</button>
-              <button data-space="ct">Native</button>
+            <span class="btnset" id="qcspace">
+              <button data-space="ct" class="active" title="Patient CT ↔ MRI — the per-case registration">Native</button>
+              <button data-space="mni" title="Standard AC-PC / template space — MNI atlases only">AC-PC</button>
               <button data-space="atlas" title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
             </span>
             <span class="btnset" id="qcmodes">
