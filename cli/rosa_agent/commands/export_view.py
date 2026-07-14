@@ -663,6 +663,18 @@ _HTML_TEMPLATE = """<!doctype html>
   /* Maximized slice — fills the 3D area (canvas-host); other panels stay in the rail. */
   .slice-panel.zoomed {{ position: absolute; inset: 0; z-index: 40; aspect-ratio: auto; border: 2px solid #2d6a45; background: #000; }}
   .slice-panel.zoomed::after {{ content: "⤢ dbl-click or Esc to exit"; position: absolute; top: 6px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #9fd8b4; background: rgba(10,14,12,0.78); padding: 2px 8px; border-radius: 4px; pointer-events: none; z-index: 3; }}
+  /* Ortho/Probe rail toggle + the probe reslice panels. */
+  #slices-head .slice-mode {{ display: inline-flex; border: 1px solid #263542; border-radius: 6px; overflow: hidden; }}
+  #slices-head .slice-mode[hidden] {{ display: none; }}
+  #slices-head .slice-mode button {{ font: inherit; font-size: 10px; padding: 2px 7px; background: #0e161d; color: #9ab6c4; border: none; cursor: pointer; }}
+  #slices-head .slice-mode button.active {{ background: #16323c; color: #d6f2ff; }}
+  .probe-panel {{ aspect-ratio: auto; }}
+  #probe-along {{ min-height: 240px; flex: 2 1 0; }}
+  #probe-eye {{ min-height: 150px; flex: 1 1 0; }}
+  #probe-along-corner, #probe-eye-corner {{ position: absolute; top: 4px; right: 6px; bottom: auto; left: auto; font-size: 10px; color: #9fd8b4; font-family: ui-monospace, monospace; pointer-events: none; }}
+  .rollbar {{ position: absolute; left: 50%; transform: translateX(-50%); bottom: 6px; z-index: 4; display: flex; align-items: center; gap: 7px; background: rgba(10,14,18,0.8); padding: 2px 9px; border-radius: 5px; font-size: 10px; color: #bcd; }}
+  .rollbar input {{ width: 130px; accent-color: #22d0ff; }}
+  .rollbar .mono {{ font-family: ui-monospace, monospace; }}
   #side {{ overflow-y: auto; padding: 12px 14px; border-left: 1px solid #2a2a2a; font-size: 13px; background: #161616; }}
   #side h2 {{ font-size: 12px; margin: 14px 0 6px; color: #999; letter-spacing: 0.08em; text-transform: uppercase; }}
   #subject {{ font-size: 14px; color: #ddd; font-weight: 500; }}
@@ -765,7 +777,10 @@ _HTML_TEMPLATE = """<!doctype html>
   <div id="slices">
     <div id="slices-head">
       <span class="ttl">Slices</span>
-      <span class="hint">scroll = scrub · click = locate · dbl-click = zoom · 3D = show plane</span>
+      <span class="slice-mode" id="slice-mode" hidden title="Ortho = axial/coronal/sagittal · Probe = along the selected electrode + probe's-eye">
+        <button data-smode="ortho" class="active">⊞ Ortho</button><button data-smode="probe">⤢ Probe</button>
+      </span>
+      <span class="hint" id="slices-hint">scroll = scrub · click = locate · dbl-click = zoom · 3D = show plane</span>
       <label class="palpha" title="Opacity of the cut planes shown in 3D">&alpha;<input type="range" id="plane-alpha" min="0" max="1" step="0.05" value="0.9"></label>
     </div>
     <div class="slice-panel" data-axis="axial">
@@ -788,6 +803,17 @@ _HTML_TEMPLATE = """<!doctype html>
       <label class="slice-3d" title="Show this plane inside the 3D scene"><input type="checkbox" data-plane="sagittal">3D</label>
       <div class="slice-axes">A&rarr;  S&uarr;</div>
       <div class="slice-coord"></div>
+    </div>
+    <div class="slice-panel probe-panel" id="probe-along" hidden>
+      <canvas></canvas>
+      <div class="slice-label" id="probe-along-label">Along electrode</div>
+      <div class="slice-coord" id="probe-along-corner"></div>
+      <div class="rollbar"><span>Roll &#8635;</span><input type="range" id="probe-roll" min="0" max="180" step="1" value="0"><span id="probe-rollv" class="mono">0&deg;</span></div>
+    </div>
+    <div class="slice-panel probe-panel" id="probe-eye" hidden>
+      <canvas></canvas>
+      <div class="slice-label">Probe&rsquo;s-eye</div>
+      <div class="slice-coord" id="probe-eye-corner"></div>
     </div>
   </div>
   <div id="side">
@@ -1235,7 +1261,7 @@ function setPlaneVisible(axis, on) {{
 }}
 
 function _initSlicePanels() {{
-  for (const panel of document.querySelectorAll(".slice-panel")) {{
+  for (const panel of document.querySelectorAll(".slice-panel[data-axis]")) {{
     const axis = panel.dataset.axis;
     const canvas = panel.querySelector("canvas");
     // Fixed device-pixel size; CSS scales to width 100%.
@@ -1996,6 +2022,7 @@ function isolateShank(shank, toggle) {{
     return;
   }}
   selectedShank = shank;
+  _probeSetShank(shank);   // offer the Probe view for this electrode
   for (const [s, nodes] of shankNodes) {{
     const visible = s === shank;
     for (const n of nodes) n.visible = visible;
@@ -2028,7 +2055,9 @@ function _setContactMaterial(node, material) {{
 }}
 
 function selectContact(label, shank) {{
+  const _sameShank = (selectedShank === shank);   // stepping within a shank → don't re-frame
   isolateShank(shank, /*toggle=*/false);
+  _probeSetContact(label);   // step the probe view to this contact
 
   // Restore previously selected contact's material
   if (selectedContact && originalMaterials.has(selectedContact)) {{
@@ -2049,18 +2078,20 @@ function selectContact(label, shank) {{
     selectionMarker.position.copy(pos);   // beacon on the highlighted contact
     selectionMarker.visible = true;
     locateMarker.visible = false;          // the contact beacon supersedes the free crosshair
-    controls.target.copy(pos);
-    const dir = camera.position.clone().sub(pos).normalize();
-    if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
-    let targetDist = 90;
-    const sNodes = shankNodes.get(shank) || [];
-    if (sNodes.length) {{
-      const box = new THREE.Box3();
-      for (const n of sNodes) box.expandByObject(n);
-      if (!box.isEmpty()) targetDist = Math.max(70, box.getSize(new THREE.Vector3()).length() * 1.3);
+    if (!_sameShank) {{                      // re-frame only when switching electrodes
+      controls.target.copy(pos);
+      const dir = camera.position.clone().sub(pos).normalize();
+      if (!isFinite(dir.x) || dir.lengthSq() < 1e-9) dir.set(0.7, 0.45, 0.8).normalize();
+      let targetDist = 90;
+      const sNodes = shankNodes.get(shank) || [];
+      if (sNodes.length) {{
+        const box = new THREE.Box3();
+        for (const n of sNodes) box.expandByObject(n);
+        if (!box.isEmpty()) targetDist = Math.max(70, box.getSize(new THREE.Vector3()).length() * 1.3);
+      }}
+      camera.position.copy(pos).addScaledVector(dir, targetDist);
+      controls.update();
     }}
-    camera.position.copy(pos).addScaledVector(dir, targetDist);
-    controls.update();
     // Snap the navigator panels + the in-scene cut planes to the contact's
     // RAS coordinate, and tell any parent frame where we landed.
     snapSlicesToRas([pos.x, pos.y, pos.z]);
@@ -2123,15 +2154,18 @@ window.addEventListener("message", (e) => {{
   else if (m.type === "rosa:locate" && Array.isArray(m.ras)) locateAtRas(m.ras);
   else if (m.type === "rosa:slice-fade") {{
     sliceFade = Math.max(0, Math.min(1, Number(m.value) || 0));
-    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); _renderProbe();
   }} else if (m.type === "rosa:atlas-overlay") {{
     atlasOverlayOn = !!m.on;
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }} else if (m.type === "rosa:slice-mode") {{
+    _setSliceMode(m.mode === "probe" ? "probe" : "ortho");
   }}
 }});
 
 function showAll() {{
   selectedShank = null;
+  _probeSetShank(null);   // deselect → back to Ortho, hide the Probe toggle
   for (const [, nodes] of shankNodes) for (const n of nodes) n.visible = true;
   if (selectedContact && originalMaterials.has(selectedContact)) {{
     _setContactMaterial(selectedContact, originalMaterials.get(selectedContact));
@@ -2264,6 +2298,163 @@ function _setupAtlasOverlayToggle() {{
   }});
 }}
 
+// ===== Probe view: along-electrode reslice + probe's-eye for the selected shank ==
+// Reuses the editor's reslice idea — oblique plane sampled from the volume — but
+// read-only (editing lives in the Edit view). Ortho ⇄ Probe swaps the rail's
+// content; Probe needs a selected electrode.
+let sliceMode = "ortho";      // "ortho" | "probe"
+let probeShank = null;        // shank currently shown in the probe view
+let probeDepth = 0;           // current contact index within probeShank
+let probeRollDeg = 0;         // roll of the along-electrode cut plane
+
+function _v3sub(a,b){{return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}}
+function _v3add(a,b){{return [a[0]+b[0],a[1]+b[1],a[2]+b[2]];}}
+function _v3scl(a,s){{return [a[0]*s,a[1]*s,a[2]*s];}}
+function _v3dot(a,b){{return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}}
+function _v3cross(a,b){{return [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}}
+function _v3len(a){{return Math.hypot(a[0],a[1],a[2]);}}
+function _v3norm(a){{const l=_v3len(a)||1;return [a[0]/l,a[1]/l,a[2]/l];}}
+
+// Gray value at a world point, honoring the CT⟷MRI fade (0..255).
+function _sampleGray(x,y,z){{
+  if(!mriVolume)return 0;
+  const v=mriVolume.rasToVox([x,y,z]);
+  const range=Math.max(1e-6,mriVolume.displayMax-mriVolume.displayMin);
+  let g=Math.max(0,Math.min(255,(mriVolume.voxel(Math.round(v[0]),Math.round(v[1]),Math.round(v[2]))-mriVolume.displayMin)/range*255));
+  if(fadeVolume&&sliceFade>0.001){{
+    const f=fadeVolume.rasToVox([x,y,z]);
+    const fr=Math.max(1e-6,fadeVolume.displayMax-fadeVolume.displayMin);
+    const fg=Math.max(0,Math.min(255,(fadeVolume.voxel(Math.round(f[0]),Math.round(f[1]),Math.round(f[2]))-fadeVolume.displayMin)/fr*255));
+    g=g*(1-sliceFade)+fg*sliceFade;
+  }}
+  return g;
+}}
+
+// Reslice a plane centered at world C with unit in-plane axes U/V and half-extents
+// (mm). Paints grayscale into cv; returns toPx() mapping world→canvas css-px.
+function _computeReslice(cv,C,U,V,extU,extV){{
+  const dpr=window.devicePixelRatio||1, r=cv.getBoundingClientRect();
+  const W=Math.max(2,(r.width*dpr)|0), H=Math.max(2,(r.height*dpr)|0);
+  if(cv.width!==W||cv.height!==H){{cv.width=W;cv.height=H;}}
+  const ctx=cv.getContext("2d"), img=ctx.createImageData(W,H), data=img.data;
+  const puU=(2*extU)/W, puV=(2*extV)/H, cx=W/2, cy=H/2;
+  for(let j=0;j<H;j++){{const vv=(cy-j)*puV;                 // flip V: +V is up
+    for(let i=0;i<W;i++){{const uu=(i-cx)*puU;
+      const g=_sampleGray(C[0]+U[0]*uu+V[0]*vv, C[1]+U[1]*uu+V[1]*vv, C[2]+U[2]*uu+V[2]*vv)|0;
+      const o=(j*W+i)*4; data[o]=g;data[o+1]=g;data[o+2]=g;data[o+3]=255;
+    }}
+  }}
+  ctx.putImageData(img,0,0);
+  return {{ctx,dpr,W,H,
+    toPx:P=>{{const q=_v3sub(P,C);return [(_v3dot(q,U)/(2*extU)+0.5)*W/dpr,(0.5-_v3dot(q,V)/(2*extV))*H/dpr];}}}};
+}}
+
+function _shankContacts(shank){{return allContacts.filter(c=>c.shank===shank).slice().sort((a,b)=>a.idx-b.idx);}}
+function _shankGeom(shank){{
+  const cs=_shankContacts(shank); if(cs.length<2)return null;
+  const A=_v3norm(_v3sub(cs[cs.length-1].ras,cs[0].ras));
+  const C=_v3scl(_v3add(cs[0].ras,cs[cs.length-1].ras),0.5);
+  return {{cs,A,C,span:_v3len(_v3sub(cs[cs.length-1].ras,cs[0].ras))}};
+}}
+function _baseV(A){{const up=Math.abs(A[2])>0.9?[0,1,0]:[0,0,1];return _v3norm(_v3cross(A,up));}}
+function _rollV(A,V0,deg){{const th=deg*Math.PI/180;return _v3norm(_v3add(_v3scl(V0,Math.cos(th)),_v3scl(_v3cross(A,V0),Math.sin(th))));}}
+
+function _resliceAlong(){{
+  const geom=_shankGeom(probeShank), cv=document.querySelector("#probe-along canvas");
+  if(!geom||!cv)return;
+  const A=geom.A, V=_rollV(A,_baseV(A),probeRollDeg);
+  const r=cv.getBoundingClientRect(), extU=(geom.span/2)+8, extV=extU*(r.height/Math.max(1,r.width));
+  const view=_computeReslice(cv,geom.C,A,V,extU,extV), g=view.ctx;
+  g.save(); g.scale(view.dpr,view.dpr);
+  const e=view.toPx(geom.cs[0].ras), t=view.toPx(geom.cs[geom.cs.length-1].ras);
+  g.strokeStyle="rgba(56,210,230,.55)"; g.lineWidth=1.2; g.setLineDash([5,4]);
+  g.beginPath(); g.moveTo(e[0],e[1]); g.lineTo(t[0],t[1]); g.stroke(); g.setLineDash([]);
+  geom.cs.forEach((c,i)=>{{
+    const p=view.toPx(c.ras), gv=_sampleGray(c.ras[0],c.ras[1],c.ras[2]);
+    g.strokeStyle = gv>170?"#38d97a":(gv>110?"#e0b23a":"#e0503a");   // on-metal proxy
+    g.lineWidth=i===probeDepth?2.4:1.5;
+    g.beginPath(); g.arc(p[0],p[1],i===probeDepth?6:4.3,0,7); g.stroke();
+    if(i===probeDepth){{g.fillStyle="rgba(56,210,230,.16)";g.fill();}}
+  }});
+  g.restore();
+  document.getElementById("probe-along-label").textContent = probeShank;
+}}
+function _resliceProbe(){{
+  const geom=_shankGeom(probeShank), cv=document.querySelector("#probe-eye canvas");
+  if(!geom||!cv)return;
+  const i=Math.max(0,Math.min(geom.cs.length-1,probeDepth)), P=geom.cs[i].ras;
+  const U=_rollV(geom.A,_baseV(geom.A),probeRollDeg), V=_v3norm(_v3cross(geom.A,U));
+  const view=_computeReslice(cv,P,U,V,14,14), g=view.ctx;
+  g.save(); g.scale(view.dpr,view.dpr);
+  const c=view.toPx(P);
+  g.strokeStyle="rgba(56,210,230,.9)"; g.lineWidth=1.2;
+  g.beginPath(); g.moveTo(c[0]-9,c[1]); g.lineTo(c[0]+9,c[1]); g.moveTo(c[0],c[1]-9); g.lineTo(c[0],c[1]+9); g.stroke();
+  g.restore();
+  document.getElementById("probe-eye-corner").textContent = `c${{i+1}}/${{geom.cs.length}} · ${{_sampleGray(P[0],P[1],P[2])|0}}`;
+  document.getElementById("probe-along-corner").textContent = `c${{i+1}}/${{geom.cs.length}}`;
+}}
+function _renderProbe(){{ if(sliceMode==="probe"&&probeShank){{ _resliceAlong(); _resliceProbe(); }} }}
+let _probeRAF=0;
+function _scheduleProbe(){{ if(_probeRAF)return; _probeRAF=requestAnimationFrame(()=>{{_probeRAF=0;_renderProbe();}}); }}
+// Step to a contact: update the probe + move the 3D beacon + slices + TELL the app
+// (rosa:selected) so the left navigator highlights the same contact. No camera
+// re-frame (stepping shouldn't jump the 3D view).
+function _probeStepTo(depth){{
+  const cs=_shankContacts(probeShank); if(!cs.length)return;
+  probeDepth=Math.max(0,Math.min(cs.length-1,depth)); _renderProbe();
+  const c=cs[probeDepth], node=nodesByName.get("contact:"+c.label);
+  const pos=node?node.getWorldPosition(new THREE.Vector3()):new THREE.Vector3(c.ras[0],c.ras[1],c.ras[2]);
+  selectionMarker.position.copy(pos); selectionMarker.visible=true; locateMarker.visible=false;
+  snapSlicesToRas([pos.x,pos.y,pos.z]); snapCutPlanesToRas([pos.x,pos.y,pos.z]);
+  emitSelected(c.label, probeShank, [pos.x,pos.y,pos.z]);
+}}
+
+function _setSliceMode(mode){{
+  if(mode==="probe"&&!probeShank)return;
+  sliceMode=mode; const probe=mode==="probe";
+  for(const ax of ["axial","coronal","sagittal"]){{const p=document.querySelector('.slice-panel[data-axis="'+ax+'"]'); if(p)p.hidden=probe;}}
+  document.getElementById("probe-along").hidden=!probe;
+  document.getElementById("probe-eye").hidden=!probe;
+  const mc=document.getElementById("slice-mode");
+  if(mc)mc.querySelectorAll("button").forEach(b=>b.classList.toggle("active",b.dataset.smode===mode));
+  if(probe)_renderProbe();
+  else {{ renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); }}
+}}
+// Selection drives Probe: a shank with ≥2 contacts enables the toggle; deselect
+// (Show all) drops back to Ortho.
+function _probeSetShank(shank){{
+  const embedded = window.parent && window.parent !== window;
+  if(shank&&_shankContacts(shank).length>=2){{
+    probeShank=shank; probeDepth=0;
+    if(!embedded)document.getElementById("slice-mode").hidden=false;   // app hosts the toggle when embedded
+    if(sliceMode==="probe")_renderProbe();
+    _emit("rosa:probe-avail",{{present:true,available:true,shank}});
+  }}else{{
+    probeShank=null;
+    if(!embedded)document.getElementById("slice-mode").hidden=true;
+    if(sliceMode==="probe")_setSliceMode("ortho");
+    _emit("rosa:probe-avail",{{present:allContacts.length>0,available:false}});
+  }}
+}}
+function _probeSetContact(label){{
+  if(!probeShank)return;
+  const k=_shankContacts(probeShank).findIndex(c=>c.label===label);
+  if(k>=0){{probeDepth=k; _renderProbe();}}
+}}
+(function _wireProbe(){{
+  const mc=document.getElementById("slice-mode");
+  if(mc)mc.addEventListener("click",e=>{{const b=e.target.closest("button[data-smode]"); if(b)_setSliceMode(b.dataset.smode);}});
+  const roll=document.getElementById("probe-roll");
+  if(roll)roll.addEventListener("input",()=>{{probeRollDeg=parseFloat(roll.value); document.getElementById("probe-rollv").textContent=roll.value+"°"; _scheduleProbe();}});
+  ["probe-along","probe-eye"].forEach(id=>{{const p=document.getElementById(id);
+    if(p)p.addEventListener("dblclick",ev=>{{ev.preventDefault(); _togglePanelZoom(p); _renderProbe();}});}});
+  window.addEventListener("keydown",e=>{{
+    if(sliceMode!=="probe"||!probeShank)return;
+    if(e.key==="ArrowUp"||e.key==="ArrowDown"){{e.preventDefault();
+      _probeStepTo(probeDepth+(e.key==="ArrowDown"?1:-1));}}
+  }});
+}})();
+
 // Metadata handler — named so picker mode can call it with a dropped (and
 // path-rewritten) scene_meta.json. Identical logic for served + picker.
 function onMeta(meta) {{
@@ -2271,7 +2462,8 @@ function onMeta(meta) {{
   // Contacts for the slice overlay (already in the CT/contact RAS frame).
   sceneMeta = meta;
   allContacts = (meta.contacts || [])
-    .map(c => ({{ label: c.label, shank: c.trajectory, ras: c.position || [c.x, c.y, c.z] }}))
+    .map(c => ({{ label: c.label, shank: c.trajectory, idx: c.contact_index || 0,
+                  ras: c.position || [c.x, c.y, c.z] }}))
     .filter(c => Array.isArray(c.ras) && c.ras.length === 3);
   // Atlas region colors (for the 2D slice tint) + the atlas labelmap volume.
   atlasColor255.clear();
@@ -2319,6 +2511,9 @@ function onMeta(meta) {{
   // in its own toolbar (the viewer hides its own copies when embedded).
   _emit("rosa:slice-caps", {{ atlas: !!(meta.atlas_volume && meta.atlas_colors),
                               fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)) }});
+  // Show the Ortho/Probe toggle for any case with electrodes; Probe stays
+  // disabled until an electrode with ≥2 contacts is selected.
+  _emit("rosa:probe-avail", {{ present: (meta.contacts||[]).length > 0, available: false }});
   updateInfoBar();
 }}
 function onMetaErr(err) {{
