@@ -281,9 +281,9 @@ function resetLabelCard() {
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
   $("qcplanes").innerHTML = ""; state.qc = null;
-  $("qcspace").hidden = true;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
+  $("regtab").hidden = true;              // no registration to check until an atlas runs
   state.thomasDir = null;
   setViewerTab("electrodes");
 }
@@ -356,11 +356,25 @@ function _postViewer(msg) {
 // (has a warped atlas? has an MRI to fade to?). Host them in the top row and
 // reset to the viewer's defaults (atlas on, fade at CT) on each (re)load.
 function _onSliceCaps({ atlas, fade }) {
-  $("slicefade-item").hidden = !fade;
-  $("atlasov-item").hidden = !atlas;
-  $("sliceovctl").hidden = !(fade || atlas);
+  state.sliceCaps = { atlas: !!atlas, fade: !!fade };
   $("app-atlas-ov").checked = true;
   $("app-slice-fade").value = 0;
+  _syncModeControls();
+}
+
+// Contextual top bar: the 3-D-view controls (Ortho/Probe, slice-fade, atlas-on-
+// slices) and the registration-check controls (space + blend + slider) never show
+// at the same time — the bar SWAPS with the view, so there's one CT—MRI slider at
+// a time. Availability (probe present, slice caps) still gates the 3-D controls.
+function _syncModeControls() {
+  const is3d = (state.viewMode || "electrodes") !== "qc";
+  const caps = state.sliceCaps || {};
+  const probe = state.probeCaps || {};
+  $("probemodectl").hidden = !(is3d && probe.present);
+  $("slicefade-item").hidden = !(is3d && caps.fade);
+  $("atlasov-item").hidden = !(is3d && caps.atlas);
+  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas));
+  $("qctools").hidden = is3d;
 }
 
 function _setAppSliceMode(mode) {
@@ -373,7 +387,7 @@ function _setAppSliceMode(mode) {
 // remember the user's choice: re-selecting an electrode returns to Probe if
 // that's what they were using (no surprise flip back to Ortho).
 function _onProbeAvail({ present, available }) {
-  $("probemodectl").hidden = !present;
+  state.probeCaps = { present: !!present, available: !!available };
   const probeBtn = $("app-slice-mode").querySelector('[data-smode="probe"]');
   probeBtn.disabled = !available;
   probeBtn.title = available ? "Along the selected electrode + probe's-eye"
@@ -383,6 +397,7 @@ function _onProbeAvail({ present, available }) {
   } else if (!available) {
     _setAppSliceMode("ortho");
   }
+  _syncModeControls();
 }
 // The viewer selected a contact (3D click, or arrow-stepping the probe) → mirror
 // it in the left navigator: open the shank, highlight + scroll to the row.
@@ -646,13 +661,10 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
     $("approvebtn").hidden = false;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
-    // "check reg" opens the registration used for this atlas: atlas↔MRI for MNI
-    // atlases, else the CT↔MRI (Native) reg that native atlases (FastSurfer /
-    // deepmriprep) rely on. Enabled whenever there's ANY registration to verify
-    // — so it's not a dead grey button on native atlases.
-    $("atlascheckbtn").hidden = false;
-    $("atlascheckbtn").disabled = !p.has_mri_qc;
+    $("atlascheckbtn").hidden = true;    // the [Registration] tab is the entry now
     previewProposed(p.contacts);        // show the proposed regions per contact
+    // showQc reveals the [Registration] tab + auto-jumps on the first label so the
+    // registration gets verified; later atlas switches just refresh it in place.
     if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
     // The 3D viewer is (re)built only on the first label; reload the iframe then
     // so the brain surface shows. Atlas switches leave the viewer untouched.
@@ -711,17 +723,26 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
+// Which registration spaces an atlas produced: Native (CT↔MRI) whenever it
+// registered; AC-PC + Atlas need the MNI-template volumes (bundled atlases only).
+// Greys the rest per atlas, and moves off a space that's no longer available
+// (e.g. after switching from an MNI atlas to THOMAS).
+function _setQcSpaces(hasCt, hasMni) {
+  const avail = { ct: !!hasCt, mni: !!hasMni, atlas: !!hasMni };
+  for (const b of $("qcspace").querySelectorAll("button")) b.disabled = !avail[b.dataset.space];
+  if (state.qc && !avail[state.qc.space])
+    state.qc.space = avail.ct ? "ct" : (Object.keys(avail).find((k) => avail[k]) || "ct");
+  const cur = $("qcspace").querySelector(`[data-space="${state.qc ? state.qc.space : "ct"}"]`);
+  if (cur) setActive("qcspace", cur);
+}
+
 function showQc(hasMni, jumpToQc = true) {
   // Build the QC panes ONCE per case (registration is per-case). Atlas switches
   // re-enter here but keep the existing panes + the user's mode/slice settings.
   if (!state.qc) {
-    // Selecting an atlas is what brings the user here, so open on the ATLAS
-    // registration check (atlas template ↔ MRI) — the thing they just set up.
-    // AC-PC / Native remain one click away for the CT↔MRI check. Native-space
-    // atlases (no MNI warp) have no atlas-template pane, so fall back to Native.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", _hasMni: hasMni, panes: [] };
-    $("qcspace").hidden = !hasMni;
-    if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="atlas"]'));
+    // Default to the ATLAS check for MNI atlases (the thing just set up), else
+    // Native (CT↔MRI). _setQcSpaces below greys whatever this atlas can't show.
+    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", panes: [] };
     const wrap = $("qcplanes");
     wrap.innerHTML = "";
     for (const [axis, name] of QC_PLANES) {
@@ -738,6 +759,9 @@ function showQc(hasMni, jumpToQc = true) {
     $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
     $("qcdir").hidden = true;
   }
+  state.qc._hasMni = hasMni;
+  _setQcSpaces(true, hasMni);        // recompute availability for THIS atlas
+  $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
   if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
   else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
 }
@@ -763,14 +787,16 @@ function openQc(kind) {
   refreshAllPanes();
 }
 
-// Switch the big pane between the 3D electrode view and the registration QC.
+// Switch the big pane between the 3D electrode view and the registration QC, and
+// SWAP the top-bar controls to match (via _syncModeControls) so only one set shows.
 function setViewerTab(tab) {
   const qc = tab === "qc";
+  state.viewMode = qc ? "qc" : "electrodes";
   $("viewerframe").hidden = qc;
   $("viewerqc").hidden = !qc;
-  $("qctools").hidden = !qc;
   for (const b of $("viewertabs").querySelectorAll("button[data-tab]"))
     b.classList.toggle("active", b.dataset.tab === tab);
+  _syncModeControls();
   if (qc) refreshAllPanes();      // (re)load images every time the QC is shown
 }
 
@@ -780,7 +806,7 @@ function wireQc() {
     if (b && !b.disabled) setViewerTab(b.dataset.tab);
   });
   $("qcspace").addEventListener("click", (ev) => {
-    const b = ev.target.closest("button"); if (!b || !state.qc) return;
+    const b = ev.target.closest("button"); if (!b || b.disabled || !state.qc) return;
     state.qc.space = b.dataset.space;
     setActive("qcspace", b);
     refreshAllPanes();
@@ -812,13 +838,23 @@ function setActive(groupId, btn) {
 }
 
 async function approveLabels() {
-  if (!state.labelJobId) return;
+  if (!state.labelJobId) {
+    $("labelmsg").textContent = "No proposed labels to apply — pick an atlas first.";
+    return;
+  }
+  $("approvebtn").disabled = true;
   try {
     const doc = await jsend(`${API}/jobs/${state.labelJobId}/labels/approve`, "POST");
     renderReview(doc);   // regions now populated → visible per contact + in export
-    $("labelmsg").textContent = "Labels applied — shown per contact and included in the export.";
+    const n = doc.shanks.reduce((a, s) => a + s.contacts.filter((c) => c.region).length, 0);
+    $("labelmsg").textContent = `✓ Applied ${n} labels — shown per contact and included in the export.`;
     $("approvebtn").hidden = true;
-  } catch (e) { $("labelmsg").textContent = `Approve failed: ${e.message}`; }
+    setViewerTab("electrodes");   // back to the 3-D view so the labeled contacts are visible
+  } catch (e) {
+    $("labelmsg").textContent = `Approve failed: ${e.message}`;
+  } finally {
+    $("approvebtn").disabled = false;
+  }
 }
 
 // Stream a job's logs into a <pre> by id (used for the label job's reg metrics).
