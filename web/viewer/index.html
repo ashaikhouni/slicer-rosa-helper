@@ -1559,7 +1559,7 @@ window.addEventListener("message", (e) => {
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); _renderProbe();
   } else if (m.type === "rosa:atlas-overlay") {
     atlasOverlayOn = !!m.on;
-    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); _renderProbe();
   } else if (m.type === "rosa:slice-mode") {
     _setSliceMode(m.mode === "probe" ? "probe" : "ortho");
   }
@@ -1740,10 +1740,16 @@ function _computeReslice(cv,C,U,V,extU,extV){
   if(cv.width!==W||cv.height!==H){cv.width=W;cv.height=H;}
   const ctx=cv.getContext("2d"), img=ctx.createImageData(W,H), data=img.data;
   const puU=(2*extU)/W, puV=(2*extV)/H, cx=W/2, cy=H/2;
+  const ov=atlasOverlayOn&&atlasSliceVolume&&atlasColor255.size, OA=atlasOverlayAlpha, OB=1-OA;
   for(let j=0;j<H;j++){const vv=(cy-j)*puV;                 // flip V: +V is up
     for(let i=0;i<W;i++){const uu=(i-cx)*puU;
-      const g=_sampleGray(C[0]+U[0]*uu+V[0]*vv, C[1]+U[1]*uu+V[1]*vv, C[2]+U[2]*uu+V[2]*vv)|0;
-      const o=(j*W+i)*4; data[o]=g;data[o+1]=g;data[o+2]=g;data[o+3]=255;
+      const wx=C[0]+U[0]*uu+V[0]*vv, wy=C[1]+U[1]*uu+V[1]*vv, wz=C[2]+U[2]*uu+V[2]*vv;
+      const g=_sampleGray(wx,wy,wz)|0; let r=g,gg=g,bb=g;
+      if(ov){const av=atlasSliceVolume.rasToVox([wx,wy,wz]);
+        const lbl=atlasSliceVolume.voxel(Math.round(av[0]),Math.round(av[1]),Math.round(av[2]));
+        if(lbl>0){const col=atlasColor255.get(lbl|0); if(col){r=g*OB+col[0]*OA;gg=g*OB+col[1]*OA;bb=g*OB+col[2]*OA;}}
+      }
+      const o=(j*W+i)*4; data[o]=r;data[o+1]=gg;data[o+2]=bb;data[o+3]=255;
     }
   }
   ctx.putImageData(img,0,0);
