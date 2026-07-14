@@ -281,7 +281,6 @@ function resetLabelCard() {
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
   $("qcplanes").innerHTML = ""; state.qc = null;
   $("qcspace").hidden = true;
-  $("tab-qc").disabled = true;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
   setViewerTab("electrodes");
@@ -344,6 +343,22 @@ function toggleShank(box, shank) {
   box.classList.toggle("open", open);
   state.openShank = open ? shank.name : null;
   if (open && shank.contacts[0]) selectInViewer(shank.contacts[0].name, shank.name);
+  else if (!open) showAllInViewer();   // collapsing the electrode → un-isolate the 3D
+}
+
+// Un-isolate the 3D view: show every electrode again + clear the selection.
+// Send BOTH messages: newer viewers handle rosa:showall (full reset); any viewer
+// (incl. ones rendered before this change) handles rosa:visibility with empty
+// hide-lists, which un-hides every shank/contact — so "Show all" works without
+// waiting for the case's viewer to be re-rendered.
+function showAllInViewer() {
+  const w = $("viewerframe").contentWindow;
+  try {
+    w.postMessage({ type: "rosa:showall" }, "*");
+    w.postMessage({ type: "rosa:visibility", hideShanks: [], hideContacts: [] }, "*");
+  } catch (_e) { /* viewer not loaded yet */ }
+  document.querySelectorAll("#reviewlist .contact.selected").forEach((r) => r.classList.remove("selected"));
+  $("showallbtn").hidden = true;
 }
 
 // Hide rejected shanks/contacts in the 3D viewer; re-accepting brings them back.
@@ -368,6 +383,8 @@ async function patch(ops) {
 function selectInViewer(label, shank) {
   try { $("viewerframe").contentWindow.postMessage({ type: "rosa:select", label, shank }, "*"); }
   catch (_e) { /* viewer not loaded yet */ }
+  // Selecting isolates the shank in 3D — surface the "Show all" way back.
+  $("showallbtn").hidden = false;
   document.querySelectorAll("#reviewlist .contact.selected").forEach((r) => r.classList.remove("selected"));
   const sel = window.CSS && CSS.escape ? CSS.escape(label) : label;
   const row = document.querySelector(`#reviewlist .contact[data-label="${sel}"]`);
@@ -526,8 +543,12 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
     $("approvebtn").hidden = false;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
-    $("atlascheckbtn").hidden = false;   // per-atlas "check reg" → atlas↔MRI QC
-    $("atlascheckbtn").disabled = !p.has_mni_qc;
+    // "check reg" opens the registration used for this atlas: atlas↔MRI for MNI
+    // atlases, else the CT↔MRI (Native) reg that native atlases (FastSurfer /
+    // deepmriprep) rely on. Enabled whenever there's ANY registration to verify
+    // — so it's not a dead grey button on native atlases.
+    $("atlascheckbtn").hidden = false;
+    $("atlascheckbtn").disabled = !p.has_mri_qc;
     previewProposed(p.contacts);        // show the proposed regions per contact
     if (p.has_mri_qc) showQc(p.has_mni_qc, jumpToQc);
     // The 3D viewer is (re)built only on the first label; reload the iframe then
@@ -591,11 +612,13 @@ function showQc(hasMni, jumpToQc = true) {
   // Build the QC panes ONCE per case (registration is per-case). Atlas switches
   // re-enter here but keep the existing panes + the user's mode/slice settings.
   if (!state.qc) {
-    // AC-PC (MNI) planes are the neuroanatomical standard, so default to them
-    // when available; otherwise slice the CT's native frame.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "mni" : "ct", _hasMni: hasMni, panes: [] };
+    // Selecting an atlas is what brings the user here, so open on the ATLAS
+    // registration check (atlas template ↔ MRI) — the thing they just set up.
+    // AC-PC / Native remain one click away for the CT↔MRI check. Native-space
+    // atlases (no MNI warp) have no atlas-template pane, so fall back to Native.
+    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", _hasMni: hasMni, panes: [] };
     $("qcspace").hidden = !hasMni;
-    if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="mni"]'));
+    if (hasMni) setActive("qcspace", $("qcspace").querySelector('[data-space="atlas"]'));
     const wrap = $("qcplanes");
     wrap.innerHTML = "";
     for (const [axis, name] of QC_PLANES) {
@@ -612,7 +635,6 @@ function showQc(hasMni, jumpToQc = true) {
     $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
     $("qcdir").hidden = true;
   }
-  $("tab-qc").disabled = false;
   if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
   else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
 }
@@ -621,13 +643,16 @@ function showQc(hasMni, jumpToQc = true) {
 // AC-PC); the atlas "check reg" opens atlas(MNI-template)↔MRI. Both land in the
 // QC pane, pre-set to the right space. No label yet → nudge to the MRI card.
 function openQc(kind) {
-  if ($("tab-qc").disabled || !state.qc) {   // no registration yet → nudge via the console
+  if (!state.qc) {   // no registration yet → nudge via the console
     $("labelmsg").textContent = state.mri
       ? "Pick an atlas to register the MRI first — then the check is available."
       : "Add a patient MRI below to enable the registration check.";
     return;
   }
-  const space = kind === "atlas" ? "atlas" : (state.qc._hasMni ? "mni" : "ct");
+  // "atlas" check needs the MNI-template panes; native atlases have none, so the
+  // atlas-check falls back to the CT↔MRI (Native) reg they actually use.
+  const space = (kind === "atlas" && state.qc._hasMni) ? "atlas"
+              : (state.qc._hasMni ? "mni" : "ct");
   state.qc.space = space;
   const btn = $("qcspace").querySelector(`[data-space="${space}"]`);
   if (btn) setActive("qcspace", btn);
@@ -779,6 +804,7 @@ async function deleteCase(c) {
 // Open an existing case: load its results, then restore its newest label job
 // (labels/QC) so the case comes back exactly as it was left.
 async function openCase(id) {
+  $("showallbtn").hidden = true;   // fresh case: viewer loads with all electrodes shown
   await loadResults(id);
   try {
     const jobs = await jget(`${API}/jobs`);
@@ -895,6 +921,7 @@ async function boot() {
   });
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
+  $("showallbtn").onclick = showAllInViewer;
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
   $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });

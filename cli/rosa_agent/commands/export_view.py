@@ -707,10 +707,13 @@ _HTML_TEMPLATE = """<!doctype html>
             <option value="white">White</option>
           </select>
         </label>
-        <label class="plane-ctl" data-control="brain-alpha">
-          <span class="axis">Brain opacity</span>
-          <input type="range" min="0" max="1" step="0.05" value="0.45" />
-          <span class="coord">0.45</span>
+        <label class="plane-ctl" data-control="brain-mode" title="Opaque = solid lit cortex · Ghost = see-through (electrodes visible inside) · None = hide the brain">
+          <span class="axis">Brain</span>
+          <select id="brain-mode-sel">
+            <option value="opaque">Opaque</option>
+            <option value="ghost" selected>Ghost</option>
+            <option value="none">None</option>
+          </select>
         </label>
       </span>
       <span class="tb-sep"></span>
@@ -902,6 +905,28 @@ resize();
 const nodesByName = new Map();           // node.name -> outer Object3D
 const shankNodes = new Map();            // shank id -> [Object3D, ...]
 const surfaceNodes = [];                 // FS pial Object3D nodes
+// Ghost-mode machinery (used ONLY by the Ghost switch state, never a gradient):
+// a depth PRE-PASS twin stamps the brain's nearest-surface depth so the colour
+// pass shows just that surface (no sulcal fold shimmer, no hemisphere flip on
+// rotation), and a Fresnel shader keeps the silhouette opaque + lit so it reads
+// as a brain, not a hollow shell. Shared uniforms (same object handed to every
+// recompiled shader) so one .value write reaches all brain meshes.
+const GHOST_ALPHA = 0.14;
+const ghostUniforms = {{ uGhostOn: {{ value: 0.0 }} }};
+function _installGhostShader(material) {{
+  material.onBeforeCompile = (shader) => {{
+    shader.uniforms.uGhostOn = ghostUniforms.uGhostOn;
+    shader.fragmentShader = "uniform float uGhostOn;\\n" + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <dithering_fragment>",
+      "#include <dithering_fragment>\\n" +
+      "if (uGhostOn > 0.5) {{\\n" +
+      "  float fres = pow(1.0 - abs(dot(normalize(normal), normalize(vViewPosition))), 2.5);\\n" +
+      "  gl_FragColor.a = mix(" + GHOST_ALPHA.toFixed(3) + ", 1.0, fres);\\n" +   // lit rim, see-through centre
+      "}}");
+  }};
+  material.needsUpdate = true;
+}}
 const originalMaterials = new Map();     // outer Object3D -> child Mesh's original material
 let gltfRoot = null;
 
@@ -983,6 +1008,22 @@ const onGltf = gltf => {{
       // dialed back to 1.0 — the source of the "fractured cortex at
       // α=1" report.
       surfaceNodes.push(obj);
+      if (mesh && mesh.material) {{
+        mesh.renderOrder = surfaceNodes.length;   // fixed, stable hemisphere order
+        _installGhostShader(mesh.material);
+      }}
+      // Depth PRE-PASS twin (Ghost mode only): opaque, colour off, after the
+      // electrodes — stamps the brain's nearest-surface depth so the Ghost colour
+      // pass draws only that surface (no fold shimmer / hemisphere flip).
+      if (mesh && mesh.geometry) {{
+        const pre = new THREE.Mesh(mesh.geometry, new THREE.MeshBasicMaterial({{
+          colorWrite: false, depthWrite: true, depthTest: true, side: THREE.FrontSide }}));
+        pre.renderOrder = 1;
+        pre.frustumCulled = false;
+        pre.visible = false;          // toggled on only in Ghost mode
+        mesh.add(pre);
+        obj.userData._depthPre = pre;
+      }}
     }} else if (extras.shank) {{
       if (!shankNodes.has(extras.shank)) shankNodes.set(extras.shank, []);
       shankNodes.get(extras.shank).push(obj);
@@ -996,7 +1037,7 @@ const onGltf = gltf => {{
   // positions in the toolbar. The result was a counter-intuitive
   // "slider says 0.45 but brain is solid" boot state.
   if (typeof _applyInitialSurfaceColor === "function") _applyInitialSurfaceColor();
-  if (typeof _applyInitialBrainAlpha === "function") _applyInitialBrainAlpha();
+  if (typeof _applyInitialBrainMode === "function") _applyInitialBrainMode();
   fitToObject(gltfRoot);
   // Re-apply any visibility a parent frame requested before the GLB finished
   // loading (embedded rosa-app: rejected contacts start hidden).
@@ -1978,6 +2019,7 @@ window.addEventListener("message", (e) => {{
   const m = e.data || {{}};
   if (!m) return;
   if (m.type === "rosa:select" && m.label) selectContact(m.label, m.shank || "");
+  else if (m.type === "rosa:showall") showAll();
   else if (m.type === "rosa:visibility") applyContactVisibility(m.hideShanks, m.hideContacts);
   else if (m.type === "rosa:locate" && Array.isArray(m.ras)) locateAtRas(m.ras);
 }});
@@ -2053,42 +2095,39 @@ function _applyInitialSurfaceColor() {{
 // Brain α slider — opacity for every FS surface mesh. Surfaces are
 // indexed during GLB load, so this works regardless of how many
 // hemispheres / surface kinds got loaded.
-function _applyBrainAlpha(v) {{
+// Three discrete brain states (no gradient — mesh transparency has no good
+// blended middle):
+//   opaque — solid, double-sided, lit cortex, its own depth. Ghost shader off.
+//   ghost  — ONE fixed see-through preset: pre-pass owns depth + front-only + no
+//            depth write + Fresnel (opaque lit rim, see-through centre). This is
+//            the rotation-stable look; as a fixed preset it dodges the gradient
+//            problems entirely.
+//   none   — hidden.
+function _setBrainMode(mode) {{
+  const ghost = mode === "ghost";
+  ghostUniforms.uGhostOn.value = ghost ? 1.0 : 0.0;
   for (const node of surfaceNodes) {{
+    node.visible = (mode !== "none");
     const mesh = node.userData && node.userData._mesh;
-    if (!mesh || !mesh.material) continue;
-    mesh.material.opacity = v;
-    mesh.material.transparent = v < 0.999;
-    // Keep depthWrite TRUE even at α<1. Three.js otherwise draws the
-    // brain's triangles in index order, so deep cortical folds bleed
-    // through the front of the brain at intermediate alpha and the
-    // surface looks fragmented. With depthWrite enabled, the closest
-    // brain fragment at each pixel wins; the alpha-blend happens
-    // against opaque electrodes that were already drawn underneath.
-    // Trade-off: the back of the brain is occluded by the front (which
-    // is what the user wants — they're looking from outside).
-    mesh.material.depthWrite = true;
-    mesh.material.needsUpdate = true;
+    if (mesh && mesh.material) {{
+      mesh.material.transparent = ghost;
+      mesh.material.depthWrite = !ghost;
+      mesh.material.side = ghost ? THREE.FrontSide : THREE.DoubleSide;
+      mesh.material.opacity = ghost ? GHOST_ALPHA : 1.0;
+      mesh.material.needsUpdate = true;
+    }}
+    const pre = node.userData && node.userData._depthPre;
+    if (pre) pre.visible = ghost;
   }}
 }}
-function _applyInitialBrainAlpha() {{
-  const ctl = document.querySelector('.plane-ctl[data-control="brain-alpha"]');
-  if (!ctl) return;
-  const slider = ctl.querySelector('input[type="range"]');
-  const coord = ctl.querySelector(".coord");
-  if (coord) coord.textContent = parseFloat(slider.value).toFixed(2);
-  _applyBrainAlpha(parseFloat(slider.value));
+function _applyInitialBrainMode() {{
+  const sel = document.getElementById("brain-mode-sel");
+  _setBrainMode(sel ? sel.value : "ghost");
 }}
-(function _wireBrainAlpha() {{
-  const ctl = document.querySelector('.plane-ctl[data-control="brain-alpha"]');
-  if (!ctl) return;
-  const slider = ctl.querySelector('input[type="range"]');
-  const coord = ctl.querySelector(".coord");
-  slider.addEventListener("input", () => {{
-    const v = parseFloat(slider.value);
-    coord.textContent = v.toFixed(2);
-    _applyBrainAlpha(v);
-  }});
+(function _wireBrainMode() {{
+  const sel = document.getElementById("brain-mode-sel");
+  if (!sel) return;
+  sel.addEventListener("change", () => _setBrainMode(sel.value));
 }})();
 
 // Metadata handler — named so picker mode can call it with a dropped (and
