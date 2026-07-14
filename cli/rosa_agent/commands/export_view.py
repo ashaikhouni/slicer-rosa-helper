@@ -432,6 +432,12 @@ def _structure_surfaces(labelmap_path, lut=None):
             surf = surface_from_mask(
                 nib.Nifti1Image(mask.astype(np.uint8), img.affine),
                 smooth_sigma=1.0, taubin_iterations=12)
+        except ImportError as exc:
+            # scikit-image (the [mesh] extra) isn't installed — nothing can mesh.
+            # Warn ONCE and bail, rather than repeating per nucleus.
+            warnings.warn(
+                f"structures not meshed — {exc}", RuntimeWarning, stacklevel=2)
+            return out
         except Exception as exc:  # noqa: BLE001 — skip a structure that won't mesh
             # Don't swallow silently: a nucleus that fails to mesh (too small /
             # too thin for marching cubes at this stride) should be visible, not

@@ -43,6 +43,19 @@ def _try_imports():
 DEPS_AVAILABLE = _try_imports()
 
 
+def _skimage_available() -> bool:
+    # surface_from_mask (marching cubes) needs scikit-image, the [mesh] extra.
+    # The minimal CI env skips it; the app env installs it.
+    try:
+        import skimage  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+SKIMAGE_AVAILABLE = _skimage_available()
+
+
 def _write_synthetic_analyze(path: Path, *, size=(20, 20, 20)) -> None:
     import numpy as np
     import SimpleITK as sitk
@@ -407,6 +420,7 @@ class ViewResultsTests(unittest.TestCase):
         rc = vr_main([str(empty), "-o", str(self.tmp / "o1")])
         self.assertEqual(rc, 2)
 
+    @unittest.skipUnless(SKIMAGE_AVAILABLE, "scikit-image ([mesh] extra) not installed")
     def test_structure_meshes_rendered(self):
         """`--structure-meshes` (+ `--structure-lut`) meshes each label into a
         colored surface and records it in scene_meta (the THOMAS viewer path)."""
