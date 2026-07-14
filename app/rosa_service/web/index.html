@@ -194,6 +194,10 @@
             <button id="approvebtn" class="primary small" hidden>Approve</button>
             <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, or CT↔MRI for native ones (FastSurfer / deepmriprep)">check reg</button>
           </span>
+          <span class="sliceovctl" id="sliceovctl" hidden>
+            <label class="sliceov-fade" id="slicefade-item" hidden title="Fade the 2D slice panels between the CT (metal) and the MRI (anatomy)"><span class="al muted">CT</span><input type="range" id="app-slice-fade" min="0" max="1" step="0.05" value="0"><span class="al muted">MRI</span></label>
+            <label class="sliceov-chk" id="atlasov-item" hidden title="Tint each atlas region on the 2D slice panels — same colors as the 3D surface"><input type="checkbox" id="app-atlas-ov" checked><span class="al">atlas on slices</span></label>
+          </span>
           <span class="viewer-tools" id="qctools" hidden>
             <span class="btnset" id="qcspace" hidden>
               <button data-space="mni" class="active">AC-PC</button>

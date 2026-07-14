@@ -660,6 +660,9 @@ _HTML_TEMPLATE = """<!doctype html>
   .slice-label {{ position: absolute; top: 4px; left: 6px; font-size: 10px; color: #bbb; letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; }}
   .slice-coord {{ position: absolute; bottom: 4px; right: 6px; font-size: 10px; color: #888; pointer-events: none; font-family: ui-monospace, monospace; }}
   .slice-axes {{ position: absolute; bottom: 4px; left: 6px; font-size: 9px; color: #555; pointer-events: none; font-family: ui-monospace, monospace; }}
+  /* Maximized slice — fills the 3D area (canvas-host); other panels stay in the rail. */
+  .slice-panel.zoomed {{ position: absolute; inset: 0; z-index: 40; aspect-ratio: auto; border: 2px solid #2d6a45; background: #000; }}
+  .slice-panel.zoomed::after {{ content: "⤢ dbl-click or Esc to exit"; position: absolute; top: 6px; left: 50%; transform: translateX(-50%); font-size: 10px; color: #9fd8b4; background: rgba(10,14,12,0.78); padding: 2px 8px; border-radius: 4px; pointer-events: none; z-index: 3; }}
   #side {{ overflow-y: auto; padding: 12px 14px; border-left: 1px solid #2a2a2a; font-size: 13px; background: #161616; }}
   #side h2 {{ font-size: 12px; margin: 14px 0 6px; color: #999; letter-spacing: 0.08em; text-transform: uppercase; }}
   #subject {{ font-size: 14px; color: #ddd; font-weight: 500; }}
@@ -727,10 +730,17 @@ _HTML_TEMPLATE = """<!doctype html>
         </label>
       </span>
       <span class="tb-sep"></span>
-      <span class="tb-group" title="Slice-navigator volume (the axial/coronal/sagittal panels + any planes shown in 3D)">
+      <span class="tb-group" title="What the axial/coronal/sagittal panels show">
         <label class="plane-ctl" data-control="volume">
           <span class="axis">Slice volume</span>
           <select id="vol-select"></select>
+        </label>
+        <label class="plane-ctl" data-control="slice-fade" id="slice-fade-ctl" style="display:none" title="Blend the slice panels between the CT (metal) and the MRI (anatomy)">
+          <span class="axis">CT&nbsp;&#8646;&nbsp;MRI</span>
+          <input type="range" id="slice-fade" min="0" max="1" step="0.05" value="0" />
+        </label>
+        <label class="plane-ctl" data-control="atlas-ov" id="atlas-ov-ctl" style="display:none" title="Tint each atlas region on the slice panels — same colors as the 3D surface">
+          <input type="checkbox" id="atlas-ov-cb" checked /><span class="axis">Atlas on slices</span>
         </label>
       </span>
       <span class="tb-sep"></span>
@@ -755,8 +765,7 @@ _HTML_TEMPLATE = """<!doctype html>
   <div id="slices">
     <div id="slices-head">
       <span class="ttl">Slices</span>
-      <span class="hint">scroll = scrub · click = locate · 3D = show plane</span>
-      <label class="atlas-ov" id="atlas-ov-ctl" style="display:none" title="Tint each atlas region on the slice panels — same colors as the 3D surface"><input type="checkbox" id="atlas-ov-cb" checked>atlas</label>
+      <span class="hint">scroll = scrub · click = locate · dbl-click = zoom · 3D = show plane</span>
       <label class="palpha" title="Opacity of the cut planes shown in 3D">&alpha;<input type="range" id="plane-alpha" min="0" max="1" step="0.05" value="0.9"></label>
     </div>
     <div class="slice-panel" data-axis="axial">
@@ -1174,7 +1183,11 @@ class NiftiVolume {{
 }}
 
 const slicePanels = {{}};   // axis -> {{ canvas, ctx, coordEl }}
-let mriVolume = null;
+let mriVolume = null;       // the BASE slice volume (the CT — contacts + metal frame)
+// CT ⟷ MRI fade: the base (mriVolume) is the CT; fadeVolume is the MRI blended in
+// per-pixel (sampled by world-RAS). sliceFade: 0 = pure CT, 1 = pure MRI.
+let fadeVolume = null;
+let sliceFade = 0;
 // Atlas labelmap tinted onto the 2D panels: each region colored by its atlas
 // color (same colors as the 3D surface, from the labeler's .colors.json),
 // sampled by world-RAS so it lands right on whatever slice volume is shown.
@@ -1241,6 +1254,8 @@ function _initSlicePanels() {{
     // Wheel → scrub the through-plane slice, like a real navigator.
     canvas.addEventListener("wheel", (ev) => {{ ev.preventDefault(); _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1); }}, {{ passive: false }});
     canvas.style.cursor = "crosshair";
+    // Double-click → maximize this panel over the 3D area (zoom); again → restore.
+    panel.addEventListener("dblclick", (ev) => {{ ev.preventDefault(); _togglePanelZoom(panel); }});
     // Per-panel "3D" toggle → show/hide THIS axis's cut plane in the scene.
     const plane3d = panel.querySelector('input[data-plane]');
     if (plane3d) plane3d.addEventListener("change", () => setPlaneVisible(axis, plane3d.checked));
@@ -1255,6 +1270,33 @@ function _initSlicePanels() {{
     }}
   }});
 }}
+
+// Maximize a slice panel over the 3D area (canvas-host). A hidden placeholder
+// keeps its spot in the rail so restoring preserves axial/coronal/sagittal
+// order. Click-to-locate still works — it maps via getBoundingClientRect, so
+// it's size-independent — and the canvas (object-fit: contain) just scales up.
+let _zoomedPanel = null;
+function _togglePanelZoom(panel) {{
+  const host = document.getElementById("canvas-host");
+  if (!host) return;
+  if (_zoomedPanel === panel) {{
+    if (panel._ph) {{ panel._ph.replaceWith(panel); panel._ph = null; }}
+    panel.classList.remove("zoomed");
+    _zoomedPanel = null;
+    return;
+  }}
+  if (_zoomedPanel) _togglePanelZoom(_zoomedPanel);   // only one maximized at a time
+  const ph = document.createElement("div");
+  ph.style.display = "none";
+  panel.before(ph);
+  panel._ph = ph;
+  host.appendChild(panel);
+  panel.classList.add("zoomed");
+  _zoomedPanel = panel;
+}}
+window.addEventListener("keydown", (e) => {{
+  if (e.key === "Escape" && _zoomedPanel) _togglePanelZoom(_zoomedPanel);
+}});
 
 // Map a pointer event on a slice canvas to a RAS point and locate there.
 function _sliceClickToRas(axis, canvas, ev) {{
@@ -1316,6 +1358,12 @@ function renderSlice(axis) {{
   const img = ctx.createImageData(W, H);
   const range = Math.max(1e-6, mriVolume.displayMax - mriVolume.displayMin);
   const lo = mriVolume.displayMin;
+  // CT ⟷ MRI fade: blend the MRI (fadeVolume) into the base CT per-pixel, sampled
+  // by world-RAS (its grid differs). fadeMat maps base voxel → MRI voxel.
+  const fade = (fadeVolume && sliceFade > 0.001) ? sliceFade : 0;
+  const fadeMat = fade ? _mul4x4(fadeVolume.affineInv, mriVolume.affine) : null;
+  const fRange = fade ? Math.max(1e-6, fadeVolume.displayMax - fadeVolume.displayMin) : 1;
+  const fLo = fade ? fadeVolume.displayMin : 0;
   // Atlas overlay: precompute the (this-volume voxel → atlas voxel) transform once
   // per slice (a single matrix apply per pixel), so the region tint lines up
   // whether the panel shows CT or MRI.
@@ -1332,7 +1380,14 @@ function renderSlice(axis) {{
       else if (axis === "coronal") {{ i = u; j = throughIdx; k = vSrc; }}
       else {{ i = throughIdx; j = u; k = vSrc; }}
       const raw = mriVolume.voxel(i, j, k);
-      const g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
+      let g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
+      if (fade) {{
+        const fi = Math.round(fadeMat[0][0]*i + fadeMat[0][1]*j + fadeMat[0][2]*k + fadeMat[0][3]);
+        const fj = Math.round(fadeMat[1][0]*i + fadeMat[1][1]*j + fadeMat[1][2]*k + fadeMat[1][3]);
+        const fk = Math.round(fadeMat[2][0]*i + fadeMat[2][1]*j + fadeMat[2][2]*k + fadeMat[2][3]);
+        const fg = Math.max(0, Math.min(255, Math.round((fadeVolume.voxel(fi, fj, fk) - fLo) / fRange * 255)));
+        g = Math.round(g*(1 - fade) + fg*fade);
+      }}
       let r = g, gg = g, bb = g;
       if (ov) {{
         const li = Math.round(M[0][0]*i + M[0][1]*j + M[0][2]*k + M[0][3]);
@@ -2066,6 +2121,13 @@ window.addEventListener("message", (e) => {{
   else if (m.type === "rosa:showall") showAll();
   else if (m.type === "rosa:visibility") applyContactVisibility(m.hideShanks, m.hideContacts);
   else if (m.type === "rosa:locate" && Array.isArray(m.ras)) locateAtRas(m.ras);
+  else if (m.type === "rosa:slice-fade") {{
+    sliceFade = Math.max(0, Math.min(1, Number(m.value) || 0));
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }} else if (m.type === "rosa:atlas-overlay") {{
+    atlasOverlayOn = !!m.on;
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }}
 }});
 
 function showAll() {{
@@ -2174,11 +2236,25 @@ function _applyInitialBrainMode() {{
   sel.addEventListener("change", () => _setBrainMode(sel.value));
 }})();
 
+// CT ⟷ MRI fade slider — shown once the MRI (fadeVolume) finishes loading.
+function _setupSliceFade() {{
+  const ctl = document.getElementById("slice-fade-ctl");
+  if (!ctl || !fadeVolume) return;
+  if (window.parent && window.parent !== window) return;   // embedded: the app row drives it
+  const inp = ctl.querySelector('input[type="range"]');
+  ctl.style.display = "";
+  inp.addEventListener("input", () => {{
+    sliceFade = parseFloat(inp.value);
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }});
+}}
+
 // "atlas" checkbox — tints the 2D panels by the atlas labelmap. Wired once the
 // atlas volume finishes loading (see onMeta). Default on.
 function _setupAtlasOverlayToggle() {{
   const ctl = document.getElementById("atlas-ov-ctl");
   if (!ctl || !atlasSliceVolume) return;
+  if (window.parent && window.parent !== window) return;   // embedded: the app row drives it
   const cb = ctl.querySelector('input[type="checkbox"]');
   ctl.style.display = "";
   cb.checked = atlasOverlayOn;
@@ -2228,27 +2304,21 @@ function onMeta(meta) {{
     try {{ const c = await _fetchVolume(ctMeta); if (c) buildMip(c); }} catch (e) {{ console.error("MIP volume", e); }}
     try {{ const b = await _fetchVolume(brainMeta || ctMeta); if (b) buildDvr(b); }} catch (e) {{ console.error("DVR volume", e); }}
   }})();
-  if (volSel && vols.length) {{
-    volSel.innerHTML = "";
-    vols.forEach((v, i) => {{
-      const opt = document.createElement("option");
-      opt.value = String(i);
-      opt.textContent = v.label || v.id || ("Volume " + i);
-      volSel.appendChild(opt);
-    }});
-    volSel.addEventListener("change", () => {{
-      const v = vols[parseInt(volSel.value, 10)];
-      if (v) loadMri(v);
-    }});
-    if (vols.length < 2) volSel.parentElement.style.display = "none";
-    // Slice navigator defaults to the CT — metal contacts are visible there.
-    let di = ctMeta ? vols.indexOf(ctMeta) : 0;
-    if (di < 0) di = 0;
-    volSel.value = String(di);
-    loadMri(vols[di]);
-  }} else {{
-    loadMri(meta.t1_volume);
+  // Base slice volume = the CT (contacts + metal frame); the MRI is blended in
+  // via the CT⟷MRI fade slider. The old per-volume dropdown is replaced by it.
+  if (volSel && volSel.parentElement) volSel.parentElement.style.display = "none";
+  const baseMeta = ctMeta || (vols.length ? vols[vols.length - 1] : meta.t1_volume);
+  if (baseMeta) loadMri(baseMeta);
+  if (brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)) {{
+    _fetchVolume(brainMeta)
+      .then(vol => {{ fadeVolume = vol; _setupSliceFade();
+                     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); }})
+      .catch(e => console.error("fade MRI volume", e));
   }}
+  // Tell an embedding app which slice-display controls apply, so it can host them
+  // in its own toolbar (the viewer hides its own copies when embedded).
+  _emit("rosa:slice-caps", {{ atlas: !!(meta.atlas_volume && meta.atlas_colors),
+                              fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)) }});
   updateInfoBar();
 }}
 function onMetaErr(err) {{
