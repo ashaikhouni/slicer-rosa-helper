@@ -98,24 +98,6 @@ def _resolve_surface_source(surface_source: str | None) -> str:
     return "otsu"
 
 
-def _structure_dir(case_dir: Path) -> Path:
-    """Canonical, persistent home for a case's imported deep-structure meshes
-    (THOMAS nuclei) — in the CASE dir, not a job dir, so it survives across
-    viewer rebuilds."""
-    return Path(case_dir) / "structures"
-
-
-def _structure_view_flags(case_dir: Path) -> list[str]:
-    """``view-results`` flags that re-attach a case's imported THOMAS structures,
-    so EVERY viewer rebuild (label / atlas switch / geometry edit) keeps the deep
-    nuclei instead of dropping them. Empty when the case has none imported."""
-    d = _structure_dir(case_dir)
-    sm, lut = d / "thomas_in_ct.nii.gz", d / "thomas_lut.json"
-    if sm.is_file() and lut.is_file():
-        return ["--structure-meshes", str(sm), "--structure-lut", str(lut)]
-    return []
-
-
 def _brain_surface_view_flags(t1: str, regcache: Path, *,
                               include_transform: bool,
                               surface_source: str | None = "auto") -> list[str]:
@@ -364,7 +346,6 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                 t1, cd / "regcache",
                 include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
                 surface_source=surface)
-        view += _structure_view_flags(cd)   # keep imported THOMAS nuclei on edit-rebuild
         return [view]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
@@ -374,9 +355,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         contacts = spec.params.get("contacts")
         ct = spec.params.get("ct")
         t1 = spec.params.get("t1")
-        if not (contacts and ct and t1):
-            raise ValueError("label job requires params.contacts, params.ct, params.t1")
         atlas = str(spec.params.get("atlas") or "cerebra")
+        is_thomas = atlas.startswith("thomas")
+        # THOMAS brings its OWN reference MRI (it registers that → the CT), so a
+        # patient T1 is optional — it only adds the cortical Ghost surface for
+        # context. Every other atlas needs the patient T1 to route registration.
+        if not (contacts and ct) or (not t1 and not is_thomas):
+            raise ValueError("label job requires params.contacts, params.ct, params.t1")
         # Same surface backend the parent pipeline chose, so this label reuses the
         # already-built brain_surface_*.npz instead of meshing a different one.
         surface = str(spec.params.get("surface") or "auto")
@@ -405,7 +390,21 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # per case (cached in regcache), recolored per atlas below. The surface,
         # native brain mask and T1→CT transform caches are shared with the pipeline
         # job via ``_brain_surface_view_flags`` so nothing is re-run per atlas.
-        if atlas == "fastsurfer":
+        thomas_lut = str(workdir / "atlas_in_ct.nii.gz.lut.json")  # THOMAS mesh LUT
+        if is_thomas:
+            # THOMAS = a BYO deep-structure atlas: register its own reference T1 →
+            # the CT (no patient-T1 route), warp the nuclei labelmap in, label the
+            # contacts by nucleus, and save the MRI-in-CT QC for the reg check.
+            thomas_dir = spec.params.get("thomas_dir")
+            if not thomas_dir:
+                raise ValueError("thomas atlas requires params.thomas_dir")
+            label_step = base + ["label", str(contacts),
+                                 "--thomas", str(thomas_dir),
+                                 "--target-volume", str(ct),
+                                 "--save-registered-mri", mri_qc,
+                                 "--save-atlas-labelmap", atlas_in_ct,
+                                 "--registration-cache", regcache, "-o", out]
+        elif atlas == "fastsurfer":
             label_step = base + ["label", str(contacts), "--fastsurfer",
                                   "--target-volume", str(ct),
                                   "--intermediate-volume", str(t1),
@@ -443,62 +442,22 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # Brain SURFACE flags (native volume + T1→CT transform the label step just
         # saved + cached mask + cached mesh). On a cache hit view-results loads the
         # mesh and ignores the FastSurfer flags. Shared with the pipeline job.
-        view_step += _brain_surface_view_flags(str(t1), Path(regcache),
-                                               include_transform=True,
-                                               surface_source=surface)
+        # THOMAS may run without a patient MRI → then there's no cortex surface.
+        if t1:
+            view_step += _brain_surface_view_flags(str(t1), Path(regcache),
+                                                   include_transform=True,
+                                                   surface_source=surface)
         # COLOR: the FastSurfer labeler keeps its own DKT parcellation; every other
-        # atlas recolors that same mesh by its warped labelmap.
+        # atlas recolors that same mesh (+ tints the slices) by its warped labelmap.
         if atlas != "fastsurfer":
-            view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
-        # Keep any imported THOMAS nuclei when this atlas relabel rebuilds the 3D.
-        view_step += _structure_view_flags(parent_dir)
+            view_step += ["--atlas-labelmap", atlas_in_ct,
+                          "--atlas-name", ("THOMAS" if is_thomas else atlas)]
+        # THOMAS additionally renders its nuclei as 3-D meshes (the deep anatomy a
+        # cortical atlas can't paint), colored by the same LUT that tints the slices.
+        if is_thomas:
+            view_step += ["--structure-meshes", atlas_in_ct, "--structure-lut", thomas_lut]
         steps.append(view_step)
         return steps
-    if kind == "import-thomas":
-        # Import a THOMAS thalamic segmentation as deep-structure MESHES: register
-        # THOMAS's own reference T1 → the case CT (rigid MI, metal-clipped), warp
-        # the per-nucleus labelmap into the contact frame, then rebuild the case's
-        # 3D viewer with those meshes so the electrodes thread through the nuclei.
-        # Unlike `label` (which recolors the cortex), this ADDS the deep anatomy a
-        # cortical atlas can't paint — and needs no patient MRI (THOMAS ships a T1).
-        case_dir = spec.params.get("case_dir")
-        ct = spec.params.get("ct")
-        thomas_dir = spec.params.get("thomas_dir")
-        contacts = spec.params.get("contacts")
-        if not (case_dir and ct and thomas_dir and contacts):
-            raise ValueError(
-                "import-thomas job requires params.case_dir, ct, thomas_dir, contacts")
-        cd = Path(case_dir)
-        label = str(spec.params.get("label") or "case")
-        t1 = spec.params.get("t1")
-        t1 = str(t1) if t1 else None
-        surface = str(spec.params.get("surface") or "auto")
-        regcache = Path(spec.params.get("regcache") or (cd / "regcache"))
-        # Persist the warped labelmap + LUT in the CASE dir (not this job dir) so
-        # later rebuilds (atlas switch, geometry edit) can re-attach them.
-        struct_map = str(_structure_dir(cd) / "thomas_in_ct.nii.gz")
-        struct_lut = str(_structure_dir(cd) / "thomas_lut.json")
-        base = [py, "-u", "-m", "rosa_agent"]
-        # 1) register + warp THOMAS into the CT frame (caches the THOMAS-T1→CT
-        #    transform so a re-import skips registration).
-        import_step = base + ["import-thomas", str(thomas_dir),
-                              "--ct", str(ct),
-                              "-o", struct_map, "--lut-out", struct_lut,
-                              "--save-transform", str(regcache / "thomas_t1_to_ct.tfm")]
-        # 2) rebuild the case viewer in place, adding the nuclei meshes. Reuse the
-        #    case's cached brain surface + T1→CT transform (the patient MRI's, not
-        #    THOMAS's) when the case has one — nuclei sit inside that Ghost cortex.
-        view = base + ["view-results", str(case_dir), "--output", str(cd / "viewer"),
-                       "--ct", str(ct), "--contacts", str(contacts),
-                       "--trajectories", str(cd / "trajectories.tsv"),
-                       "--subject-label", label,
-                       "--structure-meshes", struct_map, "--structure-lut", struct_lut]
-        if t1:
-            view += _brain_surface_view_flags(
-                t1, cd / "regcache",
-                include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
-                surface_source=surface)
-        return [import_step, view]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner
 from .models import (
-    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit, ThomasImportRequest,
+    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
     ReviewOp, ReviewPatch,
 )
 from .review import ReviewStore, export_contacts
@@ -316,6 +316,17 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "license": "deepmriprep code MIT; atlas data academic — cite the source atlas",
                     "coverage": coverage, "is_default": False,
                 })
+            # THOMAS: a BYO deep-structure atlas. The user loads a THOMAS output
+            # folder; its reference MRI is registered → the CT and the nuclei are
+            # labeled + rendered as 3-D meshes. Always offered (needs no runtime),
+            # flagged byo so the UI knows to prompt for the folder.
+            atlases.append({
+                "id": "thomas", "name": "THOMAS thalamic nuclei (load folder…)",
+                "available": True, "byo": True, "license_tier": "byo",
+                "license": "your own THOMAS segmentation output",
+                "coverage": "Deep: thalamic + subcortical nuclei (per hemisphere)",
+                "is_default": False,
+            })
             return {"atlases": atlases,
                     "default": bundled_atlases.load_manifest()["default"]}
         except Exception as exc:  # noqa: BLE001 — engine/resources missing
@@ -337,63 +348,36 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         ct = parent.params.get("ct")
         if not ct:
             raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        is_thomas = str(req.atlas or "").startswith("thomas")
+        # THOMAS is a BYO atlas: it brings its own reference MRI (registered → CT),
+        # so a patient T1 is optional (it only adds the cortical Ghost surface). It
+        # needs the uploaded folder instead.
+        thomas_dir = None
+        if is_thomas:
+            if not req.thomas_dir:
+                raise HTTPException(status_code=422,
+                                    detail="THOMAS atlas needs a folder (thomas_dir)")
+            tdir = Path(req.thomas_dir).expanduser()
+            if not ((tdir / "left").is_dir() or (tdir / "right").is_dir()):
+                raise HTTPException(
+                    status_code=422,
+                    detail="not a THOMAS output dir — expected a left/ or right/ subfolder")
+            thomas_dir = str(tdir)
         # The MRI: the request's, else the one provided at case creation (parent
         # pipeline's t1). Either lets labeling proceed without re-uploading.
         t1 = req.t1 or parent.params.get("t1")
-        if not t1:
+        if not t1 and not is_thomas:
             raise HTTPException(status_code=409,
                                 detail="no MRI (T1): provide one, or create the case with an MRI")
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
-            "t1": t1, "atlas": req.atlas,
+            "t1": t1, "atlas": req.atlas, "thomas_dir": thomas_dir,
             # Reuse the parent pipeline's surface backend so labeling meshes/loads
             # the SAME brain_surface_*.npz rather than a different one.
             "surface": parent.params.get("surface", "auto"),
             # Cache registrations in the parent case dir so labeling more atlases
             # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
             "regcache": str(parent.workdir / "regcache")})
-        try:
-            job = runner.create(spec)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return job.status()
-
-    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/import-thomas",
-              response_model=JobStatus, status_code=201)
-    async def create_thomas_job(job_id: str, req: ThomasImportRequest) -> JobStatus:
-        """Import a THOMAS thalamic segmentation into a case as deep-structure meshes.
-
-        Registers THOMAS's reference T1 → the case CT, warps the nuclei labelmap
-        into the contact frame, and rebuilds the case's 3D viewer with the meshes.
-        No patient MRI needed — THOMAS brings its own T1.
-        """
-        parent = _job_or_404(job_id)
-        contacts = parent.workdir / "contacts.tsv"
-        if not contacts.is_file():
-            raise HTTPException(status_code=409,
-                                detail="parent job has no contacts.tsv (run a pipeline job first)")
-        ct = parent.params.get("ct")
-        if not ct:
-            raise HTTPException(status_code=409, detail="parent job has no CT recorded")
-        tdir = Path(req.thomas_dir).expanduser()
-        if not tdir.is_dir():
-            raise HTTPException(status_code=422, detail=f"THOMAS dir not found: {tdir}")
-        if not ((tdir / "left").is_dir() or (tdir / "right").is_dir()):
-            raise HTTPException(
-                status_code=422,
-                detail="not a THOMAS output dir — expected a left/ or right/ subfolder of "
-                       "per-nucleus masks")
-        spec = JobSpec(kind="import-thomas", params={
-            "parent": job_id, "case_dir": str(parent.workdir),
-            "contacts": str(contacts), "ct": ct,
-            "thomas_dir": str(tdir),
-            # The patient MRI (if the case has one) + its surface backend, so the
-            # rebuilt viewer keeps the same Ghost cortex the nuclei sit inside.
-            "t1": parent.params.get("t1"),
-            "surface": parent.params.get("surface", "auto"),
-            "regcache": str(parent.workdir / "regcache"),
-            "label": parent.params.get("label"),
-        })
         try:
             job = runner.create(spec)
         except ValueError as exc:

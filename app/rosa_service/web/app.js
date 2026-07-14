@@ -254,7 +254,6 @@ function setCaseSlots() {
   $("slot-reg").hidden = !mriOn;
   $("atlasctl").hidden = !mriOn;        // atlas picker appears once an MRI is in
   $("labelbarMri").hidden = mriOn;      // MRI upload row shows only when there's no MRI
-  $("thomasctl").hidden = false;        // THOMAS import needs no MRI — available for any open case
 }
 
 // If the case was created with an MRI, the pipeline job carries its t1: pre-fill
@@ -285,8 +284,7 @@ function resetLabelCard() {
   $("qcspace").hidden = true;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
-  $("thomasctl").hidden = true;
-  clearInterval(state.thomasPoll);
+  state.thomasDir = null;
   setViewerTab("electrodes");
 }
 
@@ -509,7 +507,13 @@ function setLabelBusy(on) {
 }
 
 async function runLabel() {
-  if (!state.mri || !state.jobId) return;
+  if (!state.jobId) return;
+  const atlasId = $("atlassel").value;
+  const isThomas = atlasId.startsWith("thomas");
+  // THOMAS brings its own reference MRI, so it labels without a patient MRI — but
+  // it needs the uploaded folder. Every other atlas needs the patient MRI.
+  if (isThomas) { if (!state.thomasDir) return; }
+  else if (!state.mri) return;
   // Cancel any in-flight label for this case first — otherwise max_concurrent=1
   // would queue the new atlas behind the old (slow) one and it'd look stuck.
   if (state.labelJobId) {
@@ -523,13 +527,17 @@ async function runLabel() {
   $("labelbtn").disabled = true;
   $("approvebtn").hidden = true;
   const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
-  const atlas = $("atlassel").options[$("atlassel").selectedIndex]?.textContent || $("atlassel").value;
-  $("labelmsg").innerHTML = firstLabel
-    ? `Registering MRI → CT and warping <b>${atlas}</b> (~30 s) — the 3D recolors when done…`
-    : `Relabeling with <b>${atlas}</b> — CT↔MRI registration is cached…`;
+  const atlas = $("atlassel").options[$("atlassel").selectedIndex]?.textContent || atlasId;
+  $("labelmsg").innerHTML = isThomas
+    ? `Registering THOMAS MRI → CT and warping the nuclei (~30–60 s) — the 3D + slices update when done…`
+    : firstLabel
+      ? `Registering MRI → CT and warping <b>${atlas}</b> (~30 s) — the 3D recolors when done…`
+      : `Relabeling with <b>${atlas}</b> — CT↔MRI registration is cached…`;
   try {
-    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST",
-      { t1: state.mri.path, atlas: $("atlassel").value });
+    const body = { atlas: atlasId };
+    if (state.mri) body.t1 = state.mri.path;
+    if (isThomas) body.thomas_dir = state.thomasDir;
+    const job = await jsend(`${API}/jobs/${state.jobId}/label`, "POST", body);
     state.labelJobId = job.id;
     streamInto(job.id, "labellog");     // shows the registration metrics (QC)
     pollLabel(job.id, firstLabel);
@@ -588,85 +596,38 @@ function _showLabelError(st) {
   $("labelbtn").disabled = false;
 }
 
-// ---- THOMAS import: deep-structure meshes into the case viewer -----------
-// Registers a THOMAS segmentation's T1 → the case CT, warps the nuclei in, and
-// rebuilds the 3D view with them (electrodes thread through the nuclei). No MRI
-// needed — THOMAS ships its own reference T1.
-// Busy state swaps the button's OWN label (no extra sibling that would widen the
-// toolbar and force it to re-wrap — a re-wrap resizes the 3D canvas mid-import).
-function setThomasBusy(on) {
-  const b = $("thomasbtn");
-  b.disabled = on;
-  b.textContent = on ? "Importing…" : "Import THOMAS";
-}
-
-// Directory pick → upload the THOMAS files → import straight away (one action, no
-// second press). Filters to just what build_thomas_labelmap reads (left/ + right/
-// nucleus masks + a root-level reference nifti).
+// ---- THOMAS: a BYO atlas (load a folder) --------------------------------
+// THOMAS is picked from the atlas dropdown like any other atlas; the only
+// difference is it prompts for a THOMAS output folder. We upload the masks, then
+// run the NORMAL label flow against them (register its MRI → CT, warp the nuclei,
+// tint the slices + render the 3-D meshes + label contacts, with check-reg +
+// approve). Only the files build_thomas_labelmap reads are uploaded.
 async function uploadThomasDir(e) {
   const all = Array.from(e.target.files || []);
   e.target.value = "";                      // allow re-picking the same folder
   if (!all.length) return;
-  const want = all.filter((f) => {
+  const files = all.filter((f) => {
     const seg = (f.webkitRelativePath || f.name).split("/");
     if (seg.includes("left") || seg.includes("right")) return true;   // nucleus masks
-    if (seg.length === 2 && /\.nii(\.gz)?$/i.test(seg[1])) return true; // ref T1 at root
+    if (seg.length === 2 && /\.nii(\.gz)?$/i.test(seg[1])) return true; // ref MRI at root
     return false;
   });
-  const files = want.length ? want : all;
-  if (!files.length) { $("labelmsg").textContent = "That folder has no THOMAS masks (left/ + right/)."; return; }
-  setThomasBusy(true);
+  if (!files.length) { $("labelmsg").textContent = "That folder isn't a THOMAS output (needs left/ + right/)."; return; }
+  setLabelBusy(true);
   $("labelmsg").textContent = `Uploading ${files.length} THOMAS files…`;
   try {
     const fd = new FormData();
-    // Carry each file's relative path AS its filename (3rd arg) so the server
-    // rebuilds the tree — one clean `files` list, no parallel path array.
+    // Carry each file's relative path AS its filename so the server rebuilds the
+    // tree — one clean `files` list, no parallel path array.
     for (const f of files) fd.append("files", f, f.webkitRelativePath || f.name);
     const r = await fetch(`${API}/uploads/dir`, { method: "POST", body: fd });
     if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
-    const { path } = await r.json();
-    $("thomasdir").value = path;
-    importThomas();                         // pick → upload → import, no extra click
+    state.thomasDir = (await r.json()).path;
+    runLabel();                             // label against THOMAS, like any atlas
   } catch (err) {
-    setThomasBusy(false);
-    $("labelmsg").textContent = `Upload failed: ${err.message}`;
+    setLabelBusy(false);
+    $("labelmsg").textContent = `THOMAS upload failed: ${err.message}`;
   }
-}
-
-async function importThomas() {
-  if (!state.jobId) return;
-  const dir = $("thomasdir").value.trim();
-  if (!dir) { $("thomasdir-file").click(); return; }   // nothing typed → open the folder picker
-  setThomasBusy(true);
-  // Status goes in the muted line only — NOT the streaming log panel, whose
-  // expansion would shrink (and reflow) the 3D viewport during the import.
-  $("labelmsg").innerHTML = "Registering THOMAS → CT and warping the nuclei (~30–60 s) — the 3D updates when done…";
-  try {
-    const job = await jsend(`${API}/jobs/${state.jobId}/import-thomas`, "POST", { thomas_dir: dir });
-    pollThomas(job.id);
-  } catch (e) {
-    setThomasBusy(false);
-    $("labelmsg").textContent = `Failed to start THOMAS import: ${e.message}`;
-  }
-}
-
-function pollThomas(id) {
-  clearInterval(state.thomasPoll);
-  state.thomasPoll = setInterval(async () => {
-    let st; try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
-    if (!["succeeded", "failed", "cancelled"].includes(st.state)) return;
-    clearInterval(state.thomasPoll);
-    setThomasBusy(false);
-    if (st.state === "succeeded") {
-      $("labelmsg").innerHTML = "THOMAS nuclei imported — <b>reloading the 3D view…</b> " +
-        "Set <b>Brain → Ghost</b> and use <b>Structure opacity</b> / <b>Reveal depth</b> to explore.";
-      const f = $("viewerframe");
-      if (f) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
-    } else {
-      $("labelmsg").innerHTML =
-        `THOMAS import <strong>${st.state}</strong>${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}.`;
-    }
-  }, 1000);
 }
 
 async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
@@ -1067,13 +1028,9 @@ async function boot() {
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
   $("showallbtn").onclick = showAllInViewer;
-  $("thomasbtn").onclick = importThomas;
-  // Directory browse: the browser can't expose an absolute path, so upload the
-  // folder's files (rebuilt server-side) and fill the field with the saved root.
-  // Only the files build_thomas_labelmap needs — left/ + right/ masks + the root
-  // reference T1 — so a big THOMAS tree (output/, PNGs…) doesn't get uploaded.
+  // THOMAS is a BYO atlas: selecting it in the dropdown opens the folder picker
+  // (below), which uploads the masks and labels against them via runLabel.
   $("thomasdir-file").addEventListener("change", uploadThomasDir);
-  $("thomasdir").addEventListener("keydown", (e) => { if (e.key === "Enter") importThomas(); });
   // Slice-display controls hosted in the top row → drive the embedded viewer.
   $("app-slice-fade").addEventListener("input", (e) =>
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
@@ -1102,7 +1059,13 @@ async function boot() {
   });
   // Selecting a different atlas re-labels immediately (registration is cached,
   // so only the atlas warp + sampling re-runs) — so the labels track the atlas.
-  $("atlassel").addEventListener("change", () => { if (state.mri && state.jobId) runLabel(); });
+  $("atlassel").addEventListener("change", () => {
+    if (!state.jobId) return;
+    // THOMAS: prompt for the folder first; the picker's change handler uploads
+    // then labels. Every other atlas labels immediately (needs the patient MRI).
+    if ($("atlassel").value.startsWith("thomas")) { $("thomasdir-file").click(); return; }
+    if (state.mri) runLabel();
+  });
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
   try {

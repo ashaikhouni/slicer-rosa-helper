@@ -195,11 +195,8 @@
             <select id="atlassel"></select>
             <span class="atlasbusy" id="atlasbusy" hidden><span class="spin"></span>registering…</span>
             <button id="approvebtn" class="primary small" hidden>Approve</button>
-            <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, or CT↔MRI for native ones (FastSurfer / deepmriprep)">check reg</button>
-          </span>
-          <span class="thomasctl" id="thomasctl" hidden title="Import a THOMAS thalamic segmentation as deep-structure meshes — registers its T1 to this case's CT so the electrodes thread through the nuclei. Paste a path and press Enter, or click Import to pick the folder.">
-            <input type="text" id="thomasdir" class="thomaspath" placeholder="THOMAS dir — paste, or click Import ▸" autocomplete="off">
-            <button id="thomasbtn" class="ghost small">Import THOMAS</button>
+            <button id="atlascheckbtn" class="ghost small" hidden title="Check the registration behind this atlas's labels — atlas↔MRI for MNI atlases, CT↔MRI for native ones (FastSurfer / deepmriprep), or THOMAS-MRI↔CT for THOMAS">check reg</button>
+            <!-- BYO folder picker for the THOMAS atlas (opened when it's selected) -->
             <input type="file" id="thomasdir-file" webkitdirectory directory hidden>
           </span>
           <span class="sliceovctl" id="sliceovctl" hidden>
