@@ -433,6 +433,49 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             view_step += ["--atlas-labelmap", atlas_in_ct, "--atlas-name", atlas]
         steps.append(view_step)
         return steps
+    if kind == "import-thomas":
+        # Import a THOMAS thalamic segmentation as deep-structure MESHES: register
+        # THOMAS's own reference T1 → the case CT (rigid MI, metal-clipped), warp
+        # the per-nucleus labelmap into the contact frame, then rebuild the case's
+        # 3D viewer with those meshes so the electrodes thread through the nuclei.
+        # Unlike `label` (which recolors the cortex), this ADDS the deep anatomy a
+        # cortical atlas can't paint — and needs no patient MRI (THOMAS ships a T1).
+        case_dir = spec.params.get("case_dir")
+        ct = spec.params.get("ct")
+        thomas_dir = spec.params.get("thomas_dir")
+        contacts = spec.params.get("contacts")
+        if not (case_dir and ct and thomas_dir and contacts):
+            raise ValueError(
+                "import-thomas job requires params.case_dir, ct, thomas_dir, contacts")
+        cd = Path(case_dir)
+        label = str(spec.params.get("label") or "case")
+        t1 = spec.params.get("t1")
+        t1 = str(t1) if t1 else None
+        surface = str(spec.params.get("surface") or "auto")
+        regcache = Path(spec.params.get("regcache") or (cd / "regcache"))
+        struct_map = str(workdir / "thomas_in_ct.nii.gz")
+        struct_lut = str(workdir / "thomas_lut.json")
+        base = [py, "-u", "-m", "rosa_agent"]
+        # 1) register + warp THOMAS into the CT frame (caches the THOMAS-T1→CT
+        #    transform so a re-import skips registration).
+        import_step = base + ["import-thomas", str(thomas_dir),
+                              "--ct", str(ct),
+                              "-o", struct_map, "--lut-out", struct_lut,
+                              "--save-transform", str(regcache / "thomas_t1_to_ct.tfm")]
+        # 2) rebuild the case viewer in place, adding the nuclei meshes. Reuse the
+        #    case's cached brain surface + T1→CT transform (the patient MRI's, not
+        #    THOMAS's) when the case has one — nuclei sit inside that Ghost cortex.
+        view = base + ["view-results", str(case_dir), "--output", str(cd / "viewer"),
+                       "--ct", str(ct), "--contacts", str(contacts),
+                       "--trajectories", str(cd / "trajectories.tsv"),
+                       "--subject-label", label,
+                       "--structure-meshes", struct_map, "--structure-lut", struct_lut]
+        if t1:
+            view += _brain_surface_view_flags(
+                t1, cd / "regcache",
+                include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
+                surface_source=surface)
+        return [import_step, view]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

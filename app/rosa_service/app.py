@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner
 from .models import (
-    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
+    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit, ThomasImportRequest,
     ReviewOp, ReviewPatch,
 )
 from .review import ReviewStore, export_contacts
@@ -352,6 +352,48 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             # Cache registrations in the parent case dir so labeling more atlases
             # reuses T1→CT (once/case) + MNI→T1 (once/space) instead of re-running.
             "regcache": str(parent.workdir / "regcache")})
+        try:
+            job = runner.create(spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return job.status()
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/import-thomas",
+              response_model=JobStatus, status_code=201)
+    async def create_thomas_job(job_id: str, req: ThomasImportRequest) -> JobStatus:
+        """Import a THOMAS thalamic segmentation into a case as deep-structure meshes.
+
+        Registers THOMAS's reference T1 → the case CT, warps the nuclei labelmap
+        into the contact frame, and rebuilds the case's 3D viewer with the meshes.
+        No patient MRI needed — THOMAS brings its own T1.
+        """
+        parent = _job_or_404(job_id)
+        contacts = parent.workdir / "contacts.tsv"
+        if not contacts.is_file():
+            raise HTTPException(status_code=409,
+                                detail="parent job has no contacts.tsv (run a pipeline job first)")
+        ct = parent.params.get("ct")
+        if not ct:
+            raise HTTPException(status_code=409, detail="parent job has no CT recorded")
+        tdir = Path(req.thomas_dir).expanduser()
+        if not tdir.is_dir():
+            raise HTTPException(status_code=422, detail=f"THOMAS dir not found: {tdir}")
+        if not ((tdir / "left").is_dir() or (tdir / "right").is_dir()):
+            raise HTTPException(
+                status_code=422,
+                detail="not a THOMAS output dir — expected a left/ or right/ subfolder of "
+                       "per-nucleus masks")
+        spec = JobSpec(kind="import-thomas", params={
+            "parent": job_id, "case_dir": str(parent.workdir),
+            "contacts": str(contacts), "ct": ct,
+            "thomas_dir": str(tdir),
+            # The patient MRI (if the case has one) + its surface backend, so the
+            # rebuilt viewer keeps the same Ghost cortex the nuclei sit inside.
+            "t1": parent.params.get("t1"),
+            "surface": parent.params.get("surface", "auto"),
+            "regcache": str(parent.workdir / "regcache"),
+            "label": parent.params.get("label"),
+        })
         try:
             job = runner.create(spec)
         except ValueError as exc:

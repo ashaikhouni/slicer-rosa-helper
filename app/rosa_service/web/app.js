@@ -254,6 +254,7 @@ function setCaseSlots() {
   $("slot-reg").hidden = !mriOn;
   $("atlasctl").hidden = !mriOn;        // atlas picker appears once an MRI is in
   $("labelbarMri").hidden = mriOn;      // MRI upload row shows only when there's no MRI
+  $("thomasctl").hidden = false;        // THOMAS import needs no MRI — available for any open case
 }
 
 // If the case was created with an MRI, the pipeline job carries its t1: pre-fill
@@ -284,6 +285,8 @@ function resetLabelCard() {
   $("qcspace").hidden = true;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
+  $("thomasctl").hidden = true;
+  clearInterval(state.thomasPoll);
   setViewerTab("electrodes");
 }
 
@@ -583,6 +586,51 @@ function _showLabelError(st) {
     `Labeling <strong>${st.state}</strong>${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}. ` +
     `Pick the atlas again to retry.`;
   $("labelbtn").disabled = false;
+}
+
+// ---- THOMAS import: deep-structure meshes into the case viewer -----------
+// Registers a THOMAS segmentation's T1 → the case CT, warps the nuclei in, and
+// rebuilds the 3D view with them (electrodes thread through the nuclei). No MRI
+// needed — THOMAS ships its own reference T1.
+function setThomasBusy(on) {
+  $("thomasbusy").hidden = !on;
+  $("thomasbtn").disabled = on;
+}
+
+async function importThomas() {
+  if (!state.jobId) return;
+  const dir = $("thomasdir").value.trim();
+  if (!dir) { $("labelmsg").textContent = "Enter a THOMAS output directory first (has left/ + right/)."; return; }
+  setThomasBusy(true);
+  const ll = $("labellog"); ll.hidden = false; ll.textContent = "";
+  $("labelmsg").innerHTML = "Registering THOMAS → CT and warping the nuclei (~30–60 s) — the 3D updates when done…";
+  try {
+    const job = await jsend(`${API}/jobs/${state.jobId}/import-thomas`, "POST", { thomas_dir: dir });
+    streamInto(job.id, "labellog");     // shows the registration metrics
+    pollThomas(job.id);
+  } catch (e) {
+    setThomasBusy(false);
+    $("labelmsg").textContent = `Failed to start THOMAS import: ${e.message}`;
+  }
+}
+
+function pollThomas(id) {
+  clearInterval(state.thomasPoll);
+  state.thomasPoll = setInterval(async () => {
+    let st; try { st = await jget(`${API}/jobs/${id}`); } catch { return; }
+    if (!["succeeded", "failed", "cancelled"].includes(st.state)) return;
+    clearInterval(state.thomasPoll);
+    setThomasBusy(false);
+    if (st.state === "succeeded") {
+      $("labelmsg").innerHTML = "THOMAS nuclei imported — <b>reloading the 3D view…</b> " +
+        "Set <b>Brain → Ghost</b> and use <b>Structure opacity</b> / <b>Reveal depth</b> to explore.";
+      const f = $("viewerframe");
+      if (f) f.src = `${API}/jobs/${state.jobId}/viewer/?t=${Date.now()}`;
+    } else {
+      $("labelmsg").innerHTML =
+        `THOMAS import <strong>${st.state}</strong>${st.error ? ": " + st.error : ` (exit ${st.exit_code})`}.`;
+    }
+  }, 1000);
 }
 
 async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
@@ -983,6 +1031,19 @@ async function boot() {
   $("labelbtn").onclick = runLabel;
   $("approvebtn").onclick = approveLabels;
   $("showallbtn").onclick = showAllInViewer;
+  $("thomasbtn").onclick = importThomas;
+  // Directory browse (Electron exposes file.path): derive the picked folder's
+  // absolute path from the first file inside it and its webkitRelativePath.
+  $("thomasdir-file").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const rel = f.webkitRelativePath || "";
+    if (f.path && rel) {
+      const root = rel.split("/")[0];
+      $("thomasdir").value = f.path.slice(0, f.path.length - rel.length) + root;
+    }
+  });
+  $("thomasdir").addEventListener("keydown", (e) => { if (e.key === "Enter") importThomas(); });
   // Slice-display controls hosted in the top row → drive the embedded viewer.
   $("app-slice-fade").addEventListener("input", (e) =>
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));

@@ -151,8 +151,22 @@ class LabelRequest(BaseModel):
     atlas: str = "cerebra"
 
 
+class ThomasImportRequest(BaseModel):
+    """Import a THOMAS thalamic segmentation as deep-structure meshes.
+
+    ``thomas_dir`` is a THOMAS output directory (``left/`` + ``right/`` per-nucleus
+    masks + a reference ``T1.nii.gz``) already on this machine. The service
+    registers that T1 to the parent case's CT, warps the nuclei labelmap into the
+    contact frame, and rebuilds the case's 3D viewer with the meshes — no MRI
+    required (THOMAS brings its own reference T1).
+    """
+
+    thomas_dir: str
+
+
 __all__ = [
     "JobState", "JobSpec", "Artifact", "JobStatus",
     "ReviewContact", "ReviewShank", "ReviewDoc",
     "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest",
+    "ThomasImportRequest",
 ]
