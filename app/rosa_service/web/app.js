@@ -597,6 +597,40 @@ function setThomasBusy(on) {
   $("thomasbtn").disabled = on;
 }
 
+// Directory pick → upload the THOMAS files → fill the path field with the saved
+// server-side root. Filters to just what build_thomas_labelmap reads (left/ +
+// right/ nucleus masks + a root-level reference nifti).
+async function uploadThomasDir(e) {
+  const all = Array.from(e.target.files || []);
+  e.target.value = "";                      // allow re-picking the same folder
+  if (!all.length) return;
+  const want = all.filter((f) => {
+    const seg = (f.webkitRelativePath || f.name).split("/");
+    if (seg.includes("left") || seg.includes("right")) return true;   // nucleus masks
+    if (seg.length === 2 && /\.nii(\.gz)?$/i.test(seg[1])) return true; // ref T1 at root
+    return false;
+  });
+  const files = want.length ? want : all;
+  if (!files.length) { $("labelmsg").textContent = "That folder has no THOMAS masks (left/ + right/)."; return; }
+  setThomasBusy(true);
+  $("labelmsg").textContent = `Uploading ${files.length} THOMAS files…`;
+  try {
+    const fd = new FormData();
+    // Carry each file's relative path AS its filename (3rd arg) so the server
+    // rebuilds the tree — one clean `files` list, no parallel path array.
+    for (const f of files) fd.append("files", f, f.webkitRelativePath || f.name);
+    const r = await fetch(`${API}/uploads/dir`, { method: "POST", body: fd });
+    if (!r.ok) throw new Error((await r.text()) || `HTTP ${r.status}`);
+    const { path } = await r.json();
+    $("thomasdir").value = path;
+    $("labelmsg").innerHTML = "THOMAS folder ready — click <b>Import THOMAS</b>.";
+  } catch (err) {
+    $("labelmsg").textContent = `Upload failed: ${err.message}`;
+  } finally {
+    setThomasBusy(false);
+  }
+}
+
 async function importThomas() {
   if (!state.jobId) return;
   const dir = $("thomasdir").value.trim();
@@ -1032,17 +1066,11 @@ async function boot() {
   $("approvebtn").onclick = approveLabels;
   $("showallbtn").onclick = showAllInViewer;
   $("thomasbtn").onclick = importThomas;
-  // Directory browse (Electron exposes file.path): derive the picked folder's
-  // absolute path from the first file inside it and its webkitRelativePath.
-  $("thomasdir-file").addEventListener("change", (e) => {
-    const f = e.target.files && e.target.files[0];
-    if (!f) return;
-    const rel = f.webkitRelativePath || "";
-    if (f.path && rel) {
-      const root = rel.split("/")[0];
-      $("thomasdir").value = f.path.slice(0, f.path.length - rel.length) + root;
-    }
-  });
+  // Directory browse: the browser can't expose an absolute path, so upload the
+  // folder's files (rebuilt server-side) and fill the field with the saved root.
+  // Only the files build_thomas_labelmap needs — left/ + right/ masks + the root
+  // reference T1 — so a big THOMAS tree (output/, PNGs…) doesn't get uploaded.
+  $("thomasdir-file").addEventListener("change", uploadThomasDir);
   $("thomasdir").addEventListener("keydown", (e) => { if (e.key === "Enter") importThomas(); });
   // Slice-display controls hosted in the top row → drive the embedded viewer.
   $("app-slice-fade").addEventListener("input", (e) =>

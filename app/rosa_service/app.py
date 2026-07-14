@@ -603,6 +603,38 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             shutil.copyfileobj(file.file, out)
         return {"path": str(dest), "name": name, "bytes": dest.stat().st_size}
 
+    @app.post(f"/api/{API_VERSION}/uploads/dir")
+    async def upload_dir(files: list[UploadFile] = File(...)) -> dict:
+        """Upload a folder tree (browser directory pick) and return its root path.
+
+        Each file's *filename* carries its relative path (the browser sends
+        ``webkitRelativePath`` there, e.g. ``T1/left/11-CM.nii.gz``); we rebuild
+        the tree under ``_uploads/<uuid>/`` so a directory-consuming job
+        (import-thomas) can point at the root. The browser side sends only the
+        files that job needs, so this stays lean.
+        """
+        if not files:
+            raise HTTPException(status_code=400, detail="no files uploaded")
+        base = Path(work_root) / "_uploads" / uuid.uuid4().hex[:8]
+        roots: set[str] = set()
+        n = 0
+        for f in files:
+            # The filename IS the relative path; drop traversal/absolute segments.
+            parts = [p for p in Path(str(f.filename or "")).parts if p not in ("..", "/", "")]
+            if not parts:
+                continue
+            roots.add(parts[0])
+            dest = base.joinpath(*parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(f.file, out)
+            n += 1
+        if not n:
+            raise HTTPException(status_code=400, detail="no usable files in upload")
+        # Single common top folder → return it; otherwise the upload root.
+        root = base / next(iter(roots)) if len(roots) == 1 else base
+        return {"path": str(root), "n_files": n}
+
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the
     # SPA + its assets are served for everything else. html=True serves
