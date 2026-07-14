@@ -264,6 +264,16 @@ def _write_ct_slice_volume(
     )
 
 
+def _write_atlas_slice_volume(atlas_labelmap_path, out_path: Path) -> dict[str, Any]:
+    """Write the warped atlas labelmap as an int16 NIfTI so the 2D slice panels can
+    tint each region by its atlas color. Shipped on its own grid; the viewer samples
+    it by world-RAS, so it overlays correctly on whichever slice volume (CT or MRI)
+    is shown, and stays small for a big CT."""
+    import SimpleITK as sitk
+    lab = sitk.Cast(sitk.ReadImage(str(atlas_labelmap_path)), sitk.sitkInt16)
+    return _slice_volume_meta(lab, out_path, vid="atlas", label="Atlas labels")
+
+
 def _write_t1_resampled_to_ct(
     fixed_ct, moving_t1, sitk_transform, out_path: Path,
 ) -> dict[str, Any]:
@@ -746,6 +756,7 @@ _HTML_TEMPLATE = """<!doctype html>
     <div id="slices-head">
       <span class="ttl">Slices</span>
       <span class="hint">scroll = scrub · click = locate · 3D = show plane</span>
+      <label class="atlas-ov" id="atlas-ov-ctl" style="display:none" title="Tint each atlas region on the slice panels — same colors as the 3D surface"><input type="checkbox" id="atlas-ov-cb" checked>atlas</label>
       <label class="palpha" title="Opacity of the cut planes shown in 3D">&alpha;<input type="range" id="plane-alpha" min="0" max="1" step="0.05" value="0.9"></label>
     </div>
     <div class="slice-panel" data-axis="axial">
@@ -1092,6 +1103,14 @@ function _apply4x4(m, v) {{
   ];
 }}
 
+function _mul4x4(a, b) {{
+  const o = [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];
+  for (let r = 0; r < 4; r++)
+    for (let c = 0; c < 4; c++)
+      o[r][c] = a[r][0]*b[0][c] + a[r][1]*b[1][c] + a[r][2]*b[2][c] + a[r][3]*b[3][c];
+  return o;
+}}
+
 async function _maybeInflate(buffer) {{
   // .nii.gz support via the native DecompressionStream API
   // (Chrome 80+, Safari 16.4+, Firefox 113+). Returns the buffer
@@ -1156,6 +1175,14 @@ class NiftiVolume {{
 
 const slicePanels = {{}};   // axis -> {{ canvas, ctx, coordEl }}
 let mriVolume = null;
+// Atlas labelmap tinted onto the 2D panels: each region colored by its atlas
+// color (same colors as the 3D surface, from the labeler's .colors.json),
+// sampled by world-RAS so it lands right on whatever slice volume is shown.
+// atlasColor255: label -> [r,g,b] 0..255.
+let atlasSliceVolume = null;
+let atlasOverlayOn = true;
+let atlasOverlayAlpha = 0.4;
+const atlasColor255 = new Map();
 let mriRasCursor = null;   // last selected RAS point [x,y,z]
 let mriVoxCursor = [0, 0, 0]; // last selected vox indices
 // Contacts, in the shared CT/contact RAS frame, overlaid on every slice so the
@@ -1289,6 +1316,12 @@ function renderSlice(axis) {{
   const img = ctx.createImageData(W, H);
   const range = Math.max(1e-6, mriVolume.displayMax - mriVolume.displayMin);
   const lo = mriVolume.displayMin;
+  // Atlas overlay: precompute the (this-volume voxel → atlas voxel) transform once
+  // per slice (a single matrix apply per pixel), so the region tint lines up
+  // whether the panel shows CT or MRI.
+  const ov = atlasOverlayOn && atlasSliceVolume && atlasColor255.size;
+  const M = ov ? _mul4x4(atlasSliceVolume.affineInv, mriVolume.affine) : null;
+  const OA = atlasOverlayAlpha, OB = 1 - OA;
   for (let v = 0; v < H; v++) {{
     // Flip the vertical axis so anatomically "up" (anterior/superior)
     // appears at the top of the canvas.
@@ -1300,8 +1333,19 @@ function renderSlice(axis) {{
       else {{ i = throughIdx; j = u; k = vSrc; }}
       const raw = mriVolume.voxel(i, j, k);
       const g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
+      let r = g, gg = g, bb = g;
+      if (ov) {{
+        const li = Math.round(M[0][0]*i + M[0][1]*j + M[0][2]*k + M[0][3]);
+        const lj = Math.round(M[1][0]*i + M[1][1]*j + M[1][2]*k + M[1][3]);
+        const lk = Math.round(M[2][0]*i + M[2][1]*j + M[2][2]*k + M[2][3]);
+        const lbl = atlasSliceVolume.voxel(li, lj, lk);
+        if (lbl > 0) {{
+          const col = atlasColor255.get(lbl | 0);
+          if (col) {{ r = g*OB + col[0]*OA; gg = g*OB + col[1]*OA; bb = g*OB + col[2]*OA; }}
+        }}
+      }}
       const px = (v * W + u) * 4;
-      img.data[px] = g; img.data[px+1] = g; img.data[px+2] = g; img.data[px+3] = 255;
+      img.data[px] = r; img.data[px+1] = gg; img.data[px+2] = bb; img.data[px+3] = 255;
     }}
   }}
   ctx.putImageData(img, 0, 0);
@@ -2130,6 +2174,20 @@ function _applyInitialBrainMode() {{
   sel.addEventListener("change", () => _setBrainMode(sel.value));
 }})();
 
+// "atlas" checkbox — tints the 2D panels by the atlas labelmap. Wired once the
+// atlas volume finishes loading (see onMeta). Default on.
+function _setupAtlasOverlayToggle() {{
+  const ctl = document.getElementById("atlas-ov-ctl");
+  if (!ctl || !atlasSliceVolume) return;
+  const cb = ctl.querySelector('input[type="checkbox"]');
+  ctl.style.display = "";
+  cb.checked = atlasOverlayOn;
+  cb.addEventListener("change", () => {{
+    atlasOverlayOn = cb.checked;
+    renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal");
+  }});
+}}
+
 // Metadata handler — named so picker mode can call it with a dropped (and
 // path-rewritten) scene_meta.json. Identical logic for served + picker.
 function onMeta(meta) {{
@@ -2139,6 +2197,18 @@ function onMeta(meta) {{
   allContacts = (meta.contacts || [])
     .map(c => ({{ label: c.label, shank: c.trajectory, ras: c.position || [c.x, c.y, c.z] }}))
     .filter(c => Array.isArray(c.ras) && c.ras.length === 3);
+  // Atlas region colors (for the 2D slice tint) + the atlas labelmap volume.
+  atlasColor255.clear();
+  for (const [k, c] of Object.entries(meta.atlas_colors || {{}})) {{
+    if (Array.isArray(c)) atlasColor255.set(parseInt(k, 10),
+      [c[0] | 0, c[1] | 0, c[2] | 0]);
+  }}
+  if (meta.atlas_volume && atlasColor255.size) {{
+    _fetchVolume(meta.atlas_volume)
+      .then(vol => {{ atlasSliceVolume = vol; _setupAtlasOverlayToggle();
+                     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); }})
+      .catch(e => console.error("atlas overlay volume", e));
+  }}
   // Volume roles (CT / MRI (brain) / FreeSurfer T1). Backend lists [MRI(brain),
   // T1, CT]; falls back to legacy `t1_volume`.
   const volSel = document.getElementById("vol-select");
@@ -2213,6 +2283,7 @@ function __initPicker() {{
         ? Object.assign({{}}, v, {{ path: blobByName[v.path] }}) : v;
       if (Array.isArray(meta.volumes)) meta.volumes = meta.volumes.map(fix);
       if (meta.t1_volume) meta.t1_volume = fix(meta.t1_volume);
+      if (meta.atlas_volume) meta.atlas_volume = fix(meta.atlas_volume);
       if (dz) dz.style.display = "none";
       onMeta(meta);
       const glbUrl = blobByName["scene.glb"];
@@ -2597,6 +2668,24 @@ def _assemble_viewer(
         except Exception as exc:  # noqa: BLE001 — atlas coloring is optional
             _stderr(f"[view] atlas surface coloring skipped ({exc})")
 
+    # Ship the warped atlas labelmap + its palette so the 2D slice panels can tint
+    # each region — same colors as the recolored 3D surface (the labeler's
+    # <labelmap>.colors.json sidecar drives both), sampled by world-RAS.
+    atlas_volume_meta = None
+    atlas_colors = None
+    if atlas_labelmap_path is not None and Path(atlas_labelmap_path).is_file():
+        try:
+            atlas_volume_meta = _write_atlas_slice_volume(
+                atlas_labelmap_path, out / "atlas_in_view.nii.gz")
+            sidecar = Path(str(atlas_labelmap_path) + ".colors.json")
+            if sidecar.is_file():
+                atlas_colors = {int(k): [int(c) for c in v]
+                                for k, v in json.loads(sidecar.read_text()).items()}
+            _stderr("[view] wrote atlas_in_view.nii.gz (atlas labels for slice overlay"
+                    + (f", {len(atlas_colors)} colors" if atlas_colors else "") + ")")
+        except Exception as exc:  # noqa: BLE001 — slice overlay is optional
+            _stderr(f"[view] atlas slice-overlay volume skipped ({exc})")
+
     # Always export the working CT as a windowed uint8 slice/MIP volume so the
     # viewer has anatomy even without a FreeSurfer recon. The CT already lives
     # in the contact frame, so no resampling is needed.
@@ -2654,6 +2743,9 @@ def _assemble_viewer(
         "annotation": annotation if fs is not None else "",
         "trajectories": trajectories,
         "contacts": contact_meta,
+        "atlas_volume": atlas_volume_meta,
+        "atlas_colors": ({str(k): v for k, v in atlas_colors.items()} if atlas_colors else None),
+        "atlas_name": atlas_name,
         "volumes": volumes,
         # Back-compat: the original viewer reads `t1_volume`. Point it at the
         # default volume (T1 in FS mode, CT otherwise) so old behavior holds.
