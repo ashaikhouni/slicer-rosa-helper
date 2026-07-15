@@ -66,7 +66,26 @@ submodules), collects SimpleITK's native libs + the package data (bundled
 atlases, vendored three.js, the web UI), and **excludes** torch and the other
 heavy ML backends.
 
-## Packaged mode (later)
+## Build the .dmg (electron-builder)
 
-electron-builder bundles the one-dir sidecar under `resources/rosa-sidecar/`;
-`main.js` spawns `rosa-sidecar serve`. See the plan's Workstream 2.
+Three steps: freeze the sidecar (above), stage it, package.
+
+```bash
+# 1. freeze (above) → dist/rosa-sidecar/
+# 2. stage it where electron-builder expects it + ad-hoc sign (arm64 needs a sig)
+mkdir -p app/desktop/resources
+cp -R /tmp/rosa-freeze/dist/rosa-sidecar app/desktop/resources/rosa-sidecar
+codesign --force --deep --sign - app/desktop/resources/rosa-sidecar/rosa-sidecar
+# 3. package → release/ROSA-<ver>-arm64.dmg
+cd app/desktop && npm install && npm run dist
+```
+
+`electron-builder.yml` bundles `resources/rosa-sidecar` as `extraResources`
+(→ `Contents/Resources/rosa-sidecar/`, where `main.js` finds it) and
+`after-pack.js` deep ad-hoc signs the whole bundle so it launches on Apple
+Silicon. Result: `release/ROSA-<ver>-arm64.dmg` (~188 MB, torch-free, no Python
+needed). Research/internal build = **un-notarized**, so first launch is
+**right-click → Open**. `release/` and `resources/rosa-sidecar/` are gitignored.
+
+Packaged, the app spawns `rosa-sidecar serve` from resources and stores cases in
+`<userData>/cases`. Heavy backends (FastSurfer, …) stay BYO via `ROSA_*` env.
