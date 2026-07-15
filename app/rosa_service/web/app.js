@@ -6,7 +6,7 @@
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
 const state = { ct: null, jobId: null, es: null, poll: null,
-                mri: null, labelJobId: null, labelPoll: null, qc: null,
+                mri: null, labelJobId: null, labelPoll: null, qc: null, qcJobId: null,
                 creationMri: null,     // optional MRI (T1) picked at case creation
                 probePref: "ortho" };  // remembered Ortho/Probe slice-rail choice
 
@@ -130,29 +130,33 @@ async function uploadCreationMri(file) {
   catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
 }
 
-// ---- DICOM import: convert a series folder → de-identified NIfTI CT ----------
+// ---- DICOM import: convert a series folder → de-identified NIfTI (CT or MRI) --
 // Desktop opens a native folder dialog; browser (or a pasted path) uses the text
 // field. The engine (SimpleITK) reads the series and drops the DICOM PHI headers.
-async function pickDicomFolder(dir) {
+// target = "ct" (loads it as the CT) or "mri" (loads it as the preop MRI).
+async function pickDicomFolder(target, dir) {
+  const suffix = target === "mri" ? "-mri" : "";
+  const info = $("dicominfo" + suffix), btn = $("dicombtn" + suffix);
   if (!dir) {
     if (IS_DESKTOP && window.rosaNative.openDirectory) {
-      const r = await window.rosaNative.openDirectory({ title: "Choose a DICOM series folder" });
+      const r = await window.rosaNative.openDirectory({ title: `Choose a DICOM series folder (${target.toUpperCase()})` });
       dir = r && r.path;
     } else {
-      dir = $("dicompath").value.trim();
+      dir = $("dicompath" + suffix).value.trim();
     }
   }
-  if (!dir) { $("dicominfo").textContent = "Choose a DICOM folder (or paste a path)."; return; }
-  $("dicombtn").disabled = true;
-  $("dicominfo").textContent = "Converting DICOM → NIfTI (de-identifying)…";
+  if (!dir) { info.textContent = "Choose a DICOM folder (or paste a path)."; return; }
+  btn.disabled = true;
+  info.textContent = "Converting DICOM → NIfTI (de-identifying)…";
   try {
     const r = await jsend(`${API}/dicom-to-nifti`, "POST", { dicom_dir: dir });
-    setCt({ path: r.path, name: "ct.nii.gz (from DICOM)" });
-    $("dicominfo").innerHTML = "✓ Converted + <b>de-identified</b> — ready to run.";
+    const picked = { path: r.path, name: `${target === "mri" ? "MRI" : "CT"} (from DICOM)` };
+    if (target === "mri") setCreationMri(picked); else setCt(picked);
+    info.innerHTML = `✓ Converted + <b>de-identified</b> — loaded as the ${target.toUpperCase()}.`;
   } catch (e) {
-    $("dicominfo").textContent = `Failed: ${e.message}`;
+    info.textContent = `Failed: ${e.message}`;
   } finally {
-    $("dicombtn").disabled = false;
+    btn.disabled = false;
   }
 }
 
@@ -380,7 +384,7 @@ function resetLabelCard() {
   $("labelstatus").textContent = "";
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
-  $("qcplanes").innerHTML = ""; state.qc = null;
+  $("qcplanes").innerHTML = ""; state.qc = null; state.qcJobId = null;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
   $("regtab").hidden = true;              // no registration to check until an atlas runs
@@ -806,7 +810,7 @@ const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
 function qcSrc(p) {
   const { mode, value, dir, space } = state.qc;
-  return `${API}/jobs/${state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
+  return `${API}/jobs/${state.qcJobId || state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
     `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
 }
 
@@ -844,55 +848,55 @@ function _setQcSpaces(hasCt, hasMni) {
   if (cur) setActive("qcspace", cur);
 }
 
-function showQc(hasMni, jumpToQc = true) {
-  // Build the QC panes ONCE per case (registration is per-case). Atlas switches
-  // re-enter here but keep the existing panes + the user's mode/slice settings.
-  if (!state.qc) {
-    // Default to the ATLAS check for MNI atlases (the thing just set up), else
-    // Native (CT↔MRI). _setQcSpaces below greys whatever this atlas can't show.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", panes: [] };
-    const wrap = $("qcplanes");
-    wrap.innerHTML = "";
-    for (const [axis, name] of QC_PLANES) {
-      const holder = el("div", { class: "qc-holder" });
-      const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-      const p = { axis, label: name, holder, frac: 0.5 };
-      slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
-      const pane = el("div", { class: "qc-pane" });
-      pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
-      wrap.append(pane);
-      state.qc.panes.push(p);
-    }
-    setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
-    $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
-    $("qcdir").hidden = true;
+// Build the 3 QC panes once per case (registration is per-case). Atlas switches
+// + the Reg chip re-enter but keep the panes + the user's mode/slice settings.
+function _ensureQcPanes() {
+  if (state.qc) return;
+  state.qc = { mode: "color", value: 0.5, dir: "h", space: "ct", panes: [] };
+  const wrap = $("qcplanes");
+  wrap.innerHTML = "";
+  for (const [axis, name] of QC_PLANES) {
+    const holder = el("div", { class: "qc-holder" });
+    const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
+    const p = { axis, label: name, holder, frac: 0.5 };
+    slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
+    const pane = el("div", { class: "qc-pane" });
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
+    wrap.append(pane);
+    state.qc.panes.push(p);
   }
+  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
+  $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
+  $("qcdir").hidden = true;
+}
+
+// Labeling routes the QC at the label job (its atlas + MNI-space volumes).
+function showQc(hasMni, jumpToQc = true) {
+  const firstTime = !state.qc;
+  _ensureQcPanes();
+  if (firstTime) state.qc.space = hasMni ? "atlas" : "ct";  // MNI atlas → atlas check
   state.qc._hasMni = hasMni;
+  state.qcJobId = state.labelJobId;
   _setQcSpaces(true, hasMni);        // recompute availability for THIS atlas
   $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
   if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
   else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
 }
 
-// Two registrations, two entry points: the Reg chip opens CT↔MRI (native /
-// AC-PC); the atlas "check reg" opens atlas(MNI-template)↔MRI. Both land in the
-// QC pane, pre-set to the right space. No label yet → nudge to the MRI card.
-function openQc(kind) {
-  if (!state.qc) {   // no registration yet → nudge via the console
-    $("labelmsg").textContent = state.mri
-      ? "Pick an atlas to register the MRI first — then the check is available."
-      : "Add a patient MRI below to enable the registration check.";
-    return;
-  }
-  // "atlas" check needs the MNI-template panes; native atlases have none, so the
-  // atlas-check falls back to the CT↔MRI (Native) reg they actually use.
-  const space = (kind === "atlas" && state.qc._hasMni) ? "atlas"
-              : (state.qc._hasMni ? "mni" : "ct");
-  state.qc.space = space;
-  const btn = $("qcspace").querySelector(`[data-space="${space}"]`);
-  if (btn) setActive("qcspace", btn);
+// The Reg chip: the CT↔MRI check straight from the CASE's own registration
+// (produced at case creation for MRI cases — regcache/brain_mri_in_ct.nii.gz),
+// so it works WITHOUT labeling first. Native space only (AC-PC / Atlas need the
+// MNI warp that a label produces).
+function openRegCheck() {
+  if (!state.jobId) return;
+  if (!state.mri) { $("labelmsg").textContent = "Add a patient MRI to enable the CT↔MRI check."; return; }
+  _ensureQcPanes();
+  state.qc._hasMni = false;
+  state.qc.space = "ct";
+  state.qcJobId = state.jobId;       // the case's pipeline job serves brain_mri_in_ct
+  _setQcSpaces(true, false);         // only Native is available pre-label
+  $("regtab").hidden = false;
   setViewerTab("qc");
-  refreshAllPanes();
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC, and
@@ -1141,8 +1145,10 @@ async function boot() {
   $("runbtn").onclick = run;
   $("etypesall").onclick = () => setAllEtypes(true);
   $("etypesnone").onclick = () => setAllEtypes(false);
-  $("dicombtn").onclick = () => pickDicomFolder();
-  $("dicompath").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder($("dicompath").value.trim()); });
+  $("dicombtn").onclick = () => pickDicomFolder("ct");
+  $("dicompath").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder("ct", $("dicompath").value.trim()); });
+  $("dicombtn-mri").onclick = () => pickDicomFolder("mri");
+  $("dicompath-mri").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder("mri", $("dicompath-mri").value.trim()); });
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
@@ -1156,8 +1162,7 @@ async function boot() {
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); $("labelbar").scrollIntoView({ behavior: "smooth", block: "nearest" }); $("mriinput").focus(); }
   };
-  $("slot-reg").onclick = () => { showWs("review"); openQc("reg"); };   // CT↔MRI QC
-  $("atlascheckbtn").onclick = () => openQc("atlas");                    // atlas↔MRI QC
+  $("slot-reg").onclick = () => { showWs("review"); openRegCheck(); };  // case CT↔MRI QC (pre-label)
   $("restartbtn").onclick = showCases;          // workspace → back to the case list
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
   $("importbtn").onclick = () => showStep("import");

@@ -111,9 +111,9 @@
     </label>
     <div id="ctinfo" class="muted"></div>
 
-    <div class="or">— or a DICOM series (converted to NIfTI + de-identified) —</div>
+    <div class="or">— or import the CT from a DICOM series (de-identified to NIfTI) —</div>
     <div class="dicomrow">
-      <button type="button" id="dicombtn" class="ghost small">Choose DICOM folder…</button>
+      <button type="button" id="dicombtn" class="ghost small">Choose DICOM folder → CT…</button>
       <input type="text" id="dicompath" class="dicompath" placeholder="…or paste a DICOM folder path" autocomplete="off">
       <span id="dicominfo" class="muted"></span>
     </div>
@@ -132,6 +132,12 @@
       <label class="field">— or MRI path
         <input type="text" id="mripath" placeholder="/absolute/path/to/t1.nii.gz" autocomplete="off">
       </label>
+      <div class="or">— or import the MRI from a DICOM series (de-identified) —</div>
+      <div class="dicomrow">
+        <button type="button" id="dicombtn-mri" class="ghost small">Choose DICOM folder → MRI…</button>
+        <input type="text" id="dicompath-mri" class="dicompath" placeholder="…or paste a DICOM folder path" autocomplete="off">
+        <span id="dicominfo-mri" class="muted"></span>
+      </div>
       <label class="field small">Brain surface
         <select id="surfacesel">
           <option value="auto" selected>Auto (FastSurfer if available)</option>

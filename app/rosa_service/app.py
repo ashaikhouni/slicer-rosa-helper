@@ -489,10 +489,16 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 raise HTTPException(status_code=409, detail="no AC-PC (MNI) QC for this job")
         else:
             mri = job.workdir / "mri_in_ct.nii.gz"
+            if not mri.is_file():
+                # Fall back to the pipeline's cached MRI-in-CT so the CT↔MRI check
+                # works straight from case creation — before any labeling.
+                alt = job.workdir / "regcache" / "brain_mri_in_ct.nii.gz"
+                if alt.is_file():
+                    mri = alt
             ct = job.params.get("ct")
             if not mri.is_file() or not ct or not Path(ct).is_file():
                 raise HTTPException(status_code=409,
-                                    detail="no registration QC (label job unfinished or no MRI)")
+                                    detail="no CT↔MRI registration yet (add an MRI at case creation, or run a label)")
         try:
             from rosa_core.qc_render import render_registration_qc
             png = render_registration_qc(ct, str(mri), axis=int(axis),
