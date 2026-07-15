@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+release/
 *.log
 .DS_Store
 # PyInstaller sidecar bundle staged for packaging

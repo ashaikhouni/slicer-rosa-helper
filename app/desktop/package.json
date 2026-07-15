@@ -8,9 +8,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "start:dev": "electron ."
+    "start:dev": "electron .",
+    "dist": "electron-builder --mac --config electron-builder.yml"
   },
   "devDependencies": {
-    "electron": "^32.2.0"
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
   }
 }
