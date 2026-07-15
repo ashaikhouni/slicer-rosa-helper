@@ -482,6 +482,16 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             mri = job.workdir / "mri_in_mni.nii.gz"   # patient MRI in MNI (green)
             if not mri.is_file() or not Path(ct).is_file():
                 raise HTTPException(status_code=409, detail="no atlas-registration QC for this job")
+        elif space == "acpc":
+            # Rigid AC-PC reorientation (built by POST /acpc, cached in regcache):
+            # CT + MRI resampled onto the upright MNI grid so the check slices in
+            # standard neuroanatomical planes without deforming the geometry.
+            rc = job.workdir / "regcache"
+            ct = str(rc / "ct_in_acpc.nii.gz")
+            mri = rc / "mri_in_acpc.nii.gz"
+            if not mri.is_file() or not Path(ct).is_file():
+                raise HTTPException(status_code=409,
+                                    detail="no AC-PC reorientation yet (POST /acpc first)")
         elif space == "mni":
             ct = str(job.workdir / "ct_in_mni.nii.gz")
             mri = job.workdir / "mri_in_mni.nii.gz"
@@ -508,6 +518,44 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=500, detail=f"QC render failed: {exc}") from exc
         return Response(content=png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+    # Sync def → threadpool (a ~20-40s rigid registration; must not block the
+    # event loop). Idempotent: the reoriented volumes are cached in regcache.
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/acpc")
+    def build_acpc(job_id: str) -> dict:
+        """Build the rigid AC-PC reorientation for a case (upright slice planes).
+
+        Resamples the CT + MRI onto the AC-PC-aligned MNI grid so the
+        registration check reads as standard axial/coronal/sagittal planes
+        instead of the tilted acquisition. Needs the case MRI + the cached
+        ``t1_to_ct.tfm`` (present for MRI cases). Returns
+        ``{ready: bool, reason?}`` — ``ready=False`` (not an error) when the case
+        simply lacks the inputs, so the UI can fall back to the native view.
+        """
+        job = _job_or_404(job_id)
+        rc = job.workdir / "regcache"
+        out_ct = rc / "ct_in_acpc.nii.gz"
+        out_mri = rc / "mri_in_acpc.nii.gz"
+        if out_ct.is_file() and out_mri.is_file():
+            return {"ready": True, "cached": True}
+        ct = job.params.get("ct")
+        t1 = job.params.get("t1")
+        tfm = rc / "t1_to_ct.tfm"
+        mask = rc / "brain_mask_native.nii.gz"
+        if not (ct and Path(ct).is_file()):
+            raise HTTPException(status_code=409, detail="case CT not found")
+        if not (t1 and Path(t1).is_file()):
+            return {"ready": False, "reason": "no MRI on this case"}
+        if not tfm.is_file():
+            return {"ready": False, "reason": "no cached MRI→CT transform (older case — run a label once)"}
+        try:
+            from rosa_core.acpc import reorient_to_acpc
+            rc.mkdir(parents=True, exist_ok=True)
+            info = reorient_to_acpc(ct, t1, str(tfm), str(out_ct), str(out_mri),
+                                    brain_mask_path=str(mask) if mask.is_file() else None)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"AC-PC reorient failed: {exc}") from exc
+        return {"ready": True, "cached": False, "metric": info["metric"]}
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/files/{{path:path}}")
     async def job_file(job_id: str, path: str) -> FileResponse:

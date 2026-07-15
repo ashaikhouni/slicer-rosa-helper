@@ -852,13 +852,14 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
-// Which registration spaces an atlas produced: Native (CT↔MRI) whenever it
-// registered; AC-PC + Atlas need the MNI-template volumes (bundled atlases only).
-// Greys the rest per atlas, and moves off a space that's no longer available
-// (e.g. after switching from an MNI atlas to THOMAS).
-function _setQcSpaces(hasCt, hasMni) {
-  const avail = { ct: !!hasCt, mni: !!hasMni, atlas: !!hasMni };
-  for (const b of $("qcspace").querySelectorAll("button")) b.disabled = !avail[b.dataset.space];
+// Which registration spaces are available here: Native (CT↔MRI) whenever there's
+// a registration; `acpc` = the rigid AC-PC reorientation (reg-check, any MRI
+// case); `mni`/`atlas` = the affine atlas-space QC (labeling, MNI atlases only).
+// HIDE (not grey) the rest: `acpc` and `mni` are BOTH labelled "AC-PC" (rigid vs
+// affine), and the reg-check and the label QC must show only one of them.
+function _setQcSpaces(hasCt, hasMni, hasAcpc = false) {
+  const avail = { ct: !!hasCt, acpc: !!hasAcpc, mni: !!hasMni, atlas: !!hasMni };
+  for (const b of $("qcspace").querySelectorAll("button")) b.hidden = !avail[b.dataset.space];
   if (state.qc && !avail[state.qc.space])
     state.qc.space = avail.ct ? "ct" : (Object.keys(avail).find((k) => avail[k]) || "ct");
   const cur = $("qcspace").querySelector(`[data-space="${state.qc ? state.qc.space : "ct"}"]`);
@@ -901,19 +902,35 @@ function showQc(hasMni, jumpToQc = true) {
 }
 
 // The Reg chip: the CT↔MRI check straight from the CASE's own registration
-// (produced at case creation for MRI cases — regcache/brain_mri_in_ct.nii.gz),
-// so it works WITHOUT labeling first. Native space only (AC-PC / Atlas need the
-// MNI warp that a label produces).
-function openRegCheck() {
+// (produced at case creation for MRI cases), so it works WITHOUT labeling. Shows
+// Native immediately, then upgrades to the rigid AC-PC reorientation (upright
+// standard planes) once it's built — a one-time ~30s registration, cached.
+async function openRegCheck() {
   if (!state.jobId) return;
   if (!state.mri) { $("labelmsg").textContent = "Add a patient MRI to enable the CT↔MRI check."; return; }
   _ensureQcPanes();
   state.qc._hasMni = false;
   state.qc.space = "ct";
   state.qcJobId = state.jobId;       // the case's pipeline job serves brain_mri_in_ct
-  _setQcSpaces(true, false);         // only Native is available pre-label
+  _setQcSpaces(true, false, false);  // Native first — always available
   $("regtab").hidden = false;
   setViewerTab("qc");
+  const caseId = state.jobId;
+  try {
+    $("labelmsg").textContent = "Aligning CT↔MRI to AC-PC planes…";
+    const r = await jsend(`${API}/jobs/${caseId}/acpc`, "POST");
+    if (state.qcJobId !== caseId) return;     // user moved on (e.g. labeled) — abandon the upgrade
+    if (r && r.ready) {                        // upright reorientation ready → default to it
+      state.qc.space = "acpc";
+      _setQcSpaces(true, false, true);
+      if (!$("viewerqc").hidden) refreshAllPanes();
+      $("labelmsg").textContent = "";
+    } else {
+      $("labelmsg").textContent = r && r.reason ? `AC-PC unavailable (${r.reason}) — showing native.` : "";
+    }
+  } catch (e) {
+    if (state.qcJobId === caseId) $("labelmsg").textContent = `AC-PC unavailable — showing native. (${e.message})`;
+  }
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC, and
@@ -935,7 +952,7 @@ function wireQc() {
     if (b && !b.disabled) setViewerTab(b.dataset.tab);
   });
   $("qcspace").addEventListener("click", (ev) => {
-    const b = ev.target.closest("button"); if (!b || b.disabled || !state.qc) return;
+    const b = ev.target.closest("button"); if (!b || b.disabled || b.hidden || !state.qc) return;
     state.qc.space = b.dataset.space;
     setActive("qcspace", b);
     refreshAllPanes();
