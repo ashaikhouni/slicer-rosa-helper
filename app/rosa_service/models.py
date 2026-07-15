@@ -138,6 +138,18 @@ class ReviewPatch(BaseModel):
     ops: list[ReviewEdit] = Field(default_factory=list)
 
 
+class DicomRequest(BaseModel):
+    """Convert a DICOM series folder (on this machine) to a de-identified NIfTI.
+
+    ``dicom_dir`` is an absolute folder path (from Electron's native directory
+    picker, or typed). Converting to NIfTI drops the DICOM PHI headers, so the
+    returned file is safe to store + distribute.
+    """
+
+    dicom_dir: str
+    series_uid: str | None = None
+
+
 class LabelRequest(BaseModel):
     """Kick off anatomical labeling of a pipeline job's contacts.
 
@@ -157,5 +169,5 @@ class LabelRequest(BaseModel):
 __all__ = [
     "JobState", "JobSpec", "Artifact", "JobStatus",
     "ReviewContact", "ReviewShank", "ReviewDoc",
-    "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest",
+    "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest", "DicomRequest",
 ]

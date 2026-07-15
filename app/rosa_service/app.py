@@ -25,6 +25,7 @@ Jobs run as supervised subprocesses in an auditable per-job dir (see
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -38,10 +39,10 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 from .editor_payload import ensure_cache
-from .jobs import JobNotFound, JobRunner
+from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
-    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
-    ReviewOp, ReviewPatch,
+    DicomRequest, ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc,
+    ReviewEdit, ReviewOp, ReviewPatch,
 )
 from .review import ReviewStore, export_contacts
 
@@ -640,6 +641,29 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         # Single common top folder → return it; otherwise the upload root.
         root = base / next(iter(roots)) if len(roots) == 1 else base
         return {"path": str(root), "n_files": n}
+
+    @app.post(f"/api/{API_VERSION}/dicom-to-nifti")
+    async def dicom_to_nifti(req: DicomRequest) -> dict:
+        """Convert a DICOM series folder (on this machine) to a de-identified
+        NIfTI and return its path, ready to use as the case CT. Dropping DICOM →
+        NIfTI strips the PHI headers; the source DICOM is left untouched."""
+        src = Path(req.dicom_dir).expanduser()
+        if not src.is_dir():
+            raise HTTPException(status_code=422, detail=f"DICOM folder not found: {src}")
+        out_dir = Path(work_root) / "_uploads" / uuid.uuid4().hex[:8]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / "ct.nii.gz"
+        argv = [*_engine_base(), "dicom-to-nifti", str(src), "-o", str(out)]
+        if req.series_uid:
+            argv += ["--series-uid", req.series_uid]
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        stdout, _ = await proc.communicate()
+        log = (stdout or b"").decode(errors="replace")
+        if proc.returncode != 0 or not out.is_file():
+            raise HTTPException(status_code=422,
+                                detail=f"DICOM conversion failed: {log.strip()[-400:]}")
+        return {"path": str(out), "name": "ct.nii.gz", "deidentified": True, "log": log}
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

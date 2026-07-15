@@ -111,6 +111,13 @@
     </label>
     <div id="ctinfo" class="muted"></div>
 
+    <div class="or">— or a DICOM series (converted to NIfTI + de-identified) —</div>
+    <div class="dicomrow">
+      <button type="button" id="dicombtn" class="ghost small">Choose DICOM folder…</button>
+      <input type="text" id="dicompath" class="dicompath" placeholder="…or paste a DICOM folder path" autocomplete="off">
+      <span id="dicominfo" class="muted"></span>
+    </div>
+
     <details class="mri-optional" id="mrioptional">
       <summary>Add a preop MRI (T1) — optional</summary>
       <p class="muted">Brings the MRI in from the start: strips the brain, shows the

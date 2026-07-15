@@ -73,6 +73,7 @@ SUBCOMMANDS = {
     "place":         "rosa_agent.commands.place",
     "fit-rosa":      "rosa_agent.commands.fit_rosa",
     "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
+    "dicom-to-nifti": "rosa_agent.commands.dicom_to_nifti",
     "match-ros":     "rosa_agent.commands.match_ros",
     "match-trajectories": "rosa_agent.commands.match_trajectories",
     "export-view":   "rosa_agent.commands.export_view",

@@ -130,6 +130,32 @@ async function uploadCreationMri(file) {
   catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
 }
 
+// ---- DICOM import: convert a series folder → de-identified NIfTI CT ----------
+// Desktop opens a native folder dialog; browser (or a pasted path) uses the text
+// field. The engine (SimpleITK) reads the series and drops the DICOM PHI headers.
+async function pickDicomFolder(dir) {
+  if (!dir) {
+    if (IS_DESKTOP && window.rosaNative.openDirectory) {
+      const r = await window.rosaNative.openDirectory({ title: "Choose a DICOM series folder" });
+      dir = r && r.path;
+    } else {
+      dir = $("dicompath").value.trim();
+    }
+  }
+  if (!dir) { $("dicominfo").textContent = "Choose a DICOM folder (or paste a path)."; return; }
+  $("dicombtn").disabled = true;
+  $("dicominfo").textContent = "Converting DICOM → NIfTI (de-identifying)…";
+  try {
+    const r = await jsend(`${API}/dicom-to-nifti`, "POST", { dicom_dir: dir });
+    setCt({ path: r.path, name: "ct.nii.gz (from DICOM)" });
+    $("dicominfo").innerHTML = "✓ Converted + <b>de-identified</b> — ready to run.";
+  } catch (e) {
+    $("dicominfo").textContent = `Failed: ${e.message}`;
+  } finally {
+    $("dicombtn").disabled = false;
+  }
+}
+
 // ---- electrode library (constrain detection to the site's electrode types) ---
 
 async function loadElectrodeTypes() {
@@ -1115,6 +1141,8 @@ async function boot() {
   $("runbtn").onclick = run;
   $("etypesall").onclick = () => setAllEtypes(true);
   $("etypesnone").onclick = () => setAllEtypes(false);
+  $("dicombtn").onclick = () => pickDicomFolder();
+  $("dicompath").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder($("dicompath").value.trim()); });
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
