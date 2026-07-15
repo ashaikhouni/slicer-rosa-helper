@@ -42,6 +42,12 @@ function frozenSidecarPath() {
 }
 
 function resolveSidecar() {
+  // Explicit override — point at a PyInstaller `rosa-sidecar` binary to test the
+  // real packaged compute path before full packaging (ROSA_SIDECAR_BIN=/path/...).
+  const explicit = process.env.ROSA_SIDECAR_BIN;
+  if (explicit && fs.existsSync(explicit)) {
+    return { cmd: explicit, args: ["serve"], env: {} };
+  }
   const mode = process.env.ROSA_SIDECAR_MODE || "";
   const frozen = frozenSidecarPath();
   if (mode !== "dev" && frozen) {
