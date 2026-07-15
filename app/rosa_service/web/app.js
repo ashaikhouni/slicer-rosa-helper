@@ -102,19 +102,16 @@ function wireDrop() {
     const f = ev.target.files[0];
     if (f) uploadFile(f);
   });
-  $("ctpath").addEventListener("input", (ev) => {
-    const p = ev.target.value.trim();
-    setCt(p ? { path: p, name: p.split("/").pop() } : null);
-  });
+  // The path field takes a NIfTI file OR a DICOM folder (auto-detected).
+  $("ctpath").addEventListener("input", (ev) => typedPathInput("ct", ev.target.value));
+  $("ctpath").addEventListener("keydown", (e) => { if (e.key === "Enter") typedPathEnter("ct", e.target.value); });
   // Optional MRI (T1) at case creation — upload or point at a path.
   $("mrifileinput").addEventListener("change", (ev) => {
     const f = ev.target.files[0];
     if (f) uploadCreationMri(f);
   });
-  $("mripath").addEventListener("input", (ev) => {
-    const p = ev.target.value.trim();
-    setCreationMri(p ? { path: p, name: p.split("/").pop() } : null);
-  });
+  $("mripath").addEventListener("input", (ev) => typedPathInput("mri", ev.target.value));
+  $("mripath").addEventListener("keydown", (e) => { if (e.key === "Enter") typedPathEnter("mri", e.target.value); });
 }
 
 function setCreationMri(mri) {
@@ -130,33 +127,53 @@ async function uploadCreationMri(file) {
   catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
 }
 
-// ---- DICOM import: convert a series folder → de-identified NIfTI (CT or MRI) --
-// Desktop opens a native folder dialog; browser (or a pasted path) uses the text
-// field. The engine (SimpleITK) reads the series and drops the DICOM PHI headers.
-// target = "ct" (loads it as the CT) or "mri" (loads it as the preop MRI).
-async function pickDicomFolder(target, dir) {
-  const suffix = target === "mri" ? "-mri" : "";
-  const info = $("dicominfo" + suffix), btn = $("dicombtn" + suffix);
-  if (!dir) {
-    if (IS_DESKTOP && window.rosaNative.openDirectory) {
-      const r = await window.rosaNative.openDirectory({ title: `Choose a DICOM series folder (${target.toUpperCase()})` });
-      dir = r && r.path;
-    } else {
-      dir = $("dicompath" + suffix).value.trim();
-    }
+// ---- image loading: one picker per role, NIfTI file OR DICOM folder ----------
+// The app decides what was given: a NIfTI file loads directly; a directory is a
+// DICOM series → converted to a de-identified NIfTI first. Desktop uses one
+// native dialog that accepts either; typed/pasted paths + the browser fall back
+// to the file extension (NIfTI) vs "looks like a folder" (DICOM).
+const NIFTI_RE = /\.(nii(\.gz)?|nrrd|gz)$/i;
+const _role = (t) => (t === "mri" ? "MRI" : "CT");
+const _infoEl = (t) => $(t === "mri" ? "mricreateinfo" : "ctinfo");
+const _setImage = (t, picked) => (t === "mri" ? setCreationMri(picked) : setCt(picked));
+
+// target = "ct" | "mri". Native picker on desktop; browser falls back to the
+// hidden file input (NIfTI only — folder upload isn't a browser thing).
+async function pickImage(target) {
+  if (!(IS_DESKTOP && window.rosaNative.openImage)) {
+    $(target === "mri" ? "mrifileinput" : "fileinput").click();
+    return;
   }
-  if (!dir) { info.textContent = "Choose a DICOM folder (or paste a path)."; return; }
-  btn.disabled = true;
+  const r = await window.rosaNative.openImage({
+    title: `Choose the ${_role(target)} — NIfTI file or DICOM folder` });
+  if (!r || !r.path) return;
+  if (r.isDirectory) { importDicom(target, r.path); return; }
+  _setImage(target, { path: r.path, name: r.path.split("/").pop() });
+}
+
+// A typed/pasted path: NIfTI extension → load live; otherwise it's a folder →
+// convert on Enter (never per-keystroke — the conversion is a round-trip).
+function typedPathInput(target, raw) {
+  const p = (raw || "").trim();
+  if (!p) { _setImage(target, null); return; }
+  if (NIFTI_RE.test(p)) _setImage(target, { path: p, name: p.split("/").pop() });
+  // non-NIfTI: hold until Enter (typedPathEnter) so we don't convert mid-type.
+}
+function typedPathEnter(target, raw) {
+  const p = (raw || "").trim();
+  if (p && !NIFTI_RE.test(p)) importDicom(target, p);
+}
+
+// Convert a DICOM series folder → de-identified NIfTI, then load it as CT/MRI.
+async function importDicom(target, dir) {
+  const info = _infoEl(target), role = _role(target);
   info.textContent = "Converting DICOM → NIfTI (de-identifying)…";
   try {
     const r = await jsend(`${API}/dicom-to-nifti`, "POST", { dicom_dir: dir });
-    const picked = { path: r.path, name: `${target === "mri" ? "MRI" : "CT"} (from DICOM)` };
-    if (target === "mri") setCreationMri(picked); else setCt(picked);
-    info.innerHTML = `✓ Converted + <b>de-identified</b> — loaded as the ${target.toUpperCase()}.`;
+    _setImage(target, { path: r.path, name: r.path.split("/").pop() });   // enables run
+    info.innerHTML = `${role}: <b>de-identified from DICOM</b> ✓ — <span class="muted">${r.path.split("/").pop()}</span>`;
   } catch (e) {
-    info.textContent = `Failed: ${e.message}`;
-  } finally {
-    btn.disabled = false;
+    info.textContent = `DICOM import failed: ${e.message}`;
   }
 }
 
@@ -1145,10 +1162,8 @@ async function boot() {
   $("runbtn").onclick = run;
   $("etypesall").onclick = () => setAllEtypes(true);
   $("etypesnone").onclick = () => setAllEtypes(false);
-  $("dicombtn").onclick = () => pickDicomFolder("ct");
-  $("dicompath").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder("ct", $("dicompath").value.trim()); });
-  $("dicombtn-mri").onclick = () => pickDicomFolder("mri");
-  $("dicompath-mri").addEventListener("keydown", (e) => { if (e.key === "Enter") pickDicomFolder("mri", $("dicompath-mri").value.trim()); });
+  $("ctpickbtn").onclick = () => pickImage("ct");
+  $("mripickbtn").onclick = () => pickImage("mri");
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });

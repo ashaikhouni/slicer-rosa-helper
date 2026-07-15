@@ -102,21 +102,17 @@
         <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,application/gzip,application/octet-stream" hidden></label>.</p>
       <p class="muted">Nothing leaves this machine.</p>
     </div>
-    <div class="or">— or point at a file already on this machine —</div>
+    <div class="or">— or choose a NIfTI file, or a DICOM folder (auto-converted + de-identified) —</div>
+    <div class="dicomrow">
+      <button type="button" id="ctpickbtn" class="ghost small">Choose CT — NIfTI file or DICOM folder…</button>
+    </div>
     <label class="field">CT path
-      <input type="text" id="ctpath" placeholder="/absolute/path/to/ct.nii.gz" autocomplete="off">
+      <input type="text" id="ctpath" placeholder="/path/to/ct.nii.gz  — or a DICOM folder (⏎ to convert)" autocomplete="off">
     </label>
     <label class="field">Case label
       <input type="text" id="label" value="case" autocomplete="off">
     </label>
     <div id="ctinfo" class="muted"></div>
-
-    <div class="or">— or import the CT from a DICOM series (de-identified to NIfTI) —</div>
-    <div class="dicomrow">
-      <button type="button" id="dicombtn" class="ghost small">Choose DICOM folder → CT…</button>
-      <input type="text" id="dicompath" class="dicompath" placeholder="…or paste a DICOM folder path" autocomplete="off">
-      <span id="dicominfo" class="muted"></span>
-    </div>
 
     <details class="mri-optional" id="mrioptional">
       <summary>Add a preop MRI (T1) — optional</summary>
@@ -124,20 +120,13 @@
         anatomic surface in the 3D view, and pre-fills it for labeling (no re-upload).
         Adds brain-strip + surface time to the run. You can also add it later on the
         results screen.</p>
-      <div class="labelrow">
-        <label class="field small">MRI (T1)
-          <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd">
-        </label>
+      <div class="dicomrow">
+        <button type="button" id="mripickbtn" class="ghost small">Choose MRI — NIfTI file or DICOM folder…</button>
+        <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd" hidden>
       </div>
       <label class="field">— or MRI path
-        <input type="text" id="mripath" placeholder="/absolute/path/to/t1.nii.gz" autocomplete="off">
+        <input type="text" id="mripath" placeholder="/path/to/t1.nii.gz  — or a DICOM folder (⏎ to convert)" autocomplete="off">
       </label>
-      <div class="or">— or import the MRI from a DICOM series (de-identified) —</div>
-      <div class="dicomrow">
-        <button type="button" id="dicombtn-mri" class="ghost small">Choose DICOM folder → MRI…</button>
-        <input type="text" id="dicompath-mri" class="dicompath" placeholder="…or paste a DICOM folder path" autocomplete="off">
-        <span id="dicominfo-mri" class="muted"></span>
-      </div>
       <label class="field small">Brain surface
         <select id="surfacesel">
           <option value="auto" selected>Auto (FastSurfer if available)</option>

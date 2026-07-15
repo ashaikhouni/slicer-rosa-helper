@@ -262,6 +262,24 @@ function registerIpc() {
     return { path: p, name: path.basename(p) };
   });
 
+  // One picker for either kind of image: a NIfTI file OR a DICOM series folder.
+  // macOS NSOpenPanel can offer both in a single dialog (canChooseFiles +
+  // canChooseDirectories); we stat the result so the renderer knows which it is
+  // (folder → convert DICOM, file → load directly). macOS-only app, so we don't
+  // handle the Windows case where these two properties can't combine.
+  ipcMain.handle("rosa:openImage", async (_e, opts = {}) => {
+    const r = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openFile", "openDirectory"],
+      filters: opts.filters || NII_FILTERS,
+      title: opts.title || "Choose a NIfTI file or a DICOM folder",
+    });
+    if (r.canceled || !r.filePaths.length) return null;
+    const p = r.filePaths[0];
+    let isDirectory = false;
+    try { isDirectory = fs.statSync(p).isDirectory(); } catch (_e2) { /* stat race → treat as file */ }
+    return { path: p, name: path.basename(p), isDirectory };
+  });
+
   ipcMain.handle("rosa:saveFile", async (_e, opts = {}) => {
     const r = await dialog.showSaveDialog(mainWindow, {
       title: opts.title || "Save",

@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld("rosaNative", {
   // Native pickers → { path, name } (or null if cancelled).
   openFile: (opts) => ipcRenderer.invoke("rosa:openFile", opts),
   openDirectory: (opts) => ipcRenderer.invoke("rosa:openDirectory", opts),
+  // One picker for a NIfTI file OR a DICOM folder → { path, name, isDirectory }.
+  openImage: (opts) => ipcRenderer.invoke("rosa:openImage", opts),
   saveFile: (opts) => ipcRenderer.invoke("rosa:saveFile", opts),
 
   // Absolute path of a File from a file input OR a drag-drop (File.path was
