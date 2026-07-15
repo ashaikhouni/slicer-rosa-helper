@@ -137,6 +137,13 @@ def main(argv: list[str] | None = None) -> int:
              "Default: full library.",
     )
     parser.add_argument(
+        "--electrode-types", default=None,
+        help="Comma-separated electrode TYPES to constrain the library to "
+             "(e.g. 'AM,PMT,CM' — the types a site actually uses). Restricts "
+             "model matching to those types; takes precedence over --library. "
+             "Default: the full bundled library.",
+    )
+    parser.add_argument(
         "--mask-backend", choices=("auto", "hull", "log-watershed", "synthstrip"),
         default="auto",
         help="intracranial brain-mask backend for the placement anchor. 'auto' "
@@ -163,10 +170,26 @@ def main(argv: list[str] | None = None) -> int:
         brain_mask_img = sitk.ReadImage(str(bm_path))
         _stderr(f"[contacts] using user brain mask {bm_path} (overrides --mask-backend)")
 
+    # Library constraint: --electrode-types filters the bundled library to the
+    # site's types (an explicit model list place_seeg uses verbatim); it wins
+    # over --library. Otherwise --library (strategy key) / full library applies.
+    library = args.library
+    if args.electrode_types:
+        from rosa_core.electrode_models import load_electrode_library
+        allowed = {t.strip() for t in args.electrode_types.split(",") if t.strip()}
+        models = [m for m in load_electrode_library()["models"]
+                  if str(m.get("type") or "") in allowed]
+        if not models:
+            _stderr(f"error: no electrode models match types {sorted(allowed)}")
+            return 2
+        library = models
+        _stderr(f"[contacts] library constrained to {len(models)} models "
+                f"of types {sorted(allowed)}")
+
     trajs = read_seeds_tsv(args.trajectories_tsv)
     _stderr(f"[contacts] {len(trajs)} trajectories from {args.trajectories_tsv}")
     groups, _batch = place_contacts(
-        args.ct_path, trajs, pitch_strategy=args.library,
+        args.ct_path, trajs, pitch_strategy=library,
         mask_backend=args.mask_backend, brain_mask=brain_mask_img,
         synthstrip_path=args.synthstrip,
     )

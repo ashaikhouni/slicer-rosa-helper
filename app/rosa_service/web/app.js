@@ -130,6 +130,49 @@ async function uploadCreationMri(file) {
   catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
 }
 
+// ---- electrode library (constrain detection to the site's electrode types) ---
+
+async function loadElectrodeTypes() {
+  const list = $("etypeslist");
+  try {
+    const { types } = await jget(`${API}/electrode-models`);
+    list.innerHTML = "";
+    for (const t of types) {
+      const cc = t.contact_counts && t.contact_counts.length ? ` · ${t.contact_counts.join("/")} contacts` : "";
+      const cb = el("input", { type: "checkbox", value: t.type });
+      cb.checked = true;
+      cb.addEventListener("change", updateEtypesSummary);
+      const lbl = el("label", { class: "etype" });
+      lbl.append(cb, el("span", { class: "etype-name" }, t.type),
+                 el("span", { class: "etype-meta" }, `${t.count} model${t.count > 1 ? "s" : ""}${cc}`));
+      list.append(lbl);
+    }
+    updateEtypesSummary();
+  } catch (_e) {
+    list.innerHTML = '<span class="muted">electrode library unavailable</span>';
+  }
+}
+
+function selectedEtypes() {
+  return [...$("etypeslist").querySelectorAll('input[type="checkbox"]')]
+    .filter((c) => c.checked).map((c) => c.value);
+}
+
+function setAllEtypes(on) {
+  $("etypeslist").querySelectorAll('input[type="checkbox"]').forEach((c) => { c.checked = on; });
+  updateEtypesSummary();
+}
+
+function updateEtypesSummary() {
+  const total = $("etypeslist").querySelectorAll('input[type="checkbox"]').length;
+  const sel = selectedEtypes();
+  const s = $("etypessummary");
+  if (!total) { s.textContent = ""; return; }
+  if (sel.length === total) { s.textContent = "all types"; s.className = "muted"; }
+  else if (sel.length === 0) { s.textContent = "none selected → all types used"; s.className = "muted"; }
+  else { s.textContent = sel.join(", "); s.className = "accent"; }
+}
+
 // ---- step 2: run ------------------------------------------------------
 
 async function run(force = false) {
@@ -140,6 +183,11 @@ async function run(force = false) {
     params.t1 = state.creationMri.path;                        // MRI from the start
     params.surface = $("surfacesel").value;                    // brain-surface backend
   }
+  // Constrain detection to the site's electrode types — only when the user
+  // narrowed it to a proper subset (all/none → full library, no constraint).
+  const etypes = selectedEtypes();
+  const etypesTotal = $("etypeslist").querySelectorAll('input[type="checkbox"]').length;
+  if (etypes.length && etypes.length < etypesTotal) params.electrode_types = etypes.join(",");
   // POST first — a duplicate CT (409) is caught here, before we leave the form.
   let r, body;
   try {
@@ -1065,6 +1113,8 @@ async function runImport(force = false) {
 async function boot() {
   wireDrop();
   $("runbtn").onclick = run;
+  $("etypesall").onclick = () => setAllEtypes(true);
+  $("etypesnone").onclick = () => setAllEtypes(false);
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
@@ -1143,6 +1193,7 @@ async function boot() {
   $("thomasload").onclick = pickThomasDir;
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
+  loadElectrodeTypes();  // new-case electrode-type checkboxes (default all)
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;

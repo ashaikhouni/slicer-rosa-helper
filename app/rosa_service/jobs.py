@@ -268,6 +268,11 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                   "--save-transform", str(t1_to_ct),
                                   "--mask-in-target", str(mask_in_ct)])
         contacts_step = base + ["contacts", traj, ct, "--out", contacts]
+        # Constrain the electrode library to the types a site uses (from the
+        # new-case screen's checkboxes) — restricts model matching + speeds it up.
+        etypes = spec.params.get("electrode_types")
+        if etypes:
+            contacts_step += ["--electrode-types", str(etypes)]
         if use_mri_mask:
             # Feed the MRI-derived intracranial mask to the placement anchor.
             contacts_step += ["--brain-mask", str(mask_in_ct)]

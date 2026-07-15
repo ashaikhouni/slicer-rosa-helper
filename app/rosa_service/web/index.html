@@ -136,6 +136,18 @@
       <div id="mricreateinfo" class="muted"></div>
     </details>
 
+    <details class="mri-optional" id="etypesoptional">
+      <summary>Electrode types — <span id="etypessummary" class="muted">all types</span></summary>
+      <p class="muted">Constrain detection to the electrode types your site uses. Fewer
+        types → more accurate model matching (no spurious matches) and faster placement.
+        All types are included by default.</p>
+      <div class="etypes-actions">
+        <button type="button" id="etypesall" class="link">select all</button>
+        <button type="button" id="etypesnone" class="link">clear</button>
+      </div>
+      <div id="etypeslist" class="etypeslist"></div>
+    </details>
+
     <button id="runbtn" class="primary" disabled>Run localization →</button>
   </section>
 

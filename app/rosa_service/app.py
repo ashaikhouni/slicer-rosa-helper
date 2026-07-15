@@ -332,6 +332,28 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except Exception as exc:  # noqa: BLE001 — engine/resources missing
             raise HTTPException(status_code=500, detail=f"atlas registry error: {exc}") from exc
 
+    @app.get(f"/api/{API_VERSION}/electrode-models")
+    async def list_electrode_models() -> dict:
+        """The bundled electrode library, grouped by type — so the new-case
+        screen can offer per-type checkboxes to constrain detection/placement to
+        the electrode types a site actually uses (passed to `contacts
+        --electrode-types`)."""
+        try:
+            from rosa_core.electrode_models import load_electrode_library
+            lib = load_electrode_library()
+            groups: dict[str, list] = {}
+            for m in lib.get("models", []):
+                t = str(m.get("type") or "?")
+                groups.setdefault(t, []).append(
+                    {"id": m.get("id"), "contact_count": m.get("contact_count")})
+            types = [{"type": t, "count": len(ms),
+                      "models": ms,
+                      "contact_counts": sorted({x["contact_count"] for x in ms if x["contact_count"]})}
+                     for t, ms in groups.items()]
+            return {"vendor": lib.get("vendor"), "series": lib.get("series"), "types": types}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"electrode library error: {exc}") from exc
+
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/label",
               response_model=JobStatus, status_code=201)
     async def create_label_job(job_id: str, req: LabelRequest) -> JobStatus:
