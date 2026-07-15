@@ -14,9 +14,10 @@ contextBridge.exposeInMainWorld("rosaNative", {
   openDirectory: (opts) => ipcRenderer.invoke("rosa:openDirectory", opts),
   saveFile: (opts) => ipcRenderer.invoke("rosa:saveFile", opts),
 
-  // Absolute path of a drag-dropped File (File.path was removed in Electron ≥32).
-  getDroppedPath: (file) => {
-    try { return webUtils.getPathForFile(file); } catch (_e) { return null; }
+  // Absolute path of a File from a file input OR a drag-drop (File.path was
+  // removed in Electron ≥32, so this goes through webUtils).
+  pathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) || null; } catch (_e) { return null; }
   },
 
   // Persist a renderer-produced artifact (e.g. a JS-ML brain mask) so the sidecar

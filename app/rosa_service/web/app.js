@@ -24,6 +24,38 @@ async function jsend(url, method, body) {
   return r.json();
 }
 
+// Desktop (Electron) hands us real absolute paths via window.rosaNative, so we
+// skip the browser upload round-trip entirely — the local sidecar reads the file
+// in place (no multi-hundred-MB copy). In a browser, rosaNative is absent and we
+// POST to /uploads exactly as before.
+const IS_DESKTOP = !!(window.rosaNative && window.rosaNative.pathForFile);
+
+// Resolve a picked/dropped File to { path, name, bytes }. Desktop → the real
+// path (instant); browser → upload the bytes and use the saved path.
+async function resolveFile(file) {
+  if (IS_DESKTOP) {
+    const path = window.rosaNative.pathForFile(file);
+    if (path) return { path, name: file.name, bytes: file.size };
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// THOMAS is a folder pick. Desktop → a native directory dialog (the label
+// endpoint takes the folder path directly, no upload). Browser → the
+// webkitdirectory input that uploads the masks (uploadThomasDir).
+async function pickThomasDir() {
+  if (IS_DESKTOP && window.rosaNative.openDirectory) {
+    const r = await window.rosaNative.openDirectory({ title: "Choose a THOMAS output folder (has left/ + right/)" });
+    if (r && r.path && state.jobId) { state.thomasDir = r.path; runLabel(); }
+    return;
+  }
+  $("thomasdir-file").click();
+}
+
 function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
   // The step bar tracks the new-case wizard (drop → run → review); it's noise on
@@ -51,12 +83,9 @@ function setCt(ct) {
 }
 
 async function uploadFile(file) {
-  $("ctinfo").textContent = `Uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("ctinfo").textContent = `Upload failed: ${await r.text()}`; return; }
-  setCt(await r.json());
+  $("ctinfo").textContent = IS_DESKTOP ? `Loading ${file.name}…` : `Uploading ${file.name}…`;
+  try { setCt(await resolveFile(file)); }
+  catch (e) { $("ctinfo").textContent = `Failed: ${e.message}`; }
 }
 
 function wireDrop() {
@@ -96,12 +125,9 @@ function setCreationMri(mri) {
 }
 
 async function uploadCreationMri(file) {
-  $("mricreateinfo").textContent = `Uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("mricreateinfo").textContent = `Upload failed: ${await r.text()}`; return; }
-  setCreationMri(await r.json());
+  $("mricreateinfo").textContent = IS_DESKTOP ? `Loading ${file.name}…` : `Uploading ${file.name}…`;
+  try { setCreationMri(await resolveFile(file)); }
+  catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
 }
 
 // ---- step 2: run ------------------------------------------------------
@@ -512,15 +538,13 @@ function _syncThomasLoadBtn() {
 }
 
 async function uploadMri(file) {
-  $("labelstatus").textContent = `· uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("labelstatus").textContent = "· MRI upload failed"; return; }
-  state.mri = await r.json();
-  $("labelstatus").textContent = `· MRI ${state.mri.name}`;
-  $("labelbtn").disabled = false;
-  setCaseSlots();
+  $("labelstatus").textContent = IS_DESKTOP ? `· loading ${file.name}…` : `· uploading ${file.name}…`;
+  try {
+    state.mri = await resolveFile(file);
+    $("labelstatus").textContent = `· MRI ${state.mri.name}`;
+    $("labelbtn").disabled = false;
+    setCaseSlots();
+  } catch (_e) { $("labelstatus").textContent = "· MRI failed"; }
 }
 
 // Busy state during registration/labeling: a spinner beside the atlas picker.
@@ -975,16 +999,13 @@ async function openCase(id) {
 
 // ---- import a localization computed elsewhere ------------------------
 
-// browse → upload → fill the paired path field (reuses the /uploads endpoint).
+// browse → real path (desktop) or upload (browser) → fill the paired path field.
 async function importBrowse(fileInputId, pathId) {
   const f = $(fileInputId).files[0];
   if (!f) return;
-  $("imp-msg").textContent = `Uploading ${f.name}…`;
-  const fd = new FormData(); fd.append("file", f);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("imp-msg").textContent = `Upload failed: ${await r.text()}`; return; }
-  $(pathId).value = (await r.json()).path;
-  $("imp-msg").textContent = "";
+  $("imp-msg").textContent = IS_DESKTOP ? `Loading ${f.name}…` : `Uploading ${f.name}…`;
+  try { $(pathId).value = (await resolveFile(f)).path; $("imp-msg").textContent = ""; }
+  catch (e) { $("imp-msg").textContent = `Failed: ${e.message}`; }
 }
 
 function showImportCheck(check, isError, message) {
@@ -1114,12 +1135,12 @@ async function boot() {
     if (!state.jobId) return;
     // THOMAS: prompt for the folder first; the picker's change handler uploads
     // then labels. Every other atlas labels immediately (needs the patient MRI).
-    if ($("atlassel").value.startsWith("thomas")) { $("thomasdir-file").click(); return; }
+    if ($("atlassel").value.startsWith("thomas")) { pickThomasDir(); return; }
     if (state.mri) runLabel();
   });
   // The "Load folder…" chip: works even when THOMAS is already the selected atlas
   // (re-open / re-import), where the dropdown's change never fires.
-  $("thomasload").onclick = () => $("thomasdir-file").click();
+  $("thomasload").onclick = pickThomasDir;
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
   try {
