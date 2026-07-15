@@ -1,0 +1,7 @@
+node_modules/
+dist/
+out/
+*.log
+.DS_Store
+# PyInstaller sidecar bundle staged for packaging
+resources/rosa-sidecar/
