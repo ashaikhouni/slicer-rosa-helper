@@ -135,6 +135,19 @@ def _brain_surface_view_flags(t1: str, regcache: Path, *,
     return flags
 
 
+def _engine_base() -> list[str]:
+    """argv prefix to invoke the rosa_agent engine, in dev AND in the frozen app.
+
+    Dev / pip-installed: ``python -u -m rosa_agent``. Frozen (PyInstaller): the
+    packaged binary is a multi-call sidecar, so ``sys.executable`` is that binary
+    and it re-invokes itself as ``<binary> engine`` (see app/desktop/sidecar_main.py).
+    The frozen engine sets line-buffered stdout itself, so no ``-u`` is needed.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "engine"]
+    return [sys.executable, "-u", "-m", "rosa_agent"]
+
+
 def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
     """Map a :class:`JobSpec` to an ordered list of subprocess STEPS.
 
@@ -231,7 +244,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # PYTHONPATH; in the frozen app this becomes the frozen exe re-invoked.
         # detect (CT → trajectories) → contacts (+CT → contacts) → view-results
         # (→ served viewer dir: index.html + scene.glb + scene_meta.json + CT).
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         native_mask = regcache / "brain_mask_native.nii.gz"
         mask_in_ct = regcache / "brain_mask_in_ct.nii.gz"
         t1_to_ct = regcache / "t1_to_ct.tfm"
@@ -296,7 +309,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         contacts = str(workdir / "contacts.tsv")
         viewer = str(workdir / "viewer")
         regcache = workdir / "regcache"
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         steps = []
         # 1) stage the provided TSVs into the job dir (steps run cwd=workdir).
         stage = ("import shutil, sys\n"
@@ -336,7 +349,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         t1 = str(t1) if t1 else None
         surface = str(spec.params.get("surface") or "auto")
         cd = Path(case_dir)
-        view = [py, "-u", "-m", "rosa_agent", "view-results", case_dir,
+        view = [*_engine_base(), "view-results", case_dir,
                 "--output", str(cd / "viewer"), "--ct", ct,
                 "--contacts", str(cd / "contacts.tsv"),
                 "--trajectories", str(cd / "trajectories.tsv"),
@@ -383,7 +396,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_dir = Path(contacts).parent
         parent_traj = str(parent_dir / "trajectories.tsv")
         parent_viewer = str(parent_dir / "viewer")
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
         # bundled MNI atlases warp a template. The 3D brain MESH is atlas-INDEPENDENT
         # (FastSurfer recon whenever available, else the Otsu surface) — meshed once

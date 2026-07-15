@@ -34,8 +34,39 @@ npm start
 | `ROSA_APP_WORKDIR` | Case/job store. Defaults to `<userData>/cases`. |
 | `ROSA_FASTSURFER_*`, `ROSA_DEEPMRIPREP_PYTHON`, … | BYO heavy backends — passed through to the sidecar. |
 
+## Freeze the sidecar (PyInstaller)
+
+`sidecar_main.py` is a **multi-call** entry: one binary runs both the service
+(`rosa-sidecar serve`, prints `{url,port}`) and the engine
+(`rosa-sidecar engine <subcmd>`). `app/rosa_service/jobs.py::_engine_base()`
+spawns `[sys.executable, "engine", …]` when frozen, so the service re-invokes
+itself — no separate Python in the packaged app.
+
+Build in a **torch-free** venv (torch must stay out — it double-inits libomp
+with SimpleITK and balloons the bundle):
+
+```bash
+python -m venv /tmp/rosa-freeze && . /tmp/rosa-freeze/bin/activate
+pip install -e ".[mesh]" -e ./app matplotlib pyinstaller   # from repo root
+pyinstaller app/desktop/rosa-sidecar.spec --noconfirm \
+  --distpath /tmp/rosa-freeze/dist --workpath /tmp/rosa-freeze/build --clean
+```
+
+Result: `dist/rosa-sidecar/` (~307 MB, zero torch). Smoke it:
+
+```bash
+BIN=/tmp/rosa-freeze/dist/rosa-sidecar/rosa-sidecar
+"$BIN" engine --help                 # all subcommands dispatch
+"$BIN" serve                         # prints {url,port}; GET /healthz → 200
+```
+
+The spec (`rosa-sidecar.spec`) defeats the dynamic/lazy imports PyInstaller
+can't see (the importlib subcommand dispatch + PEP-562 `__getattr__` lazy
+submodules), collects SimpleITK's native libs + the package data (bundled
+atlases, vendored three.js, the web UI), and **excludes** torch and the other
+heavy ML backends.
+
 ## Packaged mode (later)
 
-electron-builder bundles a PyInstaller one-dir sidecar under
-`resources/rosa-sidecar/` (launcher `rosa-sidecar`); `main.js` then spawns
-`rosa-sidecar serve`. See the plan's Workstream 1/2.
+electron-builder bundles the one-dir sidecar under `resources/rosa-sidecar/`;
+`main.js` spawns `rosa-sidecar serve`. See the plan's Workstream 2.
