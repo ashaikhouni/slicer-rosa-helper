@@ -83,9 +83,16 @@ def run_deepbet(
     """
     py = find_deepbet(deepbet_python)
     if py is None:
+        # No BYO torch deepbet — use the bundled ONNX weights via onnxruntime
+        # (torch-free, bit-identical, ~1.7 s). This is the default path in the
+        # frozen app and on any machine without a deepbet env.
+        from .deepbet_onnx import run_deepbet_onnx, deepbet_onnx_available
+        if deepbet_onnx_available():
+            return run_deepbet_onnx(input_path, mask_path, log=log)
         raise DeepbetNotFound(
             "deepbet not found. `pip install deepbet` in an env and set "
-            "ROSA_DEEPBET_PYTHON to its python (deepbet is T1-only)."
+            "ROSA_DEEPBET_PYTHON to its python (deepbet is T1-only), or ship the "
+            "bundled ONNX weights + onnxruntime."
         )
     input_path = Path(input_path).expanduser().resolve()
     mask_path = Path(mask_path).expanduser().resolve()
@@ -106,8 +113,14 @@ def run_deepbet(
 
 
 def deepbet_available(deepbet_python: str | Path | None = None) -> bool:
-    """Convenience: True when a deepbet-capable python is reachable."""
-    return find_deepbet(deepbet_python) is not None
+    """True when deepbet can run — a BYO torch env OR the bundled ONNX weights."""
+    if find_deepbet(deepbet_python) is not None:
+        return True
+    try:
+        from .deepbet_onnx import deepbet_onnx_available
+        return deepbet_onnx_available()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 __all__ = ["DeepbetNotFound", "find_deepbet", "run_deepbet", "deepbet_available"]
