@@ -506,6 +506,12 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if is_thomas:
             view_step += ["--structure-meshes", atlas_in_ct, "--structure-lut", thomas_lut]
         steps.append(view_step)
+        # Pre-warm the cohort's MNI-pooled contacts once this label run has cached
+        # the CT→T1→MNI transforms (CerebrA-through-T1 only). Self-gates to a no-op
+        # otherwise, so it's safe to append for any labeled-with-MRI case. Writes
+        # <case>/regcache/contacts_mni.tsv (regcache lives in the parent case dir).
+        if t1:
+            steps.append([*_engine_base(), "cohort-export", str(Path(regcache).parent)])
         return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 

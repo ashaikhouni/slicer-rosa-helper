@@ -82,6 +82,7 @@ SUBCOMMANDS = {
     "import-thomas": "rosa_agent.commands.import_thomas",
     "brain-extract": "rosa_agent.commands.brain_extract",
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
+    "cohort-export": "rosa_agent.commands.cohort_export",
 }
 
 
