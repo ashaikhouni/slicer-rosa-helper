@@ -28,6 +28,7 @@ extraResources:
     to: rosa-sidecar
 
 mac:
+  icon: assets/icon.icns
   target:
     - target: dmg
       arch: [arm64]
