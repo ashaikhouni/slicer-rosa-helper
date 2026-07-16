@@ -340,8 +340,9 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         the electrode types a site actually uses (passed to `contacts
         --electrode-types`)."""
         try:
-            from rosa_core.electrode_models import load_electrode_library
+            from rosa_core.electrode_models import load_electrode_library, label_map
             lib = load_electrode_library()
+            top = lib.get("vendor")
             groups: dict[str, list] = {}
             for m in lib.get("models", []):
                 t = str(m.get("type") or "?")
@@ -351,7 +352,10 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                       "models": ms,
                       "contact_counts": sorted({x["contact_count"] for x in ms if x["contact_count"]})}
                      for t, ms in groups.items()]
-            return {"vendor": lib.get("vendor"), "series": lib.get("series"), "types": types}
+            # id → "Manufacturer Reference" (e.g. "DIXI D08-05AM") for friendly
+            # display of the placed electrode model in the review list.
+            return {"vendor": top, "series": lib.get("series"),
+                    "types": types, "labels": label_map(lib)}
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"electrode library error: {exc}") from exc
 
@@ -540,14 +544,12 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             return {"ready": True, "cached": True}
         ct = job.params.get("ct")
         t1 = job.params.get("t1")
-        tfm = rc / "t1_to_ct.tfm"
+        tfm = rc / "t1_to_ct.tfm"        # reused if present, else computed + cached
         mask = rc / "brain_mask_native.nii.gz"
         if not (ct and Path(ct).is_file()):
             raise HTTPException(status_code=409, detail="case CT not found")
         if not (t1 and Path(t1).is_file()):
             return {"ready": False, "reason": "no MRI on this case"}
-        if not tfm.is_file():
-            return {"ready": False, "reason": "no cached MRI→CT transform (older case — run a label once)"}
         try:
             from rosa_core.acpc import reorient_to_acpc
             rc.mkdir(parents=True, exist_ok=True)

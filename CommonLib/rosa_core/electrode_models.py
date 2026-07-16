@@ -91,3 +91,31 @@ def validate_electrode_library(data: ElectrodeLibrary) -> None:
 def model_map(data: ElectrodeLibrary) -> dict[str, ElectrodeModel]:
     """Return dictionary mapping model id to model definition."""
     return {m["id"]: m for m in data["models"]}
+
+
+def manufacturer_of(model: ElectrodeModel, top_vendor: str | None = None) -> str:
+    """Manufacturer for a model: its own ``vendor`` if set (Medtronic/NeuroPace),
+    else PMT when the id says so, else the library's top-level vendor (DIXI)."""
+    v = model.get("vendor")
+    if v:
+        return str(v)
+    mid = str(model.get("id") or "")
+    if mid.upper().startswith("PMT") or str(model.get("type") or "").upper().startswith("PMT"):
+        return "PMT"
+    return str(top_vendor or "")
+
+
+def friendly_label(model: ElectrodeModel, top_vendor: str | None = None) -> str:
+    """A human label like ``"DIXI D08-05AM"`` / ``"Medtronic 3389"`` — manufacturer
+    (short) + catalog ``reference``. Falls back to the raw id if no reference."""
+    ref = str(model.get("reference") or model.get("id") or "")
+    manu = manufacturer_of(model, top_vendor).split()[0] if manufacturer_of(model, top_vendor) else ""
+    if not manu or ref.upper().startswith(manu.upper()):
+        return ref
+    return f"{manu} {ref}".strip()
+
+
+def label_map(data: ElectrodeLibrary) -> dict[str, str]:
+    """Map model id → friendly ``"Manufacturer Reference"`` label."""
+    top = data.get("vendor")
+    return {m["id"]: friendly_label(m, top) for m in data["models"]}

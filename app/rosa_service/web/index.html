@@ -225,8 +225,7 @@
             <span class="btnset" id="qcspace">
               <button data-space="ct" class="active" title="Patient CT ↔ MRI in the native scan frame">Native</button>
               <button data-space="acpc" hidden title="Upright AC-PC planes — rigid reorientation of this case's CT ↔ MRI">AC-PC</button>
-              <button data-space="mni" title="Standard AC-PC / template space — MNI atlases only">AC-PC</button>
-              <button data-space="atlas" title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
+              <button data-space="atlas" hidden title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
             </span>
             <span class="btnset" id="qcmodes">
               <button data-mode="opacity" class="active">Opacity</button>
@@ -243,7 +242,8 @@
             <div class="qc-planes" id="qcplanes"></div>
             <p class="qc-hint muted">Structures should line up across the wipe / read gray in
               Color. Drag a plane's slider to scrub through it.
-              <strong>Native</strong> = CT↔MRI (the per-case registration);
+              <strong>Native</strong> = CT↔MRI in the scan frame;
+              <strong>AC-PC</strong> = the same, reoriented to upright standard planes;
               <strong>Atlas</strong> = MNI template↔your MRI (checks the atlas registration
               that places the labels).</p>
           </div>

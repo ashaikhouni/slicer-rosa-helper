@@ -6,7 +6,7 @@
 const API = "/api/v1";
 const $ = (id) => document.getElementById(id);
 const state = { ct: null, jobId: null, es: null, poll: null,
-                mri: null, labelJobId: null, labelPoll: null, qc: null, qcJobId: null,
+                mri: null, labelJobId: null, labelPoll: null, qc: null,
                 creationMri: null,     // optional MRI (T1) picked at case creation
                 probePref: "ortho" };  // remembered Ortho/Probe slice-rail choice
 
@@ -179,10 +179,16 @@ async function importDicom(target, dir) {
 
 // ---- electrode library (constrain detection to the site's electrode types) ---
 
+// id → "Manufacturer Reference" (e.g. "DIXI D08-05AM"), for the review list.
+function modelLabel(id) {
+  return (id && state.emodelLabels && state.emodelLabels[id]) || id || "—";
+}
+
 async function loadElectrodeTypes() {
   const list = $("etypeslist");
   try {
-    const { types } = await jget(`${API}/electrode-models`);
+    const { types, labels } = await jget(`${API}/electrode-models`);
+    state.emodelLabels = labels || {};
     list.innerHTML = "";
     for (const t of types) {
       const cc = t.contact_counts && t.contact_counts.length ? ` · ${t.contact_counts.join("/")} contacts` : "";
@@ -401,7 +407,7 @@ function resetLabelCard() {
   $("labelstatus").textContent = "";
   $("labelmsg").textContent = "";
   const ll = $("labellog"); ll.hidden = true; ll.textContent = "";
-  $("qcplanes").innerHTML = ""; state.qc = null; state.qcJobId = null;
+  $("qcplanes").innerHTML = ""; state.qc = null;
   $("atlasctl").hidden = true;
   $("atlascheckbtn").hidden = true;
   $("regtab").hidden = true;              // no registration to check until an atlas runs
@@ -431,7 +437,7 @@ function renderReview(doc) {
     const dot = el("span", { class: "shank-dot" + (labeled ? " on" : "") });
     dot.title = labeled ? "labeled" : "not labeled";
     head.append(el("span", { class: "caret" }, "▸"), el("strong", {}, shank.name),
-      el("span", { class: "muted shank-meta" }, `${shank.model || "—"} · ${shank.contacts.length}`), dot);
+      el("span", { class: "muted shank-meta" }, `${modelLabel(shank.model)} · ${shank.contacts.length}`), dot);
     head.onclick = () => toggleShank(box, shank);
     box.append(head);
 
@@ -781,12 +787,25 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   setLabelBusy(false);
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
-    $("labelmsg").innerHTML = jumpToQc
-      ? `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
-        `<strong>${p.atlas}</strong>. Verify the <em>Registration</em> tab, then Apply.`
-      : `Labels from <strong>${p.atlas}</strong> ` +
-        `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
-    $("approvebtn").hidden = false;
+    // Already applied? Approval commits the proposed regions into the parent
+    // ReviewDoc (state.doc), so if every proposed region is already committed
+    // there, this atlas's labels were approved (survives reload). A different
+    // atlas → regions differ → still needs applying.
+    const proposed = (p.contacts || []).filter((c) => c.region);
+    const approved = proposed.length > 0 && proposed.every((c) => {
+      const sh = state.doc && state.doc.shanks.find((s) => s.name === c.shank);
+      const ct = sh && sh.contacts.find((x) => x.index === c.index);
+      return ct && ct.region === c.region;
+    });
+    $("labelmsg").innerHTML = approved
+      ? `Labels from <strong>${p.atlas}</strong> applied ✓ ` +
+        `(<strong>${p.n_labeled}/${p.n_contacts}</strong>). Pick another atlas to relabel.`
+      : jumpToQc
+        ? `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
+          `<strong>${p.atlas}</strong>. Verify the <em>Registration</em> tab, then Apply.`
+        : `Labels from <strong>${p.atlas}</strong> ` +
+          `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
+    $("approvebtn").hidden = approved;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
     _syncThomasLoadBtn();
@@ -827,7 +846,10 @@ const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
 function qcSrc(p) {
   const { mode, value, dir, space } = state.qc;
-  return `${API}/jobs/${state.qcJobId || state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
+  // CT↔MRI (Native + AC-PC) is a per-CASE registration → the case job; the atlas
+  // check (template↔MRI) is per-LABEL → the label job.
+  const jid = space === "atlas" ? state.labelJobId : state.jobId;
+  return `${API}/jobs/${jid}/qc?axis=${p.axis}&mode=${mode}` +
     `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
 }
 
@@ -852,25 +874,41 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
-// Which registration spaces are available here: Native (CT↔MRI) whenever there's
-// a registration; `acpc` = the rigid AC-PC reorientation (reg-check, any MRI
-// case); `mni`/`atlas` = the affine atlas-space QC (labeling, MNI atlases only).
-// HIDE (not grey) the rest: `acpc` and `mni` are BOTH labelled "AC-PC" (rigid vs
-// affine), and the reg-check and the label QC must show only one of them.
-function _setQcSpaces(hasCt, hasMni, hasAcpc = false) {
-  const avail = { ct: !!hasCt, acpc: !!hasAcpc, mni: !!hasMni, atlas: !!hasMni };
+// Show/hide the space buttons per what's available (tracked on state.qc):
+// Native (CT↔MRI) is always there once there's an MRI; AC-PC appears once its
+// rigid reorientation is built; Atlas appears when an MNI atlas was labeled.
+function _applyQcSpaces() {
+  const avail = { ct: true, acpc: !!state.qc._hasAcpc, atlas: !!state.qc._hasAtlas };
   for (const b of $("qcspace").querySelectorAll("button")) b.hidden = !avail[b.dataset.space];
-  if (state.qc && !avail[state.qc.space])
-    state.qc.space = avail.ct ? "ct" : (Object.keys(avail).find((k) => avail[k]) || "ct");
-  const cur = $("qcspace").querySelector(`[data-space="${state.qc ? state.qc.space : "ct"}"]`);
+  if (!avail[state.qc.space]) state.qc.space = avail.acpc ? "acpc" : "ct";
+  const cur = $("qcspace").querySelector(`[data-space="${state.qc.space}"]`);
   if (cur) setActive("qcspace", cur);
+}
+
+// Build (once, cached) the rigid AC-PC reorientation for the CASE. ~10s the
+// first time; returns whether the AC-PC space is ready.
+async function ensureAcpc() {
+  if (!state.jobId || !state.mri) return false;
+  try {
+    const r = await jsend(`${API}/jobs/${state.jobId}/acpc`, "POST");
+    return !!(r && r.ready);
+  } catch (_e) { return false; }
+}
+
+// Reveal the AC-PC button once its reorientation is ready (keeps current space).
+async function _buildAcpcInBg() {
+  const ready = await ensureAcpc();
+  if (!ready || !state.qc) return;
+  state.qc._hasAcpc = true;
+  _applyQcSpaces();
 }
 
 // Build the 3 QC panes once per case (registration is per-case). Atlas switches
 // + the Reg chip re-enter but keep the panes + the user's mode/slice settings.
 function _ensureQcPanes() {
   if (state.qc) return;
-  state.qc = { mode: "color", value: 0.5, dir: "h", space: "ct", panes: [] };
+  state.qc = { mode: "color", value: 0.5, dir: "h", space: "ct", panes: [],
+               _hasAcpc: false, _hasAtlas: false };
   const wrap = $("qcplanes");
   wrap.innerHTML = "";
   for (const [axis, name] of QC_PLANES) {
@@ -888,48 +926,44 @@ function _ensureQcPanes() {
   $("qcdir").hidden = true;
 }
 
-// Labeling routes the QC at the label job (its atlas + MNI-space volumes).
+// The label QC: verify the atlas registration that placed the labels, with the
+// case-level CT↔MRI checks (Native + AC-PC) alongside. Defaults to the Atlas
+// check (the labeling concern); AC-PC builds in the background.
 function showQc(hasMni, jumpToQc = true) {
   const firstTime = !state.qc;
   _ensureQcPanes();
-  if (firstTime) state.qc.space = hasMni ? "atlas" : "ct";  // MNI atlas → atlas check
-  state.qc._hasMni = hasMni;
-  state.qcJobId = state.labelJobId;
-  _setQcSpaces(true, hasMni);        // recompute availability for THIS atlas
+  state.qc._hasAtlas = hasMni;
+  if (firstTime) state.qc.space = hasMni ? "atlas" : "ct";
+  _applyQcSpaces();
   $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
-  if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
-  else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
+  if (jumpToQc) setViewerTab("qc");
+  else if (!$("viewerqc").hidden) refreshAllPanes();
+  if (state.mri) _buildAcpcInBg();   // make the AC-PC button live
 }
 
-// The Reg chip: the CT↔MRI check straight from the CASE's own registration
-// (produced at case creation for MRI cases), so it works WITHOUT labeling. Shows
-// Native immediately, then upgrades to the rigid AC-PC reorientation (upright
-// standard planes) once it's built — a one-time ~30s registration, cached.
+// The Reg chip: the CT↔MRI check straight from the CASE's own registration, so
+// it works WITHOUT labeling. Shows Native immediately, then defaults to the
+// rigid AC-PC reorientation (upright standard planes) once built (~10s, cached).
 async function openRegCheck() {
   if (!state.jobId) return;
   if (!state.mri) { $("labelmsg").textContent = "Add a patient MRI to enable the CT↔MRI check."; return; }
   _ensureQcPanes();
-  state.qc._hasMni = false;
-  state.qc.space = "ct";
-  state.qcJobId = state.jobId;       // the case's pipeline job serves brain_mri_in_ct
-  _setQcSpaces(true, false, false);  // Native first — always available
+  state.qc._hasAtlas = false;
+  state.qc.space = "ct";             // Native immediately — always available
+  _applyQcSpaces();
   $("regtab").hidden = false;
   setViewerTab("qc");
-  const caseId = state.jobId;
-  try {
-    $("labelmsg").textContent = "Aligning CT↔MRI to AC-PC planes…";
-    const r = await jsend(`${API}/jobs/${caseId}/acpc`, "POST");
-    if (state.qcJobId !== caseId) return;     // user moved on (e.g. labeled) — abandon the upgrade
-    if (r && r.ready) {                        // upright reorientation ready → default to it
-      state.qc.space = "acpc";
-      _setQcSpaces(true, false, true);
-      if (!$("viewerqc").hidden) refreshAllPanes();
-      $("labelmsg").textContent = "";
-    } else {
-      $("labelmsg").textContent = r && r.reason ? `AC-PC unavailable (${r.reason}) — showing native.` : "";
-    }
-  } catch (e) {
-    if (state.qcJobId === caseId) $("labelmsg").textContent = `AC-PC unavailable — showing native. (${e.message})`;
+  $("labelmsg").textContent = "Aligning CT↔MRI to AC-PC planes…";
+  const ready = await ensureAcpc();
+  if (!state.qc) return;             // case reset while building — abandon
+  if (ready) {
+    state.qc._hasAcpc = true;
+    state.qc.space = "acpc";         // default to the upright view
+    _applyQcSpaces();
+    if (!$("viewerqc").hidden) refreshAllPanes();
+    $("labelmsg").textContent = "";
+  } else {
+    $("labelmsg").textContent = "AC-PC unavailable — showing native.";
   }
 }
 

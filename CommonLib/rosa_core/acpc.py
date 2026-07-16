@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .bundled_atlases import resolve as _resolve_atlas
-from .registration import load_transform, register_rigid_mi, resample_volume
+from .registration import load_transform, register_rigid_mi, resample_volume, save_transform
 
 def default_template_path() -> Path:
     """The bundled MNI152 T1w template (AC-PC aligned) used as the orientation ruler."""
@@ -55,7 +55,7 @@ def _acpc_grid(template, *, pad_mm: float = 25.0):
 def reorient_to_acpc(
     ct_path: str | Path,
     mri_path: str | Path,
-    t1_to_ct_path: str | Path,
+    t1_to_ct_path: str | Path | None,
     out_ct: str | Path,
     out_mri: str | Path,
     *,
@@ -68,8 +68,10 @@ def reorient_to_acpc(
     Args:
         ct_path: postop CT (native frame).
         mri_path: preop MRI (T1, native frame) — drives the rotation fit.
-        t1_to_ct_path: cached rigid transform from case creation, computed with
-            ``fixed=CT, moving=T1`` (maps CT→T1); inverted here for T1→CT.
+        t1_to_ct_path: cached rigid transform (``fixed=CT, moving=T1`` → maps
+            CT→T1). If the file is absent (or None), it's registered here and
+            saved back to this path — so AC-PC works even for cases that never
+            cached one.
         out_ct / out_mri: where to write ``ct_in_acpc`` / ``mri_in_acpc``.
         template_path: AC-PC-aligned MNI template used as the tilt ruler.
         brain_mask_path: optional native-T1 brain mask — masking the skull off
@@ -108,12 +110,29 @@ def reorient_to_acpc(
     res = register_rigid_mi(template, moving, init_mode="moments", logger=logger)
     tpl_to_t1 = res.transform
 
-    # CT reslicing transform: template → T1 (the fit) → CT (inverse of the cached
-    # CT→T1). SITK applies the LAST-added transform FIRST, so add T1→CT first
-    # (applied second) and template→T1 last (applied first).
-    t1_to_ct = load_transform(str(t1_to_ct_path))   # maps CT→T1
+    # T1↔CT rigid: the cached transform (fixed=CT, moving=T1 → maps CT→T1). When
+    # the case never cached one (no deepbet at creation, e.g. an older case), we
+    # register it here so AC-PC works for ANY MRI case; save it back for reuse.
+    # metal_clip keeps electrode HU from steering the cross-modality fit.
+    tfm_path = Path(t1_to_ct_path) if t1_to_ct_path else None
+    if tfm_path and tfm_path.is_file():
+        ct_to_t1 = load_transform(str(tfm_path))
+    else:
+        if logger is not None:
+            logger("[acpc] no cached MRI→CT transform — registering T1→CT …")
+        ct_to_t1 = register_rigid_mi(ct, t1, metal_clip_hu=1500.0, logger=logger).transform
+        if tfm_path is not None:
+            try:
+                tfm_path.parent.mkdir(parents=True, exist_ok=True)
+                save_transform(ct_to_t1, str(tfm_path))
+            except Exception:  # noqa: BLE001 — a read-only cache dir shouldn't fail the reorient
+                pass
+
+    # CT reslicing transform: template → T1 (the fit) → CT (inverse of CT→T1).
+    # SITK applies the LAST-added transform FIRST, so add T1→CT first (applied
+    # second) and template→T1 last (applied first).
     tpl_to_ct = sitk.CompositeTransform(3)
-    tpl_to_ct.AddTransform(t1_to_ct.GetInverse())   # T1→CT  (applied second)
+    tpl_to_ct.AddTransform(ct_to_t1.GetInverse())   # T1→CT  (applied second)
     tpl_to_ct.AddTransform(tpl_to_t1)               # tpl→T1 (applied first)
 
     # AC-PC-oriented output grid: the brain-centred template, padded to include
