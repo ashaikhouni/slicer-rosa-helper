@@ -241,7 +241,31 @@ iframe.viewer-view { width: 100%; height: 100%; border: 0; display: block; }
 .casesearch { flex: 1; max-width: 340px; padding: 7px 11px; font-size: 13px; color: var(--ink);
   border: 1px solid var(--line2); border-radius: 8px; background: #0e161d; }
 .casesearch:focus { border-color: var(--accent); outline: none; }
-.caseslist { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.caseslist { display: block; overflow-x: auto; }
+/* Cohort registry table */
+.casetable { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.casetable th, .casetable td { padding: 8px 11px; border-bottom: 1px solid var(--line);
+  text-align: left; white-space: nowrap; }
+.casetable thead th { color: var(--muted); font-weight: 600; font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .04em; cursor: pointer; user-select: none; }
+.casetable thead th:hover { color: var(--ink); }
+.casetable th.sorted { color: var(--accent); }
+.casetable th.c-num, .casetable td.c-num { text-align: right; font-variant-numeric: tabular-nums; }
+.casetable th.c-center, .casetable td.c-center { text-align: center; }
+.caserow { cursor: pointer; }
+.caserow:hover td { background: #10202a; }
+.caserow:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: -2px; }
+.ct-name { font-weight: 600; color: var(--ink); }
+.ct-scan { font-family: var(--mono); font-size: 10px; color: var(--faint); margin-top: 1px; }
+.ct-date { color: var(--muted); }
+.casetable .yes { color: var(--ok); font-weight: 700; }
+.casetable .no { color: var(--faint); }
+.mni-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--ok); box-shadow: 0 0 0 3px rgba(70, 198, 128, .16); }
+.ct-del { width: 22px; height: 22px; padding: 0; border-radius: 5px; border: none;
+  background: transparent; color: var(--faint); cursor: pointer; font-size: 15px; line-height: 1; opacity: 0; }
+.caserow:hover .ct-del { opacity: 1; }
+.ct-del:hover { background: #3a1e1e; color: var(--bad); }
 .casecard { position: relative; display: block; text-align: left; padding: 13px 14px;
   border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-weight: 400; }
 .casecard:hover { border-color: var(--accent-dim); background: #10202a; }

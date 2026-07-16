@@ -1078,46 +1078,139 @@ async function showCases() {
   renderCases();
 }
 
-// Client-side filter (search + type) over the fetched cases — instant, no refetch.
+// Cohort registry table. Columns are sortable client-side over the fetched
+// cases (instant, no refetch). `num` columns default to descending on first
+// click (biggest/newest first); text columns ascending.
+const CASE_COLS = [
+  { key: "label",        label: "Subject",    cls: "",        num: false },
+  { key: "kind",         label: "Kind",       cls: "",        num: false },
+  { key: "has_mri",      label: "MRI",        cls: "c-center", num: false },
+  { key: "n_shanks",     label: "Electrodes", cls: "c-num",    num: true  },
+  { key: "n_contacts",   label: "Contacts",   cls: "c-num",    num: true  },
+  { key: "labeled",      label: "Labeled",    cls: "c-center", num: false },
+  { key: "atlas",        label: "Atlas",      cls: "",        num: false },
+  { key: "mni_eligible", label: "MNI",        cls: "c-center", num: false },
+  { key: "created_at",   label: "Date",       cls: "",        num: true  },
+];
+
 function renderCases() {
   const all = state.cases || [];
   const q = (state.caseSearch || "").trim().toLowerCase();
   const f = state.caseFilter || "all";
-  const shown = all.filter((c) =>
+  const shown = sortCases(all.filter((c) =>
     (f === "all" || c.kind === f) &&
-    (!q || (c.label || "").toLowerCase().includes(q) || c.id.toLowerCase().includes(q)));
+    (!q || (c.label || "").toLowerCase().includes(q)
+        || c.id.toLowerCase().includes(q)
+        || (c.ct_hash || "").toLowerCase().includes(q))));   // scan hash is searchable too
   $("casescount").textContent = all.length ? `· ${all.length}` : "";
   $("casesempty").hidden = all.length > 0;
   $("casesnoresults").hidden = !(all.length > 0 && shown.length === 0);
   const list = $("caseslist");
   list.innerHTML = "";
-  for (const c of shown) list.append(caseCard(c));
+  if (shown.length) list.append(caseTable(shown));
 }
 
-function ccNum(n, one, many) {
-  const s = el("span", { class: "cc-n" });
-  s.append(el("b", {}, String(n)), " " + (n === 1 ? one : many));
-  return s;
+function sortCases(rows) {
+  const sort = state.caseSort || { key: "created_at", dir: -1 };
+  const v = (c) => {
+    switch (sort.key) {
+      case "label":        return (c.label || c.id || "").toLowerCase();
+      case "kind":         return c.kind || "";
+      case "has_mri":      return c.has_mri ? 1 : 0;
+      case "n_shanks":     return c.n_shanks || 0;
+      case "n_contacts":   return c.n_contacts || 0;
+      case "labeled":      return c.labeled ? 1 : 0;
+      case "atlas":        return (c.atlas || "").toLowerCase();
+      case "mni_eligible": return c.mni_eligible ? 1 : 0;
+      default:             return c.created_at || 0;
+    }
+  };
+  return rows.slice().sort((a, b) => {
+    const va = v(a), vb = v(b);
+    if (va < vb) return -sort.dir;
+    if (va > vb) return sort.dir;
+    return (b.created_at || 0) - (a.created_at || 0);   // tiebreak: newest first
+  });
 }
 
-function caseCard(c) {
-  const card = el("button", { class: "casecard", type: "button" });
-  card.onclick = () => openCase(c.id);
+function caseTable(rows) {
+  const sort = state.caseSort || { key: "created_at", dir: -1 };
+  const table = el("table", { class: "casetable" });
+  const htr = el("tr");
+  for (const col of CASE_COLS) {
+    const on = sort.key === col.key;
+    const th = el("th", { class: (col.cls + (on ? " sorted" : "")).trim() },
+      col.label + (on ? (sort.dir < 0 ? " ▾" : " ▴") : ""));
+    th.onclick = () => {
+      const cur = state.caseSort || { key: "created_at", dir: -1 };
+      state.caseSort = cur.key === col.key
+        ? { key: col.key, dir: -cur.dir }
+        : { key: col.key, dir: col.num ? -1 : 1 };
+      renderCases();
+    };
+    htr.append(th);
+  }
+  htr.append(el("th", { class: "c-center" }));   // delete-action column
+  const thead = el("thead"); thead.append(htr);
+  const tbody = el("tbody");
+  for (const c of rows) tbody.append(caseRow(c));
+  table.append(thead, tbody);
+  return table;
+}
+
+function ynCell(v) {
+  const td = el("td", { class: "c-center" });
+  td.append(el("span", { class: v ? "yes" : "no" }, v ? "✓" : "–"));
+  return td;
+}
+
+function atlasName(a) {
+  if (!a) return "";
+  if (a.startsWith("thomas")) return "THOMAS";
+  return { cerebra: "CerebrA", fastsurfer: "FastSurfer", deepmriprep: "deepmriprep" }[a] || a;
+}
+
+function caseRow(c) {
+  const tr = el("tr", { class: "caserow", tabindex: "0", role: "button" });
+  tr.onclick = () => openCase(c.id);
+  tr.onkeydown = (e) => { if (e.key === "Enter") openCase(c.id); };
   const when = c.created_at ? new Date(c.created_at * 1000).toLocaleDateString(
     undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
-  const stats = el("div", { class: "cc-stats" });
-  stats.append(
-    el("span", { class: `cc-badge ${c.kind}` }, c.kind === "import" ? "imported" : "detected"),
-    ccNum(c.n_shanks, "electrode", "electrodes"),
-    ccNum(c.n_contacts, "contact", "contacts"));
-  const sub = [c.has_mri ? "MRI" : "CT-only", c.labeled ? "labeled" : null, when]
-    .filter(Boolean).join(" · ");
-  const subEl = el("div", { class: "cc-sub muted" }, sub + " · ");
-  subEl.append(el("span", { class: "cc-id" }, c.id.slice(0, 8)));   // distinguishes same-named cases
-  const del = el("button", { class: "cc-del", type: "button", title: "Delete case" }, "×");
-  del.onclick = (ev) => { ev.stopPropagation(); deleteCase(c); };   // don't open the card
-  card.append(del, el("div", { class: "cc-title" }, c.label || c.id.slice(0, 8)), stats, subEl);
-  return card;
+  const scan = (c.ct_hash || c.id || "").slice(0, 8);
+
+  const subj = el("td");
+  subj.append(el("div", { class: "ct-name" }, c.label || scan),
+              el("div", { class: "ct-scan" }, scan));
+  tr.append(subj);
+
+  const kindTd = el("td");
+  kindTd.append(el("span", { class: `cc-badge ${c.kind}` }, c.kind === "import" ? "imported" : "detected"));
+  tr.append(kindTd);
+
+  tr.append(ynCell(c.has_mri));
+  tr.append(el("td", { class: "c-num" }, String(c.n_shanks || 0)));
+  tr.append(el("td", { class: "c-num" }, String(c.n_contacts || 0)));
+  tr.append(ynCell(c.labeled));
+
+  const atlasTd = el("td");
+  const an = atlasName(c.atlas);
+  atlasTd.append(an ? el("span", {}, an) : el("span", { class: "no" }, "–"));
+  tr.append(atlasTd);
+
+  const mniTd = el("td", { class: "c-center" });
+  mniTd.append(c.mni_eligible
+    ? el("span", { class: "mni-dot", title: "Contacts poolable in MNI (CerebrA-registered)" })
+    : el("span", { class: "no", title: "Label with CerebrA (through MRI) to pool this subject in MNI" }, "–"));
+  tr.append(mniTd);
+
+  tr.append(el("td", { class: "ct-date" }, when));
+
+  const delTd = el("td", { class: "c-center" });
+  const del = el("button", { class: "ct-del", type: "button", title: "Delete case" }, "×");
+  del.onclick = (ev) => { ev.stopPropagation(); deleteCase(c); };
+  delTd.append(del);
+  tr.append(delTd);
+  return tr;
 }
 
 async function deleteCase(c) {

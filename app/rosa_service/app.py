@@ -211,10 +211,20 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         finished, each enriched with electrode/contact counts + MRI/label state
         so the list is informative without opening a case. Newest first."""
         from .cases import summarize_case
+        # newest-first, so the first succeeded label child seen per case is its
+        # currently-active atlas (drives the Atlas column + MNI-poolable state).
+        atlas_by_case: dict[str, str] = {}
+        for st in runner.list():
+            if st.kind == "label" and st.state == "succeeded" and st.parent:
+                atlas_by_case.setdefault(st.parent, st.atlas or "")
         out = []
         for st in runner.list():                 # newest-first
             if st.kind in ("pipeline", "import") and st.state == "succeeded":
-                out.append(summarize_case(st, runner.get(st.id).workdir))
+                job = runner.get(st.id)
+                out.append(summarize_case(
+                    st, job.workdir,
+                    ct_hash=job.params.get("ct_hash"),
+                    atlas=atlas_by_case.get(st.id)))
         return out
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}", response_model=JobStatus)
