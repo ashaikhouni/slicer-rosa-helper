@@ -340,18 +340,23 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         the electrode types a site actually uses (passed to `contacts
         --electrode-types`)."""
         try:
-            from rosa_core.electrode_models import load_electrode_library, label_map
+            from rosa_core.electrode_models import (
+                load_electrode_library, label_map, manufacturer_of)
             lib = load_electrode_library()
             top = lib.get("vendor")
             groups: dict[str, list] = {}
+            manu: dict[str, str] = {}
             for m in lib.get("models", []):
                 t = str(m.get("type") or "?")
                 groups.setdefault(t, []).append(
                     {"id": m.get("id"), "contact_count": m.get("contact_count")})
-            types = [{"type": t, "count": len(ms),
+                # type codes are manufacturer-specific → one manufacturer per type
+                manu.setdefault(t, (manufacturer_of(m, top) or "").split()[0])
+            types = [{"type": t, "manufacturer": manu.get(t, ""), "count": len(ms),
                       "models": ms,
                       "contact_counts": sorted({x["contact_count"] for x in ms if x["contact_count"]})}
                      for t, ms in groups.items()]
+            types.sort(key=lambda x: (x["manufacturer"], x["type"]))  # cluster by manufacturer
             # id → "Manufacturer Reference" (e.g. "DIXI D08-05AM") for friendly
             # display of the placed electrode model in the review list.
             return {"vendor": top, "series": lib.get("series"),

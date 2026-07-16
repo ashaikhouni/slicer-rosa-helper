@@ -195,8 +195,11 @@ async function loadElectrodeTypes() {
       const cb = el("input", { type: "checkbox", value: t.type });
       cb.checked = true;
       cb.addEventListener("change", updateEtypesSummary);
+      // "DIXI AM" / "Medtronic ring_4" / "NeuroPace depth_4_3.5mm" / "PMT"
+      const name = t.manufacturer && t.manufacturer.toUpperCase() !== t.type.toUpperCase()
+        ? `${t.manufacturer} ${t.type}` : t.type;
       const lbl = el("label", { class: "etype" });
-      lbl.append(cb, el("span", { class: "etype-name" }, t.type),
+      lbl.append(cb, el("span", { class: "etype-name" }, name),
                  el("span", { class: "etype-meta" }, `${t.count} model${t.count > 1 ? "s" : ""}${cc}`));
       list.append(lbl);
     }
