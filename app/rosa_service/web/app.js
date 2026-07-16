@@ -312,8 +312,16 @@ function pollStatus(id) {
   }, 1000);
 }
 
+// Cancel a running detection: stop watching, terminate the job (DELETE →
+// SIGTERM), and go back to the load screen. The CT (and any MRI) stay selected
+// so re-running is one click — `run()` resets the run screen itself.
 async function cancel() {
-  if (state.jobId) { try { await fetch(`${API}/jobs/${state.jobId}`, { method: "DELETE" }); } catch {} }
+  clearInterval(state.poll);
+  if (state.es) { state.es.close(); state.es = null; }
+  const id = state.jobId;
+  state.jobId = null;
+  showStep("drop");
+  if (id) { try { await fetch(`${API}/jobs/${id}`, { method: "DELETE" }); } catch {} }
 }
 
 // ---- step 3: review + viewer -----------------------------------------
