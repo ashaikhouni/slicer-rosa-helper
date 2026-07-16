@@ -128,6 +128,12 @@ def main(argv: list[str] | None = None) -> int:
              "surface support (skips running deepmriprep).",
     )
     parser.add_argument(
+        "--brainchop", action="store_true",
+        help="run brainchop's GM/WM MeshNet (bundled ONNX, torch-free, ~7 s CPU) and "
+             "mesh the surface inside its learned tissue — the zero-setup crisp "
+             "surface, used when neither FastSurfer nor deepmriprep is chosen.",
+    )
+    parser.add_argument(
         "--keep-cerebellum", action="store_true",
         help="keep cerebellum + brainstem in the FastSurfer surface (default: "
              "cerebrum-only).",
@@ -227,6 +233,7 @@ def main(argv: list[str] | None = None) -> int:
             drop_cerebellum=not bool(args.keep_cerebellum),
             deepmriprep=bool(args.deepmriprep),
             deepmriprep_tissue=args.deepmriprep_tissue or None,
+            brainchop=bool(args.brainchop),
             atlas_labelmap=args.atlas_labelmap or None,
             atlas_name=args.atlas_name,
             structure_meshes=args.structure_meshes or None,

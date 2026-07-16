@@ -69,10 +69,20 @@ def _deepmriprep_available() -> bool:
         return False
 
 
+def _brainchop_available() -> bool:
+    """True when the bundled brainchop GM/WM ONNX + onnxruntime are present (torch-free)."""
+    try:
+        from rosa_detect.services.brainchop_onnx import brainchop_available
+        return brainchop_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Which surface backend each source name maps to a cache filename.
 _SURFACE_CACHE_NAME = {
     "fastsurfer": "brain_surface_fs.npz",
     "deepmriprep": "brain_surface_dm.npz",
+    "brainchop": "brain_surface_bc.npz",
     "otsu": "brain_surface.npz",
 }
 
@@ -88,13 +98,18 @@ def _resolve_surface_source(surface_source: str | None) -> str:
         return "fastsurfer" if _fastsurfer_available() else _resolve_surface_source("auto")
     if src == "deepmriprep":
         return "deepmriprep" if _deepmriprep_available() else _resolve_surface_source("auto")
+    if src == "brainchop":
+        return "brainchop" if _brainchop_available() else _resolve_surface_source("auto")
     if src == "otsu":
         return "otsu"
-    # auto
+    # auto: prefer BYO recons (FastSurfer > deepmriprep), then the bundled
+    # torch-free brainchop MeshNet, then the Otsu grayscale-iso fallback.
     if _fastsurfer_available():
         return "fastsurfer"
     if _deepmriprep_available():
         return "deepmriprep"
+    if _brainchop_available():
+        return "brainchop"
     return "otsu"
 
 
@@ -132,6 +147,8 @@ def _brain_surface_view_flags(t1: str, regcache: Path, *,
         dm_p0 = regcache / "deepmriprep" / "p0.nii.gz"
         flags += (["--deepmriprep-tissue", str(dm_p0)] if dm_p0.is_file()
                   else ["--deepmriprep"])
+    elif src == "brainchop":
+        flags += ["--brainchop"]
     return flags
 
 

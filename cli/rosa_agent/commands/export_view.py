@@ -2833,6 +2833,7 @@ def _assemble_viewer(
     drop_cerebellum: bool = True,
     deepmriprep: bool = False,
     deepmriprep_tissue_path: Path | None = None,
+    brainchop: bool = False,
     atlas_labelmap_path: Path | None = None,
     atlas_name: str = "",
     structure_labelmap_path: Path | None = None,
@@ -2965,6 +2966,15 @@ def _assemble_viewer(
                     bs = gyral_surface_from_mri(
                         brain_native_volume_path, nmask, step_size=1, brain_tissue=tissue)
                     backend = f"{backend}+deepmriprep"
+                elif brainchop:
+                    # brainchop GM/WM MeshNet (bundled ONNX, torch-free): a learned,
+                    # dura-free tissue support → a crisp surface with zero setup.
+                    from rosa_detect.services.brainchop_onnx import brainchop_gmwm_support
+                    supp = brainchop_gmwm_support(brain_native_volume_path, log=_stderr)
+                    bs = gyral_surface_from_mri(
+                        brain_native_volume_path, nmask, step_size=1,
+                        brain_tissue=np.asanyarray(supp.dataobj))
+                    backend = f"{backend}+brainchop"
                 else:
                     bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
                 # aparc surface coloring (when a FastSurfer/FS aseg is available):
@@ -3364,6 +3374,7 @@ def run_view_results(
     drop_cerebellum: bool = True,
     deepmriprep: bool = False,
     deepmriprep_tissue: str | Path | None = None,
+    brainchop: bool = False,
     atlas_labelmap: str | Path | None = None,
     atlas_name: str = "",
     structure_meshes: str | Path | None = None,
@@ -3423,6 +3434,7 @@ def run_view_results(
         drop_cerebellum=drop_cerebellum,
         deepmriprep=deepmriprep,
         deepmriprep_tissue_path=(Path(deepmriprep_tissue) if deepmriprep_tissue else None),
+        brainchop=brainchop,
         atlas_labelmap_path=(Path(atlas_labelmap) if atlas_labelmap else None),
         atlas_name=atlas_name,
         structure_labelmap_path=(Path(structure_meshes) if structure_meshes else None),
