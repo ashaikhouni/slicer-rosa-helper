@@ -92,6 +92,35 @@ def _read_proposed_labels(job_dir: Path) -> list[dict]:
     return out
 
 
+def _regions_from_review(case_dir) -> dict:
+    """Map channel name → anatomical region from a case's saved review.json
+    (the labeled/edited state), for the cohort viewer's per-contact tooltip."""
+    import json
+    rj = Path(case_dir) / "review.json"
+    if not rj.is_file():
+        return {}
+    try:
+        doc = json.loads(rj.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    out = {}
+    for shank in doc.get("shanks", []):
+        for c in shank.get("contacts", []):
+            if c.get("name") and c.get("region"):
+                out[c["name"]] = c["region"]
+    return out
+
+
+def _cohort_hue(case_id: str) -> str:
+    """A stable, distinct-ish per-subject color (hashed case id → HSV → hex), so a
+    subject keeps its color as the cohort grows."""
+    import colorsys
+    import hashlib
+    h = (int(hashlib.md5(case_id.encode()).hexdigest()[:8], 16) % 997) / 997.0
+    r, g, b = colorsys.hsv_to_rgb(h, 0.55, 0.96)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
 def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) -> FastAPI:
     if work_root is None:
         work_root = os.environ.get("ROSA_APP_WORKDIR") \
@@ -755,6 +784,50 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=422,
                                 detail=f"DICOM conversion failed: {log.strip()[-400:]}")
         return {"path": str(out), "name": "ct.nii.gz", "deidentified": True, "log": log}
+
+    # ---- cohort MNI group viewer: shared three.js assets + pooled contacts ----
+    import rosa_agent
+    three_dir = Path(rosa_agent.__file__).resolve().parent / "commands" / "viewer_assets" / "three"
+    if three_dir.is_dir():                        # mounted before "/" so it wins
+        app.mount("/assets/three", StaticFiles(directory=str(three_dir)), name="three")
+
+    @app.get(f"/api/{API_VERSION}/cohort/brain.glb")
+    async def cohort_brain() -> FileResponse:
+        """The shared MNI152NLin2009cSym glass brain (prebuilt, committed)."""
+        import rosa_core
+        glb = (Path(rosa_core.__file__).resolve().parent / "resources"
+               / "atlases" / "templates" / "mni152_2009c_sym_glass.glb")
+        if not glb.is_file():
+            raise HTTPException(status_code=404, detail="MNI glass brain not built")
+        return FileResponse(str(glb), media_type="model/gltf-binary")
+
+    @app.get(f"/api/{API_VERSION}/cohort/contacts")
+    async def cohort_contacts() -> dict:
+        """Every MNI-poolable case's contacts pooled in MNI152NLin2009cSym for the
+        group viewer. Lazily (re)computes each case's contacts_mni cache and joins
+        the anatomical region from its review.json."""
+        from rosa_core import cohort as cohort_mod
+        subjects = []
+        for st in runner.list():                  # newest-first
+            if not (st.kind in ("pipeline", "import") and st.state == "succeeded"):
+                continue
+            case_dir = runner.get(st.id).workdir
+            if not cohort_mod.mni_transforms_present(case_dir / "regcache"):
+                continue
+            try:
+                rows = cohort_mod.ensure_contacts_mni(case_dir)
+            except Exception:                     # noqa: BLE001 — one bad case can't sink the cohort
+                continue
+            if not rows:
+                continue
+            regions = _regions_from_review(case_dir)
+            contacts = [[r["mni_x"], r["mni_y"], r["mni_z"],
+                         regions.get(r.get("name", "")) or "", r.get("hemisphere", ""),
+                         r.get("name", "")]
+                        for r in rows]
+            subjects.append({"id": st.id, "label": st.label or st.id[:8],
+                             "color": _cohort_hue(st.id), "contacts": contacts})
+        return {"space": cohort_mod.POOL_SPACE, "subjects": subjects}
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

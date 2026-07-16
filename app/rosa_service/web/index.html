@@ -27,6 +27,7 @@
         <div class="cases-actions">
           <button id="newcasebtn" class="primary">+ New case</button>
           <button id="importbtn" class="ghost">Import localization</button>
+          <button id="cohortbtn" class="ghost">Cohort &middot; MNI</button>
         </div>
       </div>
       <div class="cases-toolbar">
@@ -42,6 +43,15 @@
         CT, or import a localization from a batch CLI run.</p>
       <p id="casesnoresults" class="muted" hidden>No cases match your search.</p>
     </div>
+  </section>
+
+  <!-- Data Explorer: every subject's contacts pooled on one shared MNI brain -->
+  <section id="panel-cohort" class="panel">
+    <div class="cohort-head">
+      <button id="cohortback" class="ghost">&larr; Cases</button>
+      <h2>Cohort coverage <span class="muted">&middot; MNI152</span></h2>
+    </div>
+    <iframe id="cohortframe" class="cohort-frame" title="Cohort MNI viewer"></iframe>
   </section>
 
   <!-- Import an existing localization (CT + TSVs from a CLI run) -->

@@ -60,7 +60,7 @@ function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
   // The step bar tracks the new-case wizard (drop → run → review); it's noise on
   // the case list, the import form, and the workspace (which has its own flow).
-  document.body.classList.toggle("nosteps", ["cases", "import", "results"].includes(name));
+  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort"].includes(name));
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -1336,6 +1336,10 @@ async function boot() {
   $("restartbtn").onclick = showCases;          // workspace → back to the case list
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
   $("importbtn").onclick = () => showStep("import");
+  // Cohort MNI viewer (Data Explorer): reload the iframe each time so newly
+  // labeled cases get pooled in.
+  $("cohortbtn").onclick = () => { $("cohortframe").src = "/cohort/?t=" + Date.now(); showStep("cohort"); };
+  $("cohortback").onclick = showCases;
   $("importback").onclick = showCases;
   $("casesearch").addEventListener("input", (ev) => { state.caseSearch = ev.target.value; renderCases(); });
   $("casesfilter").addEventListener("click", (ev) => {
