@@ -943,7 +943,10 @@ const host = document.getElementById("canvas-host");
 host.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x101010);
+// Dark slate, NOT pure black: a translucent (ghost) brain vanishes against
+// 0x101010 — it needs a ground a few stops up to read against. Still dark
+// enough to keep the surface + electrodes the focus.
+scene.background = new THREE.Color(0x1e2530);
 // Ambient kept low so sulci actually cast shadow (high ambient washes the
 // folds flat — the "mushy from some angles" look). The key + fill lights are
 // repositioned every frame RELATIVE to the camera (see updateLights) so the
@@ -1044,7 +1047,7 @@ const structureNodes = [];               // deep-structure nodes (kind="structur
 // rotation), and a Fresnel shader keeps the silhouette opaque + lit so it reads
 // as a brain, not a hollow shell. Shared uniforms (same object handed to every
 // recompiled shader) so one .value write reaches all brain meshes.
-const GHOST_ALPHA = 0.14;
+const GHOST_ALPHA = 0.26;   // see-through centre floor — 0.14 was invisible on load
 const ghostUniforms = {{ uGhostOn: {{ value: 0.0 }} }};
 function _installGhostShader(material) {{
   material.onBeforeCompile = (shader) => {{
@@ -1425,16 +1428,34 @@ function _initSlicePanels() {{
     canvas.height = 256;
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
-    slicePanels[axis] = {{ canvas, ctx, coordEl: panel.querySelector(".slice-coord") }};
+    const pst = {{ canvas, ctx, coordEl: panel.querySelector(".slice-coord"), zoom: 1, panX: 0, panY: 0 }};
+    slicePanels[axis] = pst;
 
-    // Click / drag → move the crosshair to that in-plane point.
-    let dragging = false;
+    // Click / drag → move the crosshair. ⇧-drag or middle-drag → pan (only
+    // meaningful once zoomed in).
+    let dragging = false, panMode = false, panLast = null;
     const pick = (ev) => _sliceClickToRas(axis, canvas, ev);
-    canvas.addEventListener("pointerdown", (ev) => {{ dragging = true; canvas.setPointerCapture(ev.pointerId); pick(ev); }});
-    canvas.addEventListener("pointermove", (ev) => {{ if (dragging) pick(ev); }});
-    canvas.addEventListener("pointerup", (ev) => {{ dragging = false; try {{ canvas.releasePointerCapture(ev.pointerId); }} catch (_e) {{}} }});
-    // Wheel → scrub the through-plane slice, like a real navigator.
-    canvas.addEventListener("wheel", (ev) => {{ ev.preventDefault(); _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1); }}, {{ passive: false }});
+    canvas.addEventListener("pointerdown", (ev) => {{
+      canvas.setPointerCapture(ev.pointerId);
+      if ((ev.shiftKey || ev.button === 1) && pst.zoom > 1.001) {{
+        panMode = true; panLast = [ev.clientX, ev.clientY];
+      }} else {{ dragging = true; pick(ev); }}
+    }});
+    canvas.addEventListener("pointermove", (ev) => {{
+      if (panMode) {{
+        pst.panX += ev.clientX - panLast[0]; pst.panY += ev.clientY - panLast[1];
+        panLast = [ev.clientX, ev.clientY]; _applySliceView(pst);
+      }} else if (dragging) pick(ev);
+    }});
+    canvas.addEventListener("pointerup", (ev) => {{ dragging = false; panMode = false; try {{ canvas.releasePointerCapture(ev.pointerId); }} catch (_e) {{}} }});
+    // Wheel → scrub the through-plane slice, like a real navigator. Hold
+    // ⇧/⌘/⌃ → zoom the panel in/out instead.
+    canvas.addEventListener("wheel", (ev) => {{
+      ev.preventDefault();
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey) _sliceZoom(pst, ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+      else _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1);
+    }}, {{ passive: false }});
+    canvas.title = "Scroll: slice · ⇧/⌘-scroll: zoom · ⇧-drag: pan · dbl-click: maximize";
     canvas.style.cursor = "crosshair";
     // Double-click → maximize this panel over the 3D area (zoom); again → restore.
     panel.addEventListener("dblclick", (ev) => {{ ev.preventDefault(); _togglePanelZoom(panel); }});
@@ -1491,7 +1512,7 @@ function _sliceClickToRas(axis, canvas, ev) {{
   const c = mriVoxCursor.slice();
   if (axis === "axial") {{ c[0] = u; c[1] = vSrc; }}
   else if (axis === "coronal") {{ c[0] = u; c[2] = vSrc; }}
-  else {{ c[1] = u; c[2] = vSrc; }}   // sagittal
+  else {{ c[1] = W - 1 - u; c[2] = vSrc; }}   // sagittal: anterior LEFT
   locateAtRas(_apply4x4(mriVolume.affine, c));
 }}
 
@@ -1504,6 +1525,22 @@ function _sliceScroll(axis, step) {{
   locateAtRas(_apply4x4(mriVolume.affine, c));
 }}
 
+// Zoom + pan a slice panel by composing a CSS transform on its canvas (centred
+// on the panel, then panned, then scaled). Click→RAS still maps correctly
+// because _sliceClickToRas reads the live getBoundingClientRect.
+function _applySliceView(p) {{
+  if (!p || !p.canvas) return;
+  const z = p.zoom || 1, px = p.panX || 0, py = p.panY || 0;
+  p.canvas.style.transform =
+    "translate(-50%,-50%) translate(" + px + "px," + py + "px) scale(" + z + ")";
+}}
+function _sliceZoom(p, factor) {{
+  if (!p) return;
+  p.zoom = Math.max(1, Math.min(8, (p.zoom || 1) * factor));
+  if (p.zoom <= 1.001) {{ p.panX = 0; p.panY = 0; }}   // fully zoomed out → recentre
+  _applySliceView(p);
+}}
+
 // Single entry point for "put the crosshair at this RAS point": scrub the 2D
 // panels, move the in-scene cut planes onto it, drop the 3D locate beacon, and
 // tell the parent frame.
@@ -1513,6 +1550,26 @@ function locateAtRas(ras) {{
   locateMarker.position.set(ras[0], ras[1], ras[2]);
   locateMarker.visible = true;
   emitLocated(ras);
+}}
+
+// The slice buffer is W×H VOXELS, but voxels aren't square in-plane on an
+// anisotropic CT (e.g. 0.45×0.45×1.0 mm) — drawing them 1:1 stretches the
+// image (the "compressed" coronal/sagittal look). Size the canvas display box
+// to the PHYSICAL aspect (W·pdU):(H·pdV), centred, and let object-fit:fill
+// stretch the buffer into it so millimetres read square whatever the voxel
+// shape. No-op for isotropic volumes.
+function _applySlicePhysicalAspect(canvas, axis, W, H) {{
+  const pd = (mriVolume && mriVolume.pixdim) || [1, 1, 1];
+  let pdU, pdV;
+  if (axis === "axial")        {{ pdU = pd[0]; pdV = pd[1]; }}
+  else if (axis === "coronal") {{ pdU = pd[0]; pdV = pd[2]; }}
+  else                         {{ pdU = pd[1]; pdV = pd[2]; }}   // sagittal
+  const A = (W * (pdU || 1)) / (H * (pdV || 1));                 // physical w:h
+  const st = canvas.style;
+  if (A >= 1) {{ st.width = "100%"; st.height = (100 / A).toFixed(4) + "%"; }}
+  else        {{ st.height = "100%"; st.width = (100 * A).toFixed(4) + "%"; }}
+  st.left = "50%"; st.top = "50%"; st.right = "auto"; st.bottom = "auto";
+  st.objectFit = "fill";     // box already carries the physical aspect; _applySliceView sets transform
 }}
 
 function renderSlice(axis) {{
@@ -1535,6 +1592,8 @@ function renderSlice(axis) {{
   const canvas = panel.canvas;
   if (canvas.width !== W || canvas.height !== H) {{
     canvas.width = W; canvas.height = H;
+    _applySlicePhysicalAspect(canvas, axis, W, H);
+    _applySliceView(panel);   // establish centring (+ any active zoom/pan) transform
   }}
   const ctx = panel.ctx;
   const img = ctx.createImageData(W, H);
@@ -1560,7 +1619,7 @@ function renderSlice(axis) {{
       let i, j, k;
       if (axis === "axial") {{ i = u; j = vSrc; k = throughIdx; }}
       else if (axis === "coronal") {{ i = u; j = throughIdx; k = vSrc; }}
-      else {{ i = throughIdx; j = u; k = vSrc; }}
+      else {{ i = throughIdx; j = W - 1 - u; k = vSrc; }}   // sagittal: anterior LEFT (neuro convention)
       const raw = mriVolume.voxel(i, j, k);
       let g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
       if (fade) {{
@@ -1596,7 +1655,7 @@ function renderSlice(axis) {{
     let cu, cv;
     if (axis === "axial") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[1]; }}
     else if (axis === "coronal") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[2]; }}
-    else {{ cu = mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}
+    else {{ cu = W - 1 - mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}   // sagittal: anterior LEFT
     if (cu >= 0 && cu < W && cv >= 0 && cv < H) {{
       // Lines are drawn in canvas-buffer pixels but the canvas is
       // displayed at ~half size via CSS, so a 1px stroke ends up
@@ -1638,7 +1697,7 @@ function _drawContactDots(ctx, axis, W, H, throughIdx) {{
     let through, u, vSrc;
     if (axis === "axial") {{ through = ck; u = ci; vSrc = cj; }}
     else if (axis === "coronal") {{ through = cj; u = ci; vSrc = ck; }}
-    else {{ through = ci; u = cj; vSrc = ck; }}   // sagittal
+    else {{ through = ci; u = W - 1 - cj; vSrc = ck; }}   // sagittal: anterior LEFT
     if (Math.abs(through - throughIdx) > slabVox) continue;
     const cu = u, cv = H - 1 - vSrc;
     if (cu < 0 || cu >= W || cv < 0 || cv >= H) continue;

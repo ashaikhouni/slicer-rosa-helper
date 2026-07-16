@@ -47,6 +47,8 @@
   .viewport{display:grid;grid-template-columns:1.55fr 1fr;grid-template-rows:1fr 1fr;gap:7px;padding:7px;min-height:0}
   .frame{position:relative;background:#04070b;border:1px solid var(--line);border-radius:8px;overflow:hidden;min-height:0}
   #frameInline{grid-column:1;grid-row:1 / 3}#frameMip{grid-column:2;grid-row:1}#frameProbe{grid-column:2;grid-row:2}
+  /* dbl-click the MIP → promote it to the big centre cell (good canvas for adding electrodes) */
+  .viewport.mip-main #frameInline{grid-column:2;grid-row:1}.viewport.mip-main #frameMip{grid-column:1;grid-row:1 / 3}
   .frame canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
   .flabel{position:absolute;left:8px;top:7px;z-index:3;pointer-events:none;display:flex;gap:7px;align-items:baseline}
   .flabel .k{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:#9fb0c0;font-weight:700;text-shadow:0 1px 3px #000}
@@ -118,7 +120,7 @@
       <div class="rollbar"><span>Roll &#8635;</span><input type="range" id="roll" min="0" max="180" step="1" value="0"><span id="rollv" class="mono">0&deg;</span></div>
     </div>
     <div class="frame" id="frameMip"><canvas id="mipCv"></canvas>
-      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag to rotate &middot; click to select</span></div>
+      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag rotate &middot; click select &middot; dbl-click enlarge</span></div>
       <div class="addbanner" id="addBanner"><span class="step" id="addStep">Click the BOLT (entry)</span>
         <span class="mono" style="color:var(--muted)">then the deep tip &middot; arg-max &rarr; 3D</span>
         <button id="addCancel">Cancel</button></div>
@@ -299,7 +301,11 @@ function syncInspector(){const t=active();
   $("#depth").max=MODELS[t.model].n-1;$("#depth").value=clamp(+$("#depth").value,0,MODELS[t.model].n-1);}
 function resliceAll(){resliceInline();drawProbe();drawMIP();renderQC();}
 function blitAll(){blitInline();drawProbe();drawMIP();renderQC();}
-function afterDepth(){blitInline();drawProbe();renderQC();}
+// Contact scrub (depth slider / QC rows). drawProbe re-slices the whole HU
+// volume + renderQC rebuilds the list, so coalesce rapid ticks into one render
+// per frame instead of one full reslice per slider step.
+let _depthRAF=0;
+function afterDepth(){if(_depthRAF)return;_depthRAF=requestAnimationFrame(()=>{_depthRAF=0;blitInline();drawProbe();renderQC();});}
 function selectTraj(id){activeId=id;panU=0;panV=0;renderList();syncInspector();resliceAll();}
 function toast(m){const el=$("#toast");el.innerHTML=m;el.classList.add("on");clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove("on"),2100);}
 function initModels(){const sel=$("#model");sel.innerHTML="";
@@ -401,9 +407,25 @@ window.addEventListener("pointermove",e=>{if(!mipDrag)return;const dx=e.clientX-
   if(Math.hypot(dx,dy)>3)mipDrag.moved=true;
   if(mipDrag.moved){mipAz=mipDrag.az-dx*0.008;mipEl=clamp(mipDrag.el+dy*0.008,0.25,1.45);
     if(!_mipRAF)_mipRAF=requestAnimationFrame(()=>{_mipRAF=0;drawMIP(true);});}});
+let _mipClickTimer=0;
 window.addEventListener("pointerup",()=>{if(!mipDrag)return;const md=mipDrag;mipDrag=null;
-  if(md.moved)drawMIP(false);else mipClickPt(mipPick3D(md.cx,md.cy));});
+  if(md.moved){drawMIP(false);return;}
+  if(addMode){mipClickPt(mipPick3D(md.cx,md.cy));return;}          // adds stay instant
+  const cx=md.cx,cy=md.cy;                                          // select: defer so a dbl-click (enlarge) doesn't also jump selection
+  clearTimeout(_mipClickTimer);_mipClickTimer=setTimeout(()=>mipClickPt(mipPick3D(cx,cy)),260);});
 window.addEventListener("keydown",e=>{if(e.key==="Escape"&&addMode)setAdd(false);});
+
+// Double-click a panel → promote it to the big centre cell. On the MIP this
+// gives a large canvas for adding electrodes; cancel the pending select first.
+function toggleMain(which){const vp=$(".viewport");
+  if(which==="mip")vp.classList.toggle("mip-main");else vp.classList.remove("mip-main");
+  requestAnimationFrame(()=>requestAnimationFrame(resliceAll));}    // re-fit canvases once the grid relayouts
+$("#frameMip").addEventListener("dblclick",()=>{if(addMode)return;clearTimeout(_mipClickTimer);toggleMain("mip");});
+$("#frameInline").addEventListener("dblclick",()=>toggleMain("inline"));
+// Zoom already lives on the mouse wheel — surface it so it's discoverable.
+$("#inlineCv").title="Scroll: zoom · drag E/T handles: move · drag empty: pan";
+$("#probeCv").title="Scroll: zoom · use the depth slider (right) to step contacts";
+$("#mipCv").title="Drag: rotate · click: select · scroll: zoom · dbl-click: enlarge";
 
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";
