@@ -2903,6 +2903,7 @@ def _assemble_viewer(
             from types import SimpleNamespace
             from rosa_core.brain_mesh import BrainSurface
             scache = Path(brain_surface_cache_path) if brain_surface_cache_path else None
+            nmask = None; sitk_tf = None   # set on the mesh path; resolved from cache for the self-heal below
             if scache is not None and scache.is_file():
                 # The surface is atlas-independent (it depends only on the MRI +
                 # CT + registration, all fixed per case), so it's built ONCE per
@@ -2998,14 +2999,30 @@ def _assemble_viewer(
                     extra = {"c": brain_colors} if brain_colors is not None else {}
                     np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals, **extra)
                     _stderr(f"[view] cached brain surface → {scache.name}")
-                    # Brain-extracted MRI in the CT frame → the DVR volume (cached
-                    # with the surface, atlas-independent). An isosurface raycast
-                    # of this in the browser is the mesh-free "volume brain".
+            # Brain-extracted MRI in the CT frame → the DVR volume the browser
+            # raycasts as a mesh-free "volume brain". Written whenever it's missing
+            # — DECOUPLED from the surface cache, so a case whose DVR failed once
+            # (or predates it) self-heals on the next view instead of only on a
+            # surface re-mesh. Uses the per-case cached mask + T1→CT transform (or
+            # the freshly-computed ones when we just meshed).
+            if scache is not None:
+                dvr_path = scache.parent / "brain_mri_in_ct.nii.gz"
+                mcache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+                if not dvr_path.is_file():
                     try:
                         import SimpleITK as sitk
-                        dvr = _brain_mri_dvr_volume(brain_native_volume_path, nmask, sitk_tf, ct_path)
-                        sitk.WriteImage(dvr, str(scache.parent / "brain_mri_in_ct.nii.gz"))
-                        _stderr("[view] cached DVR volume → brain_mri_in_ct.nii.gz")
+                        from rosa_core.registration import load_transform
+                        tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
+                        tf = sitk_tf if sitk_tf is not None else (
+                            load_transform(str(tfp)) if tfp and tfp.is_file() else None)
+                        nm = nmask if nmask is not None else (
+                            mcache if mcache and mcache.is_file() else None)
+                        if tf is not None and nm is not None:
+                            dvr = _brain_mri_dvr_volume(brain_native_volume_path, nm, tf, ct_path)
+                            sitk.WriteImage(dvr, str(dvr_path))
+                            _stderr("[view] cached DVR volume → brain_mri_in_ct.nii.gz")
+                        else:
+                            _stderr("[view] DVR volume skipped (no cached mask/transform)")
                     except Exception as exc:  # noqa: BLE001
                         _stderr(f"[view] DVR volume failed ({exc})")
             surfaces = [SimpleNamespace(
