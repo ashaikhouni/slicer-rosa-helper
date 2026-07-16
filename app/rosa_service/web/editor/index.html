@@ -120,7 +120,7 @@
       <div class="rollbar"><span>Roll &#8635;</span><input type="range" id="roll" min="0" max="180" step="1" value="0"><span id="rollv" class="mono">0&deg;</span></div>
     </div>
     <div class="frame" id="frameMip"><canvas id="mipCv"></canvas>
-      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag rotate &middot; click select &middot; dbl-click enlarge</span></div>
+      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag rotate &middot; drag E/T to edit &middot; dbl-click enlarge</span></div>
       <div class="addbanner" id="addBanner"><span class="step" id="addStep">Click the BOLT (entry)</span>
         <span class="mono" style="color:var(--muted)">then the deep tip &middot; arg-max &rarr; 3D</span>
         <button id="addCancel">Cancel</button></div>
@@ -271,7 +271,9 @@ function drawMIP(draft){const cv=$("#mipCv"),G=mipGeom(cv,draft?150:280),g=cv.ge
   CASE.trajectories.forEach(t=>{const on=t.name===activeId,e=G.toScreen(t.entry),tp=G.toScreen(t.target);
     g.strokeStyle=on?t.color:"rgba(150,168,186,.55)";g.lineWidth=on?1.8:0.9;
     g.beginPath();g.moveTo(e[0],e[1]);g.lineTo(tp[0],tp[1]);g.stroke();
-    if(on){g.fillStyle=t.color;g.beginPath();g.arc(tp[0],tp[1],2.2,0,7);g.fill();g.strokeRect(e[0]-2.5,e[1]-2.5,5,5);}});
+    if(on){g.fillStyle=t.color;g.strokeStyle="#fff";g.lineWidth=1.6;    // grabbable E/T handles
+      g.beginPath();g.arc(tp[0],tp[1],4,0,7);g.fill();g.stroke();                 // target = round
+      g.fillRect(e[0]-4,e[1]-4,8,8);g.strokeRect(e[0]-4,e[1]-4,8,8);}});          // entry = square
   addPts.forEach(P=>{const[x,y]=G.toScreen(P);g.strokeStyle="#e3b23c";g.lineWidth=1.3;
     g.beginPath();g.moveTo(x-4,y);g.lineTo(x+4,y);g.moveTo(x,y-4);g.lineTo(x,y+4);g.stroke();});
   _mipG=G;
@@ -400,15 +402,35 @@ function mipClickPt(P){
     CASE.trajectories.push(t);setAdd(false);selectTraj(id);snapActive();toast("Added <span class='mono'>"+id+"</span> &middot; snapped &middot; refine E/T");
   }else{let best=null,bd=9;CASE.trajectories.forEach(t=>{const dd=distToSeg(P,t.entry,t.target);if(dd<bd){bd=dd;best=t.name;}});if(best)selectTraj(best);}
 }
-let mipDrag=null;
+// Grab the active trajectory's E/T handle under the cursor (project world->image
+// px, compare in CSS px). dw = the handle's depth along the view, held fixed so
+// dragging moves it in the screen plane; rotate to correct the other axis.
+function mipHitHandle(cx,cy,r){const t=active();if(!t||!_mipG)return null;const G=_mipG;
+  for(const key of ["target","entry"]){const s=G.toScreen(t[key]);
+    const hx=s[0]*r.width/G.IW,hy=s[1]*r.height/G.IH;
+    if(Math.hypot(hx-cx,hy-cy)<15)return {key,dw:dot(sub(t[key],C0),G.w)};}
+  return null;}
+let mipDrag=null,mipEdit=null;
 $("#mipCv").addEventListener("pointerdown",e=>{const r=e.currentTarget.getBoundingClientRect();
-  mipDrag={sx:e.clientX,sy:e.clientY,az:mipAz,el:mipEl,moved:false,cx:e.clientX-r.left,cy:e.clientY-r.top};e.preventDefault();});
-window.addEventListener("pointermove",e=>{if(!mipDrag)return;const dx=e.clientX-mipDrag.sx,dy=e.clientY-mipDrag.sy;
+  const cx=e.clientX-r.left,cy=e.clientY-r.top;
+  if(!addMode){const h=mipHitHandle(cx,cy,r);if(h){mipEdit={key:h.key,dw:h.dw,r};e.preventDefault();return;}}  // edit an endpoint
+  mipDrag={sx:e.clientX,sy:e.clientY,az:mipAz,el:mipEl,moved:false,cx,cy};e.preventDefault();});
+$("#mipCv").addEventListener("mousemove",e=>{if(mipDrag||mipEdit||addMode)return;   // hover: show the handle is grabbable
+  const r=e.currentTarget.getBoundingClientRect();
+  e.currentTarget.style.cursor=mipHitHandle(e.clientX-r.left,e.clientY-r.top,r)?"move":"default";});
+window.addEventListener("pointermove",e=>{
+  if(mipEdit){const G=_mipG,r=mipEdit.r,dw=mipEdit.dw;
+    const p=((e.clientX-r.left)/r.width*G.IW-G.IW/2)*G.pu,q=((e.clientY-r.top)/r.height*G.IH-G.IH/2)*G.pu;
+    active()[mipEdit.key]=[C0[0]+G.u[0]*p+G.v[0]*q+G.w[0]*dw,C0[1]+G.u[1]*p+G.v[1]*q+G.w[1]*dw,C0[2]+G.u[2]*p+G.v[2]*q+G.w[2]*dw];
+    blitInline();if(!_mipRAF)_mipRAF=requestAnimationFrame(()=>{_mipRAF=0;drawMIP(true);});return;}
+  if(!mipDrag)return;const dx=e.clientX-mipDrag.sx,dy=e.clientY-mipDrag.sy;
   if(Math.hypot(dx,dy)>3)mipDrag.moved=true;
-  if(mipDrag.moved){mipAz=mipDrag.az-dx*0.008;mipEl=clamp(mipDrag.el+dy*0.008,0.25,1.45);
+  if(mipDrag.moved){mipAz=mipDrag.az-dx*0.008;mipEl=clamp(mipDrag.el+dy*0.008,-1.5,1.5);   // full-orbit vertical tilt
     if(!_mipRAF)_mipRAF=requestAnimationFrame(()=>{_mipRAF=0;drawMIP(true);});}});
 let _mipClickTimer=0;
-window.addEventListener("pointerup",()=>{if(!mipDrag)return;const md=mipDrag;mipDrag=null;
+window.addEventListener("pointerup",()=>{
+  if(mipEdit){mipEdit=null;resliceAll();return;}                    // committed an endpoint edit
+  if(!mipDrag)return;const md=mipDrag;mipDrag=null;
   if(md.moved){drawMIP(false);return;}
   if(addMode){mipClickPt(mipPick3D(md.cx,md.cy));return;}          // adds stay instant
   const cx=md.cx,cy=md.cy;                                          // select: defer so a dbl-click (enlarge) doesn't also jump selection
@@ -425,7 +447,7 @@ $("#frameInline").addEventListener("dblclick",()=>toggleMain("inline"));
 // Zoom already lives on the mouse wheel — surface it so it's discoverable.
 $("#inlineCv").title="Scroll: zoom · drag E/T handles: move · drag empty: pan";
 $("#probeCv").title="Scroll: zoom · use the depth slider (right) to step contacts";
-$("#mipCv").title="Drag: rotate · click: select · scroll: zoom · dbl-click: enlarge";
+$("#mipCv").title="Drag: rotate (full orbit) · drag the E/T dots: edit endpoints · click: select · scroll: zoom · dbl-click: enlarge";
 
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";

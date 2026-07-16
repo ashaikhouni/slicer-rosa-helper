@@ -648,11 +648,31 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         ct = job.params.get("ct")
         rebuild = None
         if ct:                              # rebuild the 3D scene from the new TSVs
-            spec = JobSpec(kind="rebuild", params={
+            params = {
                 "case_dir": str(job.workdir), "ct": ct,
                 "label": job.params.get("label", "case"),
                 "surface": job.params.get("surface", "auto"),
-                **({"t1": job.params["t1"]} if job.params.get("t1") else {})})
+                **({"t1": job.params["t1"]} if job.params.get("t1") else {})}
+            # Carry the case's atlas through the rebuild so it doesn't vanish after
+            # an edit — especially THOMAS deep-structure meshes, which have no
+            # cached-surface fallback. The atlas artifacts live in the case's
+            # newest succeeded label job's workdir; re-pass what that job passed.
+            for st in runner.list():        # newest-first → the currently-shown atlas
+                if st.kind != "label" or st.parent != job_id or st.state != "succeeded":
+                    continue
+                atlas = str(st.atlas or "")
+                labelmap = runner.get(st.id).workdir / "atlas_in_ct.nii.gz"
+                if atlas and atlas != "fastsurfer" and labelmap.is_file():
+                    is_thomas = atlas.startswith("thomas")
+                    params["atlas_labelmap"] = str(labelmap)
+                    params["atlas_name"] = "THOMAS" if is_thomas else atlas
+                    if is_thomas:
+                        params["structure_meshes"] = str(labelmap)
+                        lut = labelmap.with_name("atlas_in_ct.nii.gz.lut.json")
+                        if lut.is_file():
+                            params["structure_lut"] = str(lut)
+                break                       # only the newest succeeded label job
+            spec = JobSpec(kind="rebuild", params=params)
             try:
                 rebuild = runner.create(spec).status().model_dump()
             except ValueError:

@@ -381,6 +381,20 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                 t1, cd / "regcache",
                 include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
                 surface_source=surface)
+        # Re-attach the atlas the case was labeled with (resolved by app.py from
+        # the case's label job). The cortical surface survives via its cache but
+        # the atlas TINT does not, and THOMAS deep-structure meshes have no cache
+        # fallback at all — so without these flags they vanish on every rebuild.
+        atlas_labelmap = spec.params.get("atlas_labelmap")
+        if atlas_labelmap:
+            view += ["--atlas-labelmap", str(atlas_labelmap)]
+            if spec.params.get("atlas_name"):
+                view += ["--atlas-name", str(spec.params["atlas_name"])]
+        structure_meshes = spec.params.get("structure_meshes")
+        if structure_meshes:
+            view += ["--structure-meshes", str(structure_meshes)]
+            if spec.params.get("structure_lut"):
+                view += ["--structure-lut", str(spec.params["structure_lut"])]
         return [view]
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
