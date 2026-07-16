@@ -55,9 +55,10 @@ hidden += _submodules("skimage")
 # We only use InferenceSession, so drop the optional tooling (transformers model
 # zoo, quantization, training, tools) — smaller bundle, faster analysis/import.
 ort_d, ort_b, ort_h = collect_all("onnxruntime")
-_ort_drop = ("onnxruntime.transformers", "onnxruntime.tools",
-             "onnxruntime.quantization", "onnxruntime.training")
-ort_h = [h for h in ort_h if not h.startswith(_ort_drop)]
+_ort_drop = ("transformers", "tools", "quantization", "training")
+ort_h = [h for h in ort_h if not any(f"onnxruntime.{d}" in h for d in _ort_drop)]
+ort_d = [(s, dd) for (s, dd) in ort_d
+         if not any(f"onnxruntime/{d}" in str(dd).replace("\\", "/") for d in _ort_drop)]
 datas += ort_d; binaries += ort_b; hidden += ort_h
 
 EXCLUDES = [
