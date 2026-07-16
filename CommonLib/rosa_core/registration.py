@@ -150,6 +150,26 @@ DEFAULT_NUM_ITERATIONS = 200
 DEFAULT_NUM_HISTOGRAM_BINS = 50
 DEFAULT_SHRINK_FACTORS = (4, 2, 1)
 DEFAULT_SMOOTHING_SIGMAS_MM = (2.0, 1.0, 0.0)
+# Fit at ≤1 mm: a rigid/affine transform is resolution-independent in physical
+# space, so fitting on a downsampled copy gives the SAME transform far faster on
+# sub-mm inputs (e.g. a 0.25 mm 1024³ MRI). ~1 mm is well below rigid fit error.
+DEFAULT_MAX_FIT_SPACING_MM = 1.0
+
+
+def _downsample_for_fit(img, max_spacing_mm):
+    """Coarsen ``img`` so no axis is finer than ``max_spacing_mm`` (registration
+    only; the transform still applies to the full-res data). Axes already coarser
+    are untouched — anisotropy preserved. ``None``/0 disables."""
+    import SimpleITK as sitk
+    if not max_spacing_mm:
+        return img
+    sp = img.GetSpacing()
+    if min(sp) >= float(max_spacing_mm):
+        return img
+    new_sp = tuple(max(float(s), float(max_spacing_mm)) for s in sp)
+    new_size = [max(1, int(round(sz * s / ns))) for sz, s, ns in zip(img.GetSize(), sp, new_sp)]
+    return sitk.Resample(img, new_size, sitk.Transform(), sitk.sitkLinear,
+                         img.GetOrigin(), new_sp, img.GetDirection(), 0.0, img.GetPixelID())
 
 
 def register_rigid_mi(
@@ -165,6 +185,7 @@ def register_rigid_mi(
     smoothing_sigmas_mm: tuple[float, ...] = DEFAULT_SMOOTHING_SIGMAS_MM,
     init_mode: str = "geometry",
     metal_clip_hu: float | None = None,
+    max_fit_spacing_mm: float | None = DEFAULT_MAX_FIT_SPACING_MM,
     seed: int = 1,
     logger: Optional[Callable[[str], None]] = None,
 ) -> RegistrationResult:
@@ -219,6 +240,9 @@ def register_rigid_mi(
         clip = float(metal_clip_hu)
         fixed_f = sitk.Threshold(fixed_f, lower=-1e6, upper=clip, outsideValue=clip)
         moving_f = sitk.Threshold(moving_f, lower=-1e6, upper=clip, outsideValue=clip)
+    # Fit at ≤ max_fit_spacing_mm — same transform, far faster on sub-mm inputs.
+    fixed_f = _downsample_for_fit(fixed_f, max_fit_spacing_mm)
+    moving_f = _downsample_for_fit(moving_f, max_fit_spacing_mm)
 
     # Initial transform: align image centers (geometry) or center of mass.
     if str(init_mode).lower() in ("moments", "moment", "useMomentsAlign".lower()):
@@ -292,6 +316,7 @@ def register_affine_mi(
     shrink_factors: tuple[int, ...] = DEFAULT_SHRINK_FACTORS,
     smoothing_sigmas_mm: tuple[float, ...] = DEFAULT_SMOOTHING_SIGMAS_MM,
     init_mode: str = "geometry",
+    max_fit_spacing_mm: float | None = DEFAULT_MAX_FIT_SPACING_MM,
     seed: int = 1,
     logger: Optional[Callable[[str], None]] = None,
 ) -> RegistrationResult:
@@ -319,8 +344,8 @@ def register_affine_mi(
             f"smoothing_sigmas_mm ({len(smoothing_sigmas_mm)}) must align"
         )
 
-    fixed_f = sitk.Cast(fixed, sitk.sitkFloat32)
-    moving_f = sitk.Cast(moving, sitk.sitkFloat32)
+    fixed_f = _downsample_for_fit(sitk.Cast(fixed, sitk.sitkFloat32), max_fit_spacing_mm)
+    moving_f = _downsample_for_fit(sitk.Cast(moving, sitk.sitkFloat32), max_fit_spacing_mm)
 
     if str(init_mode).lower() in ("moments", "moment", "usemomentsalign"):
         init_filter = sitk.CenteredTransformInitializerFilter.MOMENTS

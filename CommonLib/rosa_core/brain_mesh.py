@@ -494,6 +494,15 @@ def gyral_surface_from_mri(
 
     vimg = volume if hasattr(volume, "dataobj") else nib.load(str(volume))
     mimg = brain_mask if hasattr(brain_mask, "dataobj") else nib.load(str(brain_mask))
+    # Cap the working resolution at ~1 mm on the Otsu path: the surface is a
+    # physical-space mesh (verts in RAS), so meshing a sub-mm subject at native
+    # res just yields millions of redundant verts and a slow N4 + marching-cubes
+    # for no visible gain. (The brain_tissue path keeps native res — its support
+    # array is already on the native grid.)
+    if brain_tissue is None and min(vimg.header.get_zooms()[:3]) < 0.9:
+        from nibabel.processing import resample_to_output
+        vimg = resample_to_output(vimg, voxel_sizes=1.0, order=1)
+        mimg = resample_to_output(mimg, voxel_sizes=1.0, order=0)   # nearest for the mask
     t1 = np.asanyarray(vimg.dataobj).astype(np.float32)
     m = np.asanyarray(mimg.dataobj) > 0
     if m.sum() == 0:

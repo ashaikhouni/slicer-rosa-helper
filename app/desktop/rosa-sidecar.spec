@@ -52,7 +52,12 @@ hidden += _submodules("skimage")
 # 4b) onnxruntime — torch-free ONNX inference for the bundled deepbet skull-strip
 # (its native libonnxruntime .dylib + capi come via collect_all). The deepbet
 # ONNX weights themselves ride along in rosa_core/resources (collected above).
+# We only use InferenceSession, so drop the optional tooling (transformers model
+# zoo, quantization, training, tools) — smaller bundle, faster analysis/import.
 ort_d, ort_b, ort_h = collect_all("onnxruntime")
+_ort_drop = ("onnxruntime.transformers", "onnxruntime.tools",
+             "onnxruntime.quantization", "onnxruntime.training")
+ort_h = [h for h in ort_h if not h.startswith(_ort_drop)]
 datas += ort_d; binaries += ort_b; hidden += ort_h
 
 EXCLUDES = [
