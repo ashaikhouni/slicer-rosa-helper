@@ -229,6 +229,11 @@ def _brain_mri_dvr_volume(native_mri_path, native_mask_path, sitk_transform, ct_
 
     mri = sitk.Cast(sitk.ReadImage(str(native_mri_path)), sitk.sitkFloat32)
     mask = sitk.Cast(sitk.ReadImage(str(native_mask_path)) > 0, sitk.sitkFloat32)
+    # Same native grid — align the geometry metadata so a strip backend's tiny
+    # direction-cosine drift (e.g. an oblique volume round-tripped through
+    # nibabel) doesn't trip SITK's strict physical-space check on the multiply.
+    if mask.GetSize() == mri.GetSize():
+        mask.CopyInformation(mri)
     masked = mri * mask                                   # same native grid
     inct = resample_volume(masked, sitk_transform, reference=sitk.ReadImage(str(ct_path)),
                            interp="linear")

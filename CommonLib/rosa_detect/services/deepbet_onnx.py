@@ -141,18 +141,27 @@ def run_deepbet_onnx(
     sub = ndi.binary_fill_holes(_largest_cc(mask[bbox]))
     mask[bbox] = sub
 
-    # reorient the canonical mask back to the input's native orientation + save
-    # with the input's geometry (deepbet.utils.reoriented_nifti).
+    # Reorient the canonical mask back to the input's native voxel order.
     ornt_ras = [[0, 1], [1, 1], [2, 1]]
     ornt_inv = nib.orientations.ornt_transform(ornt_ras, nib.io_orientation(img.affine))
-    out = nib.apply_orientation(mask.astype(np.uint8), ornt_inv)
-    out_img = nib.Nifti1Image(out, img.affine, img.header)
-    out_img.header.set_data_dtype(np.uint8)
-    out_img.to_filename(str(mask_path))
+    native = nib.apply_orientation(mask.astype(np.uint8), ornt_inv)   # nibabel (i,j,k) order
 
-    # match the sform/qform exactly to the input (shared with the other backends).
-    from .synthstrip import fix_mask_geometry
-    fix_mask_geometry(input_path, mask_path)
+    # Write with the input's EXACT physical space via SITK CopyInformation — the
+    # nibabel affine round-trip drifts the direction cosines (~1e-5) on OBLIQUE
+    # volumes, and SITK's strict physical-space check (e.g. the DVR's mri*mask)
+    # then rejects it. CopyInformation copies origin/spacing/direction bit-for-bit.
+    import SimpleITK as sitk
+    ref = sitk.ReadImage(str(input_path))
+    if ref.GetDimension() == 3 and tuple(ref.GetSize()) == native.shape:
+        m = sitk.GetImageFromArray(np.ascontiguousarray(np.transpose(native, (2, 1, 0))))
+        m.CopyInformation(ref)                         # SITK img (i,j,k) == native[i,j,k]
+        sitk.WriteImage(sitk.Cast(m, sitk.sitkUInt8), str(mask_path))
+    else:  # 4-D / odd inputs: fall back to the nibabel write + geometry fixup
+        out_img = nib.Nifti1Image(native, img.affine, img.header)
+        out_img.header.set_data_dtype(np.uint8)
+        out_img.to_filename(str(mask_path))
+        from .synthstrip import fix_mask_geometry
+        fix_mask_geometry(input_path, mask_path)
     log(f"[deepbet-onnx] wrote mask ({int(mask.sum())} voxels)")
     return mask_path
 
