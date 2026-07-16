@@ -1,19 +1,25 @@
-"""Rigid AC-PC reorientation for slice QC.
+"""AC-PC reorientation for a standardized clinician slice view.
 
-The head is rarely axis-aligned in the scanner bore, so native-frame slices
-show a tilted brain — hard to read as standard neuroanatomical planes. Rigidly
-register the patient's MRI to the AC-PC-aligned MNI152 template and resample
-BOTH the CT and the MRI onto that grid: the anatomy comes upright in axial /
-coronal / sagittal planes.
+The head is rarely axis-aligned in the scanner bore, so native slices show a
+tilted brain — hard to read as standard neuroanatomical planes. This estimates
+the AC-PC orientation and reslices the images along it, so axial / coronal /
+sagittal read the way a clinician expects.
 
-Rigid (6-DOF) on purpose: it reorients without deforming, so electrode shafts
-stay straight and inter-contact distances are preserved. (The atlas warp is
-affine/nonlinear — fine for label placement, but it shears or bends geometry, so
-it is the wrong tool for a view you might measure an electrode in.)
+Two deliberate choices, per the design discussion:
+
+* **The registration is only a *ruler for the tilt*, not a resampling target.**
+  A quick, coarse rigid fit of the MRI to the AC-PC-aligned MNI template gives
+  the rotation; we then reslice the *native* pixels along it. Nothing is ever
+  shown in MNI space — that (nonlinear) warp is a labeling concern.
+
+* **Native intensities, upright, head-centred.** The patient's own CT + MRI are
+  resampled (rigid = no deformation) onto the AC-PC-aligned template grid at
+  1 mm, padded symmetrically to include the skull. The head stays centred and
+  reads as standard planes; nothing is warped to MNI.
 
 The MRI drives the fit (same modality as the template → robust); the CT rides
-along on the already-cached rigid ``t1_to_ct`` transform. So no CT↔template
-cross-modality registration is needed.
+along on the already-cached rigid ``t1_to_ct``, so no CT↔template cross-modality
+registration is needed.
 """
 from __future__ import annotations
 
@@ -23,30 +29,27 @@ from typing import Callable, Optional
 from .bundled_atlases import resolve as _resolve_atlas
 from .registration import load_transform, register_rigid_mi, resample_volume
 
-
 def default_template_path() -> Path:
-    """The bundled MNI152 T1w template (AC-PC aligned) used as the reorient grid."""
+    """The bundled MNI152 T1w template (AC-PC aligned) used as the orientation ruler."""
     return _resolve_atlas(None).template_path
 
 
-def _isotropic_reference(template, mm: float):
-    """A resampling grid: the template's origin/orientation at ``mm`` spacing.
+def _acpc_grid(template, *, pad_mm: float = 25.0):
+    """The template's AC-PC grid, padded SYMMETRICALLY to include the skull.
 
-    Keeps the QC output at a fixed resolution regardless of the default atlas's
-    template spacing (the bundled 2009c template is already 1 mm; a coarser
-    template would otherwise give soft QC planes). Same AC-PC orientation + FOV;
-    only the output grid changes — the rigid transform is unaffected.
+    The template is skull-stripped (brain-tight), so resampling onto it alone
+    clips the cranium. Pad it a fixed amount on every side: symmetric padding
+    keeps the head centred (so it reads as upright, cleanly framed — an
+    asymmetric, CT-bbox-fitted pad instead shoves the head off-centre and the
+    rotated acquisition-box edge then *looks* like a tilt). ``sitk.ConstantPad``
+    preserves the template's exact geometry + voxel-axis storage, so the result
+    renders identically to the (known-good) template grid, just larger.
     """
     import SimpleITK as sitk
 
-    sp = template.GetSpacing()
-    sz = template.GetSize()
-    new_size = [max(1, int(round(sz[i] * sp[i] / mm))) for i in range(3)]
-    ref = sitk.Image(new_size, template.GetPixelID())
-    ref.SetOrigin(template.GetOrigin())
-    ref.SetDirection(template.GetDirection())
-    ref.SetSpacing((mm, mm, mm))
-    return ref
+    tsp = template.GetSpacing()
+    pad = [int(round(pad_mm / tsp[k])) for k in range(3)]
+    return sitk.ConstantPad(template, pad, pad, 0.0)
 
 
 def reorient_to_acpc(
@@ -58,26 +61,24 @@ def reorient_to_acpc(
     *,
     template_path: str | Path | None = None,
     brain_mask_path: str | Path | None = None,
-    out_mm: float = 1.0,
     logger: Optional[Callable[[str], None]] = None,
 ) -> dict:
-    """Resample CT + MRI onto the AC-PC-aligned MNI grid (rigid), write both.
+    """Reslice CT + MRI along AC-PC (1 mm, head-centred, skull included), write both.
 
     Args:
         ct_path: postop CT (native frame).
-        mri_path: preop MRI (T1, native frame) — drives the fit.
-        t1_to_ct_path: cached rigid transform from case creation. Computed with
-            ``fixed=CT, moving=T1`` (see brain-extract ``--save-transform``), so
-            it maps CT→T1; we invert it for T1→CT.
+        mri_path: preop MRI (T1, native frame) — drives the rotation fit.
+        t1_to_ct_path: cached rigid transform from case creation, computed with
+            ``fixed=CT, moving=T1`` (maps CT→T1); inverted here for T1→CT.
         out_ct / out_mri: where to write ``ct_in_acpc`` / ``mri_in_acpc``.
-        template_path: MNI template to reorient to (default: the bundled one).
+        template_path: AC-PC-aligned MNI template used as the tilt ruler.
         brain_mask_path: optional native-T1 brain mask — masking the skull off
             the MRI keeps the rigid fit from being pulled by the (template-
-            absent) cranium. Ignored if missing.
+            absent) cranium.
         logger: optional ``logger(str)`` progress callback.
 
     Returns:
-        ``{"metric": float, "n_iterations": int, "out_ct": str, "out_mri": str}``.
+        ``{"metric", "n_iterations", "out_ct", "out_mri"}``.
     """
     import SimpleITK as sitk
 
@@ -86,8 +87,8 @@ def reorient_to_acpc(
     t1 = sitk.ReadImage(str(mri_path), sitk.sitkFloat32)
     ct = sitk.ReadImage(str(ct_path), sitk.sitkFloat32)
 
-    # The template is skull-stripped; mask the MRI to brain so the cranium (which
-    # has no counterpart in the template) can't steer the mutual-information fit.
+    # The template is skull-stripped; mask the MRI to brain so the cranium (with
+    # no template counterpart) can't steer the mutual-information fit.
     moving = t1
     if brain_mask_path and Path(brain_mask_path).is_file():
         mask = sitk.ReadImage(str(brain_mask_path))
@@ -95,36 +96,40 @@ def reorient_to_acpc(
                              0, mask.GetPixelID())
         moving = sitk.Mask(t1, sitk.Cast(mask != 0, sitk.sitkUInt8))
         if logger is not None:
-            logger("[acpc] masked MRI to brain for the rigid fit")
+            logger("[acpc] masked MRI to brain for the tilt fit")
 
-    # fixed=template, moving=MRI → transform maps template→MRI (a resampling
-    # transform: for each template-grid point, where to sample the MRI). moments
-    # init aligns brain centres-of-mass — robust for brain↔brain.
+    # Rigid fit — the ORIENTATION only. fixed=template, moving=MRI → transform
+    # maps template→MRI (resampling convention). moments init aligns brain
+    # centres-of-mass, robust for brain↔brain. Uses the full multi-res pyramid: a
+    # coarse-only "quick" fit left a visible residual tilt, and a standardized
+    # view has to actually be straight (this is still a ~5s one-time, cached fit).
     if logger is not None:
-        logger("[acpc] rigid MRI → MNI template (AC-PC) …")
+        logger("[acpc] rigid MRI → MNI template (AC-PC axis) …")
     res = register_rigid_mi(template, moving, init_mode="moments", logger=logger)
     tpl_to_t1 = res.transform
 
-    # Slice onto a finer isotropic grid than the 2 mm template so the QC is crisp.
-    grid = _isotropic_reference(template, float(out_mm))
-
-    # MRI onto the AC-PC grid.
-    mri_in_acpc = resample_volume(t1, tpl_to_t1, reference=grid, interp="linear")
-    sitk.WriteImage(mri_in_acpc, str(out_mri))
-
-    # CT onto the AC-PC grid: template → T1 (rigid fit) → CT (inverse of the
-    # cached CT→T1). SITK applies the LAST-added transform FIRST, so add T1→CT
-    # first (applied second) and template→T1 last (applied first).
+    # CT reslicing transform: template → T1 (the fit) → CT (inverse of the cached
+    # CT→T1). SITK applies the LAST-added transform FIRST, so add T1→CT first
+    # (applied second) and template→T1 last (applied first).
     t1_to_ct = load_transform(str(t1_to_ct_path))   # maps CT→T1
     tpl_to_ct = sitk.CompositeTransform(3)
     tpl_to_ct.AddTransform(t1_to_ct.GetInverse())   # T1→CT  (applied second)
     tpl_to_ct.AddTransform(tpl_to_t1)               # tpl→T1 (applied first)
+
+    # AC-PC-oriented output grid: the brain-centred template, padded to include
+    # the skull (head-centred, upright, clean framing).
+    grid = _acpc_grid(template)
+
+    # Store int16 — CT (HU) and MRI intensities are integer-valued, so this is
+    # lossless and roughly halves the cache vs float32.
+    mri_in_acpc = resample_volume(t1, tpl_to_t1, reference=grid, interp="linear")
+    sitk.WriteImage(sitk.Cast(sitk.Round(mri_in_acpc), sitk.sitkInt16), str(out_mri))
     ct_in_acpc = resample_volume(ct, tpl_to_ct, reference=grid, interp="linear")
-    sitk.WriteImage(ct_in_acpc, str(out_ct))
+    sitk.WriteImage(sitk.Cast(sitk.Round(ct_in_acpc), sitk.sitkInt16), str(out_ct))
 
     if logger is not None:
-        logger(f"[acpc] wrote AC-PC CT/MRI (metric={res.final_metric:+.4f}, "
-               f"{res.n_iterations} iters)")
+        logger(f"[acpc] resliced CT/MRI into AC-PC (metric={res.final_metric:+.4f}, "
+               f"{res.n_iterations} iters, grid {grid.GetSize()})")
     return {"metric": float(res.final_metric), "n_iterations": int(res.n_iterations),
             "out_ct": str(out_ct), "out_mri": str(out_mri)}
 
