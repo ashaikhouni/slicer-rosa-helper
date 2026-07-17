@@ -10,6 +10,7 @@
          --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
          --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
   *{ box-sizing:border-box; } html,body{ margin:0; height:100%; }
+  [hidden]{ display:none !important; }   /* beat author display rules below */
   body{ background:var(--ground); color:var(--ink); font-family:var(--sans); overflow:hidden; }
   #app{ display:grid; grid-template-columns:230px 1fr; height:100vh; }
   #legend{ background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
@@ -34,9 +35,12 @@
   #tip{ position:absolute; z-index:5; pointer-events:none; background:#0b1219ee; border:1px solid var(--line);
         border-radius:6px; padding:5px 8px; font-size:11.5px; color:var(--ink); white-space:nowrap;
         font-family:var(--mono); box-shadow:0 4px 16px #0008; }
-  #empty{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center;
-          color:var(--muted); font-size:13.5px; line-height:1.6; padding:24px; }
-  #loading{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:13px; }
+  /* Readable, non-blocking cards (pointer-events:none so they never eat drags) */
+  #empty, #loading{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    max-width:340px; text-align:center; padding:15px 22px; border-radius:12px;
+    background:#0b1219f2; border:1px solid var(--line); color:var(--ink);
+    font-size:13px; line-height:1.7; pointer-events:none; box-shadow:0 12px 36px #000a; }
+  #empty b{ color:var(--accent); }
 </style>
 <script async src="/assets/three/es-module-shims.js"></script>
 <script type="importmap">
