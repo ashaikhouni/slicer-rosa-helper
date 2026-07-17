@@ -83,6 +83,7 @@ SUBCOMMANDS = {
     "brain-extract": "rosa_agent.commands.brain_extract",
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
     "cohort-export": "rosa_agent.commands.cohort_export",
+    "stamp-mni": "rosa_agent.commands.stamp_mni",
 }
 
 

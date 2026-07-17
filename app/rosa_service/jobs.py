@@ -308,6 +308,12 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                               include_transform=use_mri_mask,
                                               surface_source=surface)
         steps.append(view)
+        # Make MNI first-class from detection: register T1→MNI + warp contacts to
+        # MNI + label them against the bundled MNI atlases (CerebrA + Iglesias).
+        # Gated on use_mri_mask so the CT→T1 leg (t1_to_ct.tfm) exists to compose;
+        # stamp-mni self-gates to a no-op otherwise. Runs after contacts + extract.
+        if use_mri_mask:
+            steps.append(base + ["stamp-mni", str(workdir), "--t1", t1])
         return steps
     if kind == "import":
         # Import a localization computed elsewhere (a batch CLI run) for review:
@@ -395,7 +401,14 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             view += ["--structure-meshes", str(structure_meshes)]
             if spec.params.get("structure_lut"):
                 view += ["--structure-lut", str(spec.params["structure_lut"])]
-        return [view]
+        steps = [view]
+        # Re-stamp MNI on every edit-save so the MNI coords + multi-atlas labels
+        # never drift: it rebuilds wholesale from the edited contacts.tsv, so moves
+        # / adds / deletes propagate. No re-registration (the transform is stable);
+        # self-gates to a no-op when the case isn't poolable.
+        if t1:
+            steps.append([*_engine_base(), "stamp-mni", case_dir, "--t1", t1])
+        return steps
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
         # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a
@@ -506,12 +519,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if is_thomas:
             view_step += ["--structure-meshes", atlas_in_ct, "--structure-lut", thomas_lut]
         steps.append(view_step)
-        # Pre-warm the cohort's MNI-pooled contacts once this label run has cached
-        # the CT→T1→MNI transforms (CerebrA-through-T1 only). Self-gates to a no-op
-        # otherwise, so it's safe to append for any labeled-with-MRI case. Writes
-        # <case>/regcache/contacts_mni.tsv (regcache lives in the parent case dir).
+        # This label run cached the CT→T1→MNI transforms (CerebrA-through-T1), so
+        # stamp the case: warp contacts to MNI + label them against every bundled
+        # MNI atlas (CerebrA + Iglesias). Self-gates to a no-op for non-poolable
+        # atlas paths. regcache lives in the parent case dir.
         if t1:
-            steps.append([*_engine_base(), "cohort-export", str(Path(regcache).parent)])
+            steps.append([*_engine_base(), "stamp-mni",
+                          str(Path(regcache).parent), "--t1", str(t1)])
         return steps
     raise ValueError(f"unknown job kind: {kind!r}")
 

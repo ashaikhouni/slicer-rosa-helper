@@ -829,6 +829,28 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                              "color": _cohort_hue(st.id), "contacts": contacts})
         return {"space": cohort_mod.POOL_SPACE, "subjects": subjects}
 
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/labels/mni")
+    async def mni_labels(job_id: str) -> dict:
+        """This case's contacts labeled against every bundled MNI-native atlas
+        (CerebrA + Iglesias), from the auto-maintained MNI stamp. Lazily
+        (re)computes on stale. Empty ``atlases`` when the case isn't MNI-poolable."""
+        job = _job_or_404(job_id)
+        from rosa_core import mni_label
+        try:
+            rows = mni_label.ensure_contacts_labels_mni(job.workdir)
+        except Exception:                         # noqa: BLE001 — never 500 the label view
+            rows = []
+        atlases = sorted({r["atlas"] for r in rows})
+        by_contact: dict = {}
+        for r in rows:
+            key = r.get("name") or f'{r.get("trajectory")}:{r.get("contact_index")}'
+            c = by_contact.setdefault(key, {
+                "name": r.get("name"), "trajectory": r.get("trajectory"),
+                "contact_index": r.get("contact_index"), "regions": {}})
+            c["regions"][r["atlas"]] = r["region"]
+        return {"space": mni_label.POOL_SPACE, "atlases": atlases,
+                "contacts": list(by_contact.values())}
+
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the
     # SPA + its assets are served for everything else. html=True serves

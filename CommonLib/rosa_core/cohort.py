@@ -46,6 +46,35 @@ def ct_to_mni_matrix(regcache):
     return b @ a                                                              # apply A first
 
 
+def ensure_mni_transform(regcache, t1_path, *, root=None, log=lambda _m: None) -> bool:
+    """Register the patient T1 → MNI (2009cSym) and cache ``regcache/mni_*.tfm``.
+
+    The T1→MNI leg the warp needs, produced exactly the way the label job does
+    (``register_affine_mi(fixed=T1, moving=CerebrA template)``). Idempotent: a
+    no-op if the transform is already cached. Returns True once it's present,
+    False when there's no usable T1. The rigid CT→T1 leg (``t1_to_ct.tfm``) is
+    produced separately (the pipeline's brain-extract step) — this only adds the
+    MNI leg, so a case becomes poolable once both exist.
+    """
+    regcache = Path(regcache)
+    out = regcache / T1_TO_MNI_TFM
+    if out.is_file():
+        return True
+    if not t1_path or not Path(t1_path).is_file():
+        return False
+    import SimpleITK as sitk
+    from rosa_core import bundled_atlases
+    from rosa_core.registration import register_affine_mi, save_transform
+    template = bundled_atlases.resolve("cerebra", root).template_path
+    log(f"[mni] registering T1 → {POOL_SPACE} (affine MI)…")
+    reg = register_affine_mi(fixed=sitk.ReadImage(str(t1_path)),
+                             moving=sitk.ReadImage(str(template)),
+                             logger=log)
+    regcache.mkdir(parents=True, exist_ok=True)
+    save_transform(reg.transform, str(out))
+    return True
+
+
 def _read_delimited(path) -> list[dict]:
     """Read a TSV/CSV as dicts, skipping leading ``#`` provenance comments."""
     p = Path(path)
