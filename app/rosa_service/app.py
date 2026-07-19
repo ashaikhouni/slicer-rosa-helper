@@ -851,6 +851,21 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         return {"space": mni_label.POOL_SPACE, "atlases": atlases,
                 "contacts": list(by_contact.values())}
 
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/mni/refine")
+    async def mni_refine(job_id: str) -> dict:
+        """Refine this case's T1→MNI with a B-spline nonlinear warp, then re-warp +
+        re-label — better subcortical accuracy (~30 s). Returns the stamp job."""
+        job = _job_or_404(job_id)
+        t1 = job.params.get("t1")
+        if not t1:
+            raise HTTPException(status_code=409, detail="no MRI (T1) to register to MNI")
+        spec = JobSpec(kind="stamp", params={
+            "case_dir": str(job.workdir), "t1": str(t1), "refine": True})
+        try:
+            return runner.create(spec).status().model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the
     # SPA + its assets are served for everything else. html=True serves

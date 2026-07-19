@@ -38,7 +38,11 @@ def mni_transforms_present(regcache) -> bool:
 
 
 def ct_to_mni_matrix(regcache):
-    """The 4×4 RAS matrix mapping CT-frame points → MNI (``B @ A``)."""
+    """The 4×4 RAS matrix mapping CT-frame points → MNI (``B @ A``).
+
+    Affine-only fast path. Raises if the T1→MNI leg is a nonlinear (refined)
+    transform — use :func:`warp_points_ct_to_mni` for the general case.
+    """
     from rosa_core.registration import load_transform, transform_to_4x4_ras
     regcache = Path(regcache)
     a = transform_to_4x4_ras(load_transform(str(regcache / CT_TO_T1_TFM)))    # CT → T1
@@ -46,32 +50,58 @@ def ct_to_mni_matrix(regcache):
     return b @ a                                                              # apply A first
 
 
-def ensure_mni_transform(regcache, t1_path, *, root=None, log=lambda _m: None) -> bool:
+def warp_points_ct_to_mni(points_ras, regcache):
+    """Warp N×3 CT-frame RAS points → MNI, via SITK ``TransformPoint``.
+
+    General: works whether the cached T1→MNI leg is an affine or a nonlinear
+    (B-spline composite) transform. Applies CT→T1 (rigid) then T1→MNI, with
+    RAS↔LPS conversion at the boundaries (ITK transforms operate in LPS)."""
+    import numpy as np
+    from rosa_core.registration import load_transform
+    regcache = Path(regcache)
+    a = load_transform(str(regcache / CT_TO_T1_TFM))     # CT → T1
+    b = load_transform(str(regcache / T1_TO_MNI_TFM))    # T1 → MNI (affine or composite)
+    out = []
+    for p in np.asarray(points_ras, dtype=float).reshape(-1, 3):
+        lps = (-float(p[0]), -float(p[1]), float(p[2]))          # RAS → LPS
+        q = b.TransformPoint(a.TransformPoint(lps))              # CT → T1 → MNI (LPS)
+        out.append((-q[0], -q[1], q[2]))                         # LPS → RAS
+    return np.asarray(out, dtype=float)
+
+
+def ensure_mni_transform(regcache, t1_path, *, refine=False, root=None, log=lambda _m: None) -> bool:
     """Register the patient T1 → MNI (2009cSym) and cache ``regcache/mni_*.tfm``.
 
     The T1→MNI leg the warp needs, produced exactly the way the label job does
-    (``register_affine_mi(fixed=T1, moving=CerebrA template)``). Idempotent: a
-    no-op if the transform is already cached. Returns True once it's present,
-    False when there's no usable T1. The rigid CT→T1 leg (``t1_to_ct.tfm``) is
-    produced separately (the pipeline's brain-extract step) — this only adds the
-    MNI leg, so a case becomes poolable once both exist.
+    (``register_affine_mi(fixed=T1, moving=CerebrA template)``). With
+    ``refine=True`` it adds a **B-spline nonlinear refinement** on top of the
+    affine (SimpleITK, torch-free) and caches the composite instead — better
+    subcortical accuracy at the cost of ~30 s. Idempotent for the affine case (a
+    no-op if already cached); ``refine=True`` always (re)computes so the nonlinear
+    warp is applied. Returns True once the transform is present. The rigid CT→T1
+    leg (``t1_to_ct.tfm``) is produced separately (the pipeline's brain-extract).
     """
     regcache = Path(regcache)
     out = regcache / T1_TO_MNI_TFM
-    if out.is_file():
+    if out.is_file() and not refine:
         return True
     if not t1_path or not Path(t1_path).is_file():
-        return False
+        return out.is_file()
     import SimpleITK as sitk
     from rosa_core import bundled_atlases
-    from rosa_core.registration import register_affine_mi, save_transform
+    from rosa_core.registration import register_affine_mi, register_bspline_mi, save_transform
     template = bundled_atlases.resolve("cerebra", root).template_path
+    t1_img = sitk.ReadImage(str(t1_path))
+    mni_img = sitk.ReadImage(str(template))
     log(f"[mni] registering T1 → {POOL_SPACE} (affine MI)…")
-    reg = register_affine_mi(fixed=sitk.ReadImage(str(t1_path)),
-                             moving=sitk.ReadImage(str(template)),
-                             logger=log)
+    aff = register_affine_mi(fixed=t1_img, moving=mni_img, logger=log)
+    tx = aff.transform
+    if refine:
+        log("[mni] refining T1 → MNI with a B-spline (nonlinear)…")
+        tx = register_bspline_mi(fixed=t1_img, moving=mni_img,
+                                 initial_transform=aff.transform, logger=log)
     regcache.mkdir(parents=True, exist_ok=True)
-    save_transform(reg.transform, str(out))
+    save_transform(tx, str(out))
     return True
 
 
@@ -96,7 +126,6 @@ def contacts_mni_rows(case_dir) -> list[dict]:
     accepted state are joined by the caller (app-side, from review.json).
     """
     import numpy as np
-    from rosa_core.registration import apply_transform_to_points_ras
 
     case_dir = Path(case_dir)
     regcache = case_dir / "regcache"
@@ -110,7 +139,7 @@ def contacts_mni_rows(case_dir) -> list[dict]:
         pts = np.array([[float(r["x"]), float(r["y"]), float(r["z"])] for r in rows], dtype=float)
     except (KeyError, ValueError):
         return []
-    mni = apply_transform_to_points_ras(pts, ct_to_mni_matrix(regcache))
+    mni = warp_points_ct_to_mni(pts, regcache)     # affine or nonlinear (refined)
     out = []
     for r, p in zip(rows, mni):
         out.append({

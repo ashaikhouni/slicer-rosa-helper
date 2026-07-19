@@ -527,6 +527,20 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             steps.append([*_engine_base(), "stamp-mni",
                           str(Path(regcache).parent), "--t1", str(t1)])
         return steps
+    if kind == "stamp":
+        # On-demand MNI (re)stamp — used for the "Refine (nonlinear)" action. Runs
+        # stamp-mni on the case dir; --refine swaps the affine T1→MNI for a
+        # B-spline composite (~30 s) and re-warps + re-labels off it.
+        case_dir = spec.params.get("case_dir")
+        if not case_dir:
+            raise ValueError("stamp job requires params.case_dir")
+        argv = [*_engine_base(), "stamp-mni", str(case_dir)]
+        t1 = spec.params.get("t1")
+        if t1:
+            argv += ["--t1", str(t1)]
+        if spec.params.get("refine"):
+            argv += ["--refine"]
+        return [argv]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

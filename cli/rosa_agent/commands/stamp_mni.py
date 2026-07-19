@@ -31,6 +31,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("case_dir", help="the case directory (contacts.tsv + regcache/)")
     parser.add_argument("--t1", default="",
                         help="patient MRI — register T1→MNI if that transform isn't cached yet")
+    parser.add_argument("--refine", action="store_true",
+                        help="refine the T1→MNI affine with a B-spline nonlinear warp "
+                             "(SimpleITK, torch-free, ~30 s) — better subcortical accuracy. "
+                             "Requires --t1; recomputes the transform.")
     args = parser.parse_args(argv)
 
     case_dir = Path(args.case_dir)
@@ -48,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     log = lambda m: print(m, file=sys.stderr)   # noqa: E731
 
     if args.t1:
-        cohort.ensure_mni_transform(regcache, args.t1, log=log)
+        cohort.ensure_mni_transform(regcache, args.t1, refine=args.refine, log=log)
 
     if not cohort.mni_transforms_present(regcache):
         print(f"[stamp-mni] {case_dir.name}: not MNI-poolable — need "

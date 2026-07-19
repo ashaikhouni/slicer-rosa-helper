@@ -402,6 +402,69 @@ def register_affine_mi(
     )
 
 
+def register_bspline_mi(
+    fixed,
+    moving,
+    *,
+    initial_transform,
+    mesh_size: tuple[int, ...] = (5, 5, 5),
+    num_iterations: int = 100,
+    sampling_percentage: float = 0.10,
+    num_histogram_bins: int = DEFAULT_NUM_HISTOGRAM_BINS,
+    shrink_factors: tuple[int, ...] = (4, 2),
+    smoothing_sigmas_mm: tuple[float, ...] = (2.0, 1.0),
+    max_fit_spacing_mm: float | None = DEFAULT_MAX_FIT_SPACING_MM,
+    logger: Optional[Callable[[str], None]] = None,
+):
+    """Nonlinear **refinement** of an affine alignment: a B-spline free-form
+    deformation seeded from ``initial_transform`` (Mattes MI, LBFGS-B).
+
+    The bundled, torch-free nonlinear option — SimpleITK only. The affine is set
+    as the moving-initial transform, so the B-spline only has to model the
+    residual local deformation the affine can't. Returns a
+    ``sitk.CompositeTransform`` mapping **fixed → moving** (same direction the
+    affine/rigid routines return); it is NOT linear, so apply it with
+    ``TransformPoint`` / ``sitk.Resample`` — ``transform_to_4x4_ras`` will not
+    accept it.
+    """
+    import SimpleITK as sitk
+
+    fixed_f = _downsample_for_fit(sitk.Cast(fixed, sitk.sitkFloat32), max_fit_spacing_mm)
+    moving_f = _downsample_for_fit(sitk.Cast(moving, sitk.sitkFloat32), max_fit_spacing_mm)
+
+    bspline = sitk.BSplineTransformInitializer(fixed_f, list(mesh_size))
+    reg = sitk.ImageRegistrationMethod()
+    reg.SetMetricAsMattesMutualInformation(numberOfHistogramBins=int(num_histogram_bins))
+    reg.SetMetricSamplingStrategy(reg.RANDOM)
+    reg.SetMetricSamplingPercentage(float(sampling_percentage), 1)
+    reg.SetInterpolator(sitk.sitkLinear)
+    reg.SetOptimizerAsLBFGSB(gradientConvergenceTolerance=1e-5,
+                             numberOfIterations=int(num_iterations))
+    reg.SetShrinkFactorsPerLevel(list(shrink_factors))
+    reg.SetSmoothingSigmasPerLevel(list(smoothing_sigmas_mm))
+    reg.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
+    reg.SetMovingInitialTransform(initial_transform)     # the affine; B-spline refines on top
+    reg.SetInitialTransform(bspline, inPlace=True)
+
+    if logger is not None:
+        reg.AddCommand(sitk.sitkIterationEvent, lambda: _bspline_log(reg, logger))
+
+    reg.Execute(fixed_f, moving_f)
+    # fixed → moving = affine first, then the residual B-spline (moving-initial is
+    # applied after the optimized transform in SITK's composition). Verified
+    # empirically against a known deformation; see the cohort tests.
+    composite = sitk.CompositeTransform([initial_transform, bspline])
+    return composite
+
+
+def _bspline_log(reg, logger) -> None:
+    try:
+        logger(f"[reg-bspline] iter={reg.GetOptimizerIteration():>3} "
+               f"metric={reg.GetMetricValue():+.5f}")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---------------------------------------------------------------------
 # Transform persistence (for a per-case registration cache)
 # ---------------------------------------------------------------------
