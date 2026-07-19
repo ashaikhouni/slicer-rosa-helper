@@ -541,6 +541,32 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if spec.params.get("refine"):
             argv += ["--refine"]
         return [argv]
+    if kind == "burn-thomas":
+        # Standalone tool (NOT a case): burn a THOMAS nucleus into a DICOM series'
+        # intensity and export a new DICOM series. Never enters the case list
+        # (list_cases only counts pipeline/import), and writes to a user-chosen
+        # output dir rather than the case store.
+        p = spec.params
+        for req in ("dicom_dir", "thomas_dir", "out_dir"):
+            if not p.get(req):
+                raise ValueError(f"burn-thomas job requires params.{req}")
+        argv = [*_engine_base(), "burn-thomas",
+                str(p["dicom_dir"]), str(p["thomas_dir"]),
+                "--out-dir", str(p["out_dir"]),
+                "--side", str(p.get("side", "both")),
+                "--fill", str(p.get("fill", 1200))]
+        if p.get("all"):
+            argv += ["--all"]
+        else:
+            for nuc in (p.get("nuclei") or []):
+                argv += ["--nucleus", str(nuc)]
+        if p.get("series_description"):
+            argv += ["--series-description", str(p["series_description"])]
+        if p.get("series_uid"):
+            argv += ["--series-uid", str(p["series_uid"])]
+        if p.get("no_register"):
+            argv += ["--no-register"]
+        return [argv]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

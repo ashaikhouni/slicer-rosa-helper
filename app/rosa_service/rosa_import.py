@@ -31,21 +31,13 @@ def guess_modality(nii_path) -> str:
     return "other"
 
 
-def slice_png(nii_path, size: int = 150) -> str:
-    """The volume's middle axial slice as a base64 PNG data URI (a thumbnail so
-    the clinician can tell CT from MRI at a glance)."""
+def _array_to_png(sl, size: int = 150) -> str:
+    """A 2D slice → base64 PNG data URI (2–98 percentile window, roughly upright)."""
     import base64
     import io
     import numpy as np
-    import nibabel as nib
     from PIL import Image
-    data = np.asanyarray(nib.load(str(nii_path)).dataobj)
-    while data.ndim > 3:
-        data = data[..., 0]
-    if data.ndim < 3 or min(data.shape) == 0:
-        return ""
-    sl = np.asarray(data[:, :, data.shape[2] // 2], dtype=float)
-    sl = np.rot90(sl)                                     # roughly upright
+    sl = np.rot90(np.asarray(sl, dtype=float))
     lo, hi = np.percentile(sl, 2), np.percentile(sl, 98)
     if hi <= lo:
         hi = lo + 1.0
@@ -55,6 +47,35 @@ def slice_png(nii_path, size: int = 150) -> str:
     buf = io.BytesIO()
     im.save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def slice_png(nii_path, size: int = 150) -> str:
+    """The volume's middle axial slice as a base64 PNG data URI (a thumbnail so
+    the clinician can tell CT from MRI at a glance)."""
+    import numpy as np
+    import nibabel as nib
+    data = np.asanyarray(nib.load(str(nii_path)).dataobj)
+    while data.ndim > 3:
+        data = data[..., 0]
+    if data.ndim < 3 or min(data.shape) == 0:
+        return ""
+    return _array_to_png(data[:, :, data.shape[2] // 2], size)
+
+
+def dicom_preview(dicom_dir, size: int = 180) -> dict:
+    """For the burn tool's confirm step: ``{n_series, n_slices, png}`` — the
+    series count under ``dicom_dir`` plus a middle-axial thumbnail of the largest
+    series. Returns zeros + empty png when no DICOM series is present."""
+    import SimpleITK as sitk
+    from rosa_core import dicom_burn
+    series = dicom_burn.list_series(dicom_dir)
+    if not series:
+        return {"n_series": 0, "n_slices": 0, "png": ""}
+    image, _reader = dicom_burn.read_series(dicom_dir)
+    arr = sitk.GetArrayFromImage(image)                  # [z, y, x]
+    mid = arr[arr.shape[0] // 2, :, :]                   # middle axial slice
+    return {"n_series": len(series), "n_slices": int(series[0]["n_slices"]),
+            "png": _array_to_png(mid, size)}
 
 
 def enumerate_displays(staging_dir) -> list:
@@ -70,4 +91,4 @@ def enumerate_displays(staging_dir) -> list:
     return out
 
 
-__all__ = ["guess_modality", "slice_png", "enumerate_displays"]
+__all__ = ["guess_modality", "slice_png", "dicom_preview", "enumerate_displays"]

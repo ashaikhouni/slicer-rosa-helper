@@ -179,6 +179,28 @@ class RosaCreateRequest(BaseModel):
     seeds_path: str | None = None
 
 
+class BurnThomasRequest(BaseModel):
+    """Burn a THOMAS thalamic structure into a DICOM series and export a new
+    DICOM series — a standalone tool, no case involved.
+
+    ``dicom_dir`` / ``thomas_dir`` / ``out_dir`` are absolute folder paths (from
+    Electron's native directory pickers). Choose ``nuclei`` by name (``VA``,
+    ``MD-Pf`` …) or set ``all`` to burn the whole thalamus. ``no_register`` skips
+    registration when the THOMAS T1 already shares the DICOM frame.
+    """
+
+    dicom_dir: str
+    thomas_dir: str
+    out_dir: str
+    nuclei: list[str] = Field(default_factory=list)
+    all: bool = False
+    side: str = "both"
+    fill: float = 1200.0
+    series_description: str = "THOMAS_BURNED"
+    series_uid: str | None = None
+    no_register: bool = False
+
+
 class LabelRequest(BaseModel):
     """Kick off anatomical labeling of a pipeline job's contacts.
 

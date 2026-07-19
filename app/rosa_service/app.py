@@ -41,9 +41,9 @@ from fastapi.staticfiles import StaticFiles
 from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
-    DicomRequest, ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc,
-    ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest, RosaCreateRequest,
-    RosaPrepareRequest,
+    BurnThomasRequest, DicomRequest, ImportRequest, JobSpec, JobStatus,
+    LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest,
+    RosaCreateRequest, RosaPrepareRequest,
 )
 from .review import ReviewStore, export_contacts
 
@@ -999,6 +999,52 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 shutil.copyfile(req.seeds_path, job.workdir / "ros_plan.tsv")
             except OSError:
                 pass
+        return job.status().model_dump()
+
+    # ---- standalone tools (no case): burn THOMAS into a DICOM for navigation ----
+    @app.get(f"/api/{API_VERSION}/tools/thomas-nuclei")
+    async def thomas_nuclei() -> list[dict]:
+        """The canonical THOMAS nuclei (number + name + color) for the burn tool's
+        nucleus picker — sourced from the engine so the UI can't drift."""
+        from rosa_core.thomas_import import THOMAS_NUCLEI
+        return [{"num": num, "name": name, "rgb": [round(c, 3) for c in rgb]}
+                for num, (name, rgb) in THOMAS_NUCLEI.items()]
+
+    @app.post(f"/api/{API_VERSION}/tools/dicom-preview")
+    async def tools_dicom_preview(req: DicomRequest) -> dict:
+        """Middle-slice thumbnail + series count for a DICOM folder, so the user
+        can confirm they picked the right volume before burning."""
+        d = Path(req.dicom_dir)
+        if not d.is_dir():
+            raise HTTPException(status_code=404, detail=f"DICOM dir not found: {d}")
+        from .rosa_import import dicom_preview
+        try:
+            return dicom_preview(d)
+        except Exception as exc:  # noqa: BLE001 — surface a clean message
+            raise HTTPException(status_code=422, detail=f"could not read DICOM: {exc}") from exc
+
+    @app.post(f"/api/{API_VERSION}/tools/burn-thomas")
+    async def tools_burn_thomas(req: BurnThomasRequest) -> dict:
+        """Run the burn-thomas engine command as a transient job (progress via the
+        usual /jobs/{id}/logs SSE). NOT a case — nothing is added to the registry."""
+        if not Path(req.dicom_dir).is_dir():
+            raise HTTPException(status_code=404, detail=f"DICOM dir not found: {req.dicom_dir}")
+        if not Path(req.thomas_dir).is_dir():
+            raise HTTPException(status_code=404, detail=f"THOMAS dir not found: {req.thomas_dir}")
+        if not req.all and not req.nuclei:
+            raise HTTPException(status_code=422, detail="choose at least one nucleus, or 'whole thalamus'")
+        params = {
+            "dicom_dir": req.dicom_dir, "thomas_dir": req.thomas_dir,
+            "out_dir": req.out_dir, "nuclei": list(req.nuclei), "all": bool(req.all),
+            "side": req.side, "fill": req.fill,
+            "series_description": req.series_description, "no_register": bool(req.no_register),
+        }
+        if req.series_uid:
+            params["series_uid"] = req.series_uid
+        try:
+            job = runner.create(JobSpec(kind="burn-thomas", params=params))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return job.status().model_dump()
 
     # ---- the web UI (single-page wizard), served at / ----

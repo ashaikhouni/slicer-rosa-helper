@@ -43,6 +43,19 @@
       <p id="casesempty" class="muted" hidden>No cases yet — start one from a post-op
         CT, or import a localization from a batch CLI run.</p>
       <p id="casesnoresults" class="muted" hidden>No cases match your search.</p>
+
+      <div class="tools-sec">
+        <h3>Tools <span class="muted">&middot; standalone utilities (no case needed)</span></h3>
+        <div class="tools-grid">
+          <button id="burnthomasbtn" class="tool-card">
+            <span class="tool-ico">&#128293;</span>
+            <span class="tool-txt">
+              <span class="tool-name">Burn THOMAS for navigation</span>
+              <span class="tool-desc">Burn a thalamic nucleus into a DICOM's pixels and export a new DICOM series.</span>
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -58,6 +71,67 @@
       <div class="rosa-foot" id="rosa-foot" hidden>
         <label>Subject id <input type="text" id="rosa-label" class="casesearch" placeholder="e.g. T26"></label>
         <button id="rosa-create" class="primary" disabled>Create case &amp; detect</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Standalone tool: burn a THOMAS nucleus into a DICOM series for navigation -->
+  <section id="panel-burn" class="panel">
+    <div class="cases">
+      <div class="cases-head">
+        <h2>Burn THOMAS <span class="muted">&middot; for navigation &middot; no case</span></h2>
+        <div class="cases-actions"><button id="burn-cancel" class="ghost">&larr; Cases</button></div>
+      </div>
+      <p class="muted">Burn a thalamic nucleus into a post-op DICOM's pixel data and export a
+        new DICOM series. Nothing is saved as a case; the output goes to the folder you choose.</p>
+      <div class="burn-form">
+        <div class="burn-row">
+          <label class="burn-lbl">Post-op DICOM folder</label>
+          <div class="burn-pick">
+            <button id="burn-dicom-btn" class="ghost">Choose folder…</button>
+            <span id="burn-dicom-path" class="muted mono"></span>
+          </div>
+          <div class="burn-preview">
+            <img id="burn-dicom-thumb" class="burn-thumb" alt="" hidden>
+            <span id="burn-dicom-info" class="muted"></span>
+          </div>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">THOMAS folder</label>
+          <div class="burn-pick">
+            <button id="burn-thomas-btn" class="ghost">Choose folder…</button>
+            <span id="burn-thomas-path" class="muted mono"></span>
+          </div>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">Nuclei to burn
+            <span class="burn-nuclei-count muted" id="burn-nuclei-count"></span></label>
+          <label class="burn-all"><input type="checkbox" id="burn-all"> Whole thalamus (all nuclei)</label>
+          <div id="burn-nuclei" class="burn-nuclei"></div>
+        </div>
+        <div class="burn-row burn-inline">
+          <label>Side
+            <select id="burn-side">
+              <option value="both">Both</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+          </label>
+          <label>Fill (HU) <input type="number" id="burn-fill" value="1200" step="50" class="burn-fill"></label>
+          <label class="burn-noreg"><input type="checkbox" id="burn-noreg"> Skip registration (THOMAS T1 already in the DICOM frame)</label>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">Output folder</label>
+          <div class="burn-pick">
+            <button id="burn-out-btn" class="ghost">Choose folder…</button>
+            <span id="burn-out-path" class="muted mono"></span>
+          </div>
+        </div>
+        <div class="burn-foot">
+          <button id="burn-run" class="primary" disabled>Burn &amp; export</button>
+          <span id="burn-status" class="muted"></span>
+        </div>
+        <pre id="burn-log" class="burn-log" hidden></pre>
       </div>
     </div>
   </section>

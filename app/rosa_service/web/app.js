@@ -60,7 +60,7 @@ function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
   // The step bar tracks the new-case wizard (drop → run → review); it's noise on
   // the case list, the import form, and the workspace (which has its own flow).
-  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort", "rosa"].includes(name));
+  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort", "rosa", "burn"].includes(name));
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -239,6 +239,110 @@ async function createRosaCase() {
     $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Create failed: ${e.message}</span>`;
     $("rosa-create").disabled = false;
   }
+}
+
+// ---- tool: burn a THOMAS nucleus into a DICOM series (standalone, no case) ----
+let BURN = null, BURN_ES = null;
+async function openBurnTool() {
+  showStep("burn");
+  BURN = { dicom: "", thomas: "", out: "", series: null };
+  for (const w of ["dicom", "thomas", "out"]) $(`burn-${w}-path`).textContent = "";
+  $("burn-dicom-thumb").hidden = true; $("burn-dicom-info").textContent = "";
+  $("burn-status").textContent = ""; $("burn-log").hidden = true; $("burn-log").textContent = "";
+  $("burn-all").checked = false; $("burn-side").value = "both";
+  $("burn-fill").value = "1200"; $("burn-noreg").checked = false;
+  await loadBurnNuclei();
+  updateBurnRun();
+}
+async function loadBurnNuclei() {
+  const host = $("burn-nuclei"); host.textContent = "Loading…";
+  let list;
+  try { list = await jget(`${API}/tools/thomas-nuclei`); }
+  catch (e) { host.textContent = "Could not load nuclei: " + e.message; return; }
+  host.innerHTML = "";
+  for (const n of list) {
+    const lab = el("label", { class: "burn-nuc" });
+    const cb = el("input", { class: "burn-nuc-cb", value: n.name }); cb.type = "checkbox";
+    cb.onchange = updateBurnRun;
+    const sw = el("span", { class: "burn-sw" });
+    sw.style.background = `rgb(${n.rgb.map((c) => Math.round(c * 255)).join(",")})`;
+    lab.append(cb, sw, document.createTextNode(n.name));
+    host.append(lab);
+  }
+}
+async function pickBurnDir(which) {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openDirectory)) {
+    window.alert("This tool needs the desktop app."); return;
+  }
+  const titles = { dicom: "Choose the post-op DICOM folder",
+    thomas: "Choose the THOMAS output folder", out: "Choose the output folder" };
+  const r = await window.rosaNative.openDirectory({ title: titles[which] });
+  if (!r || !r.path) return;
+  BURN[which] = r.path;
+  $(`burn-${which}-path`).textContent = r.path;
+  if (which === "dicom") {
+    BURN.series = null;
+    $("burn-dicom-info").textContent = "reading…"; $("burn-dicom-thumb").hidden = true;
+    try {
+      const p = await jsend(`${API}/tools/dicom-preview`, "POST", { dicom_dir: r.path });
+      BURN.series = p;
+      if (p.png) { $("burn-dicom-thumb").src = p.png; $("burn-dicom-thumb").hidden = false; }
+      $("burn-dicom-info").textContent = p.n_series
+        ? `${p.n_slices} slices${p.n_series > 1 ? " · " + p.n_series + " series (largest used)" : ""}`
+        : "no DICOM series found here";
+    } catch (e) { $("burn-dicom-info").textContent = "preview failed: " + e.message; }
+  }
+  updateBurnRun();
+}
+function _burnNuclei() {
+  return [...document.querySelectorAll(".burn-nuc-cb:checked")].map((c) => c.value);
+}
+function updateBurnRun() {
+  const all = $("burn-all").checked;
+  document.querySelectorAll(".burn-nuc-cb").forEach((c) => { c.disabled = all; });
+  const nuc = _burnNuclei();
+  $("burn-nuclei-count").textContent = all
+    ? "· whole thalamus" : (nuc.length ? "· " + nuc.length + " selected" : "· none selected");
+  const seriesOk = BURN && BURN.series ? BURN.series.n_series > 0 : true;
+  $("burn-run").disabled = !(BURN && BURN.dicom && BURN.thomas && BURN.out
+    && (all || nuc.length) && seriesOk);
+}
+async function runBurn() {
+  const body = {
+    dicom_dir: BURN.dicom, thomas_dir: BURN.thomas, out_dir: BURN.out,
+    all: $("burn-all").checked, nuclei: _burnNuclei(),
+    side: $("burn-side").value, fill: parseFloat($("burn-fill").value) || 1200,
+    no_register: $("burn-noreg").checked,
+  };
+  $("burn-run").disabled = true; $("burn-status").textContent = "starting…";
+  $("burn-log").hidden = false; $("burn-log").textContent = "";
+  let job;
+  try { job = await jsend(`${API}/tools/burn-thomas`, "POST", body); }
+  catch (e) {
+    $("burn-status").innerHTML = `<span style="color:var(--bad)">${e.message}</span>`;
+    $("burn-run").disabled = false; return;
+  }
+  if (BURN_ES) BURN_ES.close();
+  BURN_ES = new EventSource(`${API}/jobs/${job.id}/logs`);
+  BURN_ES.onmessage = (ev) => {
+    if (!ev.data) return;
+    const pre = $("burn-log"); pre.textContent += ev.data + "\n"; pre.scrollTop = pre.scrollHeight;
+  };
+  BURN_ES.addEventListener("end", () => BURN_ES.close());
+  BURN_ES.onerror = () => BURN_ES.close();
+  const iv = setInterval(async () => {
+    let st; try { st = await jget(`${API}/jobs/${job.id}`); } catch { return; }
+    $("burn-status").textContent = "State: " + st.state;
+    if (["succeeded", "failed", "cancelled"].includes(st.state)) {
+      clearInterval(iv);
+      $("burn-run").disabled = false;
+      if (st.state === "succeeded")
+        $("burn-status").innerHTML = `<b>Done</b> — burned into <span class="mono">${BURN.out}</span>`;
+      else
+        $("burn-status").innerHTML = `<span style="color:var(--bad)">${st.state === "cancelled"
+          ? "Cancelled" : "Failed (exit " + st.exit_code + (st.error ? ": " + st.error : "") + ")"}</span>`;
+    }
+  }, 1000);
 }
 
 // ---- electrode library (constrain detection to the site's electrode types) ---
@@ -1407,6 +1511,13 @@ async function boot() {
   $("rosaimportbtn").onclick = importRosa;      // import a ROSA robot case
   $("rosa-cancel").onclick = showCases;
   $("rosa-create").onclick = createRosaCase;
+  $("burnthomasbtn").onclick = openBurnTool;    // standalone tool: burn THOMAS → DICOM
+  $("burn-cancel").onclick = showCases;
+  $("burn-dicom-btn").onclick = () => pickBurnDir("dicom");
+  $("burn-thomas-btn").onclick = () => pickBurnDir("thomas");
+  $("burn-out-btn").onclick = () => pickBurnDir("out");
+  $("burn-all").onchange = updateBurnRun;
+  $("burn-run").onclick = runBurn;
   $("importback").onclick = showCases;
   $("casesearch").addEventListener("input", (ev) => { state.caseSearch = ev.target.value; renderCases(); });
   $("casesfilter").addEventListener("click", (ev) => {

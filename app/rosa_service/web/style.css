@@ -56,6 +56,42 @@ main { flex: 1; min-height: 0; padding: 8px 20px 24px; display: flex; flex-direc
 .rosa-foot label { font-size: 13px; color: var(--muted); display: flex; gap: 7px; align-items: center; }
 .rosa-foot input { width: 160px; }
 
+/* Tools section on the home screen (standalone utilities, not case actions) */
+.tools-sec { margin-top: 26px; padding-top: 18px; border-top: 1px solid var(--line); }
+.tools-sec h3 { margin: 0 0 12px; font-size: 15px; font-weight: 600; color: var(--ink); }
+.tools-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.tool-card { display: flex; align-items: flex-start; gap: 12px; text-align: left; padding: 14px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer;
+  color: inherit; font: inherit; transition: border-color .12s, background .12s; }
+.tool-card:hover { border-color: var(--accent-dim); background: var(--panel2); }
+.tool-ico { font-size: 24px; line-height: 1.1; }
+.tool-txt { display: flex; flex-direction: column; gap: 3px; }
+.tool-name { font-weight: 600; color: var(--ink); }
+.tool-desc { font-size: 12.5px; color: var(--muted); }
+
+/* Burn THOMAS panel */
+#panel-burn.active { display: block; }
+.burn-form { display: flex; flex-direction: column; gap: 16px; max-width: 720px; margin-top: 8px; }
+.burn-row { display: flex; flex-direction: column; gap: 7px; }
+.burn-lbl { font-weight: 600; font-size: 13px; color: var(--ink); }
+.burn-pick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.burn-pick .mono { font-size: 12px; word-break: break-all; }
+.burn-preview { display: flex; align-items: center; gap: 10px; }
+.burn-thumb { width: 88px; height: 88px; object-fit: contain; background: #000; border-radius: 6px; }
+.burn-nuclei { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px 12px; }
+.burn-nuc { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.burn-sw { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex: none; }
+.burn-nuc input:disabled ~ .burn-sw { opacity: .35; }
+.burn-all { font-size: 13px; display: flex; align-items: center; gap: 7px; }
+.burn-nuclei-count { font-weight: 400; }
+.burn-inline { flex-direction: row; align-items: center; gap: 20px; flex-wrap: wrap; }
+.burn-inline label { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+.burn-fill { width: 90px; }
+.burn-foot { display: flex; align-items: center; gap: 14px; }
+.burn-log { max-height: 180px; overflow: auto; background: var(--panel2); border: 1px solid var(--line);
+  border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap;
+  color: var(--muted); }
+
 /* ---- step 1: drop ---- */
 #panel-drop { max-width: 640px; }
 .dropzone { border: 2px dashed var(--line2); border-radius: 12px; padding: 34px 20px; text-align: center;
