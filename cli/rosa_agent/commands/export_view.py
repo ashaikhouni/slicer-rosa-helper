@@ -840,6 +840,14 @@ _HTML_TEMPLATE = """<!doctype html>
         <label class="plane-ctl" data-control="atlas-ov" id="atlas-ov-ctl" style="display:none" title="Tint each atlas region on the slice panels — same colors as the 3D surface">
           <input type="checkbox" id="atlas-ov-cb" checked /><span class="axis">Atlas on slices</span>
         </label>
+        <label class="plane-ctl" data-control="mni-atlas" id="mni-atlas-ctl" style="display:none" title="Show each contact's region from a different MNI atlas — viewing only; the approved label is unchanged">
+          <span class="axis">Region atlas</span>
+          <select id="mni-atlas-sel"></select>
+        </label>
+        <span class="plane-ctl" id="mni-badge" style="display:none" title="The single T1→MNI registration underpinning every atlas's region labels">
+          <span class="axis" id="mni-badge-txt"></span>
+          <button id="mni-refine-btn" title="Refine T1→MNI with a nonlinear (B-spline) warp — better subcortical accuracy (~30 s)">Refine</button>
+        </span>
       </span>
       <span class="tb-sep"></span>
       <span class="tb-group">
@@ -2177,6 +2185,72 @@ function wireOverlayControls() {{
 let selectedContact = null;
 let selectedShank = null;
 
+// ---- MNI multi-atlas region labels (fetched live from /labels/mni) ----
+// Show ONE atlas's region per contact at a time via a dropdown; the approved
+// label is untouched (viewing/comparison only). Degrades to nothing when the
+// endpoint is absent (standalone / picker viewer).
+const MNI_CONTACTS = {{}};                  // contact label -> scene contact
+const MNI_REGIONS = {{}};                   // contact label -> {{atlas: region}}
+let MNI_ATLAS = null;                        // selected atlas id, or null = default labeling
+const MNI_NAMES = {{ cerebra: "CerebrA", thalamus_iglesias: "Iglesias thalamus" }};
+function _mniName(id) {{ return MNI_NAMES[id] || id; }}
+function regionFor(c) {{
+  if (MNI_ATLAS && MNI_REGIONS[c.label] && MNI_REGIONS[c.label][MNI_ATLAS])
+    return MNI_REGIONS[c.label][MNI_ATLAS];
+  return c.freesurfer_label || c.thomas_label || c.wm_label || "—";
+}}
+function regionHtml(c) {{
+  const dist = (!MNI_ATLAS && c.distance_mm)
+    ? ` <span class="small">${{(+c.distance_mm).toFixed(1)}}mm</span>` : "";
+  return regionFor(c) + dist;
+}}
+function refreshRegions() {{
+  for (const row of document.querySelectorAll(".contact-row")) {{
+    const c = MNI_CONTACTS[row.dataset.label];
+    if (c) {{ const sp = row.querySelector(".region"); if (sp) sp.innerHTML = regionHtml(c); }}
+  }}
+}}
+function _jobIdFromUrl() {{
+  const p = location.pathname.split("/"); const i = p.indexOf("jobs");
+  return (i >= 0 && p[i + 1]) ? p[i + 1] : null;
+}}
+async function initMniLabels() {{
+  const jid = _jobIdFromUrl();
+  if (!jid || VIEWER_MODE === "picker") return;
+  let data;
+  try {{ const r = await fetch(`/api/v1/jobs/${{jid}}/labels/mni`); if (!r.ok) return; data = await r.json(); }}
+  catch (_e) {{ return; }}
+  if (!data || !(data.atlases || []).length) return;
+  for (const c of data.contacts || []) MNI_REGIONS[c.name] = c.regions || {{}};
+  const sel = document.getElementById("mni-atlas-sel"); if (!sel) return;
+  sel.innerHTML = "<option value=''>Labeling (default)</option>" +
+    data.atlases.map(a => `<option value="${{a}}">${{_mniName(a)}}</option>`).join("");
+  sel.onchange = () => {{ MNI_ATLAS = sel.value || null; refreshRegions(); }};
+  document.getElementById("mni-atlas-ctl").style.display = "";
+  document.getElementById("mni-badge-txt").textContent =
+    "MNI · " + (data.refined ? "nonlinear ✓" : "affine");
+  document.getElementById("mni-badge").style.display = "";
+  const btn = document.getElementById("mni-refine-btn");
+  btn.style.display = data.refined ? "none" : "";
+  btn.onclick = () => _mniRefine(jid, btn);
+}}
+async function _mniRefine(jid, btn) {{
+  btn.disabled = true; btn.textContent = "Refining…";
+  try {{
+    const r = await fetch(`/api/v1/jobs/${{jid}}/mni/refine`, {{ method: "POST" }});
+    if (!r.ok) throw new Error("refine failed");
+    const job = await r.json();
+    const poll = async () => {{
+      const s = await (await fetch(`/api/v1/jobs/${{job.id}}`)).json();
+      if (["succeeded", "failed", "cancelled"].includes(s.state)) {{
+        for (const k of Object.keys(MNI_REGIONS)) delete MNI_REGIONS[k];
+        await initMniLabels(); refreshRegions();
+      }} else setTimeout(poll, 2000);
+    }};
+    poll();
+  }} catch (_e) {{ btn.disabled = false; btn.textContent = "Refine"; }}
+}}
+
 function renderSidebar(meta) {{
   document.getElementById("subject").textContent = meta.subject_label || "(unnamed)";
   document.getElementById("summary").textContent =
@@ -2214,9 +2288,8 @@ function renderSidebar(meta) {{
       const row = document.createElement("div");
       row.className = "contact-row";
       row.dataset.label = c.label;
-      const region = c.freesurfer_label || c.thomas_label || c.wm_label || "—";
-      const dist = c.distance_mm ? ` <span class="small">${{(+c.distance_mm).toFixed(1)}}mm</span>` : "";
-      row.innerHTML = `<span class="label">${{c.label}}</span><span class="region">${{region}}${{dist}}</span>`;
+      MNI_CONTACTS[c.label] = c;
+      row.innerHTML = `<span class="label">${{c.label}}</span><span class="region">${{regionHtml(c)}}</span>`;
       row.addEventListener("click", ev => {{ ev.stopPropagation(); selectContact(c.label, c.trajectory); }});
       list.appendChild(row);
     }}
@@ -2680,6 +2753,8 @@ function _probeSetContact(label){{
 // path-rewritten) scene_meta.json. Identical logic for served + picker.
 function onMeta(meta) {{
   renderSidebar(meta);
+  initMniLabels();   // fetch /labels/mni → show the Region-atlas dropdown + MNI badge
+
   // Contacts for the slice overlay (already in the CT/contact RAS frame).
   sceneMeta = meta;
   allContacts = (meta.contacts || [])

@@ -835,7 +835,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         (CerebrA + Iglesias), from the auto-maintained MNI stamp. Lazily
         (re)computes on stale. Empty ``atlases`` when the case isn't MNI-poolable."""
         job = _job_or_404(job_id)
-        from rosa_core import mni_label
+        from rosa_core import mni_label, cohort
         try:
             rows = mni_label.ensure_contacts_labels_mni(job.workdir)
         except Exception:                         # noqa: BLE001 — never 500 the label view
@@ -849,6 +849,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 "contact_index": r.get("contact_index"), "regions": {}})
             c["regions"][r["atlas"]] = r["region"]
         return {"space": mni_label.POOL_SPACE, "atlases": atlases,
+                "refined": cohort.is_refined(job.workdir / "regcache"),
                 "contacts": list(by_contact.values())}
 
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/mni/refine")

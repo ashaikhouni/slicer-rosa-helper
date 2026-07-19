@@ -37,6 +37,19 @@ def mni_transforms_present(regcache) -> bool:
     return (regcache / CT_TO_T1_TFM).is_file() and (regcache / T1_TO_MNI_TFM).is_file()
 
 
+def is_refined(regcache) -> bool:
+    """True when the cached T1→MNI leg is a nonlinear (B-spline) composite, i.e.
+    the case was refined; False for the plain affine (or when absent)."""
+    tf = Path(regcache) / T1_TO_MNI_TFM
+    if not tf.is_file():
+        return False
+    try:
+        import SimpleITK as sitk
+        return isinstance(sitk.ReadTransform(str(tf)), sitk.CompositeTransform)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def ct_to_mni_matrix(regcache):
     """The 4×4 RAS matrix mapping CT-frame points → MNI (``B @ A``).
 
