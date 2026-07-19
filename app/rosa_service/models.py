@@ -150,6 +150,16 @@ class DicomRequest(BaseModel):
     series_uid: str | None = None
 
 
+class RosMatchRequest(BaseModel):
+    """Match a case's detected trajectories against a ROSA surgical plan.
+
+    ``ros_text`` is the raw text of a ``.ros`` planning file (read client-side and
+    uploaded — no native path needed). Matching is pure line geometry, so only the
+    plan's trajectory names + entry/target are used; no images."""
+
+    ros_text: str
+
+
 class LabelRequest(BaseModel):
     """Kick off anatomical labeling of a pipeline job's contacts.
 

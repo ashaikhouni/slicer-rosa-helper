@@ -42,7 +42,7 @@ from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
     DicomRequest, ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc,
-    ReviewEdit, ReviewOp, ReviewPatch,
+    ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest,
 )
 from .review import ReviewStore, export_contacts
 
@@ -108,6 +108,44 @@ def _regions_from_review(case_dir) -> dict:
         for c in shank.get("contacts", []):
             if c.get("name") and c.get("region"):
                 out[c["name"]] = c["region"]
+    return out
+
+
+def _read_traj_lines(path) -> list:
+    """Read a trajectories.tsv (or seeds.tsv) into ``{name, start, end}`` dicts
+    (RAS mm), for line-geometry matching against a ROS plan."""
+    import csv
+    p = Path(path)
+    if not p.is_file():
+        return []
+    lines = [ln for ln in p.read_text(encoding="utf-8").splitlines()
+             if not ln.lstrip().startswith("#")]
+    out = []
+    for r in csv.DictReader(lines, delimiter="\t"):
+        try:
+            out.append({"name": (r.get("name") or "").strip(),
+                        "start": [float(r["start_x"]), float(r["start_y"]), float(r["start_z"])],
+                        "end": [float(r["end_x"]), float(r["end_y"]), float(r["end_z"])]})
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def _ros_plan_lines(ros_text: str) -> list:
+    """Parse a ``.ros`` file's text into RAS ``{name, start, end}`` plan lines."""
+    from rosa_core.ros_parser import parse_ros_text
+    from rosa_core.transforms import lps_to_ras_point
+    parsed = parse_ros_text(ros_text)
+    out = []
+    for t in (parsed.get("trajectories") or []):
+        try:
+            out.append({
+                "name": str(t.get("name") or ""),
+                "start": [float(v) for v in lps_to_ras_point(list(t["start"]))],
+                "end": [float(v) for v in lps_to_ras_point(list(t["end"]))],
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
     return out
 
 
@@ -866,6 +904,32 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             return runner.create(spec).status().model_dump()
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/match-ros")
+    async def match_ros(job_id: str, req: RosMatchRequest) -> dict:
+        """Match this case's detected trajectories against a ROSA surgical plan
+        (pure line geometry — no image registration; handles entry↔target
+        ambiguity). Returns the detected→plan name map + per-match confidence
+        (axis angle°, perpendicular mm), for a batch rename in the editor."""
+        job = _job_or_404(job_id)
+        det = _read_traj_lines(job.workdir / "trajectories.tsv")
+        if len(det) < 3:
+            raise HTTPException(status_code=422, detail="need ≥3 detected trajectories to match")
+        try:
+            plan = _ros_plan_lines(req.ros_text)
+        except Exception as exc:                  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+        if len(plan) < 3:
+            raise HTTPException(status_code=422, detail="the .ros plan needs ≥3 trajectories")
+        from rosa_core.cross_volume_match import cross_volume_match
+        res = cross_volume_match(plan, det)
+        matched = [{"plan": rn, "det": dn,
+                    "angle_deg": round(a, 1) if a is not None else None,
+                    "perp_mm": round(p, 1) if p is not None else None}
+                   for (rn, dn, a, p) in res.pairs if dn]
+        return {"matched": matched,
+                "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
+                "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

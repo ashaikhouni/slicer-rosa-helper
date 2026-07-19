@@ -104,6 +104,8 @@
     </div>
   </div>
   <button class="btn add" id="addBtn">+ Add electrode</button>
+  <button class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save">Label from ROS</button>
+  <input type="file" id="rosFile" accept=".ros,.txt" hidden>
   <button class="btn primary" id="save">Save plan</button>
 </div>
 
@@ -356,6 +358,35 @@ $("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.na
   if(!nm||nm===t.name)return;
   if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
   t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
+// Batch-rename shanks from a ROSA .ros surgical plan: read the .ros text, match
+// by trajectory geometry (server), then apply the plan names to matched shanks —
+// reusing the rename mechanics so the existing Save carries them (+ labels) through.
+$("#rosBtn").onclick=()=>$("#rosFile").click();
+$("#rosFile").onchange=async(e)=>{
+  const f=e.target.files[0];if(!f)return;e.target.value="";
+  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
+  let res;
+  try{
+    const text=await f.text();
+    const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+    const r=await fetch(jbase+"/match-ros",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({ros_text:text})});
+    if(!r.ok)throw new Error((await r.text()).slice(0,180));
+    res=await r.json();
+  }catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");return;}
+  const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
+  let applied=0,skipped=0;
+  for(const m of (res.matched||[])){
+    const t=byName[m.det];if(!t||!m.plan)continue;
+    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}
+    t.name=m.plan;applied++;
+  }
+  if(act)activeId=act.name;                       // follow the rename
+  renderList();syncInspector();drawMIP();
+  const un=(res.unmatched_plan||[]).length;
+  toast("ROS plan &middot; renamed <b>"+applied+"</b>/"+res.n_det+" shanks"+
+        (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
+        " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
+};
 $("#removeBtn").onclick=()=>{const t=active();
   if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}
   if(!confirm("Remove electrode "+t.name+"? It will be dropped when you Save."))return;
