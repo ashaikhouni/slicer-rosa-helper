@@ -358,21 +358,17 @@ $("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.na
   if(!nm||nm===t.name)return;
   if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
   t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
-// Batch-rename shanks from a ROSA .ros surgical plan: read the .ros text, match
-// by trajectory geometry (server), then apply the plan names to matched shanks —
-// reusing the rename mechanics so the existing Save carries them (+ labels) through.
-$("#rosBtn").onclick=()=>$("#rosFile").click();
-$("#rosFile").onchange=async(e)=>{
-  const f=e.target.files[0];if(!f)return;e.target.value="";
-  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
-  let res;
-  try{
-    const text=await f.text();
-    const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
-    const r=await fetch(jbase+"/match-ros",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({ros_text:text})});
-    if(!r.ok)throw new Error((await r.text()).slice(0,180));
-    res=await r.json();
-  }catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");return;}
+// Rename shanks from a ROSA surgical plan: match by trajectory geometry (server),
+// then apply the plan names, reusing the rename mechanics so the existing Save
+// carries them (+ labels) through. A ROSA-imported case uses its stashed plan; any
+// other case picks a .ros file.
+async function matchRos(body){
+  const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+  const r=await fetch(jbase+"/match-ros",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok)throw new Error((await r.text()).slice(0,180));
+  return r.json();
+}
+function applyRos(res){
   const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
   let applied=0,skipped=0;
   for(const m of (res.matched||[])){
@@ -386,6 +382,16 @@ $("#rosFile").onchange=async(e)=>{
   toast("ROS plan &middot; renamed <b>"+applied+"</b>/"+res.n_det+" shanks"+
         (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
         " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
+}
+$("#rosBtn").onclick=async()=>{
+  try{ applyRos(await matchRos({ros_text:""})); }   // ROSA-imported: use the stashed plan
+  catch(_e){ $("#rosFile").click(); }               // otherwise pick a .ros file
+};
+$("#rosFile").onchange=async(e)=>{
+  const f=e.target.files[0];if(!f)return;e.target.value="";
+  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
+  try{ applyRos(await matchRos({ros_text:await f.text()})); }
+  catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");}
 };
 $("#removeBtn").onclick=()=>{const t=active();
   if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}

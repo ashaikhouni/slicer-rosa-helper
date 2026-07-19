@@ -42,7 +42,8 @@ from .editor_payload import ensure_cache
 from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
     DicomRequest, ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc,
-    ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest,
+    ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest, RosaCreateRequest,
+    RosaPrepareRequest,
 )
 from .review import ReviewStore, export_contacts
 
@@ -915,10 +916,17 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         det = _read_traj_lines(job.workdir / "trajectories.tsv")
         if len(det) < 3:
             raise HTTPException(status_code=422, detail="need ≥3 detected trajectories to match")
-        try:
-            plan = _ros_plan_lines(req.ros_text)
-        except Exception as exc:                  # noqa: BLE001
-            raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+        if req.ros_text.strip():
+            try:
+                plan = _ros_plan_lines(req.ros_text)
+            except Exception as exc:              # noqa: BLE001
+                raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+        else:                                     # ROSA-imported case → its stashed plan
+            stash = job.workdir / "ros_plan.tsv"
+            if not stash.is_file():
+                raise HTTPException(status_code=422,
+                                    detail="no .ros plan provided and none stashed for this case")
+            plan = _read_traj_lines(stash)
         if len(plan) < 3:
             raise HTTPException(status_code=422, detail="the .ros plan needs ≥3 trajectories")
         from rosa_core.cross_volume_match import cross_volume_match
@@ -930,6 +938,68 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         return {"matched": matched,
                 "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
                 "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}
+
+    # ---- import a ROSA robot case (a .ros plan + Analyze images) ----
+    async def _run_engine_capture(args: list[str]):
+        proc = await asyncio.create_subprocess_exec(
+            *_engine_base(), *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        return proc.returncode, (out or b"").decode(errors="replace")
+
+    @app.post(f"/api/{API_VERSION}/rosa-import/prepare")
+    async def rosa_import_prepare(req: RosaPrepareRequest) -> dict:
+        """Stage a ROSA export folder: de-identify → bake to NIfTI → return the
+        display volumes (thumbnail + CT/MRI guess) for the clinician to confirm
+        which is the post-op CT and which is the non-contrast T1."""
+        rosa_dir = Path(req.rosa_dir).expanduser()
+        if not rosa_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"ROSA folder not found: {rosa_dir}")
+        label = (req.label or rosa_dir.name or "rosa").strip() or "rosa"
+        base = Path(work_root) / "_rosa_import" / uuid.uuid4().hex[:8]
+        clean, staging = base / "clean", base / "nifti"
+        staging.mkdir(parents=True, exist_ok=True)
+        rc, log = await _run_engine_capture(
+            ["deidentify-ros", str(rosa_dir), "--out-dir", str(clean),
+             "--subject-id", label, "--no-keymap"])
+        if rc != 0:
+            raise HTTPException(status_code=422, detail=f"de-identify failed: {log.strip()[-400:]}")
+        rc, log = await _run_engine_capture(
+            ["rosa-to-nifti", "--rosa-folder", str(clean), "--output", str(staging)])
+        if rc != 0:
+            raise HTTPException(status_code=422, detail=f"rosa-to-nifti failed: {log.strip()[-400:]}")
+        from .rosa_import import enumerate_displays
+        displays = enumerate_displays(staging)
+        if not displays:
+            raise HTTPException(status_code=422, detail="no display volumes found in the ROSA case")
+        seeds = staging / "seeds.tsv"
+        return {"displays": displays, "label": label,
+                "seeds": str(seeds) if seeds.is_file() else ""}
+
+    @app.post(f"/api/{API_VERSION}/rosa-import/create")
+    async def rosa_import_create(req: RosaCreateRequest) -> dict:
+        """Create a case from a staged ROSA import: run the pipeline on the chosen
+        post-op CT (+ optional non-contrast T1) and stash the plan (seeds.tsv →
+        ros_plan.tsv) so 'Label from ROS' can use it without re-picking a file."""
+        from .cases import ct_fingerprint
+        ct = Path(req.ct_path)
+        if not ct.is_file():
+            raise HTTPException(status_code=404, detail=f"CT not found: {ct}")
+        label = (req.label or "rosa").strip() or "rosa"
+        params = {"ct": str(ct), "label": label, "surface": "auto",
+                  "ct_hash": ct_fingerprint(str(ct))}
+        if req.t1_path and Path(req.t1_path).is_file():
+            params["t1"] = str(req.t1_path)
+        try:
+            job = runner.create(JobSpec(kind="pipeline", params=params))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if req.seeds_path and Path(req.seeds_path).is_file():
+            try:
+                shutil.copyfile(req.seeds_path, job.workdir / "ros_plan.tsv")
+            except OSError:
+                pass
+        return job.status().model_dump()
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

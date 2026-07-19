@@ -154,10 +154,29 @@ class RosMatchRequest(BaseModel):
     """Match a case's detected trajectories against a ROSA surgical plan.
 
     ``ros_text`` is the raw text of a ``.ros`` planning file (read client-side and
-    uploaded — no native path needed). Matching is pure line geometry, so only the
-    plan's trajectory names + entry/target are used; no images."""
+    uploaded — no native path needed). Empty → use the plan stashed at import
+    (``ros_plan.tsv``, for ROSA-imported cases). Matching is pure line geometry,
+    so only the plan's trajectory names + entry/target are used; no images."""
 
-    ros_text: str
+    ros_text: str = ""
+
+
+class RosaPrepareRequest(BaseModel):
+    """Stage a ROSA export folder for import: de-identify, bake to NIfTI, and
+    return the display volumes (with thumbnails + CT/MRI guesses) to confirm."""
+
+    rosa_dir: str
+    label: str | None = None
+
+
+class RosaCreateRequest(BaseModel):
+    """Create a case from a staged ROSA import — the clinician-chosen post-op CT
+    (+ optional non-contrast T1), plus the plan to stash for later labeling."""
+
+    ct_path: str
+    t1_path: str | None = None
+    label: str | None = None
+    seeds_path: str | None = None
 
 
 class LabelRequest(BaseModel):

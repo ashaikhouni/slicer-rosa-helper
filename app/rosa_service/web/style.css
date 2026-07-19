@@ -44,6 +44,17 @@ main { flex: 1; min-height: 0; padding: 8px 20px 24px; display: flex; flex-direc
 .cohort-head { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
 .cohort-head h2 { margin: 0; font-size: 15px; }
 .cohort-frame { flex: 1; width: 100%; border: 0; display: block; background: #1e2530; }
+#panel-rosa.active { display: block; }
+.rosa-displays { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 14px 0; }
+.rosa-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--panel);
+  display: flex; flex-direction: column; gap: 7px; align-items: center; }
+.rosa-thumb { width: 100%; max-width: 140px; aspect-ratio: 1 / 1; object-fit: contain; background: #000;
+  border-radius: 6px; image-rendering: crisp-edges; }
+.rosa-name { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: center; word-break: break-all; }
+.rosa-role { width: 100%; }
+.rosa-foot { display: flex; align-items: center; gap: 14px; margin-top: 10px; }
+.rosa-foot label { font-size: 13px; color: var(--muted); display: flex; gap: 7px; align-items: center; }
+.rosa-foot input { width: 160px; }
 
 /* ---- step 1: drop ---- */
 #panel-drop { max-width: 640px; }

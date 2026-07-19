@@ -60,7 +60,7 @@ function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
   // The step bar tracks the new-case wizard (drop → run → review); it's noise on
   // the case list, the import form, and the workspace (which has its own flow).
-  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort"].includes(name));
+  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort", "rosa"].includes(name));
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -174,6 +174,70 @@ async function importDicom(target, dir) {
     info.innerHTML = `${role}: <b>de-identified from DICOM</b> ✓ — <span class="muted">${r.path.split("/").pop()}</span>`;
   } catch (e) {
     info.textContent = `DICOM import failed: ${e.message}`;
+  }
+}
+
+// ---- import a ROSA robot case (de-identify → bake volumes → confirm roles) ----
+let ROSA = null;
+async function importRosa() {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openDirectory)) {
+    window.alert("Importing a ROSA case needs the desktop app."); return;
+  }
+  const r = await window.rosaNative.openDirectory({ title: "Choose the ROSA case folder (contains a .ros file)" });
+  if (!r || !r.path) return;
+  showStep("rosa");
+  $("rosa-sub").textContent = "· " + r.path.split("/").pop();
+  $("rosa-displays").innerHTML = ""; $("rosa-foot").hidden = true;
+  $("rosa-hint").textContent = "De-identifying + baking volumes… (this can take a moment)";
+  try { ROSA = await jsend(`${API}/rosa-import/prepare`, "POST", { rosa_dir: r.path }); }
+  catch (e) { $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Prepare failed: ${e.message}</span>`; return; }
+  renderRosaConfirm();
+}
+function renderRosaConfirm() {
+  $("rosa-label").value = ROSA.label || "";
+  const host = $("rosa-displays"); host.innerHTML = "";
+  for (const d of ROSA.displays) {
+    const card = el("div", { class: "rosa-card" });
+    const img = el("img", { class: "rosa-thumb", alt: d.name });
+    if (d.png) img.src = d.png;
+    const sel = el("select", { class: "rosa-role" }); sel.dataset.path = d.path;
+    for (const [v, t] of [["", "— ignore —"], ["ct", "Post-op CT"], ["t1", "MRI T1 (non-contrast)"]]) {
+      const o = el("option", { value: v }, t); if (v === d.guess) o.selected = true; sel.append(o);
+    }
+    sel.onchange = updateRosaCreate;
+    card.append(img, el("div", { class: "rosa-name" }, d.name), sel);
+    host.append(card);
+  }
+  $("rosa-foot").hidden = false;
+  updateRosaCreate();
+}
+function _rosaRoles() {
+  const roles = {};
+  document.querySelectorAll(".rosa-role").forEach((s) => {
+    if (s.value) (roles[s.value] = roles[s.value] || []).push(s.dataset.path);
+  });
+  return roles;
+}
+function updateRosaCreate() {
+  const roles = _rosaRoles(), nCt = (roles.ct || []).length, nT1 = (roles.t1 || []).length;
+  $("rosa-create").disabled = !(nCt === 1 && nT1 <= 1);
+  $("rosa-hint").textContent = nCt === 1
+    ? "Confirm the roles, then create the case." + (nT1 ? "" : " (T1 optional but recommended.)")
+    : (nCt === 0 ? "Select the post-op CT." : "Only one post-op CT — set the others to ignore.");
+}
+async function createRosaCase() {
+  const roles = _rosaRoles(), ct = (roles.ct || [])[0];
+  if (!ct) return;
+  const t1 = (roles.t1 || [])[0] || null;
+  $("rosa-create").disabled = true; $("rosa-hint").textContent = "Creating case + running detection…";
+  try {
+    const job = await jsend(`${API}/rosa-import/create`, "POST", {
+      ct_path: ct, t1_path: t1, label: ($("rosa-label").value || "").trim(),
+      seeds_path: ROSA.seeds || "" });
+    openCase(job.id);
+  } catch (e) {
+    $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Create failed: ${e.message}</span>`;
+    $("rosa-create").disabled = false;
   }
 }
 
@@ -1340,6 +1404,9 @@ async function boot() {
   // labeled cases get pooled in.
   $("cohortbtn").onclick = () => { $("cohortframe").src = "/cohort/?t=" + Date.now(); showStep("cohort"); };
   $("cohortback").onclick = showCases;
+  $("rosaimportbtn").onclick = importRosa;      // import a ROSA robot case
+  $("rosa-cancel").onclick = showCases;
+  $("rosa-create").onclick = createRosaCase;
   $("importback").onclick = showCases;
   $("casesearch").addEventListener("input", (ev) => { state.caseSearch = ev.target.value; renderCases(); });
   $("casesfilter").addEventListener("click", (ev) => {

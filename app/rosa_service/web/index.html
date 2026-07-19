@@ -27,6 +27,7 @@
         <div class="cases-actions">
           <button id="newcasebtn" class="primary">+ New case</button>
           <button id="importbtn" class="ghost">Import localization</button>
+          <button id="rosaimportbtn" class="ghost">Import ROSA case</button>
           <button id="cohortbtn" class="ghost">Cohort &middot; MNI</button>
         </div>
       </div>
@@ -42,6 +43,22 @@
       <p id="casesempty" class="muted" hidden>No cases yet — start one from a post-op
         CT, or import a localization from a batch CLI run.</p>
       <p id="casesnoresults" class="muted" hidden>No cases match your search.</p>
+    </div>
+  </section>
+
+  <!-- Import a ROSA robot case: de-identify → bake volumes → confirm CT/MRI roles -->
+  <section id="panel-rosa" class="panel">
+    <div class="cases">
+      <div class="cases-head">
+        <h2>Import ROSA case <span class="muted" id="rosa-sub"></span></h2>
+        <div class="cases-actions"><button id="rosa-cancel" class="ghost">Cancel</button></div>
+      </div>
+      <p class="muted" id="rosa-hint">Preparing…</p>
+      <div id="rosa-displays" class="rosa-displays"></div>
+      <div class="rosa-foot" id="rosa-foot" hidden>
+        <label>Subject id <input type="text" id="rosa-label" class="casesearch" placeholder="e.g. T26"></label>
+        <button id="rosa-create" class="primary" disabled>Create case &amp; detect</button>
+      </div>
     </div>
   </section>
 
