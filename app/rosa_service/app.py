@@ -990,12 +990,17 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                   "ct_hash": ct_fingerprint(str(ct))}
         if req.t1_path and Path(req.t1_path).is_file():
             params["t1"] = str(req.t1_path)
+        # Guided fit: feed the .ros plan (baked to seeds.tsv, all displays share the
+        # reference RAS frame) to detection as seeds → it snaps to the actual metal
+        # and carries the surgeon's trajectory names, instead of blind auto-detect.
+        if req.seeds_path and Path(req.seeds_path).is_file():
+            params["seeds"] = str(req.seeds_path)
         try:
             job = runner.create(JobSpec(kind="pipeline", params=params))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if req.seeds_path and Path(req.seeds_path).is_file():
-            try:
+            try:                              # also stash for editor "Label from ROS"
                 shutil.copyfile(req.seeds_path, job.workdir / "ros_plan.tsv")
             except OSError:
                 pass

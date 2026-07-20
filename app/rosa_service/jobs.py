@@ -293,8 +293,16 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if use_mri_mask:
             # Feed the MRI-derived intracranial mask to the placement anchor.
             contacts_step += ["--brain-mask", str(mask_in_ct)]
+        detect_step = base + ["detect", ct, "--out", traj]
+        # ROSA import: use the .ros planned trajectories as GUIDED-FIT seeds — snap
+        # each to the actual metal and inherit the surgeon's names (LSFG, …) —
+        # instead of blind auto-detection (which yields generic T01/T02 names and
+        # ignores the plan). Same guided engine as `rosa-agent pipeline <ROSA> --ref-volume`.
+        seeds = spec.params.get("seeds")
+        if seeds:
+            detect_step += ["--seeds", str(seeds)]
         steps += [
-            base + ["detect", ct, "--out", traj],
+            detect_step,
             contacts_step,
         ]
         # Without an MRI the CT stays MIP-only (fast, no surface). With an MRI,
