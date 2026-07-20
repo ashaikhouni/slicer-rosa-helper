@@ -38,7 +38,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from .editor_payload import ensure_cache
+from .editor_payload import ensure_cache, probe_patch, _ct_path
 from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
     BurnThomasRequest, DicomRequest, ImportRequest, JobSpec, JobStatus,
@@ -710,6 +710,26 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         return FileResponse(job.workdir / "editor_ct.i16", media_type="application/octet-stream")
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/probe")
+    async def editor_probe(job_id: str, req: dict) -> Response:
+        """A native-resolution patch of the CT on a probe's-eye plane. The editor
+        reslices a 1 mm crop for speed; the probe's-eye samples the FULL-res CT
+        here so the metal is sharp for sub-mm contact placement. Body:
+        ``{center:[rx,ry,rz], u:[..], v:[..], ext_mm, size}`` (RAS). Returns raw
+        row-major int16 (``size×size``)."""
+        job = _job_or_404(job_id)
+        try:
+            ct = _ct_path(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            size = max(32, min(512, int(req.get("size") or 256)))
+            data = probe_patch(ct, req["center"], req["u"], req["v"],
+                               float(req["ext_mm"]), size)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"bad probe request: {exc}") from exc
+        return Response(content=data, media_type="application/octet-stream")
 
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/plan")
     async def save_editor_plan(job_id: str, plan: dict) -> dict:

@@ -151,6 +151,47 @@ def _build(job_dir: Path) -> dict:
     return plan
 
 
+# ---- native-resolution probe's-eye patch (server samples the FULL-res CT) ----
+# The editor reslices a 1 mm crop for speed; the probe's-eye (a single-contact
+# zoom, where sub-mm centre accuracy matters) is sampled from the native CT here
+# so the metal is sharp. Only a small patch travels per request. The native CT +
+# its RAS→voxel affine are cached (keyed by path+mtime) so it's read once.
+_PROBE_CACHE: dict[str, Any] = {"key": None, "arr": None, "inv": None}
+
+
+def _probe_ct(ct_path: Path):
+    import numpy as np
+    import nibabel as nib
+    key = f"{ct_path}:{ct_path.stat().st_mtime_ns}"
+    if _PROBE_CACHE["key"] != key:
+        img = nib.load(str(ct_path))
+        arr = np.asanyarray(img.dataobj).astype(np.float32)
+        while arr.ndim > 3:                                   # drop trailing singleton dims
+            arr = arr[..., 0]
+        _PROBE_CACHE.update(key=key, arr=arr,
+                            inv=np.linalg.inv(img.affine.astype(float)))
+    return _PROBE_CACHE["arr"], _PROBE_CACHE["inv"]
+
+
+def probe_patch(ct_path, center_ras, u, v, ext_mm: float, size: int) -> bytes:
+    """A ``size×size`` int16 patch of the native CT on the plane through
+    ``center_ras`` spanned by RAS unit dirs ``u`` (columns) and ``v`` (rows),
+    ``ext_mm`` wide. Row-major bytes; the client windows + renders it."""
+    import numpy as np
+    from scipy.ndimage import map_coordinates
+    arr, inv = _probe_ct(Path(ct_path))
+    step = float(ext_mm) / size
+    t = (np.arange(size) - size / 2.0) * step                 # [-ext/2, +ext/2]
+    uu, vv = np.meshgrid(t, t, indexing="xy")                 # uu→cols, vv→rows
+    c = np.asarray(center_ras, float); U = np.asarray(u, float); V = np.asarray(v, float)
+    ras = c[None, None, :] + uu[..., None] * U[None, None, :] + vv[..., None] * V[None, None, :]
+    ras_h = np.concatenate([ras, np.ones((size, size, 1))], axis=-1)
+    vox = ras_h @ inv.T                                       # RAS → native voxel index
+    sampled = map_coordinates(arr, [vox[..., 0], vox[..., 1], vox[..., 2]],
+                              order=1, mode="constant", cval=-1024.0)
+    return np.clip(np.rint(sampled), -32768, 32767).astype("<i2").tobytes()
+
+
 def ensure_cache(job_dir: str | Path) -> Path:
     """Build ``editor_plan.json`` + ``editor_ct.i16`` if missing/stale; return the job dir."""
     job_dir = Path(job_dir)

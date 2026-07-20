@@ -82,5 +82,26 @@ class EditorCacheTests(unittest.TestCase):
         self.assertEqual(vol.stat().st_size % 2, 0)
 
 
+@unittest.skipUnless(DEPS, "numpy/nibabel/scipy/rosa_service not importable.")
+class ProbePatchTests(unittest.TestCase):
+    def test_native_probe_samples_correct_ras_point(self):
+        """probe_patch centered on a known bright RAS voxel must read that value
+        at the patch centre (locks the RAS→native-voxel mapping)."""
+        import numpy as np
+        import nibabel as nib
+        from rosa_service.editor_payload import probe_patch
+        root = Path(tempfile.mkdtemp())
+        arr = np.zeros((40, 40, 40), np.int16)
+        arr[20, 21, 22] = 3000                               # bright voxel at index (20,21,22)
+        ct = root / "ct.nii.gz"
+        nib.save(nib.Nifti1Image(arr, np.eye(4)), str(ct))   # identity → RAS == index
+        size = 64
+        buf = np.frombuffer(
+            probe_patch(ct, [20.0, 21.0, 22.0], [1, 0, 0], [0, 1, 0], 8.0, size),
+            dtype="<i2").reshape(size, size)
+        self.assertEqual(int(buf[size // 2, size // 2]), 3000)   # centre hits the bright voxel
+        self.assertEqual(int(buf[0, 0]), 0)                       # corners are background
+
+
 if __name__ == "__main__":
     unittest.main()

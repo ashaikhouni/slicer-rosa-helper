@@ -249,14 +249,43 @@ function blitInline(offx=0,offy=0){
   $("#nameA").textContent=t.name;
   $("#cornerA").innerHTML=`${MODELS[t.model].label}<br>${MODELS[t.model].uniform?"uniform":"grouped spacing"}`;
 }
-function drawProbe(){
-  const t=active(),cv=$("#probeCv"),cs=planContacts(t),i=clamp(+$("#depth").value,0,cs.length-1),P=cs[i];
-  const A=axisOf(t),U=planeV(t),V=norm(cross(A,U));
-  const ext=24/probeZoom,{img,view}=computeReslice(cv,P,U,V,ext,ext);const g=view.ctx;g.putImageData(img,0,0);g.save();g.scale(view.d,view.d);
-  const rr=cv.getBoundingClientRect(),cx=rr.width/2,cy=rr.height/2,{hu,q}=qcOf(P);
+let _probeReq=0,_probeTimer=0;
+function _probeOverlay(cv,q){                       // crosshair, in CSS pixels
+  const g=cv.getContext("2d"),d=window.devicePixelRatio||1;g.save();g.scale(d,d);
+  const rr=cv.getBoundingClientRect(),cx=rr.width/2,cy=rr.height/2;
   g.strokeStyle=col(q);g.lineWidth=2.2;g.beginPath();g.arc(cx,cy,11,0,7);g.stroke();
   for(const[dx,dy]of[[-16,0],[16,0],[0,-16],[0,16]]){g.beginPath();g.moveTo(cx+dx*.5,cy+dy*.5);g.lineTo(cx+dx,cy+dy);g.stroke();}
-  g.restore();$("#probeCorner").innerHTML=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  g.restore();
+}
+function drawProbe(){
+  const t=active(),cv=$("#probeCv"),cs=planContacts(t),i=clamp(+$("#depth").value,0,cs.length-1),P=cs[i];
+  const A=axisOf(t),U=planeV(t),V=norm(cross(A,U)),ext=24/probeZoom,{hu,q}=qcOf(P);
+  // 1) instant 1 mm reslice (responsive while dragging/stepping)
+  const {img}=computeReslice(cv,P,U,V,ext,ext);cv.getContext("2d").putImageData(img,0,0);
+  _probeOverlay(cv,q);
+  $("#probeCorner").innerHTML=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  // 2) sharpen from the NATIVE-res CT (server samples the full-res volume)
+  _probeNative(cv,P,U,V,ext,q,cv.width,cv.height);
+}
+function _probeNative(cv,P,U,V,ext,q,cw,ch){
+  clearTimeout(_probeTimer);const req=++_probeReq;
+  const O=CASE.origin||[0,0,0],center=[P[0]+O[0],P[1]+O[1],P[2]+O[2]],SIZE=320;
+  _probeTimer=setTimeout(async()=>{
+    let buf;
+    try{
+      const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+      const r=await fetch(jbase+"/editor/probe",{method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({center,u:U,v:V,ext_mm:ext,size:SIZE})});
+      if(!r.ok)return;buf=new Int16Array(await r.arrayBuffer());
+    }catch(_e){return;}
+    if(req!==_probeReq||buf.length!==SIZE*SIZE||cv.width!==cw||cv.height!==ch)return;   // stale / resized
+    const off=document.createElement("canvas");off.width=SIZE;off.height=SIZE;
+    const octx=off.getContext("2d"),oimg=octx.createImageData(SIZE,SIZE),od=oimg.data;
+    for(let k=0;k<SIZE*SIZE;k++){const gray=hu2g(buf[k])|0,o=k*4;od[o]=od[o+1]=od[o+2]=gray;od[o+3]=255;}
+    octx.putImageData(oimg,0,0);
+    const g=cv.getContext("2d");g.imageSmoothingEnabled=true;g.drawImage(off,0,0,cv.width,cv.height);
+    _probeOverlay(cv,q);
+  },45);
 }
 // draw at low internal res (cheap ray-march) and let CSS scale it up
 function mipGeom(cv,IW){const r=cv.getBoundingClientRect(),IH=Math.max(2,Math.round(IW*r.height/r.width));
