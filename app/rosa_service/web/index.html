@@ -104,6 +104,16 @@
           </div>
         </div>
         <div class="burn-row">
+          <label class="burn-lbl">Reference MRI
+            <span class="muted">— the image THOMAS ran in (T1 / FGATIR / WMnMPRAGE)</span></label>
+          <div class="burn-pick">
+            <button id="burn-ref-btn" class="ghost">Choose file…</button>
+            <span id="burn-ref-path" class="muted mono"></span>
+          </div>
+          <span class="muted burn-hint">Needed to register THOMAS onto the DICOM — unless the THOMAS
+            folder already contains it, or you skip registration below.</span>
+        </div>
+        <div class="burn-row">
           <label class="burn-lbl">Nuclei to burn
             <span class="burn-nuclei-count muted" id="burn-nuclei-count"></span></label>
           <label class="burn-all"><input type="checkbox" id="burn-all"> Whole thalamus (all nuclei)</label>

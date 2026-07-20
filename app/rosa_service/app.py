@@ -1033,6 +1033,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=404, detail=f"THOMAS dir not found: {req.thomas_dir}")
         if not req.all and not req.nuclei:
             raise HTTPException(status_code=422, detail="choose at least one nucleus, or 'whole thalamus'")
+        if req.t1 and not Path(req.t1).is_file():
+            raise HTTPException(status_code=404, detail=f"reference image not found: {req.t1}")
         params = {
             "dicom_dir": req.dicom_dir, "thomas_dir": req.thomas_dir,
             "out_dir": req.out_dir, "nuclei": list(req.nuclei), "all": bool(req.all),
@@ -1041,6 +1043,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         }
         if req.series_uid:
             params["series_uid"] = req.series_uid
+        if req.t1:
+            params["t1"] = req.t1
         try:
             job = runner.create(JobSpec(kind="burn-thomas", params=params))
         except ValueError as exc:

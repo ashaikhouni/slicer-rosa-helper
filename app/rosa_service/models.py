@@ -198,6 +198,11 @@ class BurnThomasRequest(BaseModel):
     fill: float = 1200.0
     series_description: str = "THOMAS_BURNED"
     series_uid: str | None = None
+    # The intensity image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), used to
+    # register THOMAS → the DICOM. Optional: when omitted the engine looks for one
+    # in the THOMAS folder. Required (unless ``no_register``) when THOMAS was built
+    # off a sequence that isn't stored beside its output — e.g. an FGATIR build.
+    t1: str | None = None
     no_register: bool = False
 
 

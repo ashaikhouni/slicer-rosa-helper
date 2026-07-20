@@ -564,6 +564,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
             argv += ["--series-description", str(p["series_description"])]
         if p.get("series_uid"):
             argv += ["--series-uid", str(p["series_uid"])]
+        if p.get("t1"):
+            argv += ["--t1", str(p["t1"])]
         if p.get("no_register"):
             argv += ["--no-register"]
         return [argv]

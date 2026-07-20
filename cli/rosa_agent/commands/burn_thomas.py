@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -124,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         _stderr(f"error: {exc}")
         return 2
+    except Exception as exc:  # noqa: BLE001 — clean message, not a stack trace
+        _stderr(f"error: could not read THOMAS folder {thomas_dir}: {exc}")
+        return 1
     _stderr(f"[burn-thomas] built THOMAS labelmap; burning {', '.join(names)} "
             f"({args.side}) → {len(labels)} label(s) at fill={args.fill}")
 
@@ -135,12 +139,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # THOMAS labelmap → SITK (via a temp NIfTI so its spatial metadata is
-    # unambiguous), then warp onto the DICOM grid.
+    # unambiguous). ReadImage loads it into memory, so the temp is discarded at
+    # once — nothing is left behind in the user's output folder.
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    tmp_t1frame = out_dir / "_thomas_t1frame.nii.gz"
-    labelmap_img.to_filename(str(tmp_t1frame))
-    lab_sitk = sitk.ReadImage(str(tmp_t1frame))
+    with tempfile.TemporaryDirectory() as _td:
+        tmp = Path(_td) / "thomas_t1frame.nii.gz"
+        labelmap_img.to_filename(str(tmp))
+        lab_sitk = sitk.ReadImage(str(tmp))
 
     if args.no_register:
         transform = sitk.Transform(3, sitk.sitkIdentity)
@@ -151,11 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         t1_path = Path(args.t1) if args.t1 else ref_t1
         if t1_path is None or not Path(t1_path).is_file():
-            _stderr("error: no reference T1 for registration (pass --t1, ensure "
-                    f"{thomas_dir}/T1.nii.gz exists, or use --no-register)")
+            _stderr("error: no reference image for registration — pass --t1 with the "
+                    "image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), place it in the "
+                    f"THOMAS folder, or use --no-register (THOMAS dir: {thomas_dir})")
             return 2
         t1_sitk = sitk.ReadImage(str(t1_path))
-        _stderr("[burn-thomas] registering THOMAS T1 → DICOM (rigid MI)…")
+        _stderr(f"[burn-thomas] registering reference ({Path(t1_path).name}) → DICOM (rigid MI)…")
         result = register_rigid_mi(
             fixed=target, moving=t1_sitk,
             metal_clip_hu=args.metal_clip_hu, logger=_stderr)
@@ -166,10 +173,6 @@ def main(argv: list[str] | None = None) -> int:
             _stderr(f"[burn-thomas] saved transform → {args.save_transform}")
 
     warped = resample_volume(lab_sitk, transform, reference=target, interp="nearest")
-    try:
-        tmp_t1frame.unlink()
-    except OSError:
-        pass
 
     burned, n_vox = dicom_burn.burn_labels(target, warped, labels, args.fill)
     if n_vox == 0:

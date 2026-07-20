@@ -245,8 +245,8 @@ async function createRosaCase() {
 let BURN = null, BURN_ES = null;
 async function openBurnTool() {
   showStep("burn");
-  BURN = { dicom: "", thomas: "", out: "", series: null };
-  for (const w of ["dicom", "thomas", "out"]) $(`burn-${w}-path`).textContent = "";
+  BURN = { dicom: "", thomas: "", out: "", t1: "", series: null };
+  for (const w of ["dicom", "thomas", "out", "ref"]) $(`burn-${w}-path`).textContent = "";
   $("burn-dicom-thumb").hidden = true; $("burn-dicom-info").textContent = "";
   $("burn-status").textContent = ""; $("burn-log").hidden = true; $("burn-log").textContent = "";
   $("burn-all").checked = false; $("burn-side").value = "both";
@@ -294,6 +294,15 @@ async function pickBurnDir(which) {
   }
   updateBurnRun();
 }
+async function pickBurnRef() {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openFile)) {
+    window.alert("This tool needs the desktop app."); return;
+  }
+  const r = await window.rosaNative.openFile({ title: "Choose the reference MRI (the image THOMAS ran in)" });
+  if (!r || !r.path) return;
+  BURN.t1 = r.path;
+  $("burn-ref-path").textContent = r.path;
+}
 function _burnNuclei() {
   return [...document.querySelectorAll(".burn-nuc-cb:checked")].map((c) => c.value);
 }
@@ -312,7 +321,7 @@ async function runBurn() {
     dicom_dir: BURN.dicom, thomas_dir: BURN.thomas, out_dir: BURN.out,
     all: $("burn-all").checked, nuclei: _burnNuclei(),
     side: $("burn-side").value, fill: parseFloat($("burn-fill").value) || 1200,
-    no_register: $("burn-noreg").checked,
+    t1: BURN.t1 || null, no_register: $("burn-noreg").checked,
   };
   $("burn-run").disabled = true; $("burn-status").textContent = "starting…";
   $("burn-log").hidden = false; $("burn-log").textContent = "";
@@ -1516,6 +1525,7 @@ async function boot() {
   $("burn-dicom-btn").onclick = () => pickBurnDir("dicom");
   $("burn-thomas-btn").onclick = () => pickBurnDir("thomas");
   $("burn-out-btn").onclick = () => pickBurnDir("out");
+  $("burn-ref-btn").onclick = pickBurnRef;
   $("burn-all").onchange = updateBurnRun;
   $("burn-run").onclick = runBurn;
   $("importback").onclick = showCases;
