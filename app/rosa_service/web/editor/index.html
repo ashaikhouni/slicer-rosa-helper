@@ -383,10 +383,11 @@ function applyRos(res){
         (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
         " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
 }
-$("#rosBtn").onclick=async()=>{
-  try{ applyRos(await matchRos({ros_text:""})); }   // ROSA-imported: use the stashed plan
-  catch(_e){ $("#rosFile").click(); }               // otherwise pick a .ros file
-};
+// Pick a .ros file to (re)label from. Must open the dialog SYNCHRONOUSLY inside
+// the click — a file input .click() after an await is blocked (lost user gesture).
+// ROSA-imported cases already get their names from the guided import; this is the
+// manual tool to (re)apply names from a chosen .ros.
+$("#rosBtn").onclick=()=>$("#rosFile").click();
 $("#rosFile").onchange=async(e)=>{
   const f=e.target.files[0];if(!f)return;e.target.value="";
   toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
