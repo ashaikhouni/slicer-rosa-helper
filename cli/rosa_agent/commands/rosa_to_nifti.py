@@ -123,7 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     # Export each target volume. The SAME load_rosa_volume_as_sitk call
     # the Slicer side uses — single source of truth for the .ros math.
     export_records: list[dict] = []
-    reference_volume = all_displays[0]
+    skipped: list[dict] = []
+    # Display 0 defines the reference RAS frame every other display is aligned to.
+    reference_name = all_displays[0]
+    reference_volume = reference_name
     rosa_trajectories: list[dict] | None = None
     for vname in targets:
         try:
@@ -131,8 +134,17 @@ def main(argv: list[str] | None = None) -> int:
                 str(rosa_folder), volume_name=vname,
             )
         except (ValueError, FileNotFoundError) as exc:
-            _stderr(f"error: failed to load display {vname!r}: {exc}")
-            return 2
+            if vname == reference_name:
+                # The reference display defines the common frame — can't proceed.
+                _stderr(f"error: the reference display {vname!r} could not be loaded: {exc}")
+                return 2
+            # A .ros can reference a display whose Analyze volume isn't present
+            # (never exported, or dropped in de-identification). Skip it and bake
+            # the rest so the case still imports with the volumes that ARE there.
+            _stderr(f"warning: skipping display {vname!r} — the .ros references it but its "
+                    f"Analyze volume was not found ({exc})")
+            skipped.append({"display_name": vname, "reason": str(exc)})
+            continue
 
         out_nifti = out_dir / f"{_safe_stem(vname)}.nii.gz"
         sitk.WriteImage(sitk_img, str(out_nifti))
@@ -156,6 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         if str(meta.get("reference_volume") or "") and meta["reference_volume"]:
             reference_volume = meta["reference_volume"]
 
+    if not export_records:
+        _stderr(f"error: none of the {len(targets)} display volume(s) could be "
+                f"loaded from {rosa_folder}")
+        return 2
+    if skipped:
+        log(f"[rosa-to-nifti] skipped {len(skipped)} display(s) with no Analyze volume: "
+            f"{[s['display_name'] for s in skipped]}")
+
     # Trajectories → seeds.tsv (place --seeds compatible).
     seeds_path = out_dir / "seeds.tsv"
     n_seeds = _write_seeds_tsv(seeds_path, rosa_trajectories or [])
@@ -172,6 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         "ros_file": str(Path(ros_path).resolve()),
         "reference_volume": reference_volume,
         "exported_volumes": export_records,
+        "skipped_volumes": skipped,
         "seeds_tsv": str(seeds_path),
         "n_planned_trajectories": n_seeds,
         "all_displays_in_ros": all_displays,
@@ -184,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         f"rosa_folder={rosa_folder} "
         f"output={out_dir} "
         f"exported={len(export_records)} "
+        f"skipped={len(skipped)} "
         f"seeds={n_seeds} "
         f"reference={reference_volume!r}"
     )
