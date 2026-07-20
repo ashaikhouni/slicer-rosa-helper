@@ -573,6 +573,9 @@ def _assign_by_expected(
 # ---------------------------------------------------------------------
 
 
+@np.errstate(divide="ignore", over="ignore", invalid="ignore")   # mute FP noise from
+# degenerate candidate geometry in the vectorized search (inf/nan matmul inputs
+# are filtered downstream) — keeps the clinician-facing log clean; results unchanged.
 def place_seeg(
     ct,                                            # path | sitk.Image | None (when features= passed)
     *,
