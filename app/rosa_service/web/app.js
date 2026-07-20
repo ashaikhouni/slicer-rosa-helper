@@ -235,7 +235,17 @@ async function createRosaCase() {
     const job = await jsend(`${API}/rosa-import/create`, "POST", {
       ct_path: ct, t1_path: t1, label: ($("rosa-label").value || "").trim(),
       seeds_path: ROSA.seeds || "" });
-    openCase(job.id);
+    // Watch the pipeline on the run screen; results open when it FINISHES.
+    // (Opening the case immediately races the pipeline → "no contacts.tsv" /
+    // "no viewer" until detection + the scene are written.)
+    state.jobId = job.id;
+    showStep("run");
+    $("log").textContent = "";
+    $("runstate").textContent = "Starting…";
+    $("runsub").textContent = "detect → place contacts → build viewer (~2–3 min)";
+    $("spinner").classList.remove("stopped");
+    streamLogs(job.id);
+    pollStatus(job.id);
   } catch (e) {
     $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Create failed: ${e.message}</span>`;
     $("rosa-create").disabled = false;
