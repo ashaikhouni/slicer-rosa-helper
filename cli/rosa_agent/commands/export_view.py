@@ -2604,15 +2604,24 @@ function _v3len(a){{return Math.hypot(a[0],a[1],a[2]);}}
 function _v3norm(a){{const l=_v3len(a)||1;return [a[0]/l,a[1]/l,a[2]/l];}}
 
 // Gray value at a world point, honoring the CT⟷MRI fade (0..255).
+// Trilinear voxel sample (voxel() is bounds-safe → 0 outside). Smooths the slices
+// + probe reslices like the editor, instead of blocky nearest-neighbour.
+function _triVox(vol,v){{
+  const x0=Math.floor(v[0]),y0=Math.floor(v[1]),z0=Math.floor(v[2]);
+  const fx=v[0]-x0,fy=v[1]-y0,fz=v[2]-z0,S=(a,b,c)=>vol.voxel(a,b,c);
+  const c00=S(x0,y0,z0)*(1-fx)+S(x0+1,y0,z0)*fx,c10=S(x0,y0+1,z0)*(1-fx)+S(x0+1,y0+1,z0)*fx;
+  const c01=S(x0,y0,z0+1)*(1-fx)+S(x0+1,y0,z0+1)*fx,c11=S(x0,y0+1,z0+1)*(1-fx)+S(x0+1,y0+1,z0+1)*fx;
+  return (c00*(1-fy)+c10*fy)*(1-fz)+(c01*(1-fy)+c11*fy)*fz;
+}}
 function _sampleGray(x,y,z){{
   if(!mriVolume)return 0;
   const v=mriVolume.rasToVox([x,y,z]);
   const range=Math.max(1e-6,mriVolume.displayMax-mriVolume.displayMin);
-  let g=Math.max(0,Math.min(255,(mriVolume.voxel(Math.round(v[0]),Math.round(v[1]),Math.round(v[2]))-mriVolume.displayMin)/range*255));
+  let g=Math.max(0,Math.min(255,(_triVox(mriVolume,v)-mriVolume.displayMin)/range*255));
   if(fadeVolume&&sliceFade>0.001){{
     const f=fadeVolume.rasToVox([x,y,z]);
     const fr=Math.max(1e-6,fadeVolume.displayMax-fadeVolume.displayMin);
-    const fg=Math.max(0,Math.min(255,(fadeVolume.voxel(Math.round(f[0]),Math.round(f[1]),Math.round(f[2]))-fadeVolume.displayMin)/fr*255));
+    const fg=Math.max(0,Math.min(255,(_triVox(fadeVolume,f)-fadeVolume.displayMin)/fr*255));
     g=g*(1-sliceFade)+fg*sliceFade;
   }}
   return g;
