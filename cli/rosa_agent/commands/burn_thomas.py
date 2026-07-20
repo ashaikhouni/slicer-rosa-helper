@@ -64,13 +64,21 @@ def _resolve_labels(nuclei, side: str, want_all: bool):
     return labels, names
 
 
+def _write_legend(out_dir, legend, side: str) -> None:
+    """Write ``burn_legend.tsv`` mapping each burned nucleus → its intensity, so a
+    navigation station (or window/level, or a color LUT) can tell them apart."""
+    lines = ["nucleus\tside\tfill"]
+    lines += [f"{nm}\t{side}\t{f:g}" for nm, f in legend]
+    (Path(out_dir) / "burn_legend.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="rosa-agent burn-thomas",
         description="Burn a THOMAS thalamic structure into a DICOM series' pixel "
                     "data and export it as a new DICOM series.")
-    ap.add_argument("dicom_dir", help="DICOM series to burn into (the CT/MRI)")
-    ap.add_argument("thomas_dir", help="THOMAS output dir (has left/ + right/ + T1.nii.gz)")
+    ap.add_argument("dicom_dir", help="DICOM series to burn into (CT or MRI)")
+    ap.add_argument("thomas_dir", help="THOMAS output dir (has left/ + right/)")
     ap.add_argument("--out-dir", "-o", required=True, help="output dir for the burned DICOM series")
     ap.add_argument("--nucleus", "-n", action="append", default=[], metavar="NAME",
                     help="nucleus to burn, by name (VA, MD-Pf, …) or THOMAS number; repeatable")
@@ -79,15 +87,22 @@ def main(argv: list[str] | None = None) -> int:
                     help="hemisphere(s) to burn (default: both)")
     ap.add_argument("--fill", type=float, default=1200.0,
                     help="intensity written into the structure (default 1200, e.g. HU for CT)")
+    ap.add_argument("--distinct", action="store_true",
+                    help="give each nucleus its own intensity (fill, fill+step, …) so multiple "
+                         "structures stay separable in the grayscale series; writes burn_legend.tsv")
+    ap.add_argument("--distinct-step", type=float, default=400.0,
+                    help="intensity increment between nuclei when --distinct (default 400)")
     ap.add_argument("--series-description", default="THOMAS_BURNED",
                     help="SeriesDescription for the exported series")
     ap.add_argument("--series-uid", default=None,
                     help="input series UID to burn into (default: the largest)")
-    ap.add_argument("--t1", default="", help="reference T1 (overrides THOMAS dir's T1.nii.gz)")
-    ap.add_argument("--transform", default="", help="cached T1→DICOM transform (.tfm) to reuse")
-    ap.add_argument("--save-transform", default="", help="write the T1→DICOM transform here")
+    ap.add_argument("--t1", default="",
+                    help="reference image THOMAS ran in (T1 / FGATIR / WMnMPRAGE) to register onto "
+                         "the DICOM; omit (with --no-register) to burn without registration")
+    ap.add_argument("--transform", default="", help="cached reference→DICOM transform (.tfm) to reuse")
+    ap.add_argument("--save-transform", default="", help="write the reference→DICOM transform here")
     ap.add_argument("--no-register", action="store_true",
-                    help="skip registration (THOMAS T1 already shares the DICOM frame)")
+                    help="skip registration (THOMAS already shares the DICOM frame)")
     ap.add_argument("--metal-clip-hu", type=float, default=1500.0,
                     help="clip the DICOM above this value during registration (metal bias)")
     args = ap.parse_args(argv)
@@ -121,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        labelmap_img, _lut, ref_t1 = build_thomas_labelmap(thomas_dir)
+        labelmap_img, _lut, _ref = build_thomas_labelmap(thomas_dir)
     except FileNotFoundError as exc:
         _stderr(f"error: {exc}")
         return 2
@@ -155,14 +170,19 @@ def main(argv: list[str] | None = None) -> int:
         transform = load_transform(args.transform)
         _stderr(f"[burn-thomas] reused cached transform {Path(args.transform).name}")
     else:
-        t1_path = Path(args.t1) if args.t1 else ref_t1
-        if t1_path is None or not Path(t1_path).is_file():
+        # The reference image is provided explicitly (--t1); we do NOT look inside
+        # the THOMAS folder, since it doesn't standardly hold the reference.
+        if not args.t1:
             _stderr("error: no reference image for registration — pass --t1 with the "
-                    "image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), place it in the "
-                    f"THOMAS folder, or use --no-register (THOMAS dir: {thomas_dir})")
+                    "image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), or use --no-register "
+                    "if THOMAS already shares the DICOM's frame")
+            return 2
+        t1_path = Path(args.t1)
+        if not t1_path.is_file():
+            _stderr(f"error: reference image not found: {t1_path}")
             return 2
         t1_sitk = sitk.ReadImage(str(t1_path))
-        _stderr(f"[burn-thomas] registering reference ({Path(t1_path).name}) → DICOM (rigid MI)…")
+        _stderr(f"[burn-thomas] registering reference ({t1_path.name}) → DICOM (rigid MI)…")
         result = register_rigid_mi(
             fixed=target, moving=t1_sitk,
             metal_clip_hu=args.metal_clip_hu, logger=_stderr)
@@ -174,10 +194,32 @@ def main(argv: list[str] | None = None) -> int:
 
     warped = resample_volume(lab_sitk, transform, reference=target, interp="nearest")
 
-    burned, n_vox = dicom_burn.burn_labels(target, warped, labels, args.fill)
+    if args.distinct:
+        # One intensity per nucleus (both hemispheres of a nucleus share it), so
+        # multiple structures stay apart in the grayscale series. Legend → TSV.
+        from rosa_core.thomas_import import THOMAS_NUCLEI, RIGHT_OFFSET
+        offsets = {"left": (0,), "right": (RIGHT_OFFSET,),
+                   "both": (0, RIGHT_OFFSET)}[args.side]
+        name_to_num = {nm.upper(): num for num, (nm, _rgb) in THOMAS_NUCLEI.items()}
+        burn_names = ([THOMAS_NUCLEI[num][0] for num in THOMAS_NUCLEI]
+                      if args.all else names)
+        fills, legend = {}, []
+        for i, nm in enumerate(burn_names):
+            f = args.fill + i * args.distinct_step
+            for off in offsets:
+                fills[name_to_num[nm.upper()] + off] = f
+            legend.append((nm, f))
+        burned, counts = dicom_burn.burn_label_map(target, warped, fills)
+        n_vox = sum(counts.values())
+        _write_legend(out_dir, legend, args.side)
+        _stderr("[burn-thomas] distinct intensities → burn_legend.tsv:")
+        for nm, f in legend:
+            _stderr(f"[burn-thomas]   {nm} = {f:g}")
+    else:
+        burned, n_vox = dicom_burn.burn_labels(target, warped, labels, args.fill)
     if n_vox == 0:
         _stderr("warning: 0 voxels burned — the structure did not overlap the "
-                "DICOM field of view (check the registration or --side/--nucleus)")
+                "DICOM field of view (check the reference/registration or --side/--nucleus)")
 
     written, series_uid = dicom_burn.write_series(
         burned, reader, out_dir,

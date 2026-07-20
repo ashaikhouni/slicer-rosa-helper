@@ -124,6 +124,38 @@ def burn_labels(image, labelmap, labels: Iterable[int], fill_value: float):
     return burned, n
 
 
+def burn_label_map(image, labelmap, fills):
+    """Burn each label to its OWN intensity — for distinguishing multiple
+    structures in one grayscale series (DICOM pixels can't carry color, so
+    different HU is how a navigation station can window/LUT them apart).
+
+    ``fills`` maps ``label → fill_value``. Returns ``(burned_image, {label:
+    n_voxels})``. ``image`` and ``labelmap`` must share a grid.
+    """
+    import numpy as np
+    import SimpleITK as sitk
+
+    img_arr = sitk.GetArrayFromImage(image)
+    lab_arr = sitk.GetArrayFromImage(labelmap)
+    if img_arr.shape != lab_arr.shape:
+        raise ValueError(
+            f"image {img_arr.shape} and labelmap {lab_arr.shape} are not on the same grid")
+    info = np.iinfo(img_arr.dtype) if np.issubdtype(img_arr.dtype, np.integer) else None
+    counts: dict[int, int] = {}
+    for label, fill in fills.items():
+        if info is not None and not (info.min <= fill <= info.max):
+            raise ValueError(
+                f"fill {fill} for label {label} is outside the image dtype "
+                f"{img_arr.dtype} range [{info.min}, {info.max}]")
+        mask = lab_arr == int(label)
+        counts[int(label)] = int(mask.sum())
+        if counts[int(label)]:
+            img_arr[mask] = fill
+    burned = sitk.GetImageFromArray(img_arr)
+    burned.CopyInformation(image)
+    return burned, counts
+
+
 def write_series(
     burned,
     reader,

@@ -185,6 +185,28 @@ class BurnEndToEndTests(unittest.TestCase):
         _, reader = dicom_burn.read_series(out)
         self.assertEqual(reader.GetMetaData(0, "0008|103e").strip(), "THAL_NAV")
 
+    def test_distinct_intensities_and_legend(self):
+        """--distinct gives each nucleus its own fill (fill, fill+step) and writes
+        a legend, so multiple structures stay separable in the grayscale series."""
+        import numpy as np
+        import SimpleITK as sitk
+        from rosa_core import dicom_burn
+        # add a second nucleus (CM = 11), disjoint from the VA blobs, to both maps
+        for hemi in ("left", "right"):
+            p = self.case["thomas"] / hemi / f"thomasfull_{hemi[0].upper()}.nii.gz"
+            im = sitk.ReadImage(str(p)); a = sitk.GetArrayFromImage(im)
+            a[5:7, 2:5, 6:9] = 11
+            im2 = sitk.GetImageFromArray(a); im2.CopyInformation(im)
+            sitk.WriteImage(im2, str(p))
+        out = self._run(["--nucleus", "VA", "--nucleus", "CM", "--side", "both",
+                         "--fill", "1000", "--distinct", "--distinct-step", "500"])
+        arr = sitk.GetArrayFromImage(dicom_burn.read_series(out)[0])
+        self.assertGreater(int((arr == 1000).sum()), 0)   # VA at the base fill
+        self.assertGreater(int((arr == 1500).sum()), 0)   # CM at fill + step
+        legend = (out / "burn_legend.tsv").read_text()
+        self.assertIn("VA\tboth\t1000", legend)
+        self.assertIn("CM\tboth\t1500", legend)
+
 
 @unittest.skipUnless(DEPS_AVAILABLE, "numpy/SimpleITK/rosa_agent not importable.")
 class ArgValidationTests(unittest.TestCase):

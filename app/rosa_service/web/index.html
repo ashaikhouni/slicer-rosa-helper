@@ -82,11 +82,11 @@
         <h2>Burn THOMAS <span class="muted">&middot; for navigation &middot; no case</span></h2>
         <div class="cases-actions"><button id="burn-cancel" class="ghost">&larr; Cases</button></div>
       </div>
-      <p class="muted">Burn a thalamic nucleus into a post-op DICOM's pixel data and export a
-        new DICOM series. Nothing is saved as a case; the output goes to the folder you choose.</p>
+      <p class="muted">Burn a thalamic nucleus into a DICOM's pixel data and export a new DICOM
+        series. Nothing is saved as a case; the output goes to the folder you choose.</p>
       <div class="burn-form">
         <div class="burn-row">
-          <label class="burn-lbl">Post-op DICOM folder</label>
+          <label class="burn-lbl">DICOM to burn into</label>
           <div class="burn-pick">
             <button id="burn-dicom-btn" class="ghost">Choose folder…</button>
             <span id="burn-dicom-path" class="muted mono"></span>
@@ -110,8 +110,8 @@
             <button id="burn-ref-btn" class="ghost">Choose file…</button>
             <span id="burn-ref-path" class="muted mono"></span>
           </div>
-          <span class="muted burn-hint">Needed to register THOMAS onto the DICOM — unless the THOMAS
-            folder already contains it, or you skip registration below.</span>
+          <span class="muted burn-hint">Provide it → THOMAS is registered onto the DICOM.
+            Leave empty → burned as-is, no registration (THOMAS already in the DICOM's frame).</span>
         </div>
         <div class="burn-row">
           <label class="burn-lbl">Nuclei to burn
@@ -128,7 +128,7 @@
             </select>
           </label>
           <label>Fill (HU) <input type="number" id="burn-fill" value="1200" step="50" class="burn-fill"></label>
-          <label class="burn-noreg"><input type="checkbox" id="burn-noreg"> Skip registration (THOMAS T1 already in the DICOM frame)</label>
+          <label class="burn-distinct" title="Give each nucleus its own intensity so they're separable in the grayscale series"><input type="checkbox" id="burn-distinct"> Distinct intensity per structure</label>
         </div>
         <div class="burn-row">
           <label class="burn-lbl">Output folder</label>
@@ -262,7 +262,10 @@
       <div id="etypeslist" class="etypeslist"></div>
     </details>
 
-    <button id="runbtn" class="primary" disabled>Run localization →</button>
+    <div class="drop-foot">
+      <button id="dropback" class="ghost">◀ Cases</button>
+      <button id="runbtn" class="primary" disabled>Run localization →</button>
+    </div>
   </section>
 
   <!-- Step 2: Running -->

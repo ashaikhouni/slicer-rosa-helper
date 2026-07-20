@@ -196,6 +196,10 @@ class BurnThomasRequest(BaseModel):
     all: bool = False
     side: str = "both"
     fill: float = 1200.0
+    # Give each nucleus its own intensity (fill, fill+step, …) so multiple
+    # structures stay separable in the grayscale series (writes a legend).
+    distinct: bool = False
+    distinct_step: float = 400.0
     series_description: str = "THOMAS_BURNED"
     series_uid: str | None = None
     # The intensity image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), used to

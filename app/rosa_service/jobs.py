@@ -555,6 +555,8 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                 "--out-dir", str(p["out_dir"]),
                 "--side", str(p.get("side", "both")),
                 "--fill", str(p.get("fill", 1200))]
+        if p.get("distinct"):
+            argv += ["--distinct", "--distinct-step", str(p.get("distinct_step", 400))]
         if p.get("all"):
             argv += ["--all"]
         else:

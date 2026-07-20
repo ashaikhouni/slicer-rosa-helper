@@ -250,7 +250,7 @@ async function openBurnTool() {
   $("burn-dicom-thumb").hidden = true; $("burn-dicom-info").textContent = "";
   $("burn-status").textContent = ""; $("burn-log").hidden = true; $("burn-log").textContent = "";
   $("burn-all").checked = false; $("burn-side").value = "both";
-  $("burn-fill").value = "1200"; $("burn-noreg").checked = false;
+  $("burn-fill").value = "1200"; $("burn-distinct").checked = false;
   await loadBurnNuclei();
   updateBurnRun();
 }
@@ -274,7 +274,7 @@ async function pickBurnDir(which) {
   if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openDirectory)) {
     window.alert("This tool needs the desktop app."); return;
   }
-  const titles = { dicom: "Choose the post-op DICOM folder",
+  const titles = { dicom: "Choose the DICOM to burn into",
     thomas: "Choose the THOMAS output folder", out: "Choose the output folder" };
   const r = await window.rosaNative.openDirectory({ title: titles[which] });
   if (!r || !r.path) return;
@@ -321,7 +321,8 @@ async function runBurn() {
     dicom_dir: BURN.dicom, thomas_dir: BURN.thomas, out_dir: BURN.out,
     all: $("burn-all").checked, nuclei: _burnNuclei(),
     side: $("burn-side").value, fill: parseFloat($("burn-fill").value) || 1200,
-    t1: BURN.t1 || null, no_register: $("burn-noreg").checked,
+    distinct: $("burn-distinct").checked,
+    t1: BURN.t1 || null, no_register: !BURN.t1,   // no reference → burn as-is, no registration
   };
   $("burn-run").disabled = true; $("burn-status").textContent = "starting…";
   $("burn-log").hidden = false; $("burn-log").textContent = "";
@@ -1512,6 +1513,7 @@ async function boot() {
   $("slot-reg").onclick = () => { showWs("review"); openRegCheck(); };  // case CT↔MRI QC (pre-label)
   $("restartbtn").onclick = showCases;          // workspace → back to the case list
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
+  $("dropback").onclick = showCases;            // new-case form → back to the case list
   $("importbtn").onclick = () => showStep("import");
   // Cohort MNI viewer (Data Explorer): reload the iframe each time so newly
   // labeled cases get pooled in.

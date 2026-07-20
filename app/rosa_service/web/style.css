@@ -92,6 +92,9 @@ main { flex: 1; min-height: 0; padding: 8px 20px 24px; display: flex; flex-direc
   border-radius: 8px; padding: 10px; font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap;
   color: var(--muted); }
 
+/* New-case form footer: back to the case list + run */
+.drop-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; }
+
 /* ---- step 1: drop ---- */
 #panel-drop { max-width: 640px; }
 .dropzone { border: 2px dashed var(--line2); border-radius: 12px; padding: 34px 20px; text-align: center;

@@ -1039,6 +1039,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             "dicom_dir": req.dicom_dir, "thomas_dir": req.thomas_dir,
             "out_dir": req.out_dir, "nuclei": list(req.nuclei), "all": bool(req.all),
             "side": req.side, "fill": req.fill,
+            "distinct": bool(req.distinct), "distinct_step": req.distinct_step,
             "series_description": req.series_description, "no_register": bool(req.no_register),
         }
         if req.series_uid:
