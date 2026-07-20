@@ -97,7 +97,7 @@ class ProbePatchTests(unittest.TestCase):
         nib.save(nib.Nifti1Image(arr, np.eye(4)), str(ct))   # identity → RAS == index
         size = 64
         buf = np.frombuffer(
-            probe_patch(ct, [20.0, 21.0, 22.0], [1, 0, 0], [0, 1, 0], 8.0, size),
+            probe_patch(ct, [20.0, 21.0, 22.0], [1, 0, 0], [0, 1, 0], 8.0, 8.0, size, size),
             dtype="<i2").reshape(size, size)
         self.assertEqual(int(buf[size // 2, size // 2]), 3000)   # centre hits the bright voxel
         self.assertEqual(int(buf[0, 0]), 0)                       # corners are background

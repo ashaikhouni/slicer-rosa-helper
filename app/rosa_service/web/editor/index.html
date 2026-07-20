@@ -230,12 +230,19 @@ function resliceInline(){
   let C=sub(tip,scl(A,span/2));C=add(C,add(scl(A,panU),scl(V,panV)));  // frame the comb + pan
   const rr=cv.getBoundingClientRect(),extU=(span+40)/inlineZoom,extV=extU*(rr.height/rr.width);
   _inlineDims={extU,extV,cssW:rr.width,cssH:rr.height};
-  inlineCache=computeReslice(cv,C,A,V,extU,extV);blitInline();
+  inlineCache=computeReslice(cv,C,A,V,extU,extV);blitInline();_inlineNative();
 }
 function blitInline(offx=0,offy=0){
-  if(!inlineCache)return;const t=active(),v=inlineCache.view,g=v.ctx;
+  if(!inlineCache)return;const v=inlineCache.view,g=v.ctx;
   if(offx||offy)g.clearRect(0,0,v.W,v.H);
-  g.putImageData(inlineCache.img,Math.round(offx*v.d),Math.round(offy*v.d));g.save();g.scale(v.d,v.d);g.translate(offx,offy);
+  g.putImageData(inlineCache.img,Math.round(offx*v.d),Math.round(offy*v.d));
+  _inlineOverlays(v,offx,offy);
+}
+// Trajectory line + contact circles + E/T handles — shared by the instant 1 mm
+// blit and the native-sharpened redraw (both use the same reslice geometry v).
+function _inlineOverlays(v,offx,offy){
+  const t=active(),g=v.ctx;
+  g.save();g.scale(v.d,v.d);g.translate(offx,offy);
   const px=P=>v.toPx(P),e=px(t.entry),tg=px(t.target);
   g.strokeStyle="rgba(56,210,230,.85)";g.lineWidth=1.4;g.setLineDash([5,4]);
   g.beginPath();g.moveTo(e[0],e[1]);g.lineTo(tg[0],tg[1]);g.stroke();g.setLineDash([]);
@@ -248,6 +255,32 @@ function blitInline(offx=0,offy=0){
   g.restore();
   $("#nameA").textContent=t.name;
   $("#cornerA").innerHTML=`${MODELS[t.model].label}<br>${MODELS[t.model].uniform?"uniform":"grouped spacing"}`;
+}
+// Sharpen the in-line reformat from the NATIVE CT (where placement matters most).
+// The 1 mm blit is up instantly; this fetches the full-res patch for the SAME
+// reslice plane (debounced, so a drag stays smooth) and redraws it + overlays.
+let _inlReq=0,_inlTimer=0;
+function _inlineNative(){
+  clearTimeout(_inlTimer);const req=++_inlReq;if(!inlineCache)return;
+  const v=inlineCache.view,O=CASE.origin||[0,0,0];
+  const center=[v.C[0]+O[0],v.C[1]+O[1],v.C[2]+O[2]],extU=v.puU*v.W,extV=v.puV*v.H;
+  const su=Math.min(v.W,1200),sv=Math.max(1,Math.round(su*extV/extU));
+  _inlTimer=setTimeout(async()=>{
+    let buf;
+    try{
+      const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+      const r=await fetch(jbase+"/editor/probe",{method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({center,u:v.U,v:v.V,ext_u:extU,ext_v:extV,size_u:su,size_v:sv})});
+      if(!r.ok)return;buf=new Int16Array(await r.arrayBuffer());
+    }catch(_e){return;}
+    if(req!==_inlReq||!inlineCache||inlineCache.view!==v||buf.length!==su*sv)return;   // stale / re-resliced
+    const off=document.createElement("canvas");off.width=su;off.height=sv;
+    const octx=off.getContext("2d"),oimg=octx.createImageData(su,sv),od=oimg.data;
+    for(let k=0;k<su*sv;k++){const gray=hu2g(buf[k])|0,o=k*4;od[o]=od[o+1]=od[o+2]=gray;od[o+3]=255;}
+    octx.putImageData(oimg,0,0);
+    const g=v.ctx;g.imageSmoothingEnabled=true;g.drawImage(off,0,0,v.W,v.H);
+    _inlineOverlays(v,0,0);
+  },110);
 }
 let _probeReq=0,_probeTimer=0;
 function _probeOverlay(cv,q){                       // crosshair, in CSS pixels
@@ -276,7 +309,7 @@ function _probeNative(cv,P,U,V,ext,q,cw,ch,corner){
     try{
       const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
       const r=await fetch(jbase+"/editor/probe",{method:"POST",headers:{"content-type":"application/json"},
-        body:JSON.stringify({center,u:U,v:V,ext_mm:ext,size:SIZE})});
+        body:JSON.stringify({center,u:U,v:V,ext_u:ext,ext_v:ext,size_u:SIZE,size_v:SIZE})});
       if(!r.ok)return;buf=new Int16Array(await r.arrayBuffer());
     }catch(_e){return;}
     if(req!==_probeReq||buf.length!==SIZE*SIZE||cv.width!==cw||cv.height!==ch)return;   // stale / resized

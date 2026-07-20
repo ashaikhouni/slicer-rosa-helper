@@ -711,22 +711,26 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=404, detail=str(exc))
         return FileResponse(job.workdir / "editor_ct.i16", media_type="application/octet-stream")
 
+    # Sync (not async) on purpose: the first call decompresses the whole native CT
+    # (~1-2 s), which would block the event loop in an async handler and freeze the
+    # app. FastAPI runs sync path ops in a threadpool, so the 1 mm views stay live.
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/probe")
-    async def editor_probe(job_id: str, req: dict) -> Response:
-        """A native-resolution patch of the CT on a probe's-eye plane. The editor
-        reslices a 1 mm crop for speed; the probe's-eye samples the FULL-res CT
-        here so the metal is sharp for sub-mm contact placement. Body:
-        ``{center:[rx,ry,rz], u:[..], v:[..], ext_mm, size}`` (RAS). Returns raw
-        row-major int16 (``size×size``)."""
+    def editor_probe(job_id: str, req: dict) -> Response:
+        """A native-resolution patch of the CT on an editor plane (probe's-eye or
+        in-line reformat). The editor reslices a 1 mm crop for speed; these views
+        sample the FULL-res CT so the metal is sharp for sub-mm contact placement.
+        Body: ``{center:[rx,ry,rz], u:[..], v:[..], ext_u, ext_v, size_u, size_v}``
+        (RAS). Returns raw row-major int16 (``size_v × size_u``)."""
         job = _job_or_404(job_id)
         try:
             ct = _ct_path(job.workdir)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            size = max(32, min(512, int(req.get("size") or 256)))
+            su = max(16, min(1400, int(req["size_u"])))
+            sv = max(16, min(1400, int(req["size_v"])))
             data = probe_patch(ct, req["center"], req["u"], req["v"],
-                               float(req["ext_mm"]), size)
+                               float(req["ext_u"]), float(req["ext_v"]), su, sv)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"bad probe request: {exc}") from exc
         return Response(content=data, media_type="application/octet-stream")
