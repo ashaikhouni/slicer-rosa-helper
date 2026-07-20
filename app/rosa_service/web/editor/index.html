@@ -496,7 +496,9 @@ async function boot(){
   const base=location.pathname.replace(/\/+$/,"");   // /api/v1/jobs/{id}/editor
   try{
     CASE=await (await fetch(base+"/plan",{cache:"no-store"})).json();
-    VOL=new Int16Array(await (await fetch(base+"/volume",{cache:"no-store"})).arrayBuffer());
+    const vbuf=await (await fetch(base+"/volume",{cache:"no-store"})).arrayBuffer();
+    if(vbuf.byteLength%2)throw new Error("the cached CT volume looks truncated ("+vbuf.byteLength+" bytes) — re-run the case to rebuild it");
+    VOL=new Int16Array(vbuf);
   }catch(err){document.body.insertAdjacentHTML("afterbegin",
     `<div style="padding:20px;color:#e8635f;font-family:var(--mono)">Failed to load the case: ${err}</div>`);return;}
   [NX,NY,NZ]=CASE.dims;MODELS=CASE.models;C0=[NX/2,NY/2,NZ/2];DIAG=Math.hypot(NX,NY,NZ);

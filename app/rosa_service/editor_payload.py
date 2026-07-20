@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically (temp + os.replace) so a crash or an
+    interrupted write never leaves a truncated file behind for the next reader."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 CT_CLAMP = (-1024, 3071)                  # int16 HU range we ship
 MARGIN_MM = 14.0
@@ -113,7 +122,7 @@ def _build(job_dir: Path) -> dict:
     sampled = map_coordinates(arr, [vox[..., 0], vox[..., 1], vox[..., 2]],
                               order=1, mode="constant", cval=float(arr.min()))
     vol = np.clip(sampled, *CT_CLAMP).astype(np.int16).flatten(order="F")   # x-fastest for the JS indexer
-    (job_dir / "editor_ct.i16").write_bytes(vol.tobytes())
+    _atomic_write(job_dir / "editor_ct.i16", vol.tobytes())
 
     models = electrode_library()
     for s in shanks:                          # a case model absent from the library -> detected offsets
@@ -136,7 +145,9 @@ def _build(job_dir: Path) -> dict:
                            tipOffset=0.0, length_mm=s["length_mm"], confidence_label=s["confidence_label"])
                       for k, s in enumerate(shanks)],
     )
-    (job_dir / "editor_plan.json").write_text(json.dumps(plan))
+    # Volume is written first (above), then the plan LAST — the freshness check
+    # keys on the plan's mtime, so the plan existing implies the volume is done.
+    _atomic_write(job_dir / "editor_plan.json", json.dumps(plan).encode())
     return plan
 
 
@@ -148,6 +159,18 @@ def ensure_cache(job_dir: str | Path) -> Path:
         raise FileNotFoundError(f"job {job_dir.name}: no trajectories.tsv (run a pipeline job first)")
     fresh = (plan_p.is_file() and vol_p.is_file()
              and plan_p.stat().st_mtime >= src.stat().st_mtime)
+    if fresh:
+        # Guard against a truncated/partial editor_ct.i16 — an interrupted build,
+        # or a case copied to another machine mid-transfer. It must be exactly
+        # dims_x*dims_y*dims_z * 2 bytes (int16); a mismatch (e.g. an odd length →
+        # the browser's `new Int16Array` throws) forces a rebuild.
+        try:
+            dims = json.loads(plan_p.read_text()).get("dims") or []
+            expected = int(dims[0]) * int(dims[1]) * int(dims[2]) * 2 if len(dims) == 3 else -1
+        except (ValueError, OSError, TypeError, IndexError):
+            expected = -1
+        if expected <= 0 or vol_p.stat().st_size != expected:
+            fresh = False
     if not fresh:
         _build(job_dir)
     return job_dir
