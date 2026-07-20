@@ -132,7 +132,8 @@ async function uploadCreationMri(file) {
 // DICOM series → converted to a de-identified NIfTI first. Desktop uses one
 // native dialog that accepts either; typed/pasted paths + the browser fall back
 // to the file extension (NIfTI) vs "looks like a folder" (DICOM).
-const NIFTI_RE = /\.(nii(\.gz)?|nrrd|gz)$/i;
+// A loadable image FILE (vs a DICOM folder): NIfTI, NRRD, or Analyze .img/.hdr.
+const NIFTI_RE = /\.(nii(\.gz)?|nrrd|gz|img|hdr)$/i;
 const _role = (t) => (t === "mri" ? "MRI" : "CT");
 const _infoEl = (t) => $(t === "mri" ? "mricreateinfo" : "ctinfo");
 const _setImage = (t, picked) => (t === "mri" ? setCreationMri(picked) : setCt(picked));

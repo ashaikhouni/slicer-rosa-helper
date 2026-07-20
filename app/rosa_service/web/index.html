@@ -170,7 +170,7 @@
         <label class="field">Post-op CT
           <input type="text" id="imp-ct" placeholder="/path/to/ct.nii.gz" autocomplete="off">
         </label>
-        <label class="link browse">browse<input type="file" id="imp-ct-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+        <label class="link browse">browse<input type="file" id="imp-ct-file" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden></label>
       </div>
       <div class="importrow">
         <label class="field">Contacts TSV
@@ -191,7 +191,7 @@
           <label class="field">MRI (T1)
             <input type="text" id="imp-t1" placeholder="/path/to/t1.nii.gz" autocomplete="off">
           </label>
-          <label class="link browse">browse<input type="file" id="imp-t1-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+          <label class="link browse">browse<input type="file" id="imp-t1-file" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden></label>
         </div>
         <p class="muted" style="font-size:12px">Enables the anatomic surface + labeling, same as a new case.</p>
       </details>
@@ -210,7 +210,7 @@
   <section id="panel-drop" class="panel">
     <div id="dropzone" class="dropzone">
       <p><strong>Drop a postop CT</strong> (.nii / .nii.gz) here, or
-        <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,application/gzip,application/octet-stream" hidden></label>.</p>
+        <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr,application/gzip,application/octet-stream" hidden></label>.</p>
       <p class="muted">Nothing leaves this machine.</p>
     </div>
     <div class="or">— or choose a NIfTI file, or a DICOM folder (auto-converted + de-identified) —</div>
@@ -233,7 +233,7 @@
         results screen.</p>
       <div class="dicomrow">
         <button type="button" id="mripickbtn" class="ghost small">Choose MRI — NIfTI file or DICOM folder…</button>
-        <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd" hidden>
+        <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden>
       </div>
       <label class="field">— or MRI path
         <input type="text" id="mripath" placeholder="/path/to/t1.nii.gz  — or a DICOM folder (⏎ to convert)" autocomplete="off">
@@ -367,7 +367,7 @@
         <div class="labelbar" id="labelbar">
           <div class="labelbar-mri" id="labelbarMri" hidden>
             <span class="muted">Add a patient MRI (T1) to label contacts →</span>
-            <label class="field small inline">MRI<input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd"></label>
+            <label class="field small inline">MRI<input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr"></label>
             <button id="labelbtn" class="ghost small" disabled>Register &amp; label</button>
             <span id="labelstatus" class="muted"></span>
           </div>

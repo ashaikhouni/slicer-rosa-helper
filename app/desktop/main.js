@@ -236,7 +236,9 @@ function createWindow(url) {
 // ---------------------------------------------------------------------------
 
 const NII_FILTERS = [
-  { name: "NIfTI / NRRD", extensions: ["nii", "nii.gz", "gz", "nrrd"] },
+  // Analyze (.img/.hdr, as ROSA stores volumes) reads natively via SimpleITK/
+  // nibabel — pick either file of the pair; the other must sit beside it.
+  { name: "Images (NIfTI / NRRD / Analyze)", extensions: ["nii", "nii.gz", "gz", "nrrd", "img", "hdr"] },
   { name: "All files", extensions: ["*"] },
 ];
 
