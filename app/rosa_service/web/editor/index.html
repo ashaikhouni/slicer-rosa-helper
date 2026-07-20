@@ -264,7 +264,9 @@ function _inlineNative(){
   clearTimeout(_inlTimer);const req=++_inlReq;if(!inlineCache)return;
   const v=inlineCache.view,O=CASE.origin||[0,0,0];
   const center=[v.C[0]+O[0],v.C[1]+O[1],v.C[2]+O[2]],extU=v.puU*v.W,extV=v.puV*v.H;
-  const su=Math.min(v.W,1200),sv=Math.max(1,Math.round(su*extV/extU));
+  // Sample at (essentially) the canvas device resolution so the native patch
+  // isn't upscale-blurred; cap matches the server's limit so su/sv round-trip.
+  const su=Math.min(v.W,1800),sv=Math.min(1800,Math.max(1,Math.round(su*extV/extU)));
   _inlTimer=setTimeout(async()=>{
     let buf;
     try{
@@ -278,8 +280,9 @@ function _inlineNative(){
     const octx=off.getContext("2d"),oimg=octx.createImageData(su,sv),od=oimg.data;
     for(let k=0;k<su*sv;k++){const gray=hu2g(buf[k])|0,o=k*4;od[o]=od[o+1]=od[o+2]=gray;od[o+3]=255;}
     octx.putImageData(oimg,0,0);
-    const g=v.ctx;g.imageSmoothingEnabled=true;g.drawImage(off,0,0,v.W,v.H);
+    const g=v.ctx;g.imageSmoothingEnabled=(su<v.W);g.drawImage(off,0,0,v.W,v.H);   // 1:1 → no smoothing
     _inlineOverlays(v,0,0);
+    $("#cornerA").innerHTML+=` &middot; <span style="color:#4ac7b8">native</span>`;   // sharpened
   },110);
 }
 let _probeReq=0,_probeTimer=0;

@@ -727,8 +727,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         try:
-            su = max(16, min(1400, int(req["size_u"])))
-            sv = max(16, min(1400, int(req["size_v"])))
+            su = max(16, min(1800, int(req["size_u"])))
+            sv = max(16, min(1800, int(req["size_v"])))
             data = probe_patch(ct, req["center"], req["u"], req["v"],
                                float(req["ext_u"]), float(req["ext_v"]), su, sv)
         except (KeyError, TypeError, ValueError) as exc:
