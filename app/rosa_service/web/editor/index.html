@@ -263,11 +263,12 @@ function drawProbe(){
   // 1) instant 1 mm reslice (responsive while dragging/stepping)
   const {img}=computeReslice(cv,P,U,V,ext,ext);cv.getContext("2d").putImageData(img,0,0);
   _probeOverlay(cv,q);
-  $("#probeCorner").innerHTML=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  const corner=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  $("#probeCorner").innerHTML=corner+` &middot; <span style="opacity:.5">1&thinsp;mm&hellip;</span>`;
   // 2) sharpen from the NATIVE-res CT (server samples the full-res volume)
-  _probeNative(cv,P,U,V,ext,q,cv.width,cv.height);
+  _probeNative(cv,P,U,V,ext,q,cv.width,cv.height,corner);
 }
-function _probeNative(cv,P,U,V,ext,q,cw,ch){
+function _probeNative(cv,P,U,V,ext,q,cw,ch,corner){
   clearTimeout(_probeTimer);const req=++_probeReq;
   const O=CASE.origin||[0,0,0],center=[P[0]+O[0],P[1]+O[1],P[2]+O[2]],SIZE=320;
   _probeTimer=setTimeout(async()=>{
@@ -285,6 +286,7 @@ function _probeNative(cv,P,U,V,ext,q,cw,ch){
     octx.putImageData(oimg,0,0);
     const g=cv.getContext("2d");g.imageSmoothingEnabled=true;g.drawImage(off,0,0,cv.width,cv.height);
     _probeOverlay(cv,q);
+    $("#probeCorner").innerHTML=corner+` &middot; <span style="color:#4ac7b8">native</span>`;   // sharpened
   },45);
 }
 // draw at low internal res (cheap ray-march) and let CSS scale it up

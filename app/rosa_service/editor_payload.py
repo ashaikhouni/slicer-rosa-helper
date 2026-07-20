@@ -189,7 +189,11 @@ def probe_patch(ct_path, center_ras, u, v, ext_mm: float, size: int) -> bytes:
     vox = ras_h @ inv.T                                       # RAS → native voxel index
     sampled = map_coordinates(arr, [vox[..., 0], vox[..., 1], vox[..., 2]],
                               order=1, mode="constant", cval=-1024.0)
-    return np.clip(np.rint(sampled), -32768, 32767).astype("<i2").tobytes()
+    # Clamp to the SAME range as the 1 mm crop (CT_CLAMP) so the client windows it
+    # identically — only the sharpness differs, not the brightness. Matters for CTs
+    # with a non-standard HU scale (this case peaks at 26k HU, not ~3k).
+    lo, hi = CT_CLAMP
+    return np.clip(np.rint(sampled), lo, hi).astype("<i2").tobytes()
 
 
 def ensure_cache(job_dir: str | Path) -> Path:
