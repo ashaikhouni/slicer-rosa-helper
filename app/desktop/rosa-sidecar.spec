@@ -28,6 +28,22 @@ def _submodules(pkg):
         return []
 
 
+def _tree(src_dir, dest_prefix):
+    """Collect a directory tree by ABSOLUTE path → (src, dest_dir) tuples.
+
+    Unlike ``collect_data_files(pkg, ...)`` this doesn't need ``pkg`` importable
+    at build time, so it survives a wiped editable install (a /tmp-venv cleanup
+    once silently dropped the whole web UI here). ``dest_prefix`` mirrors the
+    package layout so runtime paths are unchanged.
+    """
+    src_dir = Path(src_dir)
+    out = []
+    for f in src_dir.rglob("*"):
+        if f.is_file():
+            out.append((str(f), str(Path(dest_prefix) / f.parent.relative_to(src_dir))))
+    return out
+
+
 # 1) Our packages — recursively, to cover importlib dispatch + PEP-562 lazy loaders.
 for pkg in ("rosa_agent", "rosa_core", "rosa_detect", "shank_core", "rosa_service"):
     hidden += _submodules(pkg)
@@ -42,7 +58,11 @@ for pkg in ("pydantic", "pydantic_core", "starlette", "fastapi", "anyio",
 # 3) Package data: bundled atlases + LUTs, vendored three.js, the web UI.
 datas += collect_data_files("rosa_core", includes=["resources/**/*"])
 datas += collect_data_files("rosa_agent", includes=["commands/viewer_assets/**/*"])
-datas += collect_data_files("rosa_service", includes=["web/**/*"])
+# The web UI is the SPA that IS the app — collect it by absolute path so a
+# non-importable rosa_service (e.g. a wiped editable install) can never silently
+# drop it (which 404s every page). Falls back to collect_data_files if present.
+_web = _tree(REPO / "app" / "rosa_service" / "web", "rosa_service/web")
+datas += _web or collect_data_files("rosa_service", includes=["web/**/*"])
 
 # 4) SimpleITK native libs + skimage lazy submodules.
 binaries += collect_dynamic_libs("SimpleITK")
