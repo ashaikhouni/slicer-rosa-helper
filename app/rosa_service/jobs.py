@@ -284,7 +284,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                   "--register-to", ct,
                                   "--save-transform", str(t1_to_ct),
                                   "--mask-in-target", str(mask_in_ct)])
-        contacts_step = base + ["contacts", traj, ct, "--out", contacts]
+        # --fit-line-to-contacts: after placement, rewrite trajectories.tsv so
+        # each shank's line is the PCA fit through its placed contacts (the app
+        # runs detect + contacts as separate steps, so without this the line
+        # stays on the detected seed and reads as offset from its contacts in
+        # the 3-D scene).
+        contacts_step = base + ["contacts", traj, ct, "--out", contacts,
+                                "--fit-line-to-contacts"]
         # Constrain the electrode library to the types a site uses (from the
         # new-case screen's checkboxes) — restricts model matching + speeds it up.
         etypes = spec.params.get("electrode_types")

@@ -371,6 +371,34 @@ def _read_pipeline_contacts(path: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _refit_scene_trajectories(trajectories, contacts) -> int:
+    """Make each drawn shaft carry its contacts: refit ``start``/``end`` to the
+    PCA line through the shank's contacts, so the 3-D scene matches contacts.tsv
+    no matter how trajectories.tsv was produced. The ``pipeline`` refits the TSV
+    itself, but ``import`` / ``rebuild`` stage a trajectories.tsv verbatim and
+    only run this viewer — without this they'd draw the raw line while the editor
+    (which refits on load) shows the fitted one. Same rosa_core fit the editor
+    uses, so the two surfaces agree. In-place; <2-contact shanks are untouched."""
+    try:
+        from rosa_core.trajectory_fit import fit_line_through_points
+    except Exception:  # noqa: BLE001 — never let a viewer fail over this
+        return 0
+    from collections import defaultdict
+    pts: dict[str, list] = defaultdict(list)
+    for c in contacts:
+        pts[c.get("trajectory", "")].append(c["position"])
+    n = 0
+    for tr in trajectories:
+        p = pts.get(tr.get("name", ""), [])
+        if len(p) < 2:
+            continue
+        s, e = fit_line_through_points(p, tr["start"], tr["end"])
+        tr["start"] = (float(s[0]), float(s[1]), float(s[2]))
+        tr["end"] = (float(e[0]), float(e[1]), float(e[2]))
+        n += 1
+    return n
+
+
 def _read_labels_by_contact(path: Path | None) -> dict[str, dict[str, str]]:
     """Map ``contact_label`` -> labels-row dict. Empty when no labels TSV."""
     if path is None or not path.is_file():
@@ -3473,6 +3501,7 @@ def run_export_view(
 
     trajectories = _read_pipeline_trajectories(traj_tsv)
     contacts = _read_pipeline_contacts(contacts_tsv)
+    _refit_scene_trajectories(trajectories, contacts)
     contact_labels = _read_labels_by_contact(labels_tsv if labels_tsv.exists() else None)
     # 2-5. Register FS, window the CT, build the scene, write the viewer.
     # Shared with `view-results` (which feeds it pre-computed trajectories /
@@ -3546,6 +3575,7 @@ def run_view_results(
     trajectories = (
         _read_pipeline_trajectories(Path(trajectories_tsv)) if trajectories_tsv else []
     )
+    _refit_scene_trajectories(trajectories, contacts)
     contact_labels = _read_labels_by_contact(
         Path(labels_tsv) if labels_tsv else None
     )

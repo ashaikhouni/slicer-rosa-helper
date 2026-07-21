@@ -371,6 +371,17 @@ def run_pipeline(
         pitch_strategy=library,
     )
 
+    # The trajectory line must carry its own contacts: placement snaps contacts
+    # onto the metal (1–2 mm off the detected seed), so refit each shank's
+    # endpoints to the PCA line through its placed contacts. Done here — in the
+    # working CT frame, before any --output-frame transform — so the transform
+    # carries the refit line, and trajectories.tsv / the 3-D scene stay aligned
+    # with contacts.tsv.
+    from rosa_core.trajectory_fit import refit_trajectories_inplace
+    n_refit = refit_trajectories_inplace(trajs, contact_groups)
+    if n_refit:
+        _stderr(f"[pipeline] refit {n_refit} trajectory line(s) to their contacts")
+
     # Atlas labeling MUST run in the working CT frame: the atlas labelmaps are
     # resampled to the working CT (target_volume_path below). If we labelled
     # AFTER an --output-frame transform, the contacts would be in ROSA space

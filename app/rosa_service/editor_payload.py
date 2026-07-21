@@ -82,6 +82,7 @@ def _geometry(job_dir: Path):
         pts_by[c["trajectory"]].append([float(c["x"]), float(c["y"]), float(c["z"])])
         mod_by[c["trajectory"]].append((c.get("electrode_model") or "").strip())
 
+    from rosa_core.trajectory_fit import fit_line_through_points
     shanks, allpts = [], []
     for tr in trajs:
         name = tr["name"]
@@ -90,6 +91,11 @@ def _geometry(job_dir: Path):
         cs = np.array(pts_by.get(name, []))
         mods = [m for m in mod_by.get(name, []) if m]
         model = Counter(mods).most_common(1)[0][0] if mods else (tr.get("electrode_model") or "electrode")
+        # The editor's rigid comb is anchored to entry→target; make that axis the
+        # PCA line through the contacts so the comb carries them (fixes legacy
+        # cases whose trajectories.tsv still holds the pre-placement seed line).
+        if len(cs) >= 2:
+            entry, target = fit_line_through_points(cs, entry, target)
         # detected offsets (fallback for a model missing from the library)
         if len(cs) >= 2:
             s = np.sort(cs @ _unit(target - entry))[::-1]

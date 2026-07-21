@@ -178,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
         "--brain-mask", default=None,
         help="path to a user-supplied intracranial mask volume "
              "(overrides --mask-backend; resampled to the CT grid)")
+    parser.add_argument(
+        "--fit-line-to-contacts", action="store_true",
+        help="after placing, rewrite the input trajectory TSV so each shank's "
+             "line is the PCA fit through its placed contacts (the line 'carries' "
+             "its contacts, matching the 3-D scene). Refits in place.")
     args = parser.parse_args(argv)
 
     brain_mask_img = None
@@ -215,6 +220,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     n = write_contacts_tsv(args.out, groups)
     _stderr(f"[contacts] wrote {args.out} ({n} contacts)")
+
+    if args.fit_line_to_contacts:
+        # Placement snapped the contacts onto the metal, off the detected seed
+        # line — refit each trajectory line to the PCA axis through its contacts
+        # so trajectories.tsv (and every downstream viewer) carries them.
+        from rosa_core.trajectory_fit import refit_trajectories_file
+        n_refit = refit_trajectories_file(args.trajectories_tsv, args.out)
+        _stderr(f"[contacts] refit {n_refit} trajectory line(s) in "
+                f"{args.trajectories_tsv} to their contacts")
     return 0
 
 
