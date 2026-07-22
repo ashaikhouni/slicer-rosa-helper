@@ -27,10 +27,12 @@
         <div class="cases-actions">
           <button id="newcasebtn" class="primary">+ New case</button>
           <button id="importbtn" class="ghost">Import localization</button>
+          <button id="rosaimportbtn" class="ghost">Import ROSA case</button>
+          <button id="cohortbtn" class="ghost">Cohort &middot; MNI</button>
         </div>
       </div>
       <div class="cases-toolbar">
-        <input type="search" id="casesearch" class="casesearch" placeholder="Search by name or id…" autocomplete="off">
+        <input type="search" id="casesearch" class="casesearch" placeholder="Search by name, id, or scan…" autocomplete="off">
         <div class="btnset" id="casesfilter">
           <button data-f="all" class="active">All</button>
           <button data-f="pipeline">Detected</button>
@@ -41,7 +43,116 @@
       <p id="casesempty" class="muted" hidden>No cases yet — start one from a post-op
         CT, or import a localization from a batch CLI run.</p>
       <p id="casesnoresults" class="muted" hidden>No cases match your search.</p>
+
+      <div class="tools-sec">
+        <h3>Tools <span class="muted">&middot; standalone utilities (no case needed)</span></h3>
+        <div class="tools-grid">
+          <button id="burnthomasbtn" class="tool-card">
+            <span class="tool-ico">&#128293;</span>
+            <span class="tool-txt">
+              <span class="tool-name">Burn THOMAS for navigation</span>
+              <span class="tool-desc">Burn a thalamic nucleus into a DICOM's pixels and export a new DICOM series.</span>
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
+  </section>
+
+  <!-- Import a ROSA robot case: de-identify → bake volumes → confirm CT/MRI roles -->
+  <section id="panel-rosa" class="panel">
+    <div class="cases">
+      <div class="cases-head">
+        <h2>Import ROSA case <span class="muted" id="rosa-sub"></span></h2>
+        <div class="cases-actions"><button id="rosa-cancel" class="ghost">Cancel</button></div>
+      </div>
+      <p class="muted" id="rosa-hint">Preparing…</p>
+      <div id="rosa-displays" class="rosa-displays"></div>
+      <div class="rosa-foot" id="rosa-foot" hidden>
+        <label>Subject id <input type="text" id="rosa-label" class="casesearch" placeholder="e.g. T26"></label>
+        <button id="rosa-create" class="primary" disabled>Create case &amp; detect</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Standalone tool: burn a THOMAS nucleus into a DICOM series for navigation -->
+  <section id="panel-burn" class="panel">
+    <div class="cases">
+      <div class="cases-head">
+        <h2>Burn THOMAS <span class="muted">&middot; for navigation &middot; no case</span></h2>
+        <div class="cases-actions"><button id="burn-cancel" class="ghost">&larr; Cases</button></div>
+      </div>
+      <p class="muted">Burn a thalamic nucleus into a DICOM's pixel data and export a new DICOM
+        series. Nothing is saved as a case; the output goes to the folder you choose.</p>
+      <div class="burn-form">
+        <div class="burn-row">
+          <label class="burn-lbl">DICOM to burn into</label>
+          <div class="burn-pick">
+            <button id="burn-dicom-btn" class="ghost">Choose folder…</button>
+            <span id="burn-dicom-path" class="muted mono"></span>
+          </div>
+          <div class="burn-preview">
+            <img id="burn-dicom-thumb" class="burn-thumb" alt="" hidden>
+            <span id="burn-dicom-info" class="muted"></span>
+          </div>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">THOMAS folder</label>
+          <div class="burn-pick">
+            <button id="burn-thomas-btn" class="ghost">Choose folder…</button>
+            <span id="burn-thomas-path" class="muted mono"></span>
+          </div>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">Reference MRI
+            <span class="muted">— the image THOMAS ran in (T1 / FGATIR / WMnMPRAGE)</span></label>
+          <div class="burn-pick">
+            <button id="burn-ref-btn" class="ghost">Choose file…</button>
+            <span id="burn-ref-path" class="muted mono"></span>
+          </div>
+          <span class="muted burn-hint">Provide it → THOMAS is registered onto the DICOM.
+            Leave empty → burned as-is, no registration (THOMAS already in the DICOM's frame).</span>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">Nuclei to burn
+            <span class="burn-nuclei-count muted" id="burn-nuclei-count"></span></label>
+          <label class="burn-all"><input type="checkbox" id="burn-all"> Whole thalamus (all nuclei)</label>
+          <div id="burn-nuclei" class="burn-nuclei"></div>
+        </div>
+        <div class="burn-row burn-inline">
+          <label>Side
+            <select id="burn-side">
+              <option value="both">Both</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+          </label>
+          <label>Fill (HU) <input type="number" id="burn-fill" value="1200" step="50" class="burn-fill"></label>
+          <label class="burn-distinct" title="Give each nucleus its own intensity so they're separable in the grayscale series"><input type="checkbox" id="burn-distinct"> Distinct intensity per structure</label>
+        </div>
+        <div class="burn-row">
+          <label class="burn-lbl">Output folder</label>
+          <div class="burn-pick">
+            <button id="burn-out-btn" class="ghost">Choose folder…</button>
+            <span id="burn-out-path" class="muted mono"></span>
+          </div>
+        </div>
+        <div class="burn-foot">
+          <button id="burn-run" class="primary" disabled>Burn &amp; export</button>
+          <span id="burn-status" class="muted"></span>
+        </div>
+        <pre id="burn-log" class="burn-log" hidden></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Data Explorer: every subject's contacts pooled on one shared MNI brain -->
+  <section id="panel-cohort" class="panel">
+    <div class="cohort-head">
+      <button id="cohortback" class="ghost">&larr; Cases</button>
+      <h2>Cohort coverage <span class="muted">&middot; MNI152</span></h2>
+    </div>
+    <iframe id="cohortframe" class="cohort-frame" title="Cohort MNI viewer"></iframe>
   </section>
 
   <!-- Import an existing localization (CT + TSVs from a CLI run) -->
@@ -59,7 +170,7 @@
         <label class="field">Post-op CT
           <input type="text" id="imp-ct" placeholder="/path/to/ct.nii.gz" autocomplete="off">
         </label>
-        <label class="link browse">browse<input type="file" id="imp-ct-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+        <label class="link browse">browse<input type="file" id="imp-ct-file" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden></label>
       </div>
       <div class="importrow">
         <label class="field">Contacts TSV
@@ -80,7 +191,7 @@
           <label class="field">MRI (T1)
             <input type="text" id="imp-t1" placeholder="/path/to/t1.nii.gz" autocomplete="off">
           </label>
-          <label class="link browse">browse<input type="file" id="imp-t1-file" accept=".nii,.nii.gz,.gz,.nrrd" hidden></label>
+          <label class="link browse">browse<input type="file" id="imp-t1-file" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden></label>
         </div>
         <p class="muted" style="font-size:12px">Enables the anatomic surface + labeling, same as a new case.</p>
       </details>
@@ -99,12 +210,15 @@
   <section id="panel-drop" class="panel">
     <div id="dropzone" class="dropzone">
       <p><strong>Drop a postop CT</strong> (.nii / .nii.gz) here, or
-        <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,application/gzip,application/octet-stream" hidden></label>.</p>
+        <label class="link">browse<input type="file" id="fileinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr,application/gzip,application/octet-stream" hidden></label>.</p>
       <p class="muted">Nothing leaves this machine.</p>
     </div>
-    <div class="or">— or point at a file already on this machine —</div>
+    <div class="or">— or choose a NIfTI file, or a DICOM folder (auto-converted + de-identified) —</div>
+    <div class="dicomrow">
+      <button type="button" id="ctpickbtn" class="ghost small">Choose CT — NIfTI file or DICOM folder…</button>
+    </div>
     <label class="field">CT path
-      <input type="text" id="ctpath" placeholder="/absolute/path/to/ct.nii.gz" autocomplete="off">
+      <input type="text" id="ctpath" placeholder="/path/to/ct.nii.gz  — or a DICOM folder (⏎ to convert)" autocomplete="off">
     </label>
     <label class="field">Case label
       <input type="text" id="label" value="case" autocomplete="off">
@@ -117,26 +231,41 @@
         anatomic surface in the 3D view, and pre-fills it for labeling (no re-upload).
         Adds brain-strip + surface time to the run. You can also add it later on the
         results screen.</p>
-      <div class="labelrow">
-        <label class="field small">MRI (T1)
-          <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd">
-        </label>
+      <div class="dicomrow">
+        <button type="button" id="mripickbtn" class="ghost small">Choose MRI — NIfTI file or DICOM folder…</button>
+        <input type="file" id="mrifileinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr" hidden>
       </div>
       <label class="field">— or MRI path
-        <input type="text" id="mripath" placeholder="/absolute/path/to/t1.nii.gz" autocomplete="off">
+        <input type="text" id="mripath" placeholder="/path/to/t1.nii.gz  — or a DICOM folder (⏎ to convert)" autocomplete="off">
       </label>
       <label class="field small">Brain surface
         <select id="surfacesel">
-          <option value="auto" selected>Auto (FastSurfer if available)</option>
-          <option value="fastsurfer">FastSurfer recon</option>
-          <option value="deepmriprep">deepmriprep tissue</option>
+          <option value="auto" selected>Auto (FastSurfer → brainchop → Otsu)</option>
+          <option value="fastsurfer">FastSurfer recon (BYO)</option>
+          <option value="deepmriprep">deepmriprep tissue (BYO)</option>
+          <option value="brainchop">brainchop GM/WM (bundled, torch-free)</option>
         </select>
       </label>
-      <div class="muted" style="font-size:12px">Both run at case creation (~minutes on CPU). Labeling reuses the chosen surface.</div>
+      <div class="muted" style="font-size:12px">Runs once at case creation; labeling reuses the chosen surface. brainchop is the zero-setup crisp default.</div>
       <div id="mricreateinfo" class="muted"></div>
     </details>
 
-    <button id="runbtn" class="primary" disabled>Run localization →</button>
+    <details class="mri-optional" id="etypesoptional">
+      <summary>Electrode types — <span id="etypessummary" class="muted">all types</span></summary>
+      <p class="muted">Constrain detection to the electrode types your site uses. Fewer
+        types → more accurate model matching (no spurious matches) and faster placement.
+        All types are included by default.</p>
+      <div class="etypes-actions">
+        <button type="button" id="etypesall" class="link">select all</button>
+        <button type="button" id="etypesnone" class="link">clear</button>
+      </div>
+      <div id="etypeslist" class="etypeslist"></div>
+    </details>
+
+    <div class="drop-foot">
+      <button id="dropback" class="ghost">◀ Cases</button>
+      <button id="runbtn" class="primary" disabled>Run localization →</button>
+    </div>
   </section>
 
   <!-- Step 2: Running -->
@@ -209,9 +338,9 @@
           </span>
           <span class="viewer-tools" id="qctools" hidden>
             <span class="btnset" id="qcspace">
-              <button data-space="ct" class="active" title="Patient CT ↔ MRI — the per-case registration">Native</button>
-              <button data-space="mni" title="Standard AC-PC / template space — MNI atlases only">AC-PC</button>
-              <button data-space="atlas" title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
+              <button data-space="ct" class="active" title="Patient CT ↔ MRI in the native scan frame">Native</button>
+              <button data-space="acpc" hidden title="Upright AC-PC planes — rigid reorientation of this case's CT ↔ MRI">AC-PC</button>
+              <button data-space="atlas" hidden title="MNI template vs your MRI — checks the atlas registration">Atlas</button>
             </span>
             <span class="btnset" id="qcmodes">
               <button data-mode="opacity" class="active">Opacity</button>
@@ -228,7 +357,8 @@
             <div class="qc-planes" id="qcplanes"></div>
             <p class="qc-hint muted">Structures should line up across the wipe / read gray in
               Color. Drag a plane's slider to scrub through it.
-              <strong>Native</strong> = CT↔MRI (the per-case registration);
+              <strong>Native</strong> = CT↔MRI in the scan frame;
+              <strong>AC-PC</strong> = the same, reoriented to upright standard planes;
               <strong>Atlas</strong> = MNI template↔your MRI (checks the atlas registration
               that places the labels).</p>
           </div>
@@ -237,7 +367,7 @@
         <div class="labelbar" id="labelbar">
           <div class="labelbar-mri" id="labelbarMri" hidden>
             <span class="muted">Add a patient MRI (T1) to label contacts →</span>
-            <label class="field small inline">MRI<input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd"></label>
+            <label class="field small inline">MRI<input type="file" id="mriinput" accept=".nii,.nii.gz,.gz,.nrrd,.img,.hdr"></label>
             <button id="labelbtn" class="ghost small" disabled>Register &amp; label</button>
             <span id="labelstatus" class="muted"></span>
           </div>

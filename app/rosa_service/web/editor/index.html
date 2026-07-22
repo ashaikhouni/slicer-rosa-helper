@@ -47,6 +47,8 @@
   .viewport{display:grid;grid-template-columns:1.55fr 1fr;grid-template-rows:1fr 1fr;gap:7px;padding:7px;min-height:0}
   .frame{position:relative;background:#04070b;border:1px solid var(--line);border-radius:8px;overflow:hidden;min-height:0}
   #frameInline{grid-column:1;grid-row:1 / 3}#frameMip{grid-column:2;grid-row:1}#frameProbe{grid-column:2;grid-row:2}
+  /* dbl-click the MIP → promote it to the big centre cell (good canvas for adding electrodes) */
+  .viewport.mip-main #frameInline{grid-column:2;grid-row:1}.viewport.mip-main #frameMip{grid-column:1;grid-row:1 / 3}
   .frame canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
   .flabel{position:absolute;left:8px;top:7px;z-index:3;pointer-events:none;display:flex;gap:7px;align-items:baseline}
   .flabel .k{font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:#9fb0c0;font-weight:700;text-shadow:0 1px 3px #000}
@@ -102,6 +104,8 @@
     </div>
   </div>
   <button class="btn add" id="addBtn">+ Add electrode</button>
+  <button class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save">Label from ROS</button>
+  <input type="file" id="rosFile" accept=".ros,.txt" hidden>
   <button class="btn primary" id="save">Save plan</button>
 </div>
 
@@ -118,7 +122,7 @@
       <div class="rollbar"><span>Roll &#8635;</span><input type="range" id="roll" min="0" max="180" step="1" value="0"><span id="rollv" class="mono">0&deg;</span></div>
     </div>
     <div class="frame" id="frameMip"><canvas id="mipCv"></canvas>
-      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag to rotate &middot; click to select</span></div>
+      <div class="flabel"><span class="k">MIP overview</span><span class="v">drag rotate &middot; drag E/T to edit &middot; dbl-click enlarge</span></div>
       <div class="addbanner" id="addBanner"><span class="step" id="addStep">Click the BOLT (entry)</span>
         <span class="mono" style="color:var(--muted)">then the deep tip &middot; arg-max &rarr; 3D</span>
         <button id="addCancel">Cancel</button></div>
@@ -226,12 +230,19 @@ function resliceInline(){
   let C=sub(tip,scl(A,span/2));C=add(C,add(scl(A,panU),scl(V,panV)));  // frame the comb + pan
   const rr=cv.getBoundingClientRect(),extU=(span+40)/inlineZoom,extV=extU*(rr.height/rr.width);
   _inlineDims={extU,extV,cssW:rr.width,cssH:rr.height};
-  inlineCache=computeReslice(cv,C,A,V,extU,extV);blitInline();
+  inlineCache=computeReslice(cv,C,A,V,extU,extV);blitInline();_inlineNative();
 }
 function blitInline(offx=0,offy=0){
-  if(!inlineCache)return;const t=active(),v=inlineCache.view,g=v.ctx;
+  if(!inlineCache)return;const v=inlineCache.view,g=v.ctx;
   if(offx||offy)g.clearRect(0,0,v.W,v.H);
-  g.putImageData(inlineCache.img,Math.round(offx*v.d),Math.round(offy*v.d));g.save();g.scale(v.d,v.d);g.translate(offx,offy);
+  g.putImageData(inlineCache.img,Math.round(offx*v.d),Math.round(offy*v.d));
+  _inlineOverlays(v,offx,offy);
+}
+// Trajectory line + contact circles + E/T handles — shared by the instant 1 mm
+// blit and the native-sharpened redraw (both use the same reslice geometry v).
+function _inlineOverlays(v,offx,offy){
+  const t=active(),g=v.ctx;
+  g.save();g.scale(v.d,v.d);g.translate(offx,offy);
   const px=P=>v.toPx(P),e=px(t.entry),tg=px(t.target);
   g.strokeStyle="rgba(56,210,230,.85)";g.lineWidth=1.4;g.setLineDash([5,4]);
   g.beginPath();g.moveTo(e[0],e[1]);g.lineTo(tg[0],tg[1]);g.stroke();g.setLineDash([]);
@@ -245,14 +256,74 @@ function blitInline(offx=0,offy=0){
   $("#nameA").textContent=t.name;
   $("#cornerA").innerHTML=`${MODELS[t.model].label}<br>${MODELS[t.model].uniform?"uniform":"grouped spacing"}`;
 }
-function drawProbe(){
-  const t=active(),cv=$("#probeCv"),cs=planContacts(t),i=clamp(+$("#depth").value,0,cs.length-1),P=cs[i];
-  const A=axisOf(t),U=planeV(t),V=norm(cross(A,U));
-  const ext=24/probeZoom,{img,view}=computeReslice(cv,P,U,V,ext,ext);const g=view.ctx;g.putImageData(img,0,0);g.save();g.scale(view.d,view.d);
-  const rr=cv.getBoundingClientRect(),cx=rr.width/2,cy=rr.height/2,{hu,q}=qcOf(P);
+// Sharpen the in-line reformat from the NATIVE CT (where placement matters most).
+// The 1 mm blit is up instantly; this fetches the full-res patch for the SAME
+// reslice plane (debounced, so a drag stays smooth) and redraws it + overlays.
+let _inlReq=0,_inlTimer=0;
+function _inlineNative(){
+  clearTimeout(_inlTimer);const req=++_inlReq;if(!inlineCache)return;
+  const v=inlineCache.view,O=CASE.origin||[0,0,0];
+  const center=[v.C[0]+O[0],v.C[1]+O[1],v.C[2]+O[2]],extU=v.puU*v.W,extV=v.puV*v.H;
+  // Sample at (essentially) the canvas device resolution so the native patch
+  // isn't upscale-blurred; cap matches the server's limit so su/sv round-trip.
+  const su=Math.min(v.W,1800),sv=Math.min(1800,Math.max(1,Math.round(su*extV/extU)));
+  _inlTimer=setTimeout(async()=>{
+    let buf;
+    try{
+      const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+      const r=await fetch(jbase+"/editor/probe",{method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({center,u:v.U,v:v.V,ext_u:extU,ext_v:extV,size_u:su,size_v:sv})});
+      if(!r.ok)return;buf=new Int16Array(await r.arrayBuffer());
+    }catch(_e){return;}
+    if(req!==_inlReq||!inlineCache||inlineCache.view!==v||buf.length!==su*sv)return;   // stale / re-resliced
+    const off=document.createElement("canvas");off.width=su;off.height=sv;
+    const octx=off.getContext("2d"),oimg=octx.createImageData(su,sv),od=oimg.data;
+    for(let k=0;k<su*sv;k++){const gray=hu2g(buf[k])|0,o=k*4;od[o]=od[o+1]=od[o+2]=gray;od[o+3]=255;}
+    octx.putImageData(oimg,0,0);
+    const g=v.ctx;g.imageSmoothingEnabled=(su<v.W);g.drawImage(off,0,0,v.W,v.H);   // 1:1 → no smoothing
+    _inlineOverlays(v,0,0);
+    $("#cornerA").innerHTML+=` &middot; <span style="color:#4ac7b8">native</span>`;   // sharpened
+  },110);
+}
+let _probeReq=0,_probeTimer=0;
+function _probeOverlay(cv,q){                       // crosshair, in CSS pixels
+  const g=cv.getContext("2d"),d=window.devicePixelRatio||1;g.save();g.scale(d,d);
+  const rr=cv.getBoundingClientRect(),cx=rr.width/2,cy=rr.height/2;
   g.strokeStyle=col(q);g.lineWidth=2.2;g.beginPath();g.arc(cx,cy,11,0,7);g.stroke();
   for(const[dx,dy]of[[-16,0],[16,0],[0,-16],[0,16]]){g.beginPath();g.moveTo(cx+dx*.5,cy+dy*.5);g.lineTo(cx+dx,cy+dy);g.stroke();}
-  g.restore();$("#probeCorner").innerHTML=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  g.restore();
+}
+function drawProbe(){
+  const t=active(),cv=$("#probeCv"),cs=planContacts(t),i=clamp(+$("#depth").value,0,cs.length-1),P=cs[i];
+  const A=axisOf(t),U=planeV(t),V=norm(cross(A,U)),ext=24/probeZoom,{hu,q}=qcOf(P);
+  // 1) instant 1 mm reslice (responsive while dragging/stepping)
+  const {img}=computeReslice(cv,P,U,V,ext,ext);cv.getContext("2d").putImageData(img,0,0);
+  _probeOverlay(cv,q);
+  const corner=`c${i+1}/${cs.length} &middot; <span style="color:${col(q)}">HU ${hu|0}</span>`;
+  $("#probeCorner").innerHTML=corner+` &middot; <span style="opacity:.5">1&thinsp;mm&hellip;</span>`;
+  // 2) sharpen from the NATIVE-res CT (server samples the full-res volume)
+  _probeNative(cv,P,U,V,ext,q,cv.width,cv.height,corner);
+}
+function _probeNative(cv,P,U,V,ext,q,cw,ch,corner){
+  clearTimeout(_probeTimer);const req=++_probeReq;
+  const O=CASE.origin||[0,0,0],center=[P[0]+O[0],P[1]+O[1],P[2]+O[2]],SIZE=320;
+  _probeTimer=setTimeout(async()=>{
+    let buf;
+    try{
+      const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+      const r=await fetch(jbase+"/editor/probe",{method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({center,u:U,v:V,ext_u:ext,ext_v:ext,size_u:SIZE,size_v:SIZE})});
+      if(!r.ok)return;buf=new Int16Array(await r.arrayBuffer());
+    }catch(_e){return;}
+    if(req!==_probeReq||buf.length!==SIZE*SIZE||cv.width!==cw||cv.height!==ch)return;   // stale / resized
+    const off=document.createElement("canvas");off.width=SIZE;off.height=SIZE;
+    const octx=off.getContext("2d"),oimg=octx.createImageData(SIZE,SIZE),od=oimg.data;
+    for(let k=0;k<SIZE*SIZE;k++){const gray=hu2g(buf[k])|0,o=k*4;od[o]=od[o+1]=od[o+2]=gray;od[o+3]=255;}
+    octx.putImageData(oimg,0,0);
+    const g=cv.getContext("2d");g.imageSmoothingEnabled=true;g.drawImage(off,0,0,cv.width,cv.height);
+    _probeOverlay(cv,q);
+    $("#probeCorner").innerHTML=corner+` &middot; <span style="color:#4ac7b8">native</span>`;   // sharpened
+  },45);
 }
 // draw at low internal res (cheap ray-march) and let CSS scale it up
 function mipGeom(cv,IW){const r=cv.getBoundingClientRect(),IH=Math.max(2,Math.round(IW*r.height/r.width));
@@ -269,7 +340,9 @@ function drawMIP(draft){const cv=$("#mipCv"),G=mipGeom(cv,draft?150:280),g=cv.ge
   CASE.trajectories.forEach(t=>{const on=t.name===activeId,e=G.toScreen(t.entry),tp=G.toScreen(t.target);
     g.strokeStyle=on?t.color:"rgba(150,168,186,.55)";g.lineWidth=on?1.8:0.9;
     g.beginPath();g.moveTo(e[0],e[1]);g.lineTo(tp[0],tp[1]);g.stroke();
-    if(on){g.fillStyle=t.color;g.beginPath();g.arc(tp[0],tp[1],2.2,0,7);g.fill();g.strokeRect(e[0]-2.5,e[1]-2.5,5,5);}});
+    if(on){g.fillStyle=t.color;g.strokeStyle="#fff";g.lineWidth=1.6;    // grabbable E/T handles
+      g.beginPath();g.arc(tp[0],tp[1],4,0,7);g.fill();g.stroke();                 // target = round
+      g.fillRect(e[0]-4,e[1]-4,8,8);g.strokeRect(e[0]-4,e[1]-4,8,8);}});          // entry = square
   addPts.forEach(P=>{const[x,y]=G.toScreen(P);g.strokeStyle="#e3b23c";g.lineWidth=1.3;
     g.beginPath();g.moveTo(x-4,y);g.lineTo(x+4,y);g.moveTo(x,y-4);g.lineTo(x,y+4);g.stroke();});
   _mipG=G;
@@ -299,7 +372,11 @@ function syncInspector(){const t=active();
   $("#depth").max=MODELS[t.model].n-1;$("#depth").value=clamp(+$("#depth").value,0,MODELS[t.model].n-1);}
 function resliceAll(){resliceInline();drawProbe();drawMIP();renderQC();}
 function blitAll(){blitInline();drawProbe();drawMIP();renderQC();}
-function afterDepth(){blitInline();drawProbe();renderQC();}
+// Contact scrub (depth slider / QC rows). drawProbe re-slices the whole HU
+// volume + renderQC rebuilds the list, so coalesce rapid ticks into one render
+// per frame instead of one full reslice per slider step.
+let _depthRAF=0;
+function afterDepth(){if(_depthRAF)return;_depthRAF=requestAnimationFrame(()=>{_depthRAF=0;blitInline();drawProbe();renderQC();});}
 function selectTraj(id){activeId=id;panU=0;panV=0;renderList();syncInspector();resliceAll();}
 function toast(m){const el=$("#toast");el.innerHTML=m;el.classList.add("on");clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove("on"),2100);}
 function initModels(){const sel=$("#model");sel.innerHTML="";
@@ -348,6 +425,42 @@ $("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.na
   if(!nm||nm===t.name)return;
   if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
   t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
+// Rename shanks from a ROSA surgical plan: match by trajectory geometry (server),
+// then apply the plan names, reusing the rename mechanics so the existing Save
+// carries them (+ labels) through. A ROSA-imported case uses its stashed plan; any
+// other case picks a .ros file.
+async function matchRos(body){
+  const jbase=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+  const r=await fetch(jbase+"/match-ros",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
+  if(!r.ok)throw new Error((await r.text()).slice(0,180));
+  return r.json();
+}
+function applyRos(res){
+  const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
+  let applied=0,skipped=0;
+  for(const m of (res.matched||[])){
+    const t=byName[m.det];if(!t||!m.plan)continue;
+    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}
+    t.name=m.plan;applied++;
+  }
+  if(act)activeId=act.name;                       // follow the rename
+  renderList();syncInspector();drawMIP();
+  const un=(res.unmatched_plan||[]).length;
+  toast("ROS plan &middot; renamed <b>"+applied+"</b>/"+res.n_det+" shanks"+
+        (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
+        " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
+}
+// Pick a .ros file to (re)label from. Must open the dialog SYNCHRONOUSLY inside
+// the click — a file input .click() after an await is blocked (lost user gesture).
+// ROSA-imported cases already get their names from the guided import; this is the
+// manual tool to (re)apply names from a chosen .ros.
+$("#rosBtn").onclick=()=>$("#rosFile").click();
+$("#rosFile").onchange=async(e)=>{
+  const f=e.target.files[0];if(!f)return;e.target.value="";
+  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
+  try{ applyRos(await matchRos({ros_text:await f.text()})); }
+  catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");}
+};
 $("#removeBtn").onclick=()=>{const t=active();
   if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}
   if(!confirm("Remove electrode "+t.name+"? It will be dropped when you Save."))return;
@@ -394,16 +507,52 @@ function mipClickPt(P){
     CASE.trajectories.push(t);setAdd(false);selectTraj(id);snapActive();toast("Added <span class='mono'>"+id+"</span> &middot; snapped &middot; refine E/T");
   }else{let best=null,bd=9;CASE.trajectories.forEach(t=>{const dd=distToSeg(P,t.entry,t.target);if(dd<bd){bd=dd;best=t.name;}});if(best)selectTraj(best);}
 }
-let mipDrag=null;
+// Grab the active trajectory's E/T handle under the cursor (project world->image
+// px, compare in CSS px). dw = the handle's depth along the view, held fixed so
+// dragging moves it in the screen plane; rotate to correct the other axis.
+function mipHitHandle(cx,cy,r){const t=active();if(!t||!_mipG)return null;const G=_mipG;
+  for(const key of ["target","entry"]){const s=G.toScreen(t[key]);
+    const hx=s[0]*r.width/G.IW,hy=s[1]*r.height/G.IH;
+    if(Math.hypot(hx-cx,hy-cy)<15)return {key,dw:dot(sub(t[key],C0),G.w)};}
+  return null;}
+let mipDrag=null,mipEdit=null;
 $("#mipCv").addEventListener("pointerdown",e=>{const r=e.currentTarget.getBoundingClientRect();
-  mipDrag={sx:e.clientX,sy:e.clientY,az:mipAz,el:mipEl,moved:false,cx:e.clientX-r.left,cy:e.clientY-r.top};e.preventDefault();});
-window.addEventListener("pointermove",e=>{if(!mipDrag)return;const dx=e.clientX-mipDrag.sx,dy=e.clientY-mipDrag.sy;
+  const cx=e.clientX-r.left,cy=e.clientY-r.top;
+  if(!addMode){const h=mipHitHandle(cx,cy,r);if(h){mipEdit={key:h.key,dw:h.dw,r};e.preventDefault();return;}}  // edit an endpoint
+  mipDrag={sx:e.clientX,sy:e.clientY,az:mipAz,el:mipEl,moved:false,cx,cy};e.preventDefault();});
+$("#mipCv").addEventListener("mousemove",e=>{if(mipDrag||mipEdit||addMode)return;   // hover: show the handle is grabbable
+  const r=e.currentTarget.getBoundingClientRect();
+  e.currentTarget.style.cursor=mipHitHandle(e.clientX-r.left,e.clientY-r.top,r)?"move":"default";});
+window.addEventListener("pointermove",e=>{
+  if(mipEdit){const G=_mipG,r=mipEdit.r,dw=mipEdit.dw;
+    const p=((e.clientX-r.left)/r.width*G.IW-G.IW/2)*G.pu,q=((e.clientY-r.top)/r.height*G.IH-G.IH/2)*G.pu;
+    active()[mipEdit.key]=[C0[0]+G.u[0]*p+G.v[0]*q+G.w[0]*dw,C0[1]+G.u[1]*p+G.v[1]*q+G.w[1]*dw,C0[2]+G.u[2]*p+G.v[2]*q+G.w[2]*dw];
+    blitInline();if(!_mipRAF)_mipRAF=requestAnimationFrame(()=>{_mipRAF=0;drawMIP(true);});return;}
+  if(!mipDrag)return;const dx=e.clientX-mipDrag.sx,dy=e.clientY-mipDrag.sy;
   if(Math.hypot(dx,dy)>3)mipDrag.moved=true;
-  if(mipDrag.moved){mipAz=mipDrag.az-dx*0.008;mipEl=clamp(mipDrag.el+dy*0.008,0.25,1.45);
+  if(mipDrag.moved){mipAz=mipDrag.az-dx*0.008;mipEl=clamp(mipDrag.el+dy*0.008,-1.5,1.5);   // full-orbit vertical tilt
     if(!_mipRAF)_mipRAF=requestAnimationFrame(()=>{_mipRAF=0;drawMIP(true);});}});
-window.addEventListener("pointerup",()=>{if(!mipDrag)return;const md=mipDrag;mipDrag=null;
-  if(md.moved)drawMIP(false);else mipClickPt(mipPick3D(md.cx,md.cy));});
+let _mipClickTimer=0;
+window.addEventListener("pointerup",()=>{
+  if(mipEdit){mipEdit=null;resliceAll();return;}                    // committed an endpoint edit
+  if(!mipDrag)return;const md=mipDrag;mipDrag=null;
+  if(md.moved){drawMIP(false);return;}
+  if(addMode){mipClickPt(mipPick3D(md.cx,md.cy));return;}          // adds stay instant
+  const cx=md.cx,cy=md.cy;                                          // select: defer so a dbl-click (enlarge) doesn't also jump selection
+  clearTimeout(_mipClickTimer);_mipClickTimer=setTimeout(()=>mipClickPt(mipPick3D(cx,cy)),260);});
 window.addEventListener("keydown",e=>{if(e.key==="Escape"&&addMode)setAdd(false);});
+
+// Double-click a panel → promote it to the big centre cell. On the MIP this
+// gives a large canvas for adding electrodes; cancel the pending select first.
+function toggleMain(which){const vp=$(".viewport");
+  if(which==="mip")vp.classList.toggle("mip-main");else vp.classList.remove("mip-main");
+  requestAnimationFrame(()=>requestAnimationFrame(resliceAll));}    // re-fit canvases once the grid relayouts
+$("#frameMip").addEventListener("dblclick",()=>{if(addMode)return;clearTimeout(_mipClickTimer);toggleMain("mip");});
+$("#frameInline").addEventListener("dblclick",()=>toggleMain("inline"));
+// Zoom already lives on the mouse wheel — surface it so it's discoverable.
+$("#inlineCv").title="Scroll: zoom · drag E/T handles: move · drag empty: pan";
+$("#probeCv").title="Scroll: zoom · use the depth slider (right) to step contacts";
+$("#mipCv").title="Drag: rotate (full orbit) · drag the E/T dots: edit endpoints · click: select · scroll: zoom · dbl-click: enlarge";
 
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";
@@ -415,7 +564,9 @@ async function boot(){
   const base=location.pathname.replace(/\/+$/,"");   // /api/v1/jobs/{id}/editor
   try{
     CASE=await (await fetch(base+"/plan",{cache:"no-store"})).json();
-    VOL=new Int16Array(await (await fetch(base+"/volume",{cache:"no-store"})).arrayBuffer());
+    const vbuf=await (await fetch(base+"/volume",{cache:"no-store"})).arrayBuffer();
+    if(vbuf.byteLength%2)throw new Error("the cached CT volume looks truncated ("+vbuf.byteLength+" bytes) — re-run the case to rebuild it");
+    VOL=new Int16Array(vbuf);
   }catch(err){document.body.insertAdjacentHTML("afterbegin",
     `<div style="padding:20px;color:#e8635f;font-family:var(--mono)">Failed to load the case: ${err}</div>`);return;}
   [NX,NY,NZ]=CASE.dims;MODELS=CASE.models;C0=[NX/2,NY/2,NZ/2];DIAG=Math.hypot(NX,NY,NZ);

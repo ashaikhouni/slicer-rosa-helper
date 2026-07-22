@@ -47,6 +47,15 @@ THOMAS_NUCLEI: dict[int, tuple[str, tuple[float, float, float]]] = {
 RIGHT_OFFSET = 100   # right-hemisphere label = THOMAS# + 100
 
 
+def _readable(p: Path) -> bool:
+    """A real, non-empty file — guards against 0-byte cloud-storage placeholders
+    (e.g. a THOMAS output still syncing on Dropbox) before we try to load it."""
+    try:
+        return p.is_file() and p.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def _hemi_masks(hemi_dir: Path) -> dict[int, Path]:
     """Map THOMAS# -> mask file for one hemisphere, keeping only the canonical
     nuclei (exact ``<num>-<Name>``; the ``6_VLPd`` style subdivisions and other
@@ -78,28 +87,46 @@ def _hemi_binary_masks(hemi_dir: Path, nib, np):
     for nm in ("thomasfull_L.nii.gz", "thomasfull_R.nii.gz",
                "thomasfull_l.nii.gz", "thomasfull_r.nii.gz"):
         p = hemi_dir / nm
-        if p.is_file():
-            combined = nib.load(str(p))
-            break
+        if _readable(p):
+            try:
+                combined = nib.load(str(p))
+                break
+            except Exception:                      # noqa: BLE001
+                # A 0-byte / half-synced placeholder (common on Dropbox) or a
+                # corrupt file: don't crash — fall back to the per-nucleus masks.
+                combined = None
     if combined is not None:
         arr = np.asanyarray(combined.dataobj)
         masks = {int(v): (arr == v) for v in np.unique(arr)
                  if int(v) in THOMAS_NUCLEI}
-        return masks, combined.affine
+        if masks:
+            return masks, combined.affine
     masks, affine = {}, None
     for num, path in _hemi_masks(hemi_dir).items():
-        im = nib.load(str(path))
+        if not _readable(path):
+            continue
+        try:
+            im = nib.load(str(path))
+        except Exception:                          # noqa: BLE001
+            continue
         affine = im.affine
         masks[num] = np.asanyarray(im.dataobj) > 0
     return masks, affine
 
 
 def find_reference_t1(thomas_dir: Path) -> Path | None:
-    """The intensity T1 the segmentation lives in — used to register into CT.
-    THOMAS drops it at the top of the output dir as ``T1.nii.gz``."""
-    for name in ("T1.nii.gz", "t1.nii.gz", "ref.nii.gz"):
+    """The intensity image the segmentation lives in — used to register into CT.
+
+    THOMAS is usually built off a high-thalamic-contrast sequence and drops it at
+    the top of the output dir; accept the common names (a plain ``T1``, or an
+    ``FGATIR`` / ``WMnMPRAGE`` build). When THOMAS was run off an image that is
+    NOT stored beside its output, the caller must supply the path explicitly
+    (``import-thomas --t1`` / ``burn-thomas --t1``)."""
+    for name in ("T1.nii.gz", "t1.nii.gz", "ref.nii.gz",
+                 "fgatir.nii.gz", "FGATIR.nii.gz",
+                 "WMnMPRAGE.nii.gz", "wmnmprage.nii.gz", "mprage.nii.gz"):
         p = thomas_dir / name
-        if p.is_file():
+        if _readable(p):
             return p
     return None
 

@@ -73,14 +73,18 @@ SUBCOMMANDS = {
     "place":         "rosa_agent.commands.place",
     "fit-rosa":      "rosa_agent.commands.fit_rosa",
     "rosa-to-nifti": "rosa_agent.commands.rosa_to_nifti",
+    "dicom-to-nifti": "rosa_agent.commands.dicom_to_nifti",
     "match-ros":     "rosa_agent.commands.match_ros",
     "match-trajectories": "rosa_agent.commands.match_trajectories",
     "export-view":   "rosa_agent.commands.export_view",
     "view":          "rosa_agent.commands.view",
     "view-results":  "rosa_agent.commands.view_results",
     "import-thomas": "rosa_agent.commands.import_thomas",
+    "burn-thomas":   "rosa_agent.commands.burn_thomas",
     "brain-extract": "rosa_agent.commands.brain_extract",
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
+    "cohort-export": "rosa_agent.commands.cohort_export",
+    "stamp-mni": "rosa_agent.commands.stamp_mni",
 }
 
 

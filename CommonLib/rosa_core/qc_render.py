@@ -34,18 +34,42 @@ _VOL_CACHE: dict[str, tuple[float, np.ndarray]] = {}
 _VOL_CACHE_MAX = 6
 
 
-def _load_canonical_array(path: str | Path) -> np.ndarray:
+def _load_canonical_array(path: str | Path):
+    """Return ``(array, zooms)`` in canonical (RAS) axis order. ``zooms`` is the
+    per-axis physical spacing — needed to render anisotropic volumes with the
+    correct aspect (otherwise a thick-slice CT looks squished off-axial)."""
     import nibabel as nib
     path = str(path)
     mtime = os.path.getmtime(path)
     hit = _VOL_CACHE.get(path)
     if hit is not None and hit[0] == mtime:
-        return hit[1]
-    arr = np.asanyarray(nib.as_closest_canonical(nib.load(path)).dataobj)
+        return hit[1], hit[2]
+    canon = nib.as_closest_canonical(nib.load(path))
+    arr = np.asanyarray(canon.dataobj)
+    zooms = tuple(float(z) for z in canon.header.get_zooms()[:3])
     if len(_VOL_CACHE) >= _VOL_CACHE_MAX:
         _VOL_CACHE.pop(next(iter(_VOL_CACHE)))   # evict oldest
-    _VOL_CACHE[path] = (mtime, arr)
-    return arr
+    _VOL_CACHE[path] = (mtime, arr, zooms)
+    return arr, zooms
+
+
+def _plane_zooms(axis: int, zooms) -> tuple[float, float]:
+    """(row, col) physical spacing of the rot90'd plane, matching ``_slice``."""
+    if axis == 0:
+        return zooms[2], zooms[1]
+    if axis == 1:
+        return zooms[2], zooms[0]
+    return zooms[1], zooms[0]          # axis == 2
+
+
+def _square_pixels(sl: np.ndarray, row_zoom: float, col_zoom: float) -> np.ndarray:
+    """Rescale a 2D slice so pixels are physically square (fixes anisotropy)."""
+    s = min(row_zoom, col_zoom)
+    fr, fc = row_zoom / s, col_zoom / s
+    if abs(fr - 1.0) < 1e-3 and abs(fc - 1.0) < 1e-3:
+        return sl
+    from scipy.ndimage import zoom
+    return zoom(sl, (fr, fc), order=1).astype(sl.dtype)
 
 
 def _png_bytes(rgb: np.ndarray) -> bytes:
@@ -116,15 +140,16 @@ def render_registration_qc(
     """
     if axis not in _AXES:
         raise ValueError(f"axis must be 0/1/2, got {axis}")
-    ct = _load_canonical_array(ct_path)
-    mri = _load_canonical_array(mri_path)
+    ct, zooms = _load_canonical_array(ct_path)
+    mri, _ = _load_canonical_array(mri_path)
     if ct.shape != mri.shape:
         raise ValueError(
             f"CT {ct.shape} and MRI {mri.shape} differ — MRI must be resampled "
             f"onto the CT grid (labeling step's --save-registered-mri)")
 
-    cg = _downsample(_window(_slice(ct, axis, frac)), max_dim)
-    mg = _downsample(_window(_slice(mri, axis, frac)), max_dim)
+    rz, cz = _plane_zooms(axis, zooms)
+    cg = _downsample(_square_pixels(_window(_slice(ct, axis, frac)), rz, cz), max_dim)
+    mg = _downsample(_square_pixels(_window(_slice(mri, axis, frac)), rz, cz), max_dim)
     v = float(min(max(value, 0.0), 1.0))
 
     if mode == "ct":

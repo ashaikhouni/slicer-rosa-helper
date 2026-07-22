@@ -1,0 +1,43 @@
+# electron-builder — package the ROSA desktop app into a macOS .dmg.
+#
+# The Electron shell (main.js/preload.js) goes into the app bundle; the frozen
+# PyInstaller sidecar rides along as extraResources at Contents/Resources/
+# rosa-sidecar/ (where main.js's frozenSidecarPath() looks). Research/internal
+# build: ad-hoc signed (no Apple Developer ID), so first launch is right-click →
+# Open. Freeze the sidecar into resources/rosa-sidecar first (see README).
+
+appId: org.rosa.desktop
+productName: ROSA
+copyright: ROSA — SEEG electrode localizer
+
+# Deep ad-hoc sign the whole bundle (app + framework + frozen sidecar) so it
+# launches on Apple Silicon without a Developer ID (research/internal build).
+afterPack: ./after-pack.js
+
+directories:
+  output: release
+
+# Only the shell goes in the asar; the sidecar is extraResources (below).
+files:
+  - main.js
+  - preload.js
+  - package.json
+
+extraResources:
+  - from: resources/rosa-sidecar
+    to: rosa-sidecar
+
+mac:
+  icon: assets/icon.icns
+  target:
+    - target: dmg
+      arch: [arm64]
+  category: public.app-category.medical
+  # Research/internal: no Developer ID. electron-builder ad-hoc signs so it runs
+  # on Apple Silicon; Gatekeeper still flags it (right-click → Open once).
+  identity: null
+  # The sidecar bundles its own dylibs; allow them under the (unsigned) runtime.
+  hardenedRuntime: false
+
+dmg:
+  title: ROSA ${version}

@@ -90,6 +90,44 @@ class BuildThomasLabelmapTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 build_thomas_labelmap(Path(td))   # empty dir, no left/ or right/
 
+    def test_empty_thomasfull_falls_back_to_per_nucleus(self):
+        """A 0-byte ``thomasfull_{L,R}`` (a half-synced cloud placeholder — seen on
+        real Dropbox THOMAS outputs) must NOT crash: skip it and fall back to the
+        per-nucleus masks, producing the same labelmap."""
+        from rosa_core.thomas_import import build_thomas_labelmap
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self._synthetic_dir(root)                        # per-nucleus masks + T1
+            for hemi in ("left", "right"):
+                (root / hemi / f"thomasfull_{hemi[0].upper()}.nii.gz").write_bytes(b"")
+            img, lut, _ = build_thomas_labelmap(root)
+            labels = {int(v) for v in np.unique(np.asanyarray(img.dataobj)) if v}
+            self.assertEqual(labels, {8, 11, 108, 111})      # same as the per-nucleus build
+
+
+class ReferenceImageTests(unittest.TestCase):
+    """``find_reference_t1`` — the intensity image THOMAS ran in (used to register
+    into the CT). Accept FGATIR/WMnMPRAGE builds, and never return an empty file."""
+
+    def test_accepts_fgatir_build(self):
+        from rosa_core.thomas_import import find_reference_t1
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "fgatir.nii.gz").write_bytes(b"x")
+            self.assertEqual(find_reference_t1(Path(td)).name, "fgatir.nii.gz")
+
+    def test_prefers_t1_over_fgatir(self):
+        from rosa_core.thomas_import import find_reference_t1
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "T1.nii.gz").write_bytes(b"x")
+            (Path(td) / "fgatir.nii.gz").write_bytes(b"x")
+            self.assertEqual(find_reference_t1(Path(td)).name, "T1.nii.gz")
+
+    def test_ignores_empty_reference(self):
+        from rosa_core.thomas_import import find_reference_t1
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "T1.nii.gz").write_bytes(b"")        # 0-byte placeholder
+            self.assertIsNone(find_reference_t1(Path(td)))
+
 
 if __name__ == "__main__":
     unittest.main()

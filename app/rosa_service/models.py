@@ -138,6 +138,78 @@ class ReviewPatch(BaseModel):
     ops: list[ReviewEdit] = Field(default_factory=list)
 
 
+class DicomRequest(BaseModel):
+    """Convert a DICOM series folder (on this machine) to a de-identified NIfTI.
+
+    ``dicom_dir`` is an absolute folder path (from Electron's native directory
+    picker, or typed). Converting to NIfTI drops the DICOM PHI headers, so the
+    returned file is safe to store + distribute.
+    """
+
+    dicom_dir: str
+    series_uid: str | None = None
+
+
+class RosMatchRequest(BaseModel):
+    """Match a case's detected trajectories against a ROSA surgical plan.
+
+    ``ros_text`` is the raw text of a ``.ros`` planning file (read client-side and
+    uploaded — no native path needed). Empty → use the plan stashed at import
+    (``ros_plan.tsv``, for ROSA-imported cases). Matching is pure line geometry,
+    so only the plan's trajectory names + entry/target are used; no images."""
+
+    ros_text: str = ""
+
+
+class RosaPrepareRequest(BaseModel):
+    """Stage a ROSA export folder for import: de-identify, bake to NIfTI, and
+    return the display volumes (with thumbnails + CT/MRI guesses) to confirm."""
+
+    rosa_dir: str
+    label: str | None = None
+
+
+class RosaCreateRequest(BaseModel):
+    """Create a case from a staged ROSA import — the clinician-chosen post-op CT
+    (+ optional non-contrast T1), plus the plan to stash for later labeling."""
+
+    ct_path: str
+    t1_path: str | None = None
+    label: str | None = None
+    seeds_path: str | None = None
+
+
+class BurnThomasRequest(BaseModel):
+    """Burn a THOMAS thalamic structure into a DICOM series and export a new
+    DICOM series — a standalone tool, no case involved.
+
+    ``dicom_dir`` / ``thomas_dir`` / ``out_dir`` are absolute folder paths (from
+    Electron's native directory pickers). Choose ``nuclei`` by name (``VA``,
+    ``MD-Pf`` …) or set ``all`` to burn the whole thalamus. ``no_register`` skips
+    registration when the THOMAS T1 already shares the DICOM frame.
+    """
+
+    dicom_dir: str
+    thomas_dir: str
+    out_dir: str
+    nuclei: list[str] = Field(default_factory=list)
+    all: bool = False
+    side: str = "both"
+    fill: float = 1200.0
+    # Give each nucleus its own intensity (fill, fill+step, …) so multiple
+    # structures stay separable in the grayscale series (writes a legend).
+    distinct: bool = False
+    distinct_step: float = 400.0
+    series_description: str = "THOMAS_BURNED"
+    series_uid: str | None = None
+    # The intensity image THOMAS ran in (T1 / FGATIR / WMnMPRAGE), used to
+    # register THOMAS → the DICOM. Optional: when omitted the engine looks for one
+    # in the THOMAS folder. Required (unless ``no_register``) when THOMAS was built
+    # off a sequence that isn't stored beside its output — e.g. an FGATIR build.
+    t1: str | None = None
+    no_register: bool = False
+
+
 class LabelRequest(BaseModel):
     """Kick off anatomical labeling of a pipeline job's contacts.
 
@@ -157,5 +229,5 @@ class LabelRequest(BaseModel):
 __all__ = [
     "JobState", "JobSpec", "Artifact", "JobStatus",
     "ReviewContact", "ReviewShank", "ReviewDoc",
-    "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest",
+    "ReviewOp", "ReviewEdit", "ReviewPatch", "LabelRequest", "DicomRequest",
 ]

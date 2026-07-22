@@ -229,6 +229,11 @@ def _brain_mri_dvr_volume(native_mri_path, native_mask_path, sitk_transform, ct_
 
     mri = sitk.Cast(sitk.ReadImage(str(native_mri_path)), sitk.sitkFloat32)
     mask = sitk.Cast(sitk.ReadImage(str(native_mask_path)) > 0, sitk.sitkFloat32)
+    # Same native grid — align the geometry metadata so a strip backend's tiny
+    # direction-cosine drift (e.g. an oblique volume round-tripped through
+    # nibabel) doesn't trip SITK's strict physical-space check on the multiply.
+    if mask.GetSize() == mri.GetSize():
+        mask.CopyInformation(mri)
     masked = mri * mask                                   # same native grid
     inct = resample_volume(masked, sitk_transform, reference=sitk.ReadImage(str(ct_path)),
                            interp="linear")
@@ -364,6 +369,34 @@ def _read_pipeline_contacts(path: Path) -> list[dict[str, Any]]:
         except (KeyError, ValueError):
             continue
     return out
+
+
+def _refit_scene_trajectories(trajectories, contacts) -> int:
+    """Make each drawn shaft carry its contacts: refit ``start``/``end`` to the
+    PCA line through the shank's contacts, so the 3-D scene matches contacts.tsv
+    no matter how trajectories.tsv was produced. The ``pipeline`` refits the TSV
+    itself, but ``import`` / ``rebuild`` stage a trajectories.tsv verbatim and
+    only run this viewer — without this they'd draw the raw line while the editor
+    (which refits on load) shows the fitted one. Same rosa_core fit the editor
+    uses, so the two surfaces agree. In-place; <2-contact shanks are untouched."""
+    try:
+        from rosa_core.trajectory_fit import fit_line_through_points
+    except Exception:  # noqa: BLE001 — never let a viewer fail over this
+        return 0
+    from collections import defaultdict
+    pts: dict[str, list] = defaultdict(list)
+    for c in contacts:
+        pts[c.get("trajectory", "")].append(c["position"])
+    n = 0
+    for tr in trajectories:
+        p = pts.get(tr.get("name", ""), [])
+        if len(p) < 2:
+            continue
+        s, e = fit_line_through_points(p, tr["start"], tr["end"])
+        tr["start"] = (float(s[0]), float(s[1]), float(s[2]))
+        tr["end"] = (float(e[0]), float(e[1]), float(e[2]))
+        n += 1
+    return n
 
 
 def _read_labels_by_contact(path: Path | None) -> dict[str, dict[str, str]]:
@@ -835,6 +868,14 @@ _HTML_TEMPLATE = """<!doctype html>
         <label class="plane-ctl" data-control="atlas-ov" id="atlas-ov-ctl" style="display:none" title="Tint each atlas region on the slice panels — same colors as the 3D surface">
           <input type="checkbox" id="atlas-ov-cb" checked /><span class="axis">Atlas on slices</span>
         </label>
+        <label class="plane-ctl" data-control="mni-atlas" id="mni-atlas-ctl" style="display:none" title="Show each contact's region from a different MNI atlas — viewing only; the approved label is unchanged">
+          <span class="axis">Region atlas</span>
+          <select id="mni-atlas-sel"></select>
+        </label>
+        <span class="plane-ctl" id="mni-badge" style="display:none" title="The single T1→MNI registration underpinning every atlas's region labels">
+          <span class="axis" id="mni-badge-txt"></span>
+          <button id="mni-refine-btn" title="Refine T1→MNI with a nonlinear (B-spline) warp — better subcortical accuracy (~30 s)">Refine</button>
+        </span>
       </span>
       <span class="tb-sep"></span>
       <span class="tb-group">
@@ -938,7 +979,10 @@ const host = document.getElementById("canvas-host");
 host.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x101010);
+// Dark slate, NOT pure black: a translucent (ghost) brain vanishes against
+// 0x101010 — it needs a ground a few stops up to read against. Still dark
+// enough to keep the surface + electrodes the focus.
+scene.background = new THREE.Color(0x1e2530);
 // Ambient kept low so sulci actually cast shadow (high ambient washes the
 // folds flat — the "mushy from some angles" look). The key + fill lights are
 // repositioned every frame RELATIVE to the camera (see updateLights) so the
@@ -1039,7 +1083,7 @@ const structureNodes = [];               // deep-structure nodes (kind="structur
 // rotation), and a Fresnel shader keeps the silhouette opaque + lit so it reads
 // as a brain, not a hollow shell. Shared uniforms (same object handed to every
 // recompiled shader) so one .value write reaches all brain meshes.
-const GHOST_ALPHA = 0.14;
+const GHOST_ALPHA = 0.26;   // see-through centre floor — 0.14 was invisible on load
 const ghostUniforms = {{ uGhostOn: {{ value: 0.0 }} }};
 function _installGhostShader(material) {{
   material.onBeforeCompile = (shader) => {{
@@ -1420,16 +1464,34 @@ function _initSlicePanels() {{
     canvas.height = 256;
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = false;
-    slicePanels[axis] = {{ canvas, ctx, coordEl: panel.querySelector(".slice-coord") }};
+    const pst = {{ canvas, ctx, coordEl: panel.querySelector(".slice-coord"), zoom: 1, panX: 0, panY: 0 }};
+    slicePanels[axis] = pst;
 
-    // Click / drag → move the crosshair to that in-plane point.
-    let dragging = false;
+    // Click / drag → move the crosshair. ⇧-drag or middle-drag → pan (only
+    // meaningful once zoomed in).
+    let dragging = false, panMode = false, panLast = null;
     const pick = (ev) => _sliceClickToRas(axis, canvas, ev);
-    canvas.addEventListener("pointerdown", (ev) => {{ dragging = true; canvas.setPointerCapture(ev.pointerId); pick(ev); }});
-    canvas.addEventListener("pointermove", (ev) => {{ if (dragging) pick(ev); }});
-    canvas.addEventListener("pointerup", (ev) => {{ dragging = false; try {{ canvas.releasePointerCapture(ev.pointerId); }} catch (_e) {{}} }});
-    // Wheel → scrub the through-plane slice, like a real navigator.
-    canvas.addEventListener("wheel", (ev) => {{ ev.preventDefault(); _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1); }}, {{ passive: false }});
+    canvas.addEventListener("pointerdown", (ev) => {{
+      canvas.setPointerCapture(ev.pointerId);
+      if ((ev.shiftKey || ev.button === 1) && pst.zoom > 1.001) {{
+        panMode = true; panLast = [ev.clientX, ev.clientY];
+      }} else {{ dragging = true; pick(ev); }}
+    }});
+    canvas.addEventListener("pointermove", (ev) => {{
+      if (panMode) {{
+        pst.panX += ev.clientX - panLast[0]; pst.panY += ev.clientY - panLast[1];
+        panLast = [ev.clientX, ev.clientY]; _applySliceView(pst);
+      }} else if (dragging) pick(ev);
+    }});
+    canvas.addEventListener("pointerup", (ev) => {{ dragging = false; panMode = false; try {{ canvas.releasePointerCapture(ev.pointerId); }} catch (_e) {{}} }});
+    // Wheel → scrub the through-plane slice, like a real navigator. Hold
+    // ⇧/⌘/⌃ → zoom the panel in/out instead.
+    canvas.addEventListener("wheel", (ev) => {{
+      ev.preventDefault();
+      if (ev.shiftKey || ev.ctrlKey || ev.metaKey) _sliceZoom(pst, ev.deltaY < 0 ? 1.15 : 1 / 1.15);
+      else _sliceScroll(axis, ev.deltaY > 0 ? 1 : -1);
+    }}, {{ passive: false }});
+    canvas.title = "Scroll: slice · ⇧/⌘-scroll: zoom · ⇧-drag: pan · dbl-click: maximize";
     canvas.style.cursor = "crosshair";
     // Double-click → maximize this panel over the 3D area (zoom); again → restore.
     panel.addEventListener("dblclick", (ev) => {{ ev.preventDefault(); _togglePanelZoom(panel); }});
@@ -1486,7 +1548,7 @@ function _sliceClickToRas(axis, canvas, ev) {{
   const c = mriVoxCursor.slice();
   if (axis === "axial") {{ c[0] = u; c[1] = vSrc; }}
   else if (axis === "coronal") {{ c[0] = u; c[2] = vSrc; }}
-  else {{ c[1] = u; c[2] = vSrc; }}   // sagittal
+  else {{ c[1] = W - 1 - u; c[2] = vSrc; }}   // sagittal: anterior LEFT
   locateAtRas(_apply4x4(mriVolume.affine, c));
 }}
 
@@ -1499,6 +1561,22 @@ function _sliceScroll(axis, step) {{
   locateAtRas(_apply4x4(mriVolume.affine, c));
 }}
 
+// Zoom + pan a slice panel by composing a CSS transform on its canvas (centred
+// on the panel, then panned, then scaled). Click→RAS still maps correctly
+// because _sliceClickToRas reads the live getBoundingClientRect.
+function _applySliceView(p) {{
+  if (!p || !p.canvas) return;
+  const z = p.zoom || 1, px = p.panX || 0, py = p.panY || 0;
+  p.canvas.style.transform =
+    "translate(-50%,-50%) translate(" + px + "px," + py + "px) scale(" + z + ")";
+}}
+function _sliceZoom(p, factor) {{
+  if (!p) return;
+  p.zoom = Math.max(1, Math.min(8, (p.zoom || 1) * factor));
+  if (p.zoom <= 1.001) {{ p.panX = 0; p.panY = 0; }}   // fully zoomed out → recentre
+  _applySliceView(p);
+}}
+
 // Single entry point for "put the crosshair at this RAS point": scrub the 2D
 // panels, move the in-scene cut planes onto it, drop the 3D locate beacon, and
 // tell the parent frame.
@@ -1508,6 +1586,26 @@ function locateAtRas(ras) {{
   locateMarker.position.set(ras[0], ras[1], ras[2]);
   locateMarker.visible = true;
   emitLocated(ras);
+}}
+
+// The slice buffer is W×H VOXELS, but voxels aren't square in-plane on an
+// anisotropic CT (e.g. 0.45×0.45×1.0 mm) — drawing them 1:1 stretches the
+// image (the "compressed" coronal/sagittal look). Size the canvas display box
+// to the PHYSICAL aspect (W·pdU):(H·pdV), centred, and let object-fit:fill
+// stretch the buffer into it so millimetres read square whatever the voxel
+// shape. No-op for isotropic volumes.
+function _applySlicePhysicalAspect(canvas, axis, W, H) {{
+  const pd = (mriVolume && mriVolume.pixdim) || [1, 1, 1];
+  let pdU, pdV;
+  if (axis === "axial")        {{ pdU = pd[0]; pdV = pd[1]; }}
+  else if (axis === "coronal") {{ pdU = pd[0]; pdV = pd[2]; }}
+  else                         {{ pdU = pd[1]; pdV = pd[2]; }}   // sagittal
+  const A = (W * (pdU || 1)) / (H * (pdV || 1));                 // physical w:h
+  const st = canvas.style;
+  if (A >= 1) {{ st.width = "100%"; st.height = (100 / A).toFixed(4) + "%"; }}
+  else        {{ st.height = "100%"; st.width = (100 * A).toFixed(4) + "%"; }}
+  st.left = "50%"; st.top = "50%"; st.right = "auto"; st.bottom = "auto";
+  st.objectFit = "fill";     // box already carries the physical aspect; _applySliceView sets transform
 }}
 
 function renderSlice(axis) {{
@@ -1530,6 +1628,8 @@ function renderSlice(axis) {{
   const canvas = panel.canvas;
   if (canvas.width !== W || canvas.height !== H) {{
     canvas.width = W; canvas.height = H;
+    _applySlicePhysicalAspect(canvas, axis, W, H);
+    _applySliceView(panel);   // establish centring (+ any active zoom/pan) transform
   }}
   const ctx = panel.ctx;
   const img = ctx.createImageData(W, H);
@@ -1555,7 +1655,7 @@ function renderSlice(axis) {{
       let i, j, k;
       if (axis === "axial") {{ i = u; j = vSrc; k = throughIdx; }}
       else if (axis === "coronal") {{ i = u; j = throughIdx; k = vSrc; }}
-      else {{ i = throughIdx; j = u; k = vSrc; }}
+      else {{ i = throughIdx; j = W - 1 - u; k = vSrc; }}   // sagittal: anterior LEFT (neuro convention)
       const raw = mriVolume.voxel(i, j, k);
       let g = Math.max(0, Math.min(255, Math.round((raw - lo) / range * 255)));
       if (fade) {{
@@ -1591,7 +1691,7 @@ function renderSlice(axis) {{
     let cu, cv;
     if (axis === "axial") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[1]; }}
     else if (axis === "coronal") {{ cu = mriVoxCursor[0]; cv = H - 1 - mriVoxCursor[2]; }}
-    else {{ cu = mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}
+    else {{ cu = W - 1 - mriVoxCursor[1]; cv = H - 1 - mriVoxCursor[2]; }}   // sagittal: anterior LEFT
     if (cu >= 0 && cu < W && cv >= 0 && cv < H) {{
       // Lines are drawn in canvas-buffer pixels but the canvas is
       // displayed at ~half size via CSS, so a 1px stroke ends up
@@ -1633,7 +1733,7 @@ function _drawContactDots(ctx, axis, W, H, throughIdx) {{
     let through, u, vSrc;
     if (axis === "axial") {{ through = ck; u = ci; vSrc = cj; }}
     else if (axis === "coronal") {{ through = cj; u = ci; vSrc = ck; }}
-    else {{ through = ci; u = cj; vSrc = ck; }}   // sagittal
+    else {{ through = ci; u = W - 1 - cj; vSrc = ck; }}   // sagittal: anterior LEFT
     if (Math.abs(through - throughIdx) > slabVox) continue;
     const cu = u, cv = H - 1 - vSrc;
     if (cu < 0 || cu >= W || cv < 0 || cv >= H) continue;
@@ -2113,6 +2213,72 @@ function wireOverlayControls() {{
 let selectedContact = null;
 let selectedShank = null;
 
+// ---- MNI multi-atlas region labels (fetched live from /labels/mni) ----
+// Show ONE atlas's region per contact at a time via a dropdown; the approved
+// label is untouched (viewing/comparison only). Degrades to nothing when the
+// endpoint is absent (standalone / picker viewer).
+const MNI_CONTACTS = {{}};                  // contact label -> scene contact
+const MNI_REGIONS = {{}};                   // contact label -> {{atlas: region}}
+let MNI_ATLAS = null;                        // selected atlas id, or null = default labeling
+const MNI_NAMES = {{ cerebra: "CerebrA", thalamus_iglesias: "Iglesias thalamus" }};
+function _mniName(id) {{ return MNI_NAMES[id] || id; }}
+function regionFor(c) {{
+  if (MNI_ATLAS && MNI_REGIONS[c.label] && MNI_REGIONS[c.label][MNI_ATLAS])
+    return MNI_REGIONS[c.label][MNI_ATLAS];
+  return c.freesurfer_label || c.thomas_label || c.wm_label || "—";
+}}
+function regionHtml(c) {{
+  const dist = (!MNI_ATLAS && c.distance_mm)
+    ? ` <span class="small">${{(+c.distance_mm).toFixed(1)}}mm</span>` : "";
+  return regionFor(c) + dist;
+}}
+function refreshRegions() {{
+  for (const row of document.querySelectorAll(".contact-row")) {{
+    const c = MNI_CONTACTS[row.dataset.label];
+    if (c) {{ const sp = row.querySelector(".region"); if (sp) sp.innerHTML = regionHtml(c); }}
+  }}
+}}
+function _jobIdFromUrl() {{
+  const p = location.pathname.split("/"); const i = p.indexOf("jobs");
+  return (i >= 0 && p[i + 1]) ? p[i + 1] : null;
+}}
+async function initMniLabels() {{
+  const jid = _jobIdFromUrl();
+  if (!jid || VIEWER_MODE === "picker") return;
+  let data;
+  try {{ const r = await fetch(`/api/v1/jobs/${{jid}}/labels/mni`); if (!r.ok) return; data = await r.json(); }}
+  catch (_e) {{ return; }}
+  if (!data || !(data.atlases || []).length) return;
+  for (const c of data.contacts || []) MNI_REGIONS[c.name] = c.regions || {{}};
+  const sel = document.getElementById("mni-atlas-sel"); if (!sel) return;
+  sel.innerHTML = "<option value=''>Labeling (default)</option>" +
+    data.atlases.map(a => `<option value="${{a}}">${{_mniName(a)}}</option>`).join("");
+  sel.onchange = () => {{ MNI_ATLAS = sel.value || null; refreshRegions(); }};
+  document.getElementById("mni-atlas-ctl").style.display = "";
+  document.getElementById("mni-badge-txt").textContent =
+    "MNI · " + (data.refined ? "nonlinear ✓" : "affine");
+  document.getElementById("mni-badge").style.display = "";
+  const btn = document.getElementById("mni-refine-btn");
+  btn.style.display = data.refined ? "none" : "";
+  btn.onclick = () => _mniRefine(jid, btn);
+}}
+async function _mniRefine(jid, btn) {{
+  btn.disabled = true; btn.textContent = "Refining…";
+  try {{
+    const r = await fetch(`/api/v1/jobs/${{jid}}/mni/refine`, {{ method: "POST" }});
+    if (!r.ok) throw new Error("refine failed");
+    const job = await r.json();
+    const poll = async () => {{
+      const s = await (await fetch(`/api/v1/jobs/${{job.id}}`)).json();
+      if (["succeeded", "failed", "cancelled"].includes(s.state)) {{
+        for (const k of Object.keys(MNI_REGIONS)) delete MNI_REGIONS[k];
+        await initMniLabels(); refreshRegions();
+      }} else setTimeout(poll, 2000);
+    }};
+    poll();
+  }} catch (_e) {{ btn.disabled = false; btn.textContent = "Refine"; }}
+}}
+
 function renderSidebar(meta) {{
   document.getElementById("subject").textContent = meta.subject_label || "(unnamed)";
   document.getElementById("summary").textContent =
@@ -2150,9 +2316,8 @@ function renderSidebar(meta) {{
       const row = document.createElement("div");
       row.className = "contact-row";
       row.dataset.label = c.label;
-      const region = c.freesurfer_label || c.thomas_label || c.wm_label || "—";
-      const dist = c.distance_mm ? ` <span class="small">${{(+c.distance_mm).toFixed(1)}}mm</span>` : "";
-      row.innerHTML = `<span class="label">${{c.label}}</span><span class="region">${{region}}${{dist}}</span>`;
+      MNI_CONTACTS[c.label] = c;
+      row.innerHTML = `<span class="label">${{c.label}}</span><span class="region">${{regionHtml(c)}}</span>`;
       row.addEventListener("click", ev => {{ ev.stopPropagation(); selectContact(c.label, c.trajectory); }});
       list.appendChild(row);
     }}
@@ -2467,15 +2632,24 @@ function _v3len(a){{return Math.hypot(a[0],a[1],a[2]);}}
 function _v3norm(a){{const l=_v3len(a)||1;return [a[0]/l,a[1]/l,a[2]/l];}}
 
 // Gray value at a world point, honoring the CT⟷MRI fade (0..255).
+// Trilinear voxel sample (voxel() is bounds-safe → 0 outside). Smooths the slices
+// + probe reslices like the editor, instead of blocky nearest-neighbour.
+function _triVox(vol,v){{
+  const x0=Math.floor(v[0]),y0=Math.floor(v[1]),z0=Math.floor(v[2]);
+  const fx=v[0]-x0,fy=v[1]-y0,fz=v[2]-z0,S=(a,b,c)=>vol.voxel(a,b,c);
+  const c00=S(x0,y0,z0)*(1-fx)+S(x0+1,y0,z0)*fx,c10=S(x0,y0+1,z0)*(1-fx)+S(x0+1,y0+1,z0)*fx;
+  const c01=S(x0,y0,z0+1)*(1-fx)+S(x0+1,y0,z0+1)*fx,c11=S(x0,y0+1,z0+1)*(1-fx)+S(x0+1,y0+1,z0+1)*fx;
+  return (c00*(1-fy)+c10*fy)*(1-fz)+(c01*(1-fy)+c11*fy)*fz;
+}}
 function _sampleGray(x,y,z){{
   if(!mriVolume)return 0;
   const v=mriVolume.rasToVox([x,y,z]);
   const range=Math.max(1e-6,mriVolume.displayMax-mriVolume.displayMin);
-  let g=Math.max(0,Math.min(255,(mriVolume.voxel(Math.round(v[0]),Math.round(v[1]),Math.round(v[2]))-mriVolume.displayMin)/range*255));
+  let g=Math.max(0,Math.min(255,(_triVox(mriVolume,v)-mriVolume.displayMin)/range*255));
   if(fadeVolume&&sliceFade>0.001){{
     const f=fadeVolume.rasToVox([x,y,z]);
     const fr=Math.max(1e-6,fadeVolume.displayMax-fadeVolume.displayMin);
-    const fg=Math.max(0,Math.min(255,(fadeVolume.voxel(Math.round(f[0]),Math.round(f[1]),Math.round(f[2]))-fadeVolume.displayMin)/fr*255));
+    const fg=Math.max(0,Math.min(255,(_triVox(fadeVolume,f)-fadeVolume.displayMin)/fr*255));
     g=g*(1-sliceFade)+fg*sliceFade;
   }}
   return g;
@@ -2616,6 +2790,8 @@ function _probeSetContact(label){{
 // path-rewritten) scene_meta.json. Identical logic for served + picker.
 function onMeta(meta) {{
   renderSidebar(meta);
+  initMniLabels();   // fetch /labels/mni → show the Region-atlas dropdown + MNI badge
+
   // Contacts for the slice overlay (already in the CT/contact RAS frame).
   sceneMeta = meta;
   allContacts = (meta.contacts || [])
@@ -2828,6 +3004,7 @@ def _assemble_viewer(
     drop_cerebellum: bool = True,
     deepmriprep: bool = False,
     deepmriprep_tissue_path: Path | None = None,
+    brainchop: bool = False,
     atlas_labelmap_path: Path | None = None,
     atlas_name: str = "",
     structure_labelmap_path: Path | None = None,
@@ -2898,6 +3075,7 @@ def _assemble_viewer(
             from types import SimpleNamespace
             from rosa_core.brain_mesh import BrainSurface
             scache = Path(brain_surface_cache_path) if brain_surface_cache_path else None
+            nmask = None; sitk_tf = None   # set on the mesh path; resolved from cache for the self-heal below
             if scache is not None and scache.is_file():
                 # The surface is atlas-independent (it depends only on the MRI +
                 # CT + registration, all fixed per case), so it's built ONCE per
@@ -2959,6 +3137,15 @@ def _assemble_viewer(
                     bs = gyral_surface_from_mri(
                         brain_native_volume_path, nmask, step_size=1, brain_tissue=tissue)
                     backend = f"{backend}+deepmriprep"
+                elif brainchop:
+                    # brainchop GM/WM MeshNet (bundled ONNX, torch-free): a learned,
+                    # dura-free tissue support → a crisp surface with zero setup.
+                    from rosa_detect.services.brainchop_onnx import brainchop_gmwm_support
+                    supp = brainchop_gmwm_support(brain_native_volume_path, log=_stderr)
+                    bs = gyral_surface_from_mri(
+                        brain_native_volume_path, nmask, step_size=1,
+                        brain_tissue=np.asanyarray(supp.dataobj))
+                    backend = f"{backend}+brainchop"
                 else:
                     bs = gyral_surface_from_mri(brain_native_volume_path, nmask, step_size=1)
                 # aparc surface coloring (when a FastSurfer/FS aseg is available):
@@ -2993,14 +3180,30 @@ def _assemble_viewer(
                     extra = {"c": brain_colors} if brain_colors is not None else {}
                     np.savez(scache, v=bs.vertices_ras, f=bs.faces, n=bs.vertex_normals, **extra)
                     _stderr(f"[view] cached brain surface → {scache.name}")
-                    # Brain-extracted MRI in the CT frame → the DVR volume (cached
-                    # with the surface, atlas-independent). An isosurface raycast
-                    # of this in the browser is the mesh-free "volume brain".
+            # Brain-extracted MRI in the CT frame → the DVR volume the browser
+            # raycasts as a mesh-free "volume brain". Written whenever it's missing
+            # — DECOUPLED from the surface cache, so a case whose DVR failed once
+            # (or predates it) self-heals on the next view instead of only on a
+            # surface re-mesh. Uses the per-case cached mask + T1→CT transform (or
+            # the freshly-computed ones when we just meshed).
+            if scache is not None:
+                dvr_path = scache.parent / "brain_mri_in_ct.nii.gz"
+                mcache = Path(brain_mask_cache_path) if brain_mask_cache_path else None
+                if not dvr_path.is_file():
                     try:
                         import SimpleITK as sitk
-                        dvr = _brain_mri_dvr_volume(brain_native_volume_path, nmask, sitk_tf, ct_path)
-                        sitk.WriteImage(dvr, str(scache.parent / "brain_mri_in_ct.nii.gz"))
-                        _stderr("[view] cached DVR volume → brain_mri_in_ct.nii.gz")
+                        from rosa_core.registration import load_transform
+                        tfp = Path(brain_to_ct_transform_path) if brain_to_ct_transform_path else None
+                        tf = sitk_tf if sitk_tf is not None else (
+                            load_transform(str(tfp)) if tfp and tfp.is_file() else None)
+                        nm = nmask if nmask is not None else (
+                            mcache if mcache and mcache.is_file() else None)
+                        if tf is not None and nm is not None:
+                            dvr = _brain_mri_dvr_volume(brain_native_volume_path, nm, tf, ct_path)
+                            sitk.WriteImage(dvr, str(dvr_path))
+                            _stderr("[view] cached DVR volume → brain_mri_in_ct.nii.gz")
+                        else:
+                            _stderr("[view] DVR volume skipped (no cached mask/transform)")
                     except Exception as exc:  # noqa: BLE001
                         _stderr(f"[view] DVR volume failed ({exc})")
             surfaces = [SimpleNamespace(
@@ -3298,6 +3501,7 @@ def run_export_view(
 
     trajectories = _read_pipeline_trajectories(traj_tsv)
     contacts = _read_pipeline_contacts(contacts_tsv)
+    _refit_scene_trajectories(trajectories, contacts)
     contact_labels = _read_labels_by_contact(labels_tsv if labels_tsv.exists() else None)
     # 2-5. Register FS, window the CT, build the scene, write the viewer.
     # Shared with `view-results` (which feeds it pre-computed trajectories /
@@ -3342,6 +3546,7 @@ def run_view_results(
     drop_cerebellum: bool = True,
     deepmriprep: bool = False,
     deepmriprep_tissue: str | Path | None = None,
+    brainchop: bool = False,
     atlas_labelmap: str | Path | None = None,
     atlas_name: str = "",
     structure_meshes: str | Path | None = None,
@@ -3370,6 +3575,7 @@ def run_view_results(
     trajectories = (
         _read_pipeline_trajectories(Path(trajectories_tsv)) if trajectories_tsv else []
     )
+    _refit_scene_trajectories(trajectories, contacts)
     contact_labels = _read_labels_by_contact(
         Path(labels_tsv) if labels_tsv else None
     )
@@ -3401,6 +3607,7 @@ def run_view_results(
         drop_cerebellum=drop_cerebellum,
         deepmriprep=deepmriprep,
         deepmriprep_tissue_path=(Path(deepmriprep_tissue) if deepmriprep_tissue else None),
+        brainchop=brainchop,
         atlas_labelmap_path=(Path(atlas_labelmap) if atlas_labelmap else None),
         atlas_name=atlas_name,
         structure_labelmap_path=(Path(structure_meshes) if structure_meshes else None),

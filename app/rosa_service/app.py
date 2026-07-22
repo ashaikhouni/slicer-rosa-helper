@@ -25,6 +25,7 @@ Jobs run as supervised subprocesses in an auditable per-job dir (see
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import tempfile
@@ -37,11 +38,12 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from .editor_payload import ensure_cache
-from .jobs import JobNotFound, JobRunner
+from .editor_payload import ensure_cache, probe_patch, _ct_path
+from .jobs import JobNotFound, JobRunner, _engine_base
 from .models import (
-    ImportRequest, JobSpec, JobStatus, LabelRequest, ReviewDoc, ReviewEdit,
-    ReviewOp, ReviewPatch,
+    BurnThomasRequest, DicomRequest, ImportRequest, JobSpec, JobStatus,
+    LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest,
+    RosaCreateRequest, RosaPrepareRequest,
 )
 from .review import ReviewStore, export_contacts
 
@@ -89,6 +91,73 @@ def _read_proposed_labels(job_dir: Path) -> list[dict]:
             "region": region,
         })
     return out
+
+
+def _regions_from_review(case_dir) -> dict:
+    """Map channel name → anatomical region from a case's saved review.json
+    (the labeled/edited state), for the cohort viewer's per-contact tooltip."""
+    import json
+    rj = Path(case_dir) / "review.json"
+    if not rj.is_file():
+        return {}
+    try:
+        doc = json.loads(rj.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return {}
+    out = {}
+    for shank in doc.get("shanks", []):
+        for c in shank.get("contacts", []):
+            if c.get("name") and c.get("region"):
+                out[c["name"]] = c["region"]
+    return out
+
+
+def _read_traj_lines(path) -> list:
+    """Read a trajectories.tsv (or seeds.tsv) into ``{name, start, end}`` dicts
+    (RAS mm), for line-geometry matching against a ROS plan."""
+    import csv
+    p = Path(path)
+    if not p.is_file():
+        return []
+    lines = [ln for ln in p.read_text(encoding="utf-8").splitlines()
+             if not ln.lstrip().startswith("#")]
+    out = []
+    for r in csv.DictReader(lines, delimiter="\t"):
+        try:
+            out.append({"name": (r.get("name") or "").strip(),
+                        "start": [float(r["start_x"]), float(r["start_y"]), float(r["start_z"])],
+                        "end": [float(r["end_x"]), float(r["end_y"]), float(r["end_z"])]})
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def _ros_plan_lines(ros_text: str) -> list:
+    """Parse a ``.ros`` file's text into RAS ``{name, start, end}`` plan lines."""
+    from rosa_core.ros_parser import parse_ros_text
+    from rosa_core.transforms import lps_to_ras_point
+    parsed = parse_ros_text(ros_text)
+    out = []
+    for t in (parsed.get("trajectories") or []):
+        try:
+            out.append({
+                "name": str(t.get("name") or ""),
+                "start": [float(v) for v in lps_to_ras_point(list(t["start"]))],
+                "end": [float(v) for v in lps_to_ras_point(list(t["end"]))],
+            })
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _cohort_hue(case_id: str) -> str:
+    """A stable, distinct-ish per-subject color (hashed case id → HSV → hex), so a
+    subject keeps its color as the cohort grows."""
+    import colorsys
+    import hashlib
+    h = (int(hashlib.md5(case_id.encode()).hexdigest()[:8], 16) % 997) / 997.0
+    r, g, b = colorsys.hsv_to_rgb(h, 0.55, 0.96)
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
 
 
 def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) -> FastAPI:
@@ -210,10 +279,20 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         finished, each enriched with electrode/contact counts + MRI/label state
         so the list is informative without opening a case. Newest first."""
         from .cases import summarize_case
+        # newest-first, so the first succeeded label child seen per case is its
+        # currently-active atlas (drives the Atlas column + MNI-poolable state).
+        atlas_by_case: dict[str, str] = {}
+        for st in runner.list():
+            if st.kind == "label" and st.state == "succeeded" and st.parent:
+                atlas_by_case.setdefault(st.parent, st.atlas or "")
         out = []
         for st in runner.list():                 # newest-first
             if st.kind in ("pipeline", "import") and st.state == "succeeded":
-                out.append(summarize_case(st, runner.get(st.id).workdir))
+                job = runner.get(st.id)
+                out.append(summarize_case(
+                    st, job.workdir,
+                    ct_hash=job.params.get("ct_hash"),
+                    atlas=atlas_by_case.get(st.id)))
         return out
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}", response_model=JobStatus)
@@ -331,6 +410,37 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "default": bundled_atlases.load_manifest()["default"]}
         except Exception as exc:  # noqa: BLE001 — engine/resources missing
             raise HTTPException(status_code=500, detail=f"atlas registry error: {exc}") from exc
+
+    @app.get(f"/api/{API_VERSION}/electrode-models")
+    async def list_electrode_models() -> dict:
+        """The bundled electrode library, grouped by type — so the new-case
+        screen can offer per-type checkboxes to constrain detection/placement to
+        the electrode types a site actually uses (passed to `contacts
+        --electrode-types`)."""
+        try:
+            from rosa_core.electrode_models import (
+                load_electrode_library, label_map, manufacturer_of)
+            lib = load_electrode_library()
+            top = lib.get("vendor")
+            groups: dict[str, list] = {}
+            manu: dict[str, str] = {}
+            for m in lib.get("models", []):
+                t = str(m.get("type") or "?")
+                groups.setdefault(t, []).append(
+                    {"id": m.get("id"), "contact_count": m.get("contact_count")})
+                # type codes are manufacturer-specific → one manufacturer per type
+                manu.setdefault(t, (manufacturer_of(m, top) or "").split()[0])
+            types = [{"type": t, "manufacturer": manu.get(t, ""), "count": len(ms),
+                      "models": ms,
+                      "contact_counts": sorted({x["contact_count"] for x in ms if x["contact_count"]})}
+                     for t, ms in groups.items()]
+            types.sort(key=lambda x: (x["manufacturer"], x["type"]))  # cluster by manufacturer
+            # id → "Manufacturer Reference" (e.g. "DIXI D08-05AM") for friendly
+            # display of the placed electrode model in the review list.
+            return {"vendor": top, "series": lib.get("series"),
+                    "types": types, "labels": label_map(lib)}
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"electrode library error: {exc}") from exc
 
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/label",
               response_model=JobStatus, status_code=201)
@@ -459,6 +569,16 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             mri = job.workdir / "mri_in_mni.nii.gz"   # patient MRI in MNI (green)
             if not mri.is_file() or not Path(ct).is_file():
                 raise HTTPException(status_code=409, detail="no atlas-registration QC for this job")
+        elif space == "acpc":
+            # Rigid AC-PC reorientation (built by POST /acpc, cached in regcache):
+            # CT + MRI resampled onto the upright MNI grid so the check slices in
+            # standard neuroanatomical planes without deforming the geometry.
+            rc = job.workdir / "regcache"
+            ct = str(rc / "ct_in_acpc.nii.gz")
+            mri = rc / "mri_in_acpc.nii.gz"
+            if not mri.is_file() or not Path(ct).is_file():
+                raise HTTPException(status_code=409,
+                                    detail="no AC-PC reorientation yet (POST /acpc first)")
         elif space == "mni":
             ct = str(job.workdir / "ct_in_mni.nii.gz")
             mri = job.workdir / "mri_in_mni.nii.gz"
@@ -466,10 +586,16 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 raise HTTPException(status_code=409, detail="no AC-PC (MNI) QC for this job")
         else:
             mri = job.workdir / "mri_in_ct.nii.gz"
+            if not mri.is_file():
+                # Fall back to the pipeline's cached MRI-in-CT so the CT↔MRI check
+                # works straight from case creation — before any labeling.
+                alt = job.workdir / "regcache" / "brain_mri_in_ct.nii.gz"
+                if alt.is_file():
+                    mri = alt
             ct = job.params.get("ct")
             if not mri.is_file() or not ct or not Path(ct).is_file():
                 raise HTTPException(status_code=409,
-                                    detail="no registration QC (label job unfinished or no MRI)")
+                                    detail="no CT↔MRI registration yet (add an MRI at case creation, or run a label)")
         try:
             from rosa_core.qc_render import render_registration_qc
             png = render_registration_qc(ct, str(mri), axis=int(axis),
@@ -479,6 +605,42 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=500, detail=f"QC render failed: {exc}") from exc
         return Response(content=png, media_type="image/png",
                         headers={"Cache-Control": "no-store"})
+
+    # Sync def → threadpool (a ~20-40s rigid registration; must not block the
+    # event loop). Idempotent: the reoriented volumes are cached in regcache.
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/acpc")
+    def build_acpc(job_id: str) -> dict:
+        """Build the rigid AC-PC reorientation for a case (upright slice planes).
+
+        Resamples the CT + MRI onto the AC-PC-aligned MNI grid so the
+        registration check reads as standard axial/coronal/sagittal planes
+        instead of the tilted acquisition. Needs the case MRI + the cached
+        ``t1_to_ct.tfm`` (present for MRI cases). Returns
+        ``{ready: bool, reason?}`` — ``ready=False`` (not an error) when the case
+        simply lacks the inputs, so the UI can fall back to the native view.
+        """
+        job = _job_or_404(job_id)
+        rc = job.workdir / "regcache"
+        out_ct = rc / "ct_in_acpc.nii.gz"
+        out_mri = rc / "mri_in_acpc.nii.gz"
+        if out_ct.is_file() and out_mri.is_file():
+            return {"ready": True, "cached": True}
+        ct = job.params.get("ct")
+        t1 = job.params.get("t1")
+        tfm = rc / "t1_to_ct.tfm"        # reused if present, else computed + cached
+        mask = rc / "brain_mask_native.nii.gz"
+        if not (ct and Path(ct).is_file()):
+            raise HTTPException(status_code=409, detail="case CT not found")
+        if not (t1 and Path(t1).is_file()):
+            return {"ready": False, "reason": "no MRI on this case"}
+        try:
+            from rosa_core.acpc import reorient_to_acpc
+            rc.mkdir(parents=True, exist_ok=True)
+            info = reorient_to_acpc(ct, t1, str(tfm), str(out_ct), str(out_mri),
+                                    brain_mask_path=str(mask) if mask.is_file() else None)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"AC-PC reorient failed: {exc}") from exc
+        return {"ready": True, "cached": False, "metric": info["metric"]}
 
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/files/{{path:path}}")
     async def job_file(job_id: str, path: str) -> FileResponse:
@@ -549,6 +711,30 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=404, detail=str(exc))
         return FileResponse(job.workdir / "editor_ct.i16", media_type="application/octet-stream")
 
+    # Sync (not async) on purpose: the first call decompresses the whole native CT
+    # (~1-2 s), which would block the event loop in an async handler and freeze the
+    # app. FastAPI runs sync path ops in a threadpool, so the 1 mm views stay live.
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/probe")
+    def editor_probe(job_id: str, req: dict) -> Response:
+        """A native-resolution patch of the CT on an editor plane (probe's-eye or
+        in-line reformat). The editor reslices a 1 mm crop for speed; these views
+        sample the FULL-res CT so the metal is sharp for sub-mm contact placement.
+        Body: ``{center:[rx,ry,rz], u:[..], v:[..], ext_u, ext_v, size_u, size_v}``
+        (RAS). Returns raw row-major int16 (``size_v × size_u``)."""
+        job = _job_or_404(job_id)
+        try:
+            ct = _ct_path(job.workdir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        try:
+            su = max(16, min(1800, int(req["size_u"])))
+            sv = max(16, min(1800, int(req["size_v"])))
+            data = probe_patch(ct, req["center"], req["u"], req["v"],
+                               float(req["ext_u"]), float(req["ext_v"]), su, sv)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=f"bad probe request: {exc}") from exc
+        return Response(content=data, media_type="application/octet-stream")
+
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/editor/plan")
     async def save_editor_plan(job_id: str, plan: dict) -> dict:
         """Persist an edited plan: rewrite trajectories.tsv + regenerate
@@ -564,11 +750,31 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         ct = job.params.get("ct")
         rebuild = None
         if ct:                              # rebuild the 3D scene from the new TSVs
-            spec = JobSpec(kind="rebuild", params={
+            params = {
                 "case_dir": str(job.workdir), "ct": ct,
                 "label": job.params.get("label", "case"),
                 "surface": job.params.get("surface", "auto"),
-                **({"t1": job.params["t1"]} if job.params.get("t1") else {})})
+                **({"t1": job.params["t1"]} if job.params.get("t1") else {})}
+            # Carry the case's atlas through the rebuild so it doesn't vanish after
+            # an edit — especially THOMAS deep-structure meshes, which have no
+            # cached-surface fallback. The atlas artifacts live in the case's
+            # newest succeeded label job's workdir; re-pass what that job passed.
+            for st in runner.list():        # newest-first → the currently-shown atlas
+                if st.kind != "label" or st.parent != job_id or st.state != "succeeded":
+                    continue
+                atlas = str(st.atlas or "")
+                labelmap = runner.get(st.id).workdir / "atlas_in_ct.nii.gz"
+                if atlas and atlas != "fastsurfer" and labelmap.is_file():
+                    is_thomas = atlas.startswith("thomas")
+                    params["atlas_labelmap"] = str(labelmap)
+                    params["atlas_name"] = "THOMAS" if is_thomas else atlas
+                    if is_thomas:
+                        params["structure_meshes"] = str(labelmap)
+                        lut = labelmap.with_name("atlas_in_ct.nii.gz.lut.json")
+                        if lut.is_file():
+                            params["structure_lut"] = str(lut)
+                break                       # only the newest succeeded label job
+            spec = JobSpec(kind="rebuild", params=params)
             try:
                 rebuild = runner.create(spec).status().model_dump()
             except ValueError:
@@ -618,6 +824,262 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         # Single common top folder → return it; otherwise the upload root.
         root = base / next(iter(roots)) if len(roots) == 1 else base
         return {"path": str(root), "n_files": n}
+
+    @app.post(f"/api/{API_VERSION}/dicom-to-nifti")
+    async def dicom_to_nifti(req: DicomRequest) -> dict:
+        """Convert a DICOM series folder (on this machine) to a de-identified
+        NIfTI and return its path, ready to use as the case CT. Dropping DICOM →
+        NIfTI strips the PHI headers; the source DICOM is left untouched."""
+        src = Path(req.dicom_dir).expanduser()
+        if not src.is_dir():
+            raise HTTPException(status_code=422, detail=f"DICOM folder not found: {src}")
+        out_dir = Path(work_root) / "_uploads" / uuid.uuid4().hex[:8]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / "ct.nii.gz"
+        argv = [*_engine_base(), "dicom-to-nifti", str(src), "-o", str(out)]
+        if req.series_uid:
+            argv += ["--series-uid", req.series_uid]
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        stdout, _ = await proc.communicate()
+        log = (stdout or b"").decode(errors="replace")
+        if proc.returncode != 0 or not out.is_file():
+            raise HTTPException(status_code=422,
+                                detail=f"DICOM conversion failed: {log.strip()[-400:]}")
+        return {"path": str(out), "name": "ct.nii.gz", "deidentified": True, "log": log}
+
+    # ---- cohort MNI group viewer: shared three.js assets + pooled contacts ----
+    import rosa_agent
+    three_dir = Path(rosa_agent.__file__).resolve().parent / "commands" / "viewer_assets" / "three"
+    if three_dir.is_dir():                        # mounted before "/" so it wins
+        app.mount("/assets/three", StaticFiles(directory=str(three_dir)), name="three")
+
+    @app.get(f"/api/{API_VERSION}/cohort/brain.glb")
+    async def cohort_brain() -> FileResponse:
+        """The shared MNI152NLin2009cSym glass brain (prebuilt, committed)."""
+        import rosa_core
+        glb = (Path(rosa_core.__file__).resolve().parent / "resources"
+               / "atlases" / "templates" / "mni152_2009c_sym_glass.glb")
+        if not glb.is_file():
+            raise HTTPException(status_code=404, detail="MNI glass brain not built")
+        return FileResponse(str(glb), media_type="model/gltf-binary")
+
+    @app.get(f"/api/{API_VERSION}/cohort/contacts")
+    async def cohort_contacts() -> dict:
+        """Every MNI-poolable case's contacts pooled in MNI152NLin2009cSym for the
+        group viewer. Lazily (re)computes each case's contacts_mni cache and joins
+        the anatomical region from its review.json."""
+        from rosa_core import cohort as cohort_mod
+        subjects = []
+        for st in runner.list():                  # newest-first
+            if not (st.kind in ("pipeline", "import") and st.state == "succeeded"):
+                continue
+            case_dir = runner.get(st.id).workdir
+            if not cohort_mod.mni_transforms_present(case_dir / "regcache"):
+                continue
+            try:
+                rows = cohort_mod.ensure_contacts_mni(case_dir)
+            except Exception:                     # noqa: BLE001 — one bad case can't sink the cohort
+                continue
+            if not rows:
+                continue
+            regions = _regions_from_review(case_dir)
+            contacts = [[r["mni_x"], r["mni_y"], r["mni_z"],
+                         regions.get(r.get("name", "")) or "", r.get("hemisphere", ""),
+                         r.get("name", "")]
+                        for r in rows]
+            subjects.append({"id": st.id, "label": st.label or st.id[:8],
+                             "color": _cohort_hue(st.id), "contacts": contacts})
+        return {"space": cohort_mod.POOL_SPACE, "subjects": subjects}
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/labels/mni")
+    async def mni_labels(job_id: str) -> dict:
+        """This case's contacts labeled against every bundled MNI-native atlas
+        (CerebrA + Iglesias), from the auto-maintained MNI stamp. Lazily
+        (re)computes on stale. Empty ``atlases`` when the case isn't MNI-poolable."""
+        job = _job_or_404(job_id)
+        from rosa_core import mni_label, cohort
+        try:
+            rows = mni_label.ensure_contacts_labels_mni(job.workdir)
+        except Exception:                         # noqa: BLE001 — never 500 the label view
+            rows = []
+        atlases = sorted({r["atlas"] for r in rows})
+        by_contact: dict = {}
+        for r in rows:
+            key = r.get("name") or f'{r.get("trajectory")}:{r.get("contact_index")}'
+            c = by_contact.setdefault(key, {
+                "name": r.get("name"), "trajectory": r.get("trajectory"),
+                "contact_index": r.get("contact_index"), "regions": {}})
+            c["regions"][r["atlas"]] = r["region"]
+        return {"space": mni_label.POOL_SPACE, "atlases": atlases,
+                "refined": cohort.is_refined(job.workdir / "regcache"),
+                "contacts": list(by_contact.values())}
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/mni/refine")
+    async def mni_refine(job_id: str) -> dict:
+        """Refine this case's T1→MNI with a B-spline nonlinear warp, then re-warp +
+        re-label — better subcortical accuracy (~30 s). Returns the stamp job."""
+        job = _job_or_404(job_id)
+        t1 = job.params.get("t1")
+        if not t1:
+            raise HTTPException(status_code=409, detail="no MRI (T1) to register to MNI")
+        spec = JobSpec(kind="stamp", params={
+            "case_dir": str(job.workdir), "t1": str(t1), "refine": True})
+        try:
+            return runner.create(spec).status().model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/match-ros")
+    async def match_ros(job_id: str, req: RosMatchRequest) -> dict:
+        """Match this case's detected trajectories against a ROSA surgical plan
+        (pure line geometry — no image registration; handles entry↔target
+        ambiguity). Returns the detected→plan name map + per-match confidence
+        (axis angle°, perpendicular mm), for a batch rename in the editor."""
+        job = _job_or_404(job_id)
+        det = _read_traj_lines(job.workdir / "trajectories.tsv")
+        if len(det) < 3:
+            raise HTTPException(status_code=422, detail="need ≥3 detected trajectories to match")
+        if req.ros_text.strip():
+            try:
+                plan = _ros_plan_lines(req.ros_text)
+            except Exception as exc:              # noqa: BLE001
+                raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+        else:                                     # ROSA-imported case → its stashed plan
+            stash = job.workdir / "ros_plan.tsv"
+            if not stash.is_file():
+                raise HTTPException(status_code=422,
+                                    detail="no .ros plan provided and none stashed for this case")
+            plan = _read_traj_lines(stash)
+        if len(plan) < 3:
+            raise HTTPException(status_code=422, detail="the .ros plan needs ≥3 trajectories")
+        from rosa_core.cross_volume_match import cross_volume_match
+        res = cross_volume_match(plan, det)
+        matched = [{"plan": rn, "det": dn,
+                    "angle_deg": round(a, 1) if a is not None else None,
+                    "perp_mm": round(p, 1) if p is not None else None}
+                   for (rn, dn, a, p) in res.pairs if dn]
+        return {"matched": matched,
+                "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
+                "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}
+
+    # ---- import a ROSA robot case (a .ros plan + Analyze images) ----
+    async def _run_engine_capture(args: list[str]):
+        proc = await asyncio.create_subprocess_exec(
+            *_engine_base(), *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        return proc.returncode, (out or b"").decode(errors="replace")
+
+    @app.post(f"/api/{API_VERSION}/rosa-import/prepare")
+    async def rosa_import_prepare(req: RosaPrepareRequest) -> dict:
+        """Stage a ROSA export folder: de-identify → bake to NIfTI → return the
+        display volumes (thumbnail + CT/MRI guess) for the clinician to confirm
+        which is the post-op CT and which is the non-contrast T1."""
+        rosa_dir = Path(req.rosa_dir).expanduser()
+        if not rosa_dir.is_dir():
+            raise HTTPException(status_code=404, detail=f"ROSA folder not found: {rosa_dir}")
+        label = (req.label or rosa_dir.name or "rosa").strip() or "rosa"
+        base = Path(work_root) / "_rosa_import" / uuid.uuid4().hex[:8]
+        clean, staging = base / "clean", base / "nifti"
+        staging.mkdir(parents=True, exist_ok=True)
+        rc, log = await _run_engine_capture(
+            ["deidentify-ros", str(rosa_dir), "--out-dir", str(clean),
+             "--subject-id", label, "--no-keymap"])
+        if rc != 0:
+            raise HTTPException(status_code=422, detail=f"de-identify failed: {log.strip()[-400:]}")
+        rc, log = await _run_engine_capture(
+            ["rosa-to-nifti", "--rosa-folder", str(clean), "--output", str(staging)])
+        if rc != 0:
+            raise HTTPException(status_code=422, detail=f"rosa-to-nifti failed: {log.strip()[-400:]}")
+        from .rosa_import import enumerate_displays
+        displays = enumerate_displays(staging)
+        if not displays:
+            raise HTTPException(status_code=422, detail="no display volumes found in the ROSA case")
+        seeds = staging / "seeds.tsv"
+        return {"displays": displays, "label": label,
+                "seeds": str(seeds) if seeds.is_file() else ""}
+
+    @app.post(f"/api/{API_VERSION}/rosa-import/create")
+    async def rosa_import_create(req: RosaCreateRequest) -> dict:
+        """Create a case from a staged ROSA import: run the pipeline on the chosen
+        post-op CT (+ optional non-contrast T1) and stash the plan (seeds.tsv →
+        ros_plan.tsv) so 'Label from ROS' can use it without re-picking a file."""
+        from .cases import ct_fingerprint
+        ct = Path(req.ct_path)
+        if not ct.is_file():
+            raise HTTPException(status_code=404, detail=f"CT not found: {ct}")
+        label = (req.label or "rosa").strip() or "rosa"
+        params = {"ct": str(ct), "label": label, "surface": "auto",
+                  "ct_hash": ct_fingerprint(str(ct))}
+        if req.t1_path and Path(req.t1_path).is_file():
+            params["t1"] = str(req.t1_path)
+        # Guided fit: feed the .ros plan (baked to seeds.tsv, all displays share the
+        # reference RAS frame) to detection as seeds → it snaps to the actual metal
+        # and carries the surgeon's trajectory names, instead of blind auto-detect.
+        if req.seeds_path and Path(req.seeds_path).is_file():
+            params["seeds"] = str(req.seeds_path)
+        try:
+            job = runner.create(JobSpec(kind="pipeline", params=params))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if req.seeds_path and Path(req.seeds_path).is_file():
+            try:                              # also stash for editor "Label from ROS"
+                shutil.copyfile(req.seeds_path, job.workdir / "ros_plan.tsv")
+            except OSError:
+                pass
+        return job.status().model_dump()
+
+    # ---- standalone tools (no case): burn THOMAS into a DICOM for navigation ----
+    @app.get(f"/api/{API_VERSION}/tools/thomas-nuclei")
+    async def thomas_nuclei() -> list[dict]:
+        """The canonical THOMAS nuclei (number + name + color) for the burn tool's
+        nucleus picker — sourced from the engine so the UI can't drift."""
+        from rosa_core.thomas_import import THOMAS_NUCLEI
+        return [{"num": num, "name": name, "rgb": [round(c, 3) for c in rgb]}
+                for num, (name, rgb) in THOMAS_NUCLEI.items()]
+
+    @app.post(f"/api/{API_VERSION}/tools/dicom-preview")
+    async def tools_dicom_preview(req: DicomRequest) -> dict:
+        """Middle-slice thumbnail + series count for a DICOM folder, so the user
+        can confirm they picked the right volume before burning."""
+        d = Path(req.dicom_dir)
+        if not d.is_dir():
+            raise HTTPException(status_code=404, detail=f"DICOM dir not found: {d}")
+        from .rosa_import import dicom_preview
+        try:
+            return dicom_preview(d)
+        except Exception as exc:  # noqa: BLE001 — surface a clean message
+            raise HTTPException(status_code=422, detail=f"could not read DICOM: {exc}") from exc
+
+    @app.post(f"/api/{API_VERSION}/tools/burn-thomas")
+    async def tools_burn_thomas(req: BurnThomasRequest) -> dict:
+        """Run the burn-thomas engine command as a transient job (progress via the
+        usual /jobs/{id}/logs SSE). NOT a case — nothing is added to the registry."""
+        if not Path(req.dicom_dir).is_dir():
+            raise HTTPException(status_code=404, detail=f"DICOM dir not found: {req.dicom_dir}")
+        if not Path(req.thomas_dir).is_dir():
+            raise HTTPException(status_code=404, detail=f"THOMAS dir not found: {req.thomas_dir}")
+        if not req.all and not req.nuclei:
+            raise HTTPException(status_code=422, detail="choose at least one nucleus, or 'whole thalamus'")
+        if req.t1 and not Path(req.t1).is_file():
+            raise HTTPException(status_code=404, detail=f"reference image not found: {req.t1}")
+        params = {
+            "dicom_dir": req.dicom_dir, "thomas_dir": req.thomas_dir,
+            "out_dir": req.out_dir, "nuclei": list(req.nuclei), "all": bool(req.all),
+            "side": req.side, "fill": req.fill,
+            "distinct": bool(req.distinct), "distinct_step": req.distinct_step,
+            "series_description": req.series_description, "no_register": bool(req.no_register),
+        }
+        if req.series_uid:
+            params["series_uid"] = req.series_uid
+        if req.t1:
+            params["t1"] = req.t1
+        try:
+            job = runner.create(JobSpec(kind="burn-thomas", params=params))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return job.status().model_dump()
 
     # ---- the web UI (single-page wizard), served at / ----
     # Mounted LAST so the /api and /healthz routes above take precedence; the

@@ -67,10 +67,23 @@ def _is_labeled(job_dir: Path) -> bool:
                for s in doc.get("shanks", []) for c in s.get("contacts", []))
 
 
-def summarize_case(status, job_dir: str | Path) -> dict:
-    """A Cases-list row: identity + electrode/contact counts + MRI/label state."""
+# The cohort pools contacts in CerebrA's space (MNI152NLin2009cSym); a case is
+# "MNI-poolable" once its CerebrA-through-T1 label run has cached both legs of
+# CT→T1→MNI in regcache/ (see docs/design/cohort_view.md §4.2).
+_MNI_POOL_TFM = "mni_MNI152NLin2009cSym_to_t1.tfm"
+
+
+def summarize_case(status, job_dir: str | Path, *, ct_hash=None, atlas=None) -> dict:
+    """A Cases-list row: identity + electrode/contact counts + MRI/label/atlas
+    state. ``ct_hash`` (PHI-safe scan identity, from the manifest params) and
+    ``atlas`` (the case's active label atlas) are resolved by the caller, which
+    has the job params + the runner; here we only add the derived ``mni_eligible``
+    (both CT→T1→MNI transforms cached)."""
     job_dir = Path(job_dir)
     contacts = job_dir / "contacts.tsv"
+    regcache = job_dir / "regcache"
+    mni_eligible = ((regcache / "t1_to_ct.tfm").is_file()
+                    and (regcache / _MNI_POOL_TFM).is_file())
     return {
         "id": status.id,
         "label": status.label,
@@ -80,6 +93,9 @@ def summarize_case(status, job_dir: str | Path) -> dict:
         "n_contacts": _count_data_rows(contacts),
         "n_shanks": _count_data_rows(job_dir / "trajectories.tsv") or _distinct_trajectories(contacts),
         "labeled": _is_labeled(job_dir),
+        "ct_hash": ct_hash,
+        "atlas": atlas,
+        "mni_eligible": mni_eligible,
     }
 
 

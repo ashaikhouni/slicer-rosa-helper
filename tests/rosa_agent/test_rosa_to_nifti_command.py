@@ -76,6 +76,46 @@ def _build_synthetic_rosa_case(case_dir: Path) -> None:
     (case_dir / "case.ros").write_text(ros_text)
 
 
+def _display_block(name: str, uid: str) -> str:
+    return textwrap.dedent(f"""
+        [TRdicomRdisplay]
+        1 0 0 0
+        0 1 0 0
+        0 0 1 0
+        0 0 0 1
+        [VOLUME]
+        DICOM/{uid}/{name}
+        [IMAGERY_NAME]
+        {name}
+        [SERIE_UID]
+        {uid}
+        [IMAGERY_3DREF]
+        0
+    """).strip()
+
+
+def _build_multi_display_case(case_dir: Path, displays):
+    """A ROSA case declaring several displays; ``displays`` is a list of
+    ``(name, has_img)``. The FIRST entry is the reference (display 0). Displays
+    with ``has_img=False`` are declared in the .ros but have no Analyze file —
+    exactly the real-world case (a .ros references empty display slots)."""
+    blocks = []
+    for i, (name, has_img) in enumerate(displays):
+        uid = f"uid_{i}"
+        if has_img:
+            root = case_dir / "DICOM" / uid
+            root.mkdir(parents=True, exist_ok=True)
+            _write_synthetic_analyze(root / name)
+        blocks.append(_display_block(name, uid))
+    traj = textwrap.dedent("""
+        [TRAJECTORY]
+        traj1
+        T1 1 0 0 -1.0 -2.0 3.0 0 -10.0 -20.0 30.0
+        [END]
+    """).strip()
+    (case_dir / "case.ros").write_text("\n".join(blocks) + "\n" + traj + "\n")
+
+
 @unittest.skipUnless(
     DEPS_AVAILABLE,
     "numpy/SimpleITK/rosa_agent not importable in this environment.",
@@ -170,6 +210,32 @@ class RosaToNiftiTests(unittest.TestCase):
             "--quiet",
         ])
         self.assertEqual(rc, 2)
+
+    def test_missing_nonreference_display_is_skipped(self):
+        """A display the .ros declares but with no Analyze volume is skipped —
+        the case still imports with the volumes that ARE present."""
+        from rosa_agent.commands.rosa_to_nifti import main as cmd
+        case = self.tmp / "multi"; case.mkdir()
+        _build_multi_display_case(case, [("ref_vol", True), ("gone", False)])
+        out = self.tmp / "multi_out"
+        rc = cmd(["--rosa-folder", str(case), "--output", str(out), "--quiet"])
+        self.assertEqual(rc, 0)
+        self.assertTrue((out / "ref_vol.nii.gz").exists())
+        self.assertFalse((out / "gone.nii.gz").exists())          # not baked
+        m = json.loads((out / "manifest.json").read_text())
+        self.assertEqual([e["display_name"] for e in m["exported_volumes"]], ["ref_vol"])
+        self.assertEqual([s["display_name"] for s in m["skipped_volumes"]], ["gone"])
+
+    def test_missing_reference_display_is_fatal(self):
+        """But if the REFERENCE display (display 0, the common frame) has no
+        volume, that IS fatal — the rest can't be placed without it."""
+        from rosa_agent.commands.rosa_to_nifti import main as cmd
+        case = self.tmp / "noref"; case.mkdir()
+        _build_multi_display_case(case, [("gone_ref", False), ("ref_vol", True)])
+        out = self.tmp / "noref_out"
+        rc = cmd(["--rosa-folder", str(case), "--output", str(out), "--quiet"])
+        self.assertEqual(rc, 2)
+        self.assertFalse((out / "manifest.json").exists())
 
 
 if __name__ == "__main__":

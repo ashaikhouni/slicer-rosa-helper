@@ -1,0 +1,18 @@
+{
+  "name": "rosa-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ROSA SEEG electrode localizer — desktop shell (Electron) that spawns the local rosa_service sidecar and loads its UI. Server-free clinician app.",
+  "author": "ROSA",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron .",
+    "dist": "electron-builder --mac --config electron-builder.yml"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

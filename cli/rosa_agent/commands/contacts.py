@@ -102,9 +102,29 @@ def place_contacts(
         progress_logger=_stderr,
     )
 
+    # Sanity bound: place_seeg can DIVERGE for a low-confidence guided-fit seed (a
+    # failed snap) and emit contacts hundreds of mm outside the scan. A contact
+    # can't lie outside the CT — drop those, so one bad shank doesn't poison the
+    # export or blow up the 3-D scene's camera framing. Distance-based (frame-
+    # invariant): centre = CT centre in RAS, radius = half-diagonal + 50 mm margin.
+    import numpy as np
+    import SimpleITK as sitk
+    _img = sitk.ReadImage(str(ct_path))
+    _sz = np.array(_img.GetSize(), dtype=float)
+    _sp = np.array(_img.GetSpacing(), dtype=float)
+    _c_lps = np.array(_img.TransformContinuousIndexToPhysicalPoint((_sz / 2.0).tolist()))
+    _center = _c_lps * np.array([-1.0, -1.0, 1.0])              # LPS → RAS
+    _max_r = 0.5 * float(np.linalg.norm(_sz * _sp)) + 50.0
+
     out: list[dict[str, Any]] = []
     for placed in batch.trajectories:
         contacts_ras = [list(c) for c in placed.contacts_ras]
+        kept = [c for c in contacts_ras
+                if float(np.linalg.norm(np.asarray(c, dtype=float) - _center)) <= _max_r]
+        if len(kept) != len(contacts_ras):
+            _stderr(f"[contacts] {placed.name}: dropped {len(contacts_ras) - len(kept)} "
+                    f"contact(s) outside the CT (diverged fit)")
+        contacts_ras = kept
         if not contacts_ras:
             _stderr(f"[contacts] {placed.name}: no contacts placed (band={placed.band})")
         out.append({
@@ -137,6 +157,13 @@ def main(argv: list[str] | None = None) -> int:
              "Default: full library.",
     )
     parser.add_argument(
+        "--electrode-types", default=None,
+        help="Comma-separated electrode TYPES to constrain the library to "
+             "(e.g. 'AM,PMT,CM' — the types a site actually uses). Restricts "
+             "model matching to those types; takes precedence over --library. "
+             "Default: the full bundled library.",
+    )
+    parser.add_argument(
         "--mask-backend", choices=("auto", "hull", "log-watershed", "synthstrip"),
         default="auto",
         help="intracranial brain-mask backend for the placement anchor. 'auto' "
@@ -151,6 +178,11 @@ def main(argv: list[str] | None = None) -> int:
         "--brain-mask", default=None,
         help="path to a user-supplied intracranial mask volume "
              "(overrides --mask-backend; resampled to the CT grid)")
+    parser.add_argument(
+        "--fit-line-to-contacts", action="store_true",
+        help="after placing, rewrite the input trajectory TSV so each shank's "
+             "line is the PCA fit through its placed contacts (the line 'carries' "
+             "its contacts, matching the 3-D scene). Refits in place.")
     args = parser.parse_args(argv)
 
     brain_mask_img = None
@@ -163,15 +195,40 @@ def main(argv: list[str] | None = None) -> int:
         brain_mask_img = sitk.ReadImage(str(bm_path))
         _stderr(f"[contacts] using user brain mask {bm_path} (overrides --mask-backend)")
 
+    # Library constraint: --electrode-types filters the bundled library to the
+    # site's types (an explicit model list place_seeg uses verbatim); it wins
+    # over --library. Otherwise --library (strategy key) / full library applies.
+    library = args.library
+    if args.electrode_types:
+        from rosa_core.electrode_models import load_electrode_library
+        allowed = {t.strip() for t in args.electrode_types.split(",") if t.strip()}
+        models = [m for m in load_electrode_library()["models"]
+                  if str(m.get("type") or "") in allowed]
+        if not models:
+            _stderr(f"error: no electrode models match types {sorted(allowed)}")
+            return 2
+        library = models
+        _stderr(f"[contacts] library constrained to {len(models)} models "
+                f"of types {sorted(allowed)}")
+
     trajs = read_seeds_tsv(args.trajectories_tsv)
     _stderr(f"[contacts] {len(trajs)} trajectories from {args.trajectories_tsv}")
     groups, _batch = place_contacts(
-        args.ct_path, trajs, pitch_strategy=args.library,
+        args.ct_path, trajs, pitch_strategy=library,
         mask_backend=args.mask_backend, brain_mask=brain_mask_img,
         synthstrip_path=args.synthstrip,
     )
     n = write_contacts_tsv(args.out, groups)
     _stderr(f"[contacts] wrote {args.out} ({n} contacts)")
+
+    if args.fit_line_to_contacts:
+        # Placement snapped the contacts onto the metal, off the detected seed
+        # line — refit each trajectory line to the PCA axis through its contacts
+        # so trajectories.tsv (and every downstream viewer) carries them.
+        from rosa_core.trajectory_fit import refit_trajectories_file
+        n_refit = refit_trajectories_file(args.trajectories_tsv, args.out)
+        _stderr(f"[contacts] refit {n_refit} trajectory line(s) in "
+                f"{args.trajectories_tsv} to their contacts")
     return 0
 
 

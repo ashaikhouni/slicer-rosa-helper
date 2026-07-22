@@ -69,10 +69,20 @@ def _deepmriprep_available() -> bool:
         return False
 
 
+def _brainchop_available() -> bool:
+    """True when the bundled brainchop GM/WM ONNX + onnxruntime are present (torch-free)."""
+    try:
+        from rosa_detect.services.brainchop_onnx import brainchop_available
+        return brainchop_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # Which surface backend each source name maps to a cache filename.
 _SURFACE_CACHE_NAME = {
     "fastsurfer": "brain_surface_fs.npz",
     "deepmriprep": "brain_surface_dm.npz",
+    "brainchop": "brain_surface_bc.npz",
     "otsu": "brain_surface.npz",
 }
 
@@ -88,13 +98,18 @@ def _resolve_surface_source(surface_source: str | None) -> str:
         return "fastsurfer" if _fastsurfer_available() else _resolve_surface_source("auto")
     if src == "deepmriprep":
         return "deepmriprep" if _deepmriprep_available() else _resolve_surface_source("auto")
+    if src == "brainchop":
+        return "brainchop" if _brainchop_available() else _resolve_surface_source("auto")
     if src == "otsu":
         return "otsu"
-    # auto
+    # auto: prefer BYO recons (FastSurfer > deepmriprep), then the bundled
+    # torch-free brainchop MeshNet, then the Otsu grayscale-iso fallback.
     if _fastsurfer_available():
         return "fastsurfer"
     if _deepmriprep_available():
         return "deepmriprep"
+    if _brainchop_available():
+        return "brainchop"
     return "otsu"
 
 
@@ -132,7 +147,22 @@ def _brain_surface_view_flags(t1: str, regcache: Path, *,
         dm_p0 = regcache / "deepmriprep" / "p0.nii.gz"
         flags += (["--deepmriprep-tissue", str(dm_p0)] if dm_p0.is_file()
                   else ["--deepmriprep"])
+    elif src == "brainchop":
+        flags += ["--brainchop"]
     return flags
+
+
+def _engine_base() -> list[str]:
+    """argv prefix to invoke the rosa_agent engine, in dev AND in the frozen app.
+
+    Dev / pip-installed: ``python -u -m rosa_agent``. Frozen (PyInstaller): the
+    packaged binary is a multi-call sidecar, so ``sys.executable`` is that binary
+    and it re-invokes itself as ``<binary> engine`` (see app/desktop/sidecar_main.py).
+    The frozen engine sets line-buffered stdout itself, so no ``-u`` is needed.
+    """
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "engine"]
+    return [sys.executable, "-u", "-m", "rosa_agent"]
 
 
 def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
@@ -231,7 +261,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         # PYTHONPATH; in the frozen app this becomes the frozen exe re-invoked.
         # detect (CT → trajectories) → contacts (+CT → contacts) → view-results
         # (→ served viewer dir: index.html + scene.glb + scene_meta.json + CT).
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         native_mask = regcache / "brain_mask_native.nii.gz"
         mask_in_ct = regcache / "brain_mask_in_ct.nii.gz"
         t1_to_ct = regcache / "t1_to_ct.tfm"
@@ -254,12 +284,31 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                   "--register-to", ct,
                                   "--save-transform", str(t1_to_ct),
                                   "--mask-in-target", str(mask_in_ct)])
-        contacts_step = base + ["contacts", traj, ct, "--out", contacts]
+        # --fit-line-to-contacts: after placement, rewrite trajectories.tsv so
+        # each shank's line is the PCA fit through its placed contacts (the app
+        # runs detect + contacts as separate steps, so without this the line
+        # stays on the detected seed and reads as offset from its contacts in
+        # the 3-D scene).
+        contacts_step = base + ["contacts", traj, ct, "--out", contacts,
+                                "--fit-line-to-contacts"]
+        # Constrain the electrode library to the types a site uses (from the
+        # new-case screen's checkboxes) — restricts model matching + speeds it up.
+        etypes = spec.params.get("electrode_types")
+        if etypes:
+            contacts_step += ["--electrode-types", str(etypes)]
         if use_mri_mask:
             # Feed the MRI-derived intracranial mask to the placement anchor.
             contacts_step += ["--brain-mask", str(mask_in_ct)]
+        detect_step = base + ["detect", ct, "--out", traj]
+        # ROSA import: use the .ros planned trajectories as GUIDED-FIT seeds — snap
+        # each to the actual metal and inherit the surgeon's names (LSFG, …) —
+        # instead of blind auto-detection (which yields generic T01/T02 names and
+        # ignores the plan). Same guided engine as `rosa-agent pipeline <ROSA> --ref-volume`.
+        seeds = spec.params.get("seeds")
+        if seeds:
+            detect_step += ["--seeds", str(seeds)]
         steps += [
-            base + ["detect", ct, "--out", traj],
+            detect_step,
             contacts_step,
         ]
         # Without an MRI the CT stays MIP-only (fast, no surface). With an MRI,
@@ -273,6 +322,12 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                                               include_transform=use_mri_mask,
                                               surface_source=surface)
         steps.append(view)
+        # Make MNI first-class from detection: register T1→MNI + warp contacts to
+        # MNI + label them against the bundled MNI atlases (CerebrA + Iglesias).
+        # Gated on use_mri_mask so the CT→T1 leg (t1_to_ct.tfm) exists to compose;
+        # stamp-mni self-gates to a no-op otherwise. Runs after contacts + extract.
+        if use_mri_mask:
+            steps.append(base + ["stamp-mni", str(workdir), "--t1", t1])
         return steps
     if kind == "import":
         # Import a localization computed elsewhere (a batch CLI run) for review:
@@ -296,7 +351,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         contacts = str(workdir / "contacts.tsv")
         viewer = str(workdir / "viewer")
         regcache = workdir / "regcache"
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         steps = []
         # 1) stage the provided TSVs into the job dir (steps run cwd=workdir).
         stage = ("import shutil, sys\n"
@@ -336,7 +391,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         t1 = str(t1) if t1 else None
         surface = str(spec.params.get("surface") or "auto")
         cd = Path(case_dir)
-        view = [py, "-u", "-m", "rosa_agent", "view-results", case_dir,
+        view = [*_engine_base(), "view-results", case_dir,
                 "--output", str(cd / "viewer"), "--ct", ct,
                 "--contacts", str(cd / "contacts.tsv"),
                 "--trajectories", str(cd / "trajectories.tsv"),
@@ -346,7 +401,28 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
                 t1, cd / "regcache",
                 include_transform=(cd / "regcache" / "t1_to_ct.tfm").is_file(),
                 surface_source=surface)
-        return [view]
+        # Re-attach the atlas the case was labeled with (resolved by app.py from
+        # the case's label job). The cortical surface survives via its cache but
+        # the atlas TINT does not, and THOMAS deep-structure meshes have no cache
+        # fallback at all — so without these flags they vanish on every rebuild.
+        atlas_labelmap = spec.params.get("atlas_labelmap")
+        if atlas_labelmap:
+            view += ["--atlas-labelmap", str(atlas_labelmap)]
+            if spec.params.get("atlas_name"):
+                view += ["--atlas-name", str(spec.params["atlas_name"])]
+        structure_meshes = spec.params.get("structure_meshes")
+        if structure_meshes:
+            view += ["--structure-meshes", str(structure_meshes)]
+            if spec.params.get("structure_lut"):
+                view += ["--structure-lut", str(spec.params["structure_lut"])]
+        steps = [view]
+        # Re-stamp MNI on every edit-save so the MNI coords + multi-atlas labels
+        # never drift: it rebuilds wholesale from the edited contacts.tsv, so moves
+        # / adds / deletes propagate. No re-registration (the transform is stable);
+        # self-gates to a no-op when the case isn't poolable.
+        if t1:
+            steps.append([*_engine_base(), "stamp-mni", case_dir, "--t1", t1])
+        return steps
     if kind == "label":
         # Anatomical labeling of an existing pipeline run's contacts against a
         # bundled MNI atlas, routed through the patient's T1 (MRI). Produces a
@@ -383,7 +459,7 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         parent_dir = Path(contacts).parent
         parent_traj = str(parent_dir / "trajectories.tsv")
         parent_viewer = str(parent_dir / "viewer")
-        base = [py, "-u", "-m", "rosa_agent"]
+        base = _engine_base()
         # FastSurfer = subject-specific labeler (native aparc+aseg, no MNI). The
         # bundled MNI atlases warp a template. The 3D brain MESH is atlas-INDEPENDENT
         # (FastSurfer recon whenever available, else the Otsu surface) — meshed once
@@ -457,7 +533,58 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         if is_thomas:
             view_step += ["--structure-meshes", atlas_in_ct, "--structure-lut", thomas_lut]
         steps.append(view_step)
+        # This label run cached the CT→T1→MNI transforms (CerebrA-through-T1), so
+        # stamp the case: warp contacts to MNI + label them against every bundled
+        # MNI atlas (CerebrA + Iglesias). Self-gates to a no-op for non-poolable
+        # atlas paths. regcache lives in the parent case dir.
+        if t1:
+            steps.append([*_engine_base(), "stamp-mni",
+                          str(Path(regcache).parent), "--t1", str(t1)])
         return steps
+    if kind == "stamp":
+        # On-demand MNI (re)stamp — used for the "Refine (nonlinear)" action. Runs
+        # stamp-mni on the case dir; --refine swaps the affine T1→MNI for a
+        # B-spline composite (~30 s) and re-warps + re-labels off it.
+        case_dir = spec.params.get("case_dir")
+        if not case_dir:
+            raise ValueError("stamp job requires params.case_dir")
+        argv = [*_engine_base(), "stamp-mni", str(case_dir)]
+        t1 = spec.params.get("t1")
+        if t1:
+            argv += ["--t1", str(t1)]
+        if spec.params.get("refine"):
+            argv += ["--refine"]
+        return [argv]
+    if kind == "burn-thomas":
+        # Standalone tool (NOT a case): burn a THOMAS nucleus into a DICOM series'
+        # intensity and export a new DICOM series. Never enters the case list
+        # (list_cases only counts pipeline/import), and writes to a user-chosen
+        # output dir rather than the case store.
+        p = spec.params
+        for req in ("dicom_dir", "thomas_dir", "out_dir"):
+            if not p.get(req):
+                raise ValueError(f"burn-thomas job requires params.{req}")
+        argv = [*_engine_base(), "burn-thomas",
+                str(p["dicom_dir"]), str(p["thomas_dir"]),
+                "--out-dir", str(p["out_dir"]),
+                "--side", str(p.get("side", "both")),
+                "--fill", str(p.get("fill", 1200))]
+        if p.get("distinct"):
+            argv += ["--distinct", "--distinct-step", str(p.get("distinct_step", 400))]
+        if p.get("all"):
+            argv += ["--all"]
+        else:
+            for nuc in (p.get("nuclei") or []):
+                argv += ["--nucleus", str(nuc)]
+        if p.get("series_description"):
+            argv += ["--series-description", str(p["series_description"])]
+        if p.get("series_uid"):
+            argv += ["--series-uid", str(p["series_uid"])]
+        if p.get("t1"):
+            argv += ["--t1", str(p["t1"])]
+        if p.get("no_register"):
+            argv += ["--no-register"]
+        return [argv]
     raise ValueError(f"unknown job kind: {kind!r}")
 
 

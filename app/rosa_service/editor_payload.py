@@ -17,11 +17,20 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically (temp + os.replace) so a crash or an
+    interrupted write never leaves a truncated file behind for the next reader."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 CT_CLAMP = (-1024, 3071)                  # int16 HU range we ship
 MARGIN_MM = 14.0
@@ -73,6 +82,7 @@ def _geometry(job_dir: Path):
         pts_by[c["trajectory"]].append([float(c["x"]), float(c["y"]), float(c["z"])])
         mod_by[c["trajectory"]].append((c.get("electrode_model") or "").strip())
 
+    from rosa_core.trajectory_fit import fit_line_through_points
     shanks, allpts = [], []
     for tr in trajs:
         name = tr["name"]
@@ -81,6 +91,11 @@ def _geometry(job_dir: Path):
         cs = np.array(pts_by.get(name, []))
         mods = [m for m in mod_by.get(name, []) if m]
         model = Counter(mods).most_common(1)[0][0] if mods else (tr.get("electrode_model") or "electrode")
+        # The editor's rigid comb is anchored to entry→target; make that axis the
+        # PCA line through the contacts so the comb carries them (fixes legacy
+        # cases whose trajectories.tsv still holds the pre-placement seed line).
+        if len(cs) >= 2:
+            entry, target = fit_line_through_points(cs, entry, target)
         # detected offsets (fallback for a model missing from the library)
         if len(cs) >= 2:
             s = np.sort(cs @ _unit(target - entry))[::-1]
@@ -113,7 +128,7 @@ def _build(job_dir: Path) -> dict:
     sampled = map_coordinates(arr, [vox[..., 0], vox[..., 1], vox[..., 2]],
                               order=1, mode="constant", cval=float(arr.min()))
     vol = np.clip(sampled, *CT_CLAMP).astype(np.int16).flatten(order="F")   # x-fastest for the JS indexer
-    (job_dir / "editor_ct.i16").write_bytes(vol.tobytes())
+    _atomic_write(job_dir / "editor_ct.i16", vol.tobytes())
 
     models = electrode_library()
     for s in shanks:                          # a case model absent from the library -> detected offsets
@@ -136,8 +151,56 @@ def _build(job_dir: Path) -> dict:
                            tipOffset=0.0, length_mm=s["length_mm"], confidence_label=s["confidence_label"])
                       for k, s in enumerate(shanks)],
     )
-    (job_dir / "editor_plan.json").write_text(json.dumps(plan))
+    # Volume is written first (above), then the plan LAST — the freshness check
+    # keys on the plan's mtime, so the plan existing implies the volume is done.
+    _atomic_write(job_dir / "editor_plan.json", json.dumps(plan).encode())
     return plan
+
+
+# ---- native-resolution probe's-eye patch (server samples the FULL-res CT) ----
+# The editor reslices a 1 mm crop for speed; the probe's-eye (a single-contact
+# zoom, where sub-mm centre accuracy matters) is sampled from the native CT here
+# so the metal is sharp. Only a small patch travels per request. The native CT +
+# its RAS→voxel affine are cached (keyed by path+mtime) so it's read once.
+_PROBE_CACHE: dict[str, Any] = {"key": None, "arr": None, "inv": None}
+
+
+def _probe_ct(ct_path: Path):
+    import numpy as np
+    import nibabel as nib
+    key = f"{ct_path}:{ct_path.stat().st_mtime_ns}"
+    if _PROBE_CACHE["key"] != key:
+        img = nib.load(str(ct_path))
+        arr = np.asanyarray(img.dataobj)                      # keep native dtype (int16
+        while arr.ndim > 3:                                   # → half the RAM/load of float32)
+            arr = arr[..., 0]
+        _PROBE_CACHE.update(key=key, arr=np.ascontiguousarray(arr),
+                            inv=np.linalg.inv(img.affine.astype(float)))
+    return _PROBE_CACHE["arr"], _PROBE_CACHE["inv"]
+
+
+def probe_patch(ct_path, center_ras, u, v, ext_u: float, ext_v: float,
+                size_u: int, size_v: int) -> bytes:
+    """A ``size_v × size_u`` int16 patch of the native CT on the plane through
+    ``center_ras`` spanned by RAS dirs ``u`` (columns, ``ext_u`` mm wide) and
+    ``v`` (rows, ``ext_v`` mm tall). Row-major bytes, clamped to the SAME range as
+    the 1 mm crop (CT_CLAMP) so the client windows it identically — only sharpness
+    differs, not brightness (matters for CTs on a non-standard HU scale). Serves
+    both the square probe's-eye and the rectangular in-line reformat."""
+    import numpy as np
+    from scipy.ndimage import map_coordinates
+    arr, inv = _probe_ct(Path(ct_path))
+    tu = (np.arange(size_u) - size_u / 2.0) * (float(ext_u) / size_u)   # cols → u
+    tv = (np.arange(size_v) - size_v / 2.0) * (float(ext_v) / size_v)   # rows → v
+    uu, vv = np.meshgrid(tu, tv, indexing="xy")               # [size_v, size_u]
+    c = np.asarray(center_ras, float); U = np.asarray(u, float); V = np.asarray(v, float)
+    ras = c[None, None, :] + uu[..., None] * U[None, None, :] + vv[..., None] * V[None, None, :]
+    ras_h = np.concatenate([ras, np.ones((size_v, size_u, 1))], axis=-1)
+    vox = ras_h @ inv.T                                       # RAS → native voxel index
+    sampled = map_coordinates(arr, [vox[..., 0], vox[..., 1], vox[..., 2]],
+                              order=1, mode="constant", cval=-1024.0)
+    lo, hi = CT_CLAMP
+    return np.clip(np.rint(sampled), lo, hi).astype("<i2").tobytes()
 
 
 def ensure_cache(job_dir: str | Path) -> Path:
@@ -148,6 +211,18 @@ def ensure_cache(job_dir: str | Path) -> Path:
         raise FileNotFoundError(f"job {job_dir.name}: no trajectories.tsv (run a pipeline job first)")
     fresh = (plan_p.is_file() and vol_p.is_file()
              and plan_p.stat().st_mtime >= src.stat().st_mtime)
+    if fresh:
+        # Guard against a truncated/partial editor_ct.i16 — an interrupted build,
+        # or a case copied to another machine mid-transfer. It must be exactly
+        # dims_x*dims_y*dims_z * 2 bytes (int16); a mismatch (e.g. an odd length →
+        # the browser's `new Int16Array` throws) forces a rebuild.
+        try:
+            dims = json.loads(plan_p.read_text()).get("dims") or []
+            expected = int(dims[0]) * int(dims[1]) * int(dims[2]) * 2 if len(dims) == 3 else -1
+        except (ValueError, OSError, TypeError, IndexError):
+            expected = -1
+        if expected <= 0 or vol_p.stat().st_size != expected:
+            fresh = False
     if not fresh:
         _build(job_dir)
     return job_dir

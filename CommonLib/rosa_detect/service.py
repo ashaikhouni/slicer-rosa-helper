@@ -254,6 +254,12 @@ def run_contact_pitch_v1(ctx: DetectionContext) -> DetectionResult:
     return result
 
 
+# The vectorized geometric search evaluates many candidate axes/lines, some
+# degenerate (a zero-length vector normalizes to inf/nan); numpy would then emit
+# a storm of "divide/overflow/invalid encountered in matmul" RuntimeWarnings that
+# are meaningless to a user — those degenerate candidates are filtered downstream.
+# Mute just those FP categories for the run; the detection results are identical.
+@np.errstate(divide="ignore", over="ignore", invalid="ignore")
 def run_contact_pitch_v1_with_features(
     ctx: DetectionContext,
 ) -> tuple[DetectionResult, dict[str, Any]]:

@@ -24,11 +24,43 @@ async function jsend(url, method, body) {
   return r.json();
 }
 
+// Desktop (Electron) hands us real absolute paths via window.rosaNative, so we
+// skip the browser upload round-trip entirely — the local sidecar reads the file
+// in place (no multi-hundred-MB copy). In a browser, rosaNative is absent and we
+// POST to /uploads exactly as before.
+const IS_DESKTOP = !!(window.rosaNative && window.rosaNative.pathForFile);
+
+// Resolve a picked/dropped File to { path, name, bytes }. Desktop → the real
+// path (instant); browser → upload the bytes and use the saved path.
+async function resolveFile(file) {
+  if (IS_DESKTOP) {
+    const path = window.rosaNative.pathForFile(file);
+    if (path) return { path, name: file.name, bytes: file.size };
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+// THOMAS is a folder pick. Desktop → a native directory dialog (the label
+// endpoint takes the folder path directly, no upload). Browser → the
+// webkitdirectory input that uploads the masks (uploadThomasDir).
+async function pickThomasDir() {
+  if (IS_DESKTOP && window.rosaNative.openDirectory) {
+    const r = await window.rosaNative.openDirectory({ title: "Choose a THOMAS output folder (has left/ + right/)" });
+    if (r && r.path && state.jobId) { state.thomasDir = r.path; runLabel(); }
+    return;
+  }
+  $("thomasdir-file").click();
+}
+
 function showStep(name) {
   document.body.classList.toggle("results-active", name === "results");
   // The step bar tracks the new-case wizard (drop → run → review); it's noise on
   // the case list, the import form, and the workspace (which has its own flow).
-  document.body.classList.toggle("nosteps", ["cases", "import", "results"].includes(name));
+  document.body.classList.toggle("nosteps", ["cases", "import", "results", "cohort", "rosa", "burn"].includes(name));
   for (const p of document.querySelectorAll(".panel")) {
     p.classList.toggle("active", p.id === `panel-${name}`);
   }
@@ -51,12 +83,9 @@ function setCt(ct) {
 }
 
 async function uploadFile(file) {
-  $("ctinfo").textContent = `Uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("ctinfo").textContent = `Upload failed: ${await r.text()}`; return; }
-  setCt(await r.json());
+  $("ctinfo").textContent = IS_DESKTOP ? `Loading ${file.name}…` : `Uploading ${file.name}…`;
+  try { setCt(await resolveFile(file)); }
+  catch (e) { $("ctinfo").textContent = `Failed: ${e.message}`; }
 }
 
 function wireDrop() {
@@ -73,19 +102,16 @@ function wireDrop() {
     const f = ev.target.files[0];
     if (f) uploadFile(f);
   });
-  $("ctpath").addEventListener("input", (ev) => {
-    const p = ev.target.value.trim();
-    setCt(p ? { path: p, name: p.split("/").pop() } : null);
-  });
+  // The path field takes a NIfTI file OR a DICOM folder (auto-detected).
+  $("ctpath").addEventListener("input", (ev) => typedPathInput("ct", ev.target.value));
+  $("ctpath").addEventListener("keydown", (e) => { if (e.key === "Enter") typedPathEnter("ct", e.target.value); });
   // Optional MRI (T1) at case creation — upload or point at a path.
   $("mrifileinput").addEventListener("change", (ev) => {
     const f = ev.target.files[0];
     if (f) uploadCreationMri(f);
   });
-  $("mripath").addEventListener("input", (ev) => {
-    const p = ev.target.value.trim();
-    setCreationMri(p ? { path: p, name: p.split("/").pop() } : null);
-  });
+  $("mripath").addEventListener("input", (ev) => typedPathInput("mri", ev.target.value));
+  $("mripath").addEventListener("keydown", (e) => { if (e.key === "Enter") typedPathEnter("mri", e.target.value); });
 }
 
 function setCreationMri(mri) {
@@ -96,12 +122,300 @@ function setCreationMri(mri) {
 }
 
 async function uploadCreationMri(file) {
-  $("mricreateinfo").textContent = `Uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("mricreateinfo").textContent = `Upload failed: ${await r.text()}`; return; }
-  setCreationMri(await r.json());
+  $("mricreateinfo").textContent = IS_DESKTOP ? `Loading ${file.name}…` : `Uploading ${file.name}…`;
+  try { setCreationMri(await resolveFile(file)); }
+  catch (e) { $("mricreateinfo").textContent = `Failed: ${e.message}`; }
+}
+
+// ---- image loading: one picker per role, NIfTI file OR DICOM folder ----------
+// The app decides what was given: a NIfTI file loads directly; a directory is a
+// DICOM series → converted to a de-identified NIfTI first. Desktop uses one
+// native dialog that accepts either; typed/pasted paths + the browser fall back
+// to the file extension (NIfTI) vs "looks like a folder" (DICOM).
+// A loadable image FILE (vs a DICOM folder): NIfTI, NRRD, or Analyze .img/.hdr.
+const NIFTI_RE = /\.(nii(\.gz)?|nrrd|gz|img|hdr)$/i;
+const _role = (t) => (t === "mri" ? "MRI" : "CT");
+const _infoEl = (t) => $(t === "mri" ? "mricreateinfo" : "ctinfo");
+const _setImage = (t, picked) => (t === "mri" ? setCreationMri(picked) : setCt(picked));
+
+// target = "ct" | "mri". Native picker on desktop; browser falls back to the
+// hidden file input (NIfTI only — folder upload isn't a browser thing).
+async function pickImage(target) {
+  if (!(IS_DESKTOP && window.rosaNative.openImage)) {
+    $(target === "mri" ? "mrifileinput" : "fileinput").click();
+    return;
+  }
+  const r = await window.rosaNative.openImage({
+    title: `Choose the ${_role(target)} — NIfTI file or DICOM folder` });
+  if (!r || !r.path) return;
+  if (r.isDirectory) { importDicom(target, r.path); return; }
+  _setImage(target, { path: r.path, name: r.path.split("/").pop() });
+}
+
+// A typed/pasted path: NIfTI extension → load live; otherwise it's a folder →
+// convert on Enter (never per-keystroke — the conversion is a round-trip).
+function typedPathInput(target, raw) {
+  const p = (raw || "").trim();
+  if (!p) { _setImage(target, null); return; }
+  if (NIFTI_RE.test(p)) _setImage(target, { path: p, name: p.split("/").pop() });
+  // non-NIfTI: hold until Enter (typedPathEnter) so we don't convert mid-type.
+}
+function typedPathEnter(target, raw) {
+  const p = (raw || "").trim();
+  if (p && !NIFTI_RE.test(p)) importDicom(target, p);
+}
+
+// Convert a DICOM series folder → de-identified NIfTI, then load it as CT/MRI.
+async function importDicom(target, dir) {
+  const info = _infoEl(target), role = _role(target);
+  info.textContent = "Converting DICOM → NIfTI (de-identifying)…";
+  try {
+    const r = await jsend(`${API}/dicom-to-nifti`, "POST", { dicom_dir: dir });
+    _setImage(target, { path: r.path, name: r.path.split("/").pop() });   // enables run
+    info.innerHTML = `${role}: <b>de-identified from DICOM</b> ✓ — <span class="muted">${r.path.split("/").pop()}</span>`;
+  } catch (e) {
+    info.textContent = `DICOM import failed: ${e.message}`;
+  }
+}
+
+// ---- import a ROSA robot case (de-identify → bake volumes → confirm roles) ----
+let ROSA = null;
+async function importRosa() {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openDirectory)) {
+    window.alert("Importing a ROSA case needs the desktop app."); return;
+  }
+  const r = await window.rosaNative.openDirectory({ title: "Choose the ROSA case folder (contains a .ros file)" });
+  if (!r || !r.path) return;
+  showStep("rosa");
+  $("rosa-sub").textContent = "· " + r.path.split("/").pop();
+  $("rosa-displays").innerHTML = ""; $("rosa-foot").hidden = true;
+  $("rosa-hint").textContent = "De-identifying + baking volumes… (this can take a moment)";
+  try { ROSA = await jsend(`${API}/rosa-import/prepare`, "POST", { rosa_dir: r.path }); }
+  catch (e) { $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Prepare failed: ${e.message}</span>`; return; }
+  renderRosaConfirm();
+}
+function renderRosaConfirm() {
+  $("rosa-label").value = ROSA.label || "";
+  const host = $("rosa-displays"); host.innerHTML = "";
+  for (const d of ROSA.displays) {
+    const card = el("div", { class: "rosa-card" });
+    const img = el("img", { class: "rosa-thumb", alt: d.name });
+    if (d.png) img.src = d.png;
+    const sel = el("select", { class: "rosa-role" }); sel.dataset.path = d.path;
+    for (const [v, t] of [["", "— ignore —"], ["ct", "Post-op CT"], ["t1", "MRI T1 (non-contrast)"]]) {
+      const o = el("option", { value: v }, t); if (v === d.guess) o.selected = true; sel.append(o);
+    }
+    sel.onchange = updateRosaCreate;
+    card.append(img, el("div", { class: "rosa-name" }, d.name), sel);
+    host.append(card);
+  }
+  $("rosa-foot").hidden = false;
+  updateRosaCreate();
+}
+function _rosaRoles() {
+  const roles = {};
+  document.querySelectorAll(".rosa-role").forEach((s) => {
+    if (s.value) (roles[s.value] = roles[s.value] || []).push(s.dataset.path);
+  });
+  return roles;
+}
+function updateRosaCreate() {
+  const roles = _rosaRoles(), nCt = (roles.ct || []).length, nT1 = (roles.t1 || []).length;
+  $("rosa-create").disabled = !(nCt === 1 && nT1 <= 1);
+  $("rosa-hint").textContent = nCt === 1
+    ? "Confirm the roles, then create the case." + (nT1 ? "" : " (T1 optional but recommended.)")
+    : (nCt === 0 ? "Select the post-op CT." : "Only one post-op CT — set the others to ignore.");
+}
+async function createRosaCase() {
+  const roles = _rosaRoles(), ct = (roles.ct || [])[0];
+  if (!ct) return;
+  const t1 = (roles.t1 || [])[0] || null;
+  $("rosa-create").disabled = true; $("rosa-hint").textContent = "Creating case + running detection…";
+  try {
+    const job = await jsend(`${API}/rosa-import/create`, "POST", {
+      ct_path: ct, t1_path: t1, label: ($("rosa-label").value || "").trim(),
+      seeds_path: ROSA.seeds || "" });
+    // Watch the pipeline on the run screen; results open when it FINISHES.
+    // (Opening the case immediately races the pipeline → "no contacts.tsv" /
+    // "no viewer" until detection + the scene are written.)
+    state.jobId = job.id;
+    showStep("run");
+    $("log").textContent = "";
+    $("runstate").textContent = "Starting…";
+    $("runsub").textContent = "detect → place contacts → build viewer (~2–3 min)";
+    $("spinner").classList.remove("stopped");
+    streamLogs(job.id);
+    pollStatus(job.id);
+  } catch (e) {
+    $("rosa-hint").innerHTML = `<span style="color:var(--bad)">Create failed: ${e.message}</span>`;
+    $("rosa-create").disabled = false;
+  }
+}
+
+// ---- tool: burn a THOMAS nucleus into a DICOM series (standalone, no case) ----
+let BURN = null, BURN_ES = null;
+async function openBurnTool() {
+  showStep("burn");
+  BURN = { dicom: "", thomas: "", out: "", t1: "", series: null };
+  for (const w of ["dicom", "thomas", "out", "ref"]) $(`burn-${w}-path`).textContent = "";
+  $("burn-dicom-thumb").hidden = true; $("burn-dicom-info").textContent = "";
+  $("burn-status").textContent = ""; $("burn-log").hidden = true; $("burn-log").textContent = "";
+  $("burn-all").checked = false; $("burn-side").value = "both";
+  $("burn-fill").value = "1200"; $("burn-distinct").checked = false;
+  await loadBurnNuclei();
+  updateBurnRun();
+}
+async function loadBurnNuclei() {
+  const host = $("burn-nuclei"); host.textContent = "Loading…";
+  let list;
+  try { list = await jget(`${API}/tools/thomas-nuclei`); }
+  catch (e) { host.textContent = "Could not load nuclei: " + e.message; return; }
+  host.innerHTML = "";
+  for (const n of list) {
+    const lab = el("label", { class: "burn-nuc" });
+    const cb = el("input", { class: "burn-nuc-cb", value: n.name }); cb.type = "checkbox";
+    cb.onchange = updateBurnRun;
+    const sw = el("span", { class: "burn-sw" });
+    sw.style.background = `rgb(${n.rgb.map((c) => Math.round(c * 255)).join(",")})`;
+    lab.append(cb, sw, document.createTextNode(n.name));
+    host.append(lab);
+  }
+}
+async function pickBurnDir(which) {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openDirectory)) {
+    window.alert("This tool needs the desktop app."); return;
+  }
+  const titles = { dicom: "Choose the DICOM to burn into",
+    thomas: "Choose the THOMAS output folder", out: "Choose the output folder" };
+  const r = await window.rosaNative.openDirectory({ title: titles[which] });
+  if (!r || !r.path) return;
+  BURN[which] = r.path;
+  $(`burn-${which}-path`).textContent = r.path;
+  if (which === "dicom") {
+    BURN.series = null;
+    $("burn-dicom-info").textContent = "reading…"; $("burn-dicom-thumb").hidden = true;
+    try {
+      const p = await jsend(`${API}/tools/dicom-preview`, "POST", { dicom_dir: r.path });
+      BURN.series = p;
+      if (p.png) { $("burn-dicom-thumb").src = p.png; $("burn-dicom-thumb").hidden = false; }
+      $("burn-dicom-info").textContent = p.n_series
+        ? `${p.n_slices} slices${p.n_series > 1 ? " · " + p.n_series + " series (largest used)" : ""}`
+        : "no DICOM series found here";
+    } catch (e) { $("burn-dicom-info").textContent = "preview failed: " + e.message; }
+  }
+  updateBurnRun();
+}
+async function pickBurnRef() {
+  if (!(IS_DESKTOP && window.rosaNative && window.rosaNative.openFile)) {
+    window.alert("This tool needs the desktop app."); return;
+  }
+  const r = await window.rosaNative.openFile({ title: "Choose the reference MRI (the image THOMAS ran in)" });
+  if (!r || !r.path) return;
+  BURN.t1 = r.path;
+  $("burn-ref-path").textContent = r.path;
+}
+function _burnNuclei() {
+  return [...document.querySelectorAll(".burn-nuc-cb:checked")].map((c) => c.value);
+}
+function updateBurnRun() {
+  const all = $("burn-all").checked;
+  document.querySelectorAll(".burn-nuc-cb").forEach((c) => { c.disabled = all; });
+  const nuc = _burnNuclei();
+  $("burn-nuclei-count").textContent = all
+    ? "· whole thalamus" : (nuc.length ? "· " + nuc.length + " selected" : "· none selected");
+  const seriesOk = BURN && BURN.series ? BURN.series.n_series > 0 : true;
+  $("burn-run").disabled = !(BURN && BURN.dicom && BURN.thomas && BURN.out
+    && (all || nuc.length) && seriesOk);
+}
+async function runBurn() {
+  const body = {
+    dicom_dir: BURN.dicom, thomas_dir: BURN.thomas, out_dir: BURN.out,
+    all: $("burn-all").checked, nuclei: _burnNuclei(),
+    side: $("burn-side").value, fill: parseFloat($("burn-fill").value) || 1200,
+    distinct: $("burn-distinct").checked,
+    t1: BURN.t1 || null, no_register: !BURN.t1,   // no reference → burn as-is, no registration
+  };
+  $("burn-run").disabled = true; $("burn-status").textContent = "starting…";
+  $("burn-log").hidden = false; $("burn-log").textContent = "";
+  let job;
+  try { job = await jsend(`${API}/tools/burn-thomas`, "POST", body); }
+  catch (e) {
+    $("burn-status").innerHTML = `<span style="color:var(--bad)">${e.message}</span>`;
+    $("burn-run").disabled = false; return;
+  }
+  if (BURN_ES) BURN_ES.close();
+  BURN_ES = new EventSource(`${API}/jobs/${job.id}/logs`);
+  BURN_ES.onmessage = (ev) => {
+    if (!ev.data) return;
+    const pre = $("burn-log"); pre.textContent += ev.data + "\n"; pre.scrollTop = pre.scrollHeight;
+  };
+  BURN_ES.addEventListener("end", () => BURN_ES.close());
+  BURN_ES.onerror = () => BURN_ES.close();
+  const iv = setInterval(async () => {
+    let st; try { st = await jget(`${API}/jobs/${job.id}`); } catch { return; }
+    $("burn-status").textContent = "State: " + st.state;
+    if (["succeeded", "failed", "cancelled"].includes(st.state)) {
+      clearInterval(iv);
+      $("burn-run").disabled = false;
+      if (st.state === "succeeded")
+        $("burn-status").innerHTML = `<b>Done</b> — burned into <span class="mono">${BURN.out}</span>`;
+      else
+        $("burn-status").innerHTML = `<span style="color:var(--bad)">${st.state === "cancelled"
+          ? "Cancelled" : "Failed (exit " + st.exit_code + (st.error ? ": " + st.error : "") + ")"}</span>`;
+    }
+  }, 1000);
+}
+
+// ---- electrode library (constrain detection to the site's electrode types) ---
+
+// id → "Manufacturer Reference" (e.g. "DIXI D08-05AM"), for the review list.
+function modelLabel(id) {
+  return (id && state.emodelLabels && state.emodelLabels[id]) || id || "—";
+}
+
+async function loadElectrodeTypes() {
+  const list = $("etypeslist");
+  try {
+    const { types, labels } = await jget(`${API}/electrode-models`);
+    state.emodelLabels = labels || {};
+    list.innerHTML = "";
+    for (const t of types) {
+      const cc = t.contact_counts && t.contact_counts.length ? ` · ${t.contact_counts.join("/")} contacts` : "";
+      const cb = el("input", { type: "checkbox", value: t.type });
+      cb.checked = true;
+      cb.addEventListener("change", updateEtypesSummary);
+      // "DIXI AM" / "Medtronic ring_4" / "NeuroPace depth_4_3.5mm" / "PMT"
+      const name = t.manufacturer && t.manufacturer.toUpperCase() !== t.type.toUpperCase()
+        ? `${t.manufacturer} ${t.type}` : t.type;
+      const lbl = el("label", { class: "etype" });
+      lbl.append(cb, el("span", { class: "etype-name" }, name),
+                 el("span", { class: "etype-meta" }, `${t.count} model${t.count > 1 ? "s" : ""}${cc}`));
+      list.append(lbl);
+    }
+    updateEtypesSummary();
+  } catch (_e) {
+    list.innerHTML = '<span class="muted">electrode library unavailable</span>';
+  }
+}
+
+function selectedEtypes() {
+  return [...$("etypeslist").querySelectorAll('input[type="checkbox"]')]
+    .filter((c) => c.checked).map((c) => c.value);
+}
+
+function setAllEtypes(on) {
+  $("etypeslist").querySelectorAll('input[type="checkbox"]').forEach((c) => { c.checked = on; });
+  updateEtypesSummary();
+}
+
+function updateEtypesSummary() {
+  const total = $("etypeslist").querySelectorAll('input[type="checkbox"]').length;
+  const sel = selectedEtypes();
+  const s = $("etypessummary");
+  if (!total) { s.textContent = ""; return; }
+  if (sel.length === total) { s.textContent = "all types"; s.className = "muted"; }
+  else if (sel.length === 0) { s.textContent = "none selected → all types used"; s.className = "muted"; }
+  else { s.textContent = sel.join(", "); s.className = "accent"; }
 }
 
 // ---- step 2: run ------------------------------------------------------
@@ -114,6 +428,11 @@ async function run(force = false) {
     params.t1 = state.creationMri.path;                        // MRI from the start
     params.surface = $("surfacesel").value;                    // brain-surface backend
   }
+  // Constrain detection to the site's electrode types — only when the user
+  // narrowed it to a proper subset (all/none → full library, no constraint).
+  const etypes = selectedEtypes();
+  const etypesTotal = $("etypeslist").querySelectorAll('input[type="checkbox"]').length;
+  if (etypes.length && etypes.length < etypesTotal) params.electrode_types = etypes.join(",");
   // POST first — a duplicate CT (409) is caught here, before we leave the form.
   let r, body;
   try {
@@ -185,8 +504,16 @@ function pollStatus(id) {
   }, 1000);
 }
 
+// Cancel a running detection: stop watching, terminate the job (DELETE →
+// SIGTERM), and go back to the load screen. The CT (and any MRI) stay selected
+// so re-running is one click — `run()` resets the run screen itself.
 async function cancel() {
-  if (state.jobId) { try { await fetch(`${API}/jobs/${state.jobId}`, { method: "DELETE" }); } catch {} }
+  clearInterval(state.poll);
+  if (state.es) { state.es.close(); state.es = null; }
+  const id = state.jobId;
+  state.jobId = null;
+  showStep("drop");
+  if (id) { try { await fetch(`${API}/jobs/${id}`, { method: "DELETE" }); } catch {} }
 }
 
 // ---- step 3: review + viewer -----------------------------------------
@@ -310,7 +637,7 @@ function renderReview(doc) {
     const dot = el("span", { class: "shank-dot" + (labeled ? " on" : "") });
     dot.title = labeled ? "labeled" : "not labeled";
     head.append(el("span", { class: "caret" }, "▸"), el("strong", {}, shank.name),
-      el("span", { class: "muted shank-meta" }, `${shank.model || "—"} · ${shank.contacts.length}`), dot);
+      el("span", { class: "muted shank-meta" }, `${modelLabel(shank.model)} · ${shank.contacts.length}`), dot);
     head.onclick = () => toggleShank(box, shank);
     box.append(head);
 
@@ -512,15 +839,13 @@ function _syncThomasLoadBtn() {
 }
 
 async function uploadMri(file) {
-  $("labelstatus").textContent = `· uploading ${file.name}…`;
-  const fd = new FormData();
-  fd.append("file", file);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("labelstatus").textContent = "· MRI upload failed"; return; }
-  state.mri = await r.json();
-  $("labelstatus").textContent = `· MRI ${state.mri.name}`;
-  $("labelbtn").disabled = false;
-  setCaseSlots();
+  $("labelstatus").textContent = IS_DESKTOP ? `· loading ${file.name}…` : `· uploading ${file.name}…`;
+  try {
+    state.mri = await resolveFile(file);
+    $("labelstatus").textContent = `· MRI ${state.mri.name}`;
+    $("labelbtn").disabled = false;
+    setCaseSlots();
+  } catch (_e) { $("labelstatus").textContent = "· MRI failed"; }
 }
 
 // Busy state during registration/labeling: a spinner beside the atlas picker.
@@ -662,12 +987,25 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   setLabelBusy(false);
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
-    $("labelmsg").innerHTML = jumpToQc
-      ? `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
-        `<strong>${p.atlas}</strong>. Verify the <em>Registration</em> tab, then Apply.`
-      : `Labels from <strong>${p.atlas}</strong> ` +
-        `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
-    $("approvebtn").hidden = false;
+    // Already applied? Approval commits the proposed regions into the parent
+    // ReviewDoc (state.doc), so if every proposed region is already committed
+    // there, this atlas's labels were approved (survives reload). A different
+    // atlas → regions differ → still needs applying.
+    const proposed = (p.contacts || []).filter((c) => c.region);
+    const approved = proposed.length > 0 && proposed.every((c) => {
+      const sh = state.doc && state.doc.shanks.find((s) => s.name === c.shank);
+      const ct = sh && sh.contacts.find((x) => x.index === c.index);
+      return ct && ct.region === c.region;
+    });
+    $("labelmsg").innerHTML = approved
+      ? `Labels from <strong>${p.atlas}</strong> applied ✓ ` +
+        `(<strong>${p.n_labeled}/${p.n_contacts}</strong>). Pick another atlas to relabel.`
+      : jumpToQc
+        ? `Proposed <strong>${p.n_labeled}/${p.n_contacts}</strong> labels from ` +
+          `<strong>${p.atlas}</strong>. Verify the <em>Registration</em> tab, then Apply.`
+        : `Labels from <strong>${p.atlas}</strong> ` +
+          `(<strong>${p.n_labeled}/${p.n_contacts}</strong>) — Apply to commit.`;
+    $("approvebtn").hidden = approved;
     $("atlasctl").hidden = false;        // atlas picker + approve live on the 3D toolbar
     if (p.atlas) $("atlassel").value = p.atlas;   // reflect which atlas is shown
     _syncThomasLoadBtn();
@@ -708,7 +1046,10 @@ const QC_PLANES = [[2, "Axial"], [1, "Coronal"], [0, "Sagittal"]];
 
 function qcSrc(p) {
   const { mode, value, dir, space } = state.qc;
-  return `${API}/jobs/${state.labelJobId}/qc?axis=${p.axis}&mode=${mode}` +
+  // CT↔MRI (Native + AC-PC) is a per-CASE registration → the case job; the atlas
+  // check (template↔MRI) is per-LABEL → the label job.
+  const jid = space === "atlas" ? state.labelJobId : state.jobId;
+  return `${API}/jobs/${jid}/qc?axis=${p.axis}&mode=${mode}` +
     `&value=${value.toFixed(3)}&dir=${dir}&frac=${p.frac.toFixed(3)}&space=${space}`;
 }
 
@@ -733,68 +1074,97 @@ function refreshAllPanes() {
   _qcRaf = requestAnimationFrame(() => { for (const p of state.qc.panes) refreshPane(p); });
 }
 
-// Which registration spaces an atlas produced: Native (CT↔MRI) whenever it
-// registered; AC-PC + Atlas need the MNI-template volumes (bundled atlases only).
-// Greys the rest per atlas, and moves off a space that's no longer available
-// (e.g. after switching from an MNI atlas to THOMAS).
-function _setQcSpaces(hasCt, hasMni) {
-  const avail = { ct: !!hasCt, mni: !!hasMni, atlas: !!hasMni };
-  for (const b of $("qcspace").querySelectorAll("button")) b.disabled = !avail[b.dataset.space];
-  if (state.qc && !avail[state.qc.space])
-    state.qc.space = avail.ct ? "ct" : (Object.keys(avail).find((k) => avail[k]) || "ct");
-  const cur = $("qcspace").querySelector(`[data-space="${state.qc ? state.qc.space : "ct"}"]`);
+// Show/hide the space buttons per what's available (tracked on state.qc):
+// Native (CT↔MRI) is always there once there's an MRI; AC-PC appears once its
+// rigid reorientation is built; Atlas appears when an MNI atlas was labeled.
+function _applyQcSpaces() {
+  const avail = { ct: true, acpc: !!state.qc._hasAcpc, atlas: !!state.qc._hasAtlas };
+  for (const b of $("qcspace").querySelectorAll("button")) b.hidden = !avail[b.dataset.space];
+  if (!avail[state.qc.space]) state.qc.space = avail.acpc ? "acpc" : "ct";
+  const cur = $("qcspace").querySelector(`[data-space="${state.qc.space}"]`);
   if (cur) setActive("qcspace", cur);
 }
 
-function showQc(hasMni, jumpToQc = true) {
-  // Build the QC panes ONCE per case (registration is per-case). Atlas switches
-  // re-enter here but keep the existing panes + the user's mode/slice settings.
-  if (!state.qc) {
-    // Default to the ATLAS check for MNI atlases (the thing just set up), else
-    // Native (CT↔MRI). _setQcSpaces below greys whatever this atlas can't show.
-    state.qc = { mode: "color", value: 0.5, dir: "h", space: hasMni ? "atlas" : "ct", panes: [] };
-    const wrap = $("qcplanes");
-    wrap.innerHTML = "";
-    for (const [axis, name] of QC_PLANES) {
-      const holder = el("div", { class: "qc-holder" });
-      const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
-      const p = { axis, label: name, holder, frac: 0.5 };
-      slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
-      const pane = el("div", { class: "qc-pane" });
-      pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
-      wrap.append(pane);
-      state.qc.panes.push(p);
-    }
-    setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
-    $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
-    $("qcdir").hidden = true;
-  }
-  state.qc._hasMni = hasMni;
-  _setQcSpaces(true, hasMni);        // recompute availability for THIS atlas
-  $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
-  if (jumpToQc) setViewerTab("qc");                 // first label: verify registration
-  else if (!$("viewerqc").hidden) refreshAllPanes();  // already on QC: refresh for the new job
+// Build (once, cached) the rigid AC-PC reorientation for the CASE. ~10s the
+// first time; returns whether the AC-PC space is ready.
+async function ensureAcpc() {
+  if (!state.jobId || !state.mri) return false;
+  try {
+    const r = await jsend(`${API}/jobs/${state.jobId}/acpc`, "POST");
+    return !!(r && r.ready);
+  } catch (_e) { return false; }
 }
 
-// Two registrations, two entry points: the Reg chip opens CT↔MRI (native /
-// AC-PC); the atlas "check reg" opens atlas(MNI-template)↔MRI. Both land in the
-// QC pane, pre-set to the right space. No label yet → nudge to the MRI card.
-function openQc(kind) {
-  if (!state.qc) {   // no registration yet → nudge via the console
-    $("labelmsg").textContent = state.mri
-      ? "Pick an atlas to register the MRI first — then the check is available."
-      : "Add a patient MRI below to enable the registration check.";
-    return;
+// Reveal the AC-PC button once its reorientation is ready (keeps current space).
+async function _buildAcpcInBg() {
+  const ready = await ensureAcpc();
+  if (!ready || !state.qc) return;
+  state.qc._hasAcpc = true;
+  _applyQcSpaces();
+}
+
+// Build the 3 QC panes once per case (registration is per-case). Atlas switches
+// + the Reg chip re-enter but keep the panes + the user's mode/slice settings.
+function _ensureQcPanes() {
+  if (state.qc) return;
+  state.qc = { mode: "color", value: 0.5, dir: "h", space: "ct", panes: [],
+               _hasAcpc: false, _hasAtlas: false };
+  const wrap = $("qcplanes");
+  wrap.innerHTML = "";
+  for (const [axis, name] of QC_PLANES) {
+    const holder = el("div", { class: "qc-holder" });
+    const slice = el("input", { type: "range", min: "2", max: "98", value: "50", class: "qc-slice" });
+    const p = { axis, label: name, holder, frac: 0.5 };
+    slice.addEventListener("input", () => { p.frac = Number(slice.value) / 100; refreshPane(p); });
+    const pane = el("div", { class: "qc-pane" });
+    pane.append(el("div", { class: "muted qc-plane-label" }, name), holder, slice);
+    wrap.append(pane);
+    state.qc.panes.push(p);
   }
-  // "atlas" check needs the MNI-template panes; native atlases have none, so the
-  // atlas-check falls back to the CT↔MRI (Native) reg they actually use.
-  const space = (kind === "atlas" && state.qc._hasMni) ? "atlas"
-              : (state.qc._hasMni ? "mni" : "ct");
-  state.qc.space = space;
-  const btn = $("qcspace").querySelector(`[data-space="${space}"]`);
-  if (btn) setActive("qcspace", btn);
+  setActive("qcmodes", $("qcmodes").querySelector('[data-mode="color"]'));
+  $("qcvaluewrap").style.visibility = "hidden";   // color needs no value slider
+  $("qcdir").hidden = true;
+}
+
+// The label QC: verify the atlas registration that placed the labels, with the
+// case-level CT↔MRI checks (Native + AC-PC) alongside. Defaults to the Atlas
+// check (the labeling concern); AC-PC builds in the background.
+function showQc(hasMni, jumpToQc = true) {
+  const firstTime = !state.qc;
+  _ensureQcPanes();
+  state.qc._hasAtlas = hasMni;
+  if (firstTime) state.qc.space = hasMni ? "atlas" : "ct";
+  _applyQcSpaces();
+  $("regtab").hidden = false;        // the [3D][Registration] toggle is now usable
+  if (jumpToQc) setViewerTab("qc");
+  else if (!$("viewerqc").hidden) refreshAllPanes();
+  if (state.mri) _buildAcpcInBg();   // make the AC-PC button live
+}
+
+// The Reg chip: the CT↔MRI check straight from the CASE's own registration, so
+// it works WITHOUT labeling. Shows Native immediately, then defaults to the
+// rigid AC-PC reorientation (upright standard planes) once built (~10s, cached).
+async function openRegCheck() {
+  if (!state.jobId) return;
+  if (!state.mri) { $("labelmsg").textContent = "Add a patient MRI to enable the CT↔MRI check."; return; }
+  _ensureQcPanes();
+  state.qc._hasAtlas = false;
+  state.qc.space = "ct";             // Native immediately — always available
+  _applyQcSpaces();
+  $("regtab").hidden = false;
   setViewerTab("qc");
-  refreshAllPanes();
+  $("labelmsg").textContent = "Aligning CT↔MRI to AC-PC planes…";
+  const ready = await ensureAcpc();
+  if (!state.qc) return;             // case reset while building — abandon
+  if (ready) {
+    state.qc._hasAcpc = true;
+    state.qc.space = "acpc";         // default to the upright view
+    _applyQcSpaces();
+    if (!$("viewerqc").hidden) refreshAllPanes();
+    $("labelmsg").textContent = "";
+  } else {
+    $("labelmsg").textContent = "AC-PC unavailable — showing native.";
+  }
 }
 
 // Switch the big pane between the 3D electrode view and the registration QC, and
@@ -816,7 +1186,7 @@ function wireQc() {
     if (b && !b.disabled) setViewerTab(b.dataset.tab);
   });
   $("qcspace").addEventListener("click", (ev) => {
-    const b = ev.target.closest("button"); if (!b || b.disabled || !state.qc) return;
+    const b = ev.target.closest("button"); if (!b || b.disabled || b.hidden || !state.qc) return;
     state.qc.space = b.dataset.space;
     setActive("qcspace", b);
     refreshAllPanes();
@@ -897,46 +1267,139 @@ async function showCases() {
   renderCases();
 }
 
-// Client-side filter (search + type) over the fetched cases — instant, no refetch.
+// Cohort registry table. Columns are sortable client-side over the fetched
+// cases (instant, no refetch). `num` columns default to descending on first
+// click (biggest/newest first); text columns ascending.
+const CASE_COLS = [
+  { key: "label",        label: "Subject",    cls: "",        num: false },
+  { key: "kind",         label: "Kind",       cls: "",        num: false },
+  { key: "has_mri",      label: "MRI",        cls: "c-center", num: false },
+  { key: "n_shanks",     label: "Electrodes", cls: "c-num",    num: true  },
+  { key: "n_contacts",   label: "Contacts",   cls: "c-num",    num: true  },
+  { key: "labeled",      label: "Labeled",    cls: "c-center", num: false },
+  { key: "atlas",        label: "Atlas",      cls: "",        num: false },
+  { key: "mni_eligible", label: "MNI",        cls: "c-center", num: false },
+  { key: "created_at",   label: "Date",       cls: "",        num: true  },
+];
+
 function renderCases() {
   const all = state.cases || [];
   const q = (state.caseSearch || "").trim().toLowerCase();
   const f = state.caseFilter || "all";
-  const shown = all.filter((c) =>
+  const shown = sortCases(all.filter((c) =>
     (f === "all" || c.kind === f) &&
-    (!q || (c.label || "").toLowerCase().includes(q) || c.id.toLowerCase().includes(q)));
+    (!q || (c.label || "").toLowerCase().includes(q)
+        || c.id.toLowerCase().includes(q)
+        || (c.ct_hash || "").toLowerCase().includes(q))));   // scan hash is searchable too
   $("casescount").textContent = all.length ? `· ${all.length}` : "";
   $("casesempty").hidden = all.length > 0;
   $("casesnoresults").hidden = !(all.length > 0 && shown.length === 0);
   const list = $("caseslist");
   list.innerHTML = "";
-  for (const c of shown) list.append(caseCard(c));
+  if (shown.length) list.append(caseTable(shown));
 }
 
-function ccNum(n, one, many) {
-  const s = el("span", { class: "cc-n" });
-  s.append(el("b", {}, String(n)), " " + (n === 1 ? one : many));
-  return s;
+function sortCases(rows) {
+  const sort = state.caseSort || { key: "created_at", dir: -1 };
+  const v = (c) => {
+    switch (sort.key) {
+      case "label":        return (c.label || c.id || "").toLowerCase();
+      case "kind":         return c.kind || "";
+      case "has_mri":      return c.has_mri ? 1 : 0;
+      case "n_shanks":     return c.n_shanks || 0;
+      case "n_contacts":   return c.n_contacts || 0;
+      case "labeled":      return c.labeled ? 1 : 0;
+      case "atlas":        return (c.atlas || "").toLowerCase();
+      case "mni_eligible": return c.mni_eligible ? 1 : 0;
+      default:             return c.created_at || 0;
+    }
+  };
+  return rows.slice().sort((a, b) => {
+    const va = v(a), vb = v(b);
+    if (va < vb) return -sort.dir;
+    if (va > vb) return sort.dir;
+    return (b.created_at || 0) - (a.created_at || 0);   // tiebreak: newest first
+  });
 }
 
-function caseCard(c) {
-  const card = el("button", { class: "casecard", type: "button" });
-  card.onclick = () => openCase(c.id);
+function caseTable(rows) {
+  const sort = state.caseSort || { key: "created_at", dir: -1 };
+  const table = el("table", { class: "casetable" });
+  const htr = el("tr");
+  for (const col of CASE_COLS) {
+    const on = sort.key === col.key;
+    const th = el("th", { class: (col.cls + (on ? " sorted" : "")).trim() },
+      col.label + (on ? (sort.dir < 0 ? " ▾" : " ▴") : ""));
+    th.onclick = () => {
+      const cur = state.caseSort || { key: "created_at", dir: -1 };
+      state.caseSort = cur.key === col.key
+        ? { key: col.key, dir: -cur.dir }
+        : { key: col.key, dir: col.num ? -1 : 1 };
+      renderCases();
+    };
+    htr.append(th);
+  }
+  htr.append(el("th", { class: "c-center" }));   // delete-action column
+  const thead = el("thead"); thead.append(htr);
+  const tbody = el("tbody");
+  for (const c of rows) tbody.append(caseRow(c));
+  table.append(thead, tbody);
+  return table;
+}
+
+function ynCell(v) {
+  const td = el("td", { class: "c-center" });
+  td.append(el("span", { class: v ? "yes" : "no" }, v ? "✓" : "–"));
+  return td;
+}
+
+function atlasName(a) {
+  if (!a) return "";
+  if (a.startsWith("thomas")) return "THOMAS";
+  return { cerebra: "CerebrA", fastsurfer: "FastSurfer", deepmriprep: "deepmriprep" }[a] || a;
+}
+
+function caseRow(c) {
+  const tr = el("tr", { class: "caserow", tabindex: "0", role: "button" });
+  tr.onclick = () => openCase(c.id);
+  tr.onkeydown = (e) => { if (e.key === "Enter") openCase(c.id); };
   const when = c.created_at ? new Date(c.created_at * 1000).toLocaleDateString(
     undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
-  const stats = el("div", { class: "cc-stats" });
-  stats.append(
-    el("span", { class: `cc-badge ${c.kind}` }, c.kind === "import" ? "imported" : "detected"),
-    ccNum(c.n_shanks, "electrode", "electrodes"),
-    ccNum(c.n_contacts, "contact", "contacts"));
-  const sub = [c.has_mri ? "MRI" : "CT-only", c.labeled ? "labeled" : null, when]
-    .filter(Boolean).join(" · ");
-  const subEl = el("div", { class: "cc-sub muted" }, sub + " · ");
-  subEl.append(el("span", { class: "cc-id" }, c.id.slice(0, 8)));   // distinguishes same-named cases
-  const del = el("button", { class: "cc-del", type: "button", title: "Delete case" }, "×");
-  del.onclick = (ev) => { ev.stopPropagation(); deleteCase(c); };   // don't open the card
-  card.append(del, el("div", { class: "cc-title" }, c.label || c.id.slice(0, 8)), stats, subEl);
-  return card;
+  const scan = (c.ct_hash || c.id || "").slice(0, 8);
+
+  const subj = el("td");
+  subj.append(el("div", { class: "ct-name" }, c.label || scan),
+              el("div", { class: "ct-scan" }, scan));
+  tr.append(subj);
+
+  const kindTd = el("td");
+  kindTd.append(el("span", { class: `cc-badge ${c.kind}` }, c.kind === "import" ? "imported" : "detected"));
+  tr.append(kindTd);
+
+  tr.append(ynCell(c.has_mri));
+  tr.append(el("td", { class: "c-num" }, String(c.n_shanks || 0)));
+  tr.append(el("td", { class: "c-num" }, String(c.n_contacts || 0)));
+  tr.append(ynCell(c.labeled));
+
+  const atlasTd = el("td");
+  const an = atlasName(c.atlas);
+  atlasTd.append(an ? el("span", {}, an) : el("span", { class: "no" }, "–"));
+  tr.append(atlasTd);
+
+  const mniTd = el("td", { class: "c-center" });
+  mniTd.append(c.mni_eligible
+    ? el("span", { class: "mni-dot", title: "Contacts poolable in MNI (CerebrA-registered)" })
+    : el("span", { class: "no", title: "Label with CerebrA (through MRI) to pool this subject in MNI" }, "–"));
+  tr.append(mniTd);
+
+  tr.append(el("td", { class: "ct-date" }, when));
+
+  const delTd = el("td", { class: "c-center" });
+  const del = el("button", { class: "ct-del", type: "button", title: "Delete case" }, "×");
+  del.onclick = (ev) => { ev.stopPropagation(); deleteCase(c); };
+  delTd.append(del);
+  tr.append(delTd);
+  return tr;
 }
 
 async function deleteCase(c) {
@@ -975,16 +1438,13 @@ async function openCase(id) {
 
 // ---- import a localization computed elsewhere ------------------------
 
-// browse → upload → fill the paired path field (reuses the /uploads endpoint).
+// browse → real path (desktop) or upload (browser) → fill the paired path field.
 async function importBrowse(fileInputId, pathId) {
   const f = $(fileInputId).files[0];
   if (!f) return;
-  $("imp-msg").textContent = `Uploading ${f.name}…`;
-  const fd = new FormData(); fd.append("file", f);
-  const r = await fetch(`${API}/uploads`, { method: "POST", body: fd });
-  if (!r.ok) { $("imp-msg").textContent = `Upload failed: ${await r.text()}`; return; }
-  $(pathId).value = (await r.json()).path;
-  $("imp-msg").textContent = "";
+  $("imp-msg").textContent = IS_DESKTOP ? `Loading ${f.name}…` : `Uploading ${f.name}…`;
+  try { $(pathId).value = (await resolveFile(f)).path; $("imp-msg").textContent = ""; }
+  catch (e) { $("imp-msg").textContent = `Failed: ${e.message}`; }
 }
 
 function showImportCheck(check, isError, message) {
@@ -1044,6 +1504,10 @@ async function runImport(force = false) {
 async function boot() {
   wireDrop();
   $("runbtn").onclick = run;
+  $("etypesall").onclick = () => setAllEtypes(true);
+  $("etypesnone").onclick = () => setAllEtypes(false);
+  $("ctpickbtn").onclick = () => pickImage("ct");
+  $("mripickbtn").onclick = () => pickImage("mri");
   $("cancelbtn").onclick = cancel;
   $("exportbtn").onclick = doExport;
   document.querySelectorAll("#wsflow button").forEach((b) => { b.onclick = () => showWs(b.dataset.ws); });
@@ -1057,11 +1521,26 @@ async function boot() {
   $("slot-mri").onclick = () => {
     if (!state.mri) { showWs("review"); $("labelbar").scrollIntoView({ behavior: "smooth", block: "nearest" }); $("mriinput").focus(); }
   };
-  $("slot-reg").onclick = () => { showWs("review"); openQc("reg"); };   // CT↔MRI QC
-  $("atlascheckbtn").onclick = () => openQc("atlas");                    // atlas↔MRI QC
+  $("slot-reg").onclick = () => { showWs("review"); openRegCheck(); };  // case CT↔MRI QC (pre-label)
   $("restartbtn").onclick = showCases;          // workspace → back to the case list
   $("newcasebtn").onclick = restart;            // case list → fresh new-case (drop) form
+  $("dropback").onclick = showCases;            // new-case form → back to the case list
   $("importbtn").onclick = () => showStep("import");
+  // Cohort MNI viewer (Data Explorer): reload the iframe each time so newly
+  // labeled cases get pooled in.
+  $("cohortbtn").onclick = () => { $("cohortframe").src = "/cohort/?t=" + Date.now(); showStep("cohort"); };
+  $("cohortback").onclick = showCases;
+  $("rosaimportbtn").onclick = importRosa;      // import a ROSA robot case
+  $("rosa-cancel").onclick = showCases;
+  $("rosa-create").onclick = createRosaCase;
+  $("burnthomasbtn").onclick = openBurnTool;    // standalone tool: burn THOMAS → DICOM
+  $("burn-cancel").onclick = showCases;
+  $("burn-dicom-btn").onclick = () => pickBurnDir("dicom");
+  $("burn-thomas-btn").onclick = () => pickBurnDir("thomas");
+  $("burn-out-btn").onclick = () => pickBurnDir("out");
+  $("burn-ref-btn").onclick = pickBurnRef;
+  $("burn-all").onchange = updateBurnRun;
+  $("burn-run").onclick = runBurn;
   $("importback").onclick = showCases;
   $("casesearch").addEventListener("input", (ev) => { state.caseSearch = ev.target.value; renderCases(); });
   $("casesfilter").addEventListener("click", (ev) => {
@@ -1114,14 +1593,15 @@ async function boot() {
     if (!state.jobId) return;
     // THOMAS: prompt for the folder first; the picker's change handler uploads
     // then labels. Every other atlas labels immediately (needs the patient MRI).
-    if ($("atlassel").value.startsWith("thomas")) { $("thomasdir-file").click(); return; }
+    if ($("atlassel").value.startsWith("thomas")) { pickThomasDir(); return; }
     if (state.mri) runLabel();
   });
   // The "Load folder…" chip: works even when THOMAS is already the selected atlas
   // (re-open / re-import), where the dropdown's change never fires.
-  $("thomasload").onclick = () => $("thomasdir-file").click();
+  $("thomasload").onclick = pickThomasDir;
   wireQc();
   await loadAtlases();   // populate the picker before a resume sets its value
+  loadElectrodeTypes();  // new-case electrode-type checkboxes (default all)
   try {
     const h = await jget("/healthz");
     $("engine").textContent = `engine ${h.engine_version} · ${h.engine_import_ok ? "ready" : "NOT LINKED"}`;
