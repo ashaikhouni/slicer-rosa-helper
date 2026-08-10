@@ -85,6 +85,7 @@ SUBCOMMANDS = {
     "deidentify-ros": "rosa_agent.commands.deidentify_ros",
     "cohort-export": "rosa_agent.commands.cohort_export",
     "stamp-mni": "rosa_agent.commands.stamp_mni",
+    "stage-files": "rosa_agent.commands.stage_files",
 }
 
 

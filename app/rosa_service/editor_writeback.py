@@ -33,12 +33,12 @@ def _unit(v: np.ndarray) -> np.ndarray:
 def _rows(path: Path) -> list[dict]:
     if not path.is_file():
         return []
-    with open(path) as f:
+    with open(path, encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
 def _write_tsv(path: Path, cols: list[str], rows: list[dict]) -> None:
-    with open(path, "w", newline="") as f:
+    with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols, delimiter="\t", extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)

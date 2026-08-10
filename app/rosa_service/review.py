@@ -153,7 +153,7 @@ class ReviewStore:
             saved = Path(job_dir) / "review.json"
             if saved.is_file():
                 try:
-                    self._docs[job_id] = ReviewDoc.model_validate_json(saved.read_text())
+                    self._docs[job_id] = ReviewDoc.model_validate_json(saved.read_text(encoding="utf-8"))
                     return self._docs[job_id]
                 except Exception:  # noqa: BLE001 — fall back to a fresh build
                     pass
@@ -179,7 +179,7 @@ class ReviewStore:
         prev = self._docs.get(job_id)
         if prev is None and (job_dir / "review.json").is_file():
             try:
-                prev = ReviewDoc.model_validate_json((job_dir / "review.json").read_text())
+                prev = ReviewDoc.model_validate_json((job_dir / "review.json").read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001
                 prev = None
         regions = {(s.name, c.index): c.region
