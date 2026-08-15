@@ -936,22 +936,34 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         (pure line geometry — no image registration; handles entry↔target
         ambiguity). Returns the detected→plan name map + per-match confidence
         (axis angle°, perpendicular mm), for a batch rename in the editor."""
+        import sys
+        def _rlog(msg: str) -> None:              # → sidecar.log, so a failure is diagnosable
+            print(f"[match-ros] job={job_id[:8]} {msg}", file=sys.stderr, flush=True)
+
         job = _job_or_404(job_id)
         det = _read_traj_lines(job.workdir / "trajectories.tsv")
+        _rlog(f"detected={len(det)} shanks from trajectories.tsv; "
+              f"ros_text={len(req.ros_text or '')} chars")
         if len(det) < 3:
+            _rlog("ABORT: <3 detected trajectories")
             raise HTTPException(status_code=422, detail="need ≥3 detected trajectories to match")
         if req.ros_text.strip():
             try:
                 plan = _ros_plan_lines(req.ros_text)
             except Exception as exc:              # noqa: BLE001
+                _rlog(f"ABORT: .ros parse error: {exc}")
                 raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+            _rlog(f"parsed plan={len(plan)} trajectories from .ros text")
         else:                                     # ROSA-imported case → its stashed plan
             stash = job.workdir / "ros_plan.tsv"
             if not stash.is_file():
+                _rlog("ABORT: no ros_text and no stashed ros_plan.tsv")
                 raise HTTPException(status_code=422,
                                     detail="no .ros plan provided and none stashed for this case")
             plan = _read_traj_lines(stash)
+            _rlog(f"plan={len(plan)} from stashed ros_plan.tsv")
         if len(plan) < 3:
+            _rlog("ABORT: plan has <3 trajectories")
             raise HTTPException(status_code=422, detail="the .ros plan needs ≥3 trajectories")
         from rosa_core.cross_volume_match import cross_volume_match
         res = cross_volume_match(plan, det)
@@ -959,6 +971,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "angle_deg": round(a, 1) if a is not None else None,
                     "perp_mm": round(p, 1) if p is not None else None}
                    for (rn, dn, a, p) in res.pairs if dn]
+        _rlog(f"RESULT matched={len(matched)}/{len(det)} inliers={int(res.refined_inliers)} "
+              f"pairs={[(m['plan'], m['det']) for m in matched]}")
         return {"matched": matched,
                 "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
                 "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}

@@ -97,6 +97,13 @@
   .pmodal-msg{font-size:12.5px;color:var(--ink);margin-bottom:9px}
   .pmodal-input{width:100%;background:#0e161d;color:var(--ink);border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;box-sizing:border-box}
   .pmodal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+  /* Persistent ROS-labeling status/log line (survives, unlike the toast). */
+  .rosstatus{position:fixed;top:52px;right:12px;z-index:150;max-width:520px;
+    background:#0b1219f2;border:1px solid var(--line2);border-radius:8px;padding:8px 11px;
+    font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;
+    box-shadow:0 8px 30px #000a}
+  .rosstatus[hidden]{display:none}
+  .rosstatus .ok{color:var(--good)} .rosstatus .bad{color:var(--bad)} .rosstatus b{color:var(--ink)}
 </style>
 
 <div class="topbar">
@@ -112,10 +119,13 @@
     </div>
   </div>
   <button class="btn add" id="addBtn">+ Add electrode</button>
-  <button class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save">Label from ROS</button>
-  <input type="file" id="rosFile" accept=".ros,.txt" hidden>
+  <!-- A <label> wrapping the file input: clicking it opens the picker NATIVELY.
+       A hidden input + programmatic .click() is silently blocked inside Electron's
+       sandboxed editor iframe (no dialog, no error) — this avoids that entirely. -->
+  <label class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save"><input type="file" id="rosFile" accept=".ros,.txt" hidden>Label from ROS</label>
   <button class="btn primary" id="save">Save plan</button>
 </div>
+<div id="rosStatus" class="rosstatus" hidden></div>
 
 <div class="console">
   <aside class="rail">
@@ -468,29 +478,49 @@ async function matchRos(body){
 }
 function applyRos(res){
   const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
-  let applied=0,skipped=0;
+  let applied=0,skipped=0;const detail=[];
   for(const m of (res.matched||[])){
-    const t=byName[m.det];if(!t||!m.plan)continue;
-    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}
-    t.name=m.plan;applied++;
+    const t=byName[m.det];
+    if(!t){detail.push(`det ${m.det} not in case`);continue;}
+    if(!m.plan)continue;
+    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;detail.push(`${m.det}→${m.plan} name-clash`);continue;}
+    t.name=m.plan;applied++;detail.push(`${m.det}→${m.plan}`);
   }
+  console.log(`[ROS] applied=${applied} skipped=${skipped}`,detail);
   if(act)activeId=act.name;                       // follow the rename
   renderList();syncInspector();drawMIP();
-  const un=(res.unmatched_plan||[]).length;
-  toast("ROS plan &middot; renamed <b>"+applied+"</b>/"+res.n_det+" shanks"+
-        (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
-        " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
+  return {applied,skipped};
 }
-// Pick a .ros file to (re)label from. Must open the dialog SYNCHRONOUSLY inside
-// the click — a file input .click() after an await is blocked (lost user gesture).
-// ROSA-imported cases already get their names from the guided import; this is the
-// manual tool to (re)apply names from a chosen .ros.
-$("#rosBtn").onclick=()=>$("#rosFile").click();
+// ROS-labeling activity log: persistent panel (survives, unlike the 2 s toast)
+// + console, so a failure is never silent. The <label>-wrapped #rosFile opens
+// the picker natively — no programmatic .click() (Electron blocks that in the
+// sandboxed iframe: no dialog, no error). ROSA-imported cases already get names
+// from the guided import; this re-applies names from a chosen .ros.
+function rosLog(html,cls){
+  const el=$("#rosStatus");el.hidden=false;
+  el.innerHTML=(cls?`<span class="${cls}">`:"")+html+(cls?"</span>":"");
+  console[cls==="bad"?"error":"log"]("[ROS] "+el.textContent);
+}
 $("#rosFile").onchange=async(e)=>{
-  const f=e.target.files[0];if(!f)return;e.target.value="";
-  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
-  try{ applyRos(await matchRos({ros_text:await f.text()})); }
-  catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");}
+  const f=e.target.files[0];if(!f){rosLog("no file chosen","bad");return;}
+  e.target.value="";
+  rosLog(`reading <b>${f.name}</b> (${(f.size/1024).toFixed(0)} KB)&hellip;`);
+  try{
+    const text=await f.text();
+    rosLog(`matching <b>${f.name}</b> — ${text.length} chars &rarr; /match-ros&hellip;`);
+    const res=await matchRos({ros_text:text});
+    console.log("[ROS] /match-ros response:",res);
+    const {applied,skipped}=applyRos(res);
+    const un=(res.unmatched_plan||[]).length;
+    rosLog(`<b>${applied}</b>/${res.n_det} renamed · ${res.inliers} inliers`+
+           (skipped?` · ${skipped} name-clash`:"")+(un?` · ${un} plan unmatched`:"")+
+           (applied?` · <span class="ok">review, then Save</span>`
+                   :` · <span class="bad">nothing applied — check the .ros matches this CT</span>`),
+           applied?null:"bad");
+  }catch(err){
+    console.error("[ROS] match failed:",err);
+    rosLog(`match failed: ${(err&&err.message)||err}`,"bad");
+  }
 };
 $("#removeBtn").onclick=()=>{const t=active();
   if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}
