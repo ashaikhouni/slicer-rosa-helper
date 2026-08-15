@@ -89,6 +89,14 @@
     padding:9px 15px;border-radius:9px;font-size:12.5px;opacity:0;pointer-events:none;transition:.25s;z-index:50}
   .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}.toast .mono{color:var(--accent)}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  /* In-page text prompt: window.prompt() is unsupported in Electron, so the
+     rename used it and silently no-op'd in the packaged app. */
+  .pmodal{position:fixed;inset:0;background:#04070bcc;display:flex;align-items:center;justify-content:center;z-index:200}
+  .pmodal[hidden]{display:none}
+  .pmodal-card{background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:16px;min-width:300px;box-shadow:0 12px 44px #000b}
+  .pmodal-msg{font-size:12.5px;color:var(--ink);margin-bottom:9px}
+  .pmodal-input{width:100%;background:#0e161d;color:var(--ink);border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;box-sizing:border-box}
+  .pmodal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
 </style>
 
 <div class="topbar">
@@ -164,6 +172,16 @@
   </aside>
 </div>
 <div class="toast" id="toast"></div>
+<div id="pmodal" class="pmodal" hidden>
+  <div class="pmodal-card" role="dialog" aria-modal="true" aria-labelledby="pmodalMsg">
+    <div id="pmodalMsg" class="pmodal-msg"></div>
+    <input id="pmodalInput" class="pmodal-input" type="text" autocomplete="off" spellcheck="false">
+    <div class="pmodal-actions">
+      <button class="btn" id="pmodalCancel">Cancel</button>
+      <button class="btn primary" id="pmodalOk">OK</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -379,6 +397,19 @@ let _depthRAF=0;
 function afterDepth(){if(_depthRAF)return;_depthRAF=requestAnimationFrame(()=>{_depthRAF=0;blitInline();drawProbe();renderQC();});}
 function selectTraj(id){activeId=id;panU=0;panV=0;renderList();syncInspector();resliceAll();}
 function toast(m){const el=$("#toast");el.innerHTML=m;el.classList.add("on");clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove("on"),2100);}
+// A promise-based text prompt that works in Electron (where window.prompt() is
+// unsupported) AND in a browser. Resolves to the entered string, or null on cancel.
+function promptText(message,initial=""){
+  return new Promise(resolve=>{
+    const m=$("#pmodal"),inp=$("#pmodalInput");
+    $("#pmodalMsg").textContent=message;inp.value=initial||"";m.hidden=false;
+    setTimeout(()=>{inp.focus();inp.select();},0);
+    const done=v=>{m.hidden=true;inp.onkeydown=null;$("#pmodalOk").onclick=null;$("#pmodalCancel").onclick=null;resolve(v);};
+    $("#pmodalOk").onclick=()=>done(inp.value);
+    $("#pmodalCancel").onclick=()=>done(null);
+    inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();done(inp.value);}else if(e.key==="Escape"){e.preventDefault();done(null);}};
+  });
+}
 function initModels(){const sel=$("#model");sel.innerHTML="";
   Object.entries(MODELS).forEach(([k,m])=>{const o=document.createElement("option");o.value=k;o.textContent=m.label;sel.appendChild(o);});}
 function setWin(wl,ww){winWL=wl;winWW=ww;$("#wl").value=wl;$("#ww").value=ww;$("#wlv").textContent=wl;$("#wwv").textContent=ww;}
@@ -421,7 +452,7 @@ $("#save").onclick=async()=>{
   }catch(e){toast("<span style='color:var(--bad)'>Save failed: "+e.message+"</span>");}
   btn.disabled=false;
 };
-$("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.name)||"").trim();
+$("#renameBtn").onclick=async()=>{const t=active(),nm=((await promptText("Rename electrode",t.name))||"").trim();
   if(!nm||nm===t.name)return;
   if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
   t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
