@@ -682,10 +682,11 @@ function _postViewer(msg) {
 // The embedded viewer reports which slice-display controls apply for this case
 // (has a warped atlas? has an MRI to fade to?). Host them in the top row and
 // reset to the viewer's defaults (atlas on, fade at CT) on each (re)load.
-function _onSliceCaps({ atlas, fade }) {
-  state.sliceCaps = { atlas: !!atlas, fade: !!fade };
+function _onSliceCaps({ atlas, fade, acpc }) {
+  state.sliceCaps = { atlas: !!atlas, fade: !!fade, acpc: !!acpc };
   $("app-atlas-ov").checked = true;
   $("app-slice-fade").value = 0;
+  $("app-acpc").checked = false;            // default to the native scanner grid
   _syncModeControls();
 }
 
@@ -700,7 +701,8 @@ function _syncModeControls() {
   $("probemodectl").hidden = !(is3d && probe.present);
   $("slicefade-item").hidden = !(is3d && caps.fade);
   $("atlasov-item").hidden = !(is3d && caps.atlas);
-  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas));
+  $("acpc-item").hidden = !(is3d && caps.acpc);
+  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas || caps.acpc));
   $("qctools").hidden = is3d;
 }
 
@@ -1565,6 +1567,8 @@ async function boot() {
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
   $("app-atlas-ov").addEventListener("change", (e) =>
     _postViewer({ type: "rosa:atlas-overlay", on: e.target.checked }));
+  $("app-acpc").addEventListener("change", (e) =>
+    _postViewer({ type: "rosa:slice-acpc", on: e.target.checked }));
   $("app-slice-mode").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-smode]"); if (!b || b.disabled) return;
     state.probePref = b.dataset.smode;   // remember the choice
