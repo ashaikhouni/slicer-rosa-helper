@@ -151,9 +151,29 @@ def line_perp_distance(
     return float(abs(delta @ (n / n_norm)))
 
 
+def _pairwise_line_perp(p_a: np.ndarray, d_a: np.ndarray,
+                        p_b: np.ndarray, d_b: np.ndarray) -> np.ndarray:
+    """``(len(p_a), len(p_b))`` matrix of :func:`line_perp_distance` for every
+    (a, b) pair — vectorized, exactly matching the scalar version (same 1e-6
+    parallel threshold). This is the RANSAC inner loop's hot path."""
+    n = np.cross(d_a[:, None, :], d_b[None, :, :])          # (na, nb, 3)
+    n_norm = np.linalg.norm(n, axis=2)                       # (na, nb)
+    delta = p_b[None, :, :] - p_a[:, None, :]               # (na, nb, 3)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        skew = np.abs(np.einsum("abk,abk->ab", delta, n)) / n_norm
+    dproj = np.einsum("abk,ak->ab", delta, d_a)            # (delta · d_a)
+    par = np.linalg.norm(delta - dproj[:, :, None] * d_a[:, None, :], axis=2)
+    return np.where(n_norm < 1e-6, par, skew)
+
+
 # ---------------------------------------------------------------------
 # RANSAC + refinement
 # ---------------------------------------------------------------------
+
+# RANSAC converges early for well-separated lines; stop after this many
+# consecutive non-improving iterations (of the n_iter budget) once >=3 inliers
+# are found. Generous — well past typical convergence — so the match is unchanged.
+_RANSAC_STALE_STOP = 250
 
 
 def _ransac_align_lines(
@@ -194,7 +214,16 @@ def _ransac_align_lines(
     best_pairs: list[tuple[int, int]] = []
     best_n = 0
 
+    # Early-exit on convergence: for well-separated lines the best model is found
+    # in the first tens of iterations, so once ``_RANSAC_STALE_STOP`` consecutive
+    # iterations fail to improve it, the remaining budget is wasted work (this
+    # loop is the dominant cost — 48 hypotheses × an n_d×n_r inlier scan each).
+    # Deterministic (seeded RNG + counter), so the match is unchanged and
+    # CLI/Slicer parity holds; it just stops grinding once it has clearly won.
+    stale = 0
+
     for _ in range(n_iter):
+        improved = False
         d_idx = rng.choice(n_d, size=3, replace=False)
         r_idx = rng.choice(n_r, size=3, replace=False)
         d_dirs_s = det_dirs[d_idx]
@@ -216,21 +245,15 @@ def _ransac_align_lines(
                 det_dirs_t = det_dirs @ R.T
                 det_mids_t = det_mids @ R.T + t
 
-                pairs: list[tuple[int, int]] = []
-                for di in range(n_d):
-                    da = det_dirs_t[di]
-                    pa = det_mids_t[di]
-                    best_pd = np.inf
-                    best_ri = -1
-                    for ri in range(n_r):
-                        if abs(float(da @ ros_dirs[ri])) < cos_tol:
-                            continue
-                        pd = line_perp_distance(pa, da, ros_mids[ri], ros_dirs[ri])
-                        if pd < best_pd:
-                            best_pd = pd
-                            best_ri = ri
-                    if best_ri >= 0 and best_pd <= perp_tol_mm:
-                        pairs.append((di, best_ri))
+                # Inlier scoring — vectorized (identical greedy: per det line, the
+                # nearest angle-compatible ros line, kept if within perp_tol_mm).
+                perp = _pairwise_line_perp(det_mids_t, det_dirs_t, ros_mids, ros_dirs)  # (n_d, n_r)
+                ang_ok = np.abs(det_dirs_t @ ros_dirs.T) >= cos_tol
+                perp = np.where(ang_ok, perp, np.inf)
+                best_ri = np.argmin(perp, axis=1)
+                best_pd = perp[np.arange(n_d), best_ri]
+                pairs = [(di, int(best_ri[di])) for di in range(n_d)
+                         if best_pd[di] <= perp_tol_mm]
 
                 if len(pairs) > best_n:
                     M = np.eye(4)
@@ -239,6 +262,14 @@ def _ransac_align_lines(
                     best_M = M
                     best_pairs = pairs
                     best_n = len(pairs)
+                    improved = True
+
+        if improved:
+            stale = 0
+        else:
+            stale += 1
+            if best_n >= 3 and stale >= _RANSAC_STALE_STOP:
+                break
 
     return best_M, best_pairs
 

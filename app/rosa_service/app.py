@@ -931,7 +931,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/match-ros")
-    async def match_ros(job_id: str, req: RosMatchRequest) -> dict:
+    def match_ros(job_id: str, req: RosMatchRequest) -> dict:      # sync → threadpool, never blocks the event loop
         """Match this case's detected trajectories against a ROSA surgical plan
         (pure line geometry — no image registration; handles entry↔target
         ambiguity). Returns the detected→plan name map + per-match confidence

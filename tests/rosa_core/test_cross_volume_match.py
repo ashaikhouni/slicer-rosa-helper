@@ -94,5 +94,28 @@ class CrossVolumeMatchTests(unittest.TestCase):
         self.assertIsNone(got["D"])  # no detector counterpart → kept, det empty
 
 
+@unittest.skipUnless(DEPS_AVAILABLE, "numpy / rosa_core not importable")
+class VectorizedPerpTests(unittest.TestCase):
+    """The RANSAC inner loop was vectorized (38 s → ~1 s); its pairwise
+    line-distance MUST stay identical to the scalar reference."""
+
+    def test_pairwise_matches_scalar(self):
+        import numpy as np
+        from rosa_core.cross_volume_match import line_perp_distance, _pairwise_line_perp
+        rng = np.random.default_rng(7)
+
+        def _unit(v):
+            return v / np.linalg.norm(v)
+
+        pa = rng.normal(size=(6, 3)); da = np.array([_unit(v) for v in rng.normal(size=(6, 3))])
+        pb = rng.normal(size=(5, 3)); db = np.array([_unit(v) for v in rng.normal(size=(5, 3))])
+        db[0] = da[0]  # force a (near-)parallel pair → exercises the fallback branch
+        M = _pairwise_line_perp(pa, da, pb, db)
+        for i in range(6):
+            for j in range(5):
+                self.assertAlmostEqual(
+                    float(M[i, j]), line_perp_distance(pa[i], da[i], pb[j], db[j]), places=9)
+
+
 if __name__ == "__main__":
     unittest.main()

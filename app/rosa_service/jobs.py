@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import sys
 import time
@@ -163,6 +164,20 @@ def _engine_base() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, "engine"]
     return [sys.executable, "-u", "-m", "rosa_agent"]
+
+
+# The SERVICE process runs single-threaded BLAS (rosa_service.__main__) to dodge a
+# frozen-macOS OpenMP double-init crash; the compute/ML engine runs in isolated
+# subprocesses, so give them full threading back by stripping those caps from the
+# inherited environment.
+_SERVICE_THREAD_CAPS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                        "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+
+
+def _engine_env() -> dict:
+    """Inherited env with the service's single-thread caps removed (engine + BYO
+    torch backends want their default multi-threading)."""
+    return {k: v for k, v in os.environ.items() if k not in _SERVICE_THREAD_CAPS}
 
 
 def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
@@ -745,6 +760,7 @@ class JobRunner:
                             await self._emit(job, logf, f"[step {i}/{n}] {_step_label(argv)}")
                         proc = await asyncio.create_subprocess_exec(
                             *argv, cwd=str(job.workdir),
+                            env=_engine_env(),
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.STDOUT,
                         )
