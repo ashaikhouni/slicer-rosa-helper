@@ -1516,6 +1516,7 @@ async function boot() {
   window.addEventListener("message", (ev) => {   // viewer/editor iframe → app
     const d = ev.data; if (!d) return;
     if (d.type === "rosa:edited") onEdited(d.rebuild);
+    else if (d.type === "rosa:editor-back") showWs("review");   // editor Back → Review (no iframe nav)
     else if (d.type === "rosa:slice-caps") _onSliceCaps(d);
     else if (d.type === "rosa:probe-avail") _onProbeAvail(d);
     else if (d.type === "rosa:selected") _onViewerSelected(d);

@@ -971,10 +971,38 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "angle_deg": round(a, 1) if a is not None else None,
                     "perp_mm": round(p, 1) if p is not None else None}
                    for (rn, dn, a, p) in res.pairs if dn]
+        # For each LEFTOVER detected shank, suggest the nearest LEFTOVER plan line
+        # under the recovered transform (even if beyond tolerance) so the UI can
+        # say WHY it was left unnamed + offer a likely name to apply by hand.
+        import numpy as np
+        from rosa_core.cross_volume_match import trajectories_to_lines, line_perp_distance
+        matched_det = {m["det"] for m in matched}
+        matched_plan = {m["plan"] for m in matched}
+        M = np.asarray(res.transform_4x4, dtype=float)
+        R, tvec = M[:3, :3], M[:3, 3]
+        left_plan = [pl for pl in trajectories_to_lines(plan) if pl.name not in matched_plan]
+        unmatched_det = []
+        for dl in trajectories_to_lines(det):
+            if dl.name in matched_det:
+                continue
+            mid_t = R @ np.asarray(dl.mid, float) + tvec
+            dir_t = R @ np.asarray(dl.direction, float)
+            best = {"plan": None, "angle_deg": None, "perp_mm": None}
+            for pl in left_plan:
+                ang = float(np.degrees(np.arccos(
+                    min(1.0, abs(float(np.dot(dir_t, pl.direction)))))))
+                if best["angle_deg"] is None or ang < best["angle_deg"]:
+                    best = {"plan": pl.name, "angle_deg": round(ang, 1),
+                            "perp_mm": round(line_perp_distance(
+                                mid_t, dir_t, np.asarray(pl.mid, float),
+                                np.asarray(pl.direction, float)), 1)}
+            unmatched_det.append({"det": dl.name, **best})
         _rlog(f"RESULT matched={len(matched)}/{len(det)} inliers={int(res.refined_inliers)} "
-              f"pairs={[(m['plan'], m['det']) for m in matched]}")
+              f"unmatched_det={[(s['det'], s['plan'], s['angle_deg']) for s in unmatched_det]} "
+              f"unused_plan={[rn for (rn, dn, _a, _p) in res.pairs if not dn]}")
         return {"matched": matched,
                 "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
+                "unmatched_det": unmatched_det,
                 "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}
 
     # ---- import a ROSA robot case (a .ros plan + Analyze images) ----

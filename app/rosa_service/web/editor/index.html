@@ -478,18 +478,19 @@ async function matchRos(body){
 }
 function applyRos(res){
   const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
-  let applied=0,skipped=0;const detail=[];
+  const allDet=CASE.trajectories.map(t=>t.name);      // detection names, before renaming
+  let applied=0,skipped=0;const renamed=new Set();
   for(const m of (res.matched||[])){
     const t=byName[m.det];
-    if(!t){detail.push(`det ${m.det} not in case`);continue;}
-    if(!m.plan)continue;
-    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;detail.push(`${m.det}→${m.plan} name-clash`);continue;}
-    t.name=m.plan;applied++;detail.push(`${m.det}→${m.plan}`);
+    if(!t||!m.plan)continue;
+    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}   // plan name already used
+    t.name=m.plan;applied++;renamed.add(m.det);
   }
-  console.log(`[ROS] applied=${applied} skipped=${skipped}`,detail);
+  const unnamed=allDet.filter(d=>!renamed.has(d));     // shanks left with their detection name
+  console.log(`[ROS] applied=${applied} skipped=${skipped} unnamed=`,unnamed);
   if(act)activeId=act.name;                       // follow the rename
   renderList();syncInspector();drawMIP();
-  return {applied,skipped};
+  return {applied,skipped,unnamed};
 }
 // ROS-labeling activity log: persistent panel (survives, unlike the 2 s toast)
 // + console, so a failure is never silent. The <label>-wrapped #rosFile opens
@@ -511,12 +512,22 @@ $("#rosFile").onchange=async(e)=>{
     const res=await matchRos({ros_text:text});
     console.log("[ROS] /match-ros response:",res);
     const {applied,skipped}=applyRos(res);
-    const un=(res.unmatched_plan||[]).length;
-    rosLog(`<b>${applied}</b>/${res.n_det} renamed · ${res.inliers} inliers`+
-           (skipped?` · ${skipped} name-clash`:"")+(un?` · ${un} plan unmatched`:"")+
-           (applied?` · <span class="ok">review, then Save</span>`
-                   :` · <span class="bad">nothing applied — check the .ros matches this CT</span>`),
-           applied?null:"bad");
+    const sugg=res.unmatched_det||[];
+    let msg=`<b>${applied}</b>/${res.n_det} renamed · ${res.inliers} inliers`;
+    if(skipped)msg+=` · ${skipped} name-clash`;
+    if(res.unmatched_det&&res.unmatched_det.length){
+      // WHY each was left unnamed: its nearest UNUSED plan line + how far off it was.
+      const parts=sugg.map(s=>s.plan
+        ? `${s.det} ≈ <b>${s.plan}</b> (${s.angle_deg}°/${s.perp_mm}mm — over tol)`
+        : s.det);
+      msg+=`<br><span class="bad">not matched: ${parts.join("; ")}</span>`;
+    }
+    const up=res.unmatched_plan||[];
+    if(up.length)msg+=`<br>unused plan names: ${up.join(", ")}`;
+    msg+=applied
+      ? `<br><span class="ok">rename any leftover by hand (✎), then Save</span>`
+      : `<br><span class="bad">nothing applied — check the .ros matches this CT</span>`;
+    rosLog(msg,applied?null:"bad");
   }catch(err){
     console.error("[ROS] match failed:",err);
     rosLog(`match failed: ${(err&&err.message)||err}`,"bad");
@@ -527,7 +538,14 @@ $("#removeBtn").onclick=()=>{const t=active();
   if(!confirm("Remove electrode "+t.name+"? It will be dropped when you Save."))return;
   CASE.trajectories=CASE.trajectories.filter(x=>x!==t);
   activeId=CASE.trajectories[0].name;renderList();syncInspector();resliceAll();drawMIP();toast("Removed "+t.name);};
-$("#backbtn").onclick=()=>{ if(window.opener&&!window.opener.closed)window.close(); else location.href="/"; };  // opened via window.open -> close the tab; direct -> app root
+// Embedded in the app's <iframe> → tell the PARENT to return to Review. Never
+// navigate THIS frame to "/", which loads the whole app inside the edit iframe
+// (nested frames). Standalone tab (window.open) → close; direct page → app root.
+$("#backbtn").onclick=()=>{
+  if(window.parent&&window.parent!==window){window.parent.postMessage({type:"rosa:editor-back"},"*");return;}
+  if(window.opener&&!window.opener.closed){window.close();return;}
+  location.href="/";
+};
 
 // in-line endpoint drag: freeze image, move handle, re-slice on release
 function hitInline(sx,sy){const t=active(),v=inlineCache?.view;if(!v)return null;
