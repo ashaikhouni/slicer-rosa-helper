@@ -747,6 +747,9 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         except (ValueError, KeyError) as exc:
             raise HTTPException(status_code=422, detail=f"bad plan: {exc}") from exc
         reviews.rebuild_preserving_labels(job_id, job.workdir, renames=summary.get("renames"))
+        # Plan-vs-actual accuracy is now stale (the actual trajectories changed) —
+        # drop the cache so it recomputes against the edit on next read.
+        (job.workdir / "plan_accuracy.json").unlink(missing_ok=True)
         ct = job.params.get("ct")
         rebuild = None
         if ct:                              # rebuild the 3D scene from the new TSVs
@@ -780,6 +783,37 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             except ValueError:
                 rebuild = None
         return {**summary, "rebuild_job": rebuild}
+
+    def _plan_accuracy(job_dir: Path):
+        """Compute-if-stale + cache the plan-vs-actual accuracy for a case.
+        None when the case has no ros_plan.tsv (no plan → no error)."""
+        from rosa_core.plan_accuracy import compute_plan_accuracy
+        cache, traj = job_dir / "plan_accuracy.json", job_dir / "trajectories.tsv"
+        # Fresh only if the cache is newer than EVERY input (the case files live in
+        # the user's Dropbox and may be hand-edited without touching trajectories.tsv).
+        newest_in = max((p.stat().st_mtime for p in
+                         (traj, job_dir / "ros_plan.tsv", job_dir / "contacts.tsv") if p.is_file()),
+                        default=0.0)
+        if cache.is_file() and cache.stat().st_mtime >= newest_in:
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                pass
+        res = compute_plan_accuracy(job_dir / "ros_plan.tsv", traj, job_dir / "contacts.tsv")
+        if res is not None:
+            try:
+                cache.write_text(json.dumps(res), encoding="utf-8")
+            except OSError:
+                pass
+        return res
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/plan-accuracy")
+    async def plan_accuracy(job_id: str) -> dict:
+        """Per-shank + summary accuracy of the actual trajectories vs the ROSA
+        plan (``ros_plan.tsv``). ``has_plan: false`` when the case has no plan."""
+        job = _job_or_404(job_id)
+        res = _plan_accuracy(job.workdir)
+        return {"has_plan": res is not None, **(res or {})}
 
     # ---- uploads (browser drag-drop → a local path a job can consume) ----
 
@@ -997,10 +1031,49 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                                 mid_t, dir_t, np.asarray(pl.mid, float),
                                 np.asarray(pl.direction, float)), 1)}
             unmatched_det.append({"det": dl.name, **best})
+
+        # Best-fit-for-ALL: apply the confident matches PLUS each leftover shank's
+        # nearest plan line; the client applies them all and flags the low-confidence
+        # ones (over-tolerance) so a forced/wrong name stands out.
+        assignments = [{**m, "confident": True} for m in matched] + [
+            {"det": s["det"], "plan": s["plan"], "angle_deg": s["angle_deg"],
+             "perp_mm": s["perp_mm"], "confident": False}
+            for s in unmatched_det if s.get("plan")]
+
+        # Persist the plan as ros_plan.tsv so plan-vs-actual ACCURACY is recomputable
+        # on every edit — but ONLY when the plan and CT are genuinely CO-FRAMED, i.e.
+        # the recovered transform is near-identity. Otherwise the line-geometry
+        # alignment residual would confound the accuracy (it names shanks fine but is
+        # not an accurate registration); such a case gets naming only, no plan/error.
+        # (Import cases already have an authoritative co-framed ros_plan.tsv.)
+        rot_deg = float(np.degrees(np.arccos(max(-1.0, min(1.0, (np.trace(R) - 1.0) / 2.0)))))
+        co_framed = rot_deg <= 3.0 and float(np.linalg.norm(tvec)) <= 5.0
+        plan_path = job.workdir / "ros_plan.tsv"
+        if not co_framed:
+            _rlog(f"NOT co-framed (rot={rot_deg:.1f}deg, t={np.linalg.norm(tvec):.1f}mm) "
+                  f"→ naming only, no accuracy plan persisted")
+        if req.ros_text.strip() and not plan_path.is_file() and int(res.refined_inliers) >= 3 and co_framed:
+            try:
+                Minv = np.linalg.inv(M)                    # transform_4x4 is CT→ros; invert for ros→CT
+                def _to_ct(p):
+                    q = Minv @ np.array([p[0], p[1], p[2], 1.0], dtype=float)
+                    return [float(q[0]), float(q[1]), float(q[2])]
+                import csv as _csv
+                with open(plan_path, "w", newline="", encoding="utf-8") as f:
+                    w = _csv.writer(f, delimiter="\t")
+                    w.writerow(["name", "start_x", "start_y", "start_z", "end_x", "end_y", "end_z"])
+                    for pl in plan:
+                        s, e = _to_ct(pl["start"]), _to_ct(pl["end"])
+                        w.writerow([pl["name"], *(f"{v:.6f}" for v in s), *(f"{v:.6f}" for v in e)])
+                (job.workdir / "plan_accuracy.json").unlink(missing_ok=True)   # recompute with the new plan
+                _rlog(f"persisted ros_plan.tsv ({len(plan)} plan lines in CT frame)")
+            except Exception as exc:                        # noqa: BLE001 — persistence is best-effort
+                _rlog(f"could not persist ros_plan.tsv: {exc}")
+
         _rlog(f"RESULT matched={len(matched)}/{len(det)} inliers={int(res.refined_inliers)} "
               f"unmatched_det={[(s['det'], s['plan'], s['angle_deg']) for s in unmatched_det]} "
               f"unused_plan={[rn for (rn, dn, _a, _p) in res.pairs if not dn]}")
-        return {"matched": matched,
+        return {"matched": matched, "assignments": assignments,
                 "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
                 "unmatched_det": unmatched_det,
                 "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}

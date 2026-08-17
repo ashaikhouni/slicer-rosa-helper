@@ -41,6 +41,8 @@
   .titem:hover{background:#111a22}.titem[aria-selected="true"]{background:#12222a;border-color:var(--accent)}
   .swatch{width:10px;height:10px;border-radius:3px}
   .tname{font-weight:650;font-size:12.5px}.tmeta{font-size:10.5px;color:var(--muted);margin-top:1px}
+  .accbadge{font-family:var(--mono);font-weight:600;padding:0 4px;border-radius:8px}
+  .accbadge.accg{color:var(--good)}.accbadge.accw{color:var(--warn)}.accbadge.accb{color:var(--bad)}
   .pill{font-size:9px;letter-spacing:.04em;text-transform:uppercase;font-weight:700;padding:2px 5px;border-radius:20px}
   .pill.high{color:var(--good);background:#122a1e}.pill.medium{color:var(--warn);background:#2a2413}.pill.low{color:var(--bad);background:#2a1414}
   .pill.added{color:var(--good);background:#122a1e}
@@ -375,11 +377,26 @@ function drawMIP(draft){const cv=$("#mipCv"),G=mipGeom(cv,draft?150:280),g=cv.ge
     g.beginPath();g.moveTo(x-4,y);g.lineTo(x+4,y);g.moveTo(x,y-4);g.lineTo(x,y+4);g.stroke();});
   _mipG=G;
 }
+// Plan-vs-actual accuracy (only when the case has a co-framed plan). Populated by
+// boot() from /plan-accuracy; a per-shank tip-error badge in the trajectory list.
+let ACC={};
+const _accmm=v=>v==null?"–":v.toFixed(1)+"mm";
+function _accBadge(name){
+  const r=ACC[name]; if(!r||r.target_error_mm==null) return "";
+  const v=r.target_error_mm, cls=v<=3?"accg":v<=6?"accw":"accb";
+  return ` &middot; <span class="accbadge ${cls}" title="vs plan &middot; entry ${_accmm(r.entry_error_mm)} &middot; tip ${_accmm(r.target_error_mm)} &middot; axis ${r.angle_deg==null?"–":r.angle_deg.toFixed(1)+"°"}">tip ${_accmm(v)}</span>`;
+}
+function loadAccuracy(){
+  const base=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+  fetch(base+"/plan-accuracy",{cache:"no-store"}).then(r=>r.json()).then(a=>{
+    if(a&&a.has_plan&&Array.isArray(a.rows)){ACC={};a.rows.forEach(r=>ACC[r.trajectory]=r);renderList();}
+  }).catch(()=>{});
+}
 function renderList(){const el=$("#tlist");el.innerHTML="";
   CASE.trajectories.forEach(t=>{const d=document.createElement("div");d.className="titem";
     d.setAttribute("role","option");d.setAttribute("aria-selected",t.name===activeId);d.tabIndex=0;
     d.innerHTML=`<span class="swatch" style="background:${t.color}"></span>
-      <div><div class="tname">${t.name}</div><div class="tmeta">${MODELS[t.model].n} contacts &middot; ${(t.length_mm||0).toFixed(0)} mm</div></div>
+      <div><div class="tname">${t.name}</div><div class="tmeta">${MODELS[t.model].n} contacts &middot; ${(t.length_mm||0).toFixed(0)} mm${_accBadge(t.name)}</div></div>
       <span class="pill ${t.confidence_label||'medium'}">${t.confidence_label||''}</span>`;
     d.onclick=()=>selectTraj(t.name);d.onkeydown=e=>{if(e.key==="Enter")selectTraj(t.name);};el.appendChild(d);});
   $("#tcount").textContent=CASE.trajectories.length+" shanks";}
@@ -636,7 +653,7 @@ $("#mipCv").title="Drag: rotate (full orbit) · drag the E/T dots: edit endpoint
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";
   setWin(700,2200);$$(".wbtn").forEach(b=>b.setAttribute("aria-pressed",b.dataset.win==="metal"));  // metal default (electrode-first)
-  initModels();renderList();syncInspector();resliceAll();
+  initModels();renderList();syncInspector();resliceAll();loadAccuracy();
   new ResizeObserver(()=>resliceAll()).observe(document.querySelector(".viewport"));
 }
 async function boot(){

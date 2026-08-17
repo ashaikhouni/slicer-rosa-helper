@@ -663,6 +663,37 @@ function renderReview(doc) {
     if (b) b.classList.add("open");
   }
   syncVisibility(doc);
+  _loadReviewAccuracy();
+}
+
+// Plan-vs-actual accuracy: shown only for a case with a co-framed plan
+// (ros_plan.tsv). Headline = median target error; per-shank badge = its tip error.
+const _accMm = (v) => (v == null ? "–" : v.toFixed(1) + " mm");
+const _accCls = (v) => (v == null ? "" : v <= 3 ? "acc-ok" : v <= 6 ? "acc-warn" : "acc-bad");
+async function _loadReviewAccuracy() {
+  const head = $("plan-acc-head");
+  if (!head || !state.jobId) return;
+  head.hidden = true;                       // hide now → no stale headline flash while the new case loads
+  const jid = state.jobId;
+  const acc = await jget(`${API}/jobs/${jid}/plan-accuracy`).catch(() => null);
+  if (state.jobId !== jid) return;          // navigated to another case mid-fetch → don't paint A onto B
+  if (!acc || !acc.has_plan || !acc.rows) { head.hidden = true; return; }
+  state.accuracy = acc;
+  head.hidden = false;
+  head.innerHTML = `accuracy vs plan · median tip <b class="${_accCls(acc.headline_tpe_mm)}">`
+    + `${_accMm(acc.headline_tpe_mm)}</b> · ${acc.n_matched}/${acc.n_plan} shanks matched`;
+  const by = {}; for (const r of acc.rows) by[r.trajectory] = r;
+  for (const box of document.querySelectorAll("#reviewlist .shank")) {
+    const r = by[box.dataset.shank];
+    const meta = box.querySelector(".shank-meta");
+    if (!r || r.target_error_mm == null || !meta || meta.nextElementSibling?.classList.contains("acc-badge")) continue;
+    const b = el("span", { class: "acc-badge " + _accCls(r.target_error_mm),
+      title: `vs plan · entry ${_accMm(r.entry_error_mm)} · tip ${_accMm(r.target_error_mm)}`
+             + ` · axis ${r.angle_deg == null ? "–" : r.angle_deg.toFixed(1) + "°"}`
+             + ` · contact radial(max) ${_accMm(r.max_contact_radial_mm)}` },
+      "tip " + _accMm(r.target_error_mm));
+    meta.after(b);
+  }
 }
 
 // Accordion: one shank open at a time; opening one snaps the 3D view to it.
