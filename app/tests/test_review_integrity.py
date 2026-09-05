@@ -120,11 +120,12 @@ class ReviewIntegrityTests(unittest.TestCase):
             self.assertEqual((self.case / n).read_bytes(), original)
 
     def test_accuracy_requires_independent_plan_and_valid_hash(self):
-        (self.case / 'ros_plan.tsv').write_text(self.traj)
+        # Hash the actual file bytes, including Windows CRLF line endings.
+        (self.case / 'ros_plan.tsv').write_bytes(self.traj.replace('\n', '\r\n').encode('utf-8'))
         client = TestClient(create_app(work_root=self.root))
         self.assertFalse(client.get('/api/v1/jobs/case/plan-accuracy').json()['has_plan'])
         self.manifest['params'] = {'plan_source': 'rosa_import',
-                                  'plan_sha256': hashlib.sha256(self.traj.encode()).hexdigest()}
+                                  'plan_sha256': hashlib.sha256((self.case / 'ros_plan.tsv').read_bytes()).hexdigest()}
         self.save_manifest()
         self.assertTrue(client.get('/api/v1/jobs/case/plan-accuracy').json()['has_plan'])
         (self.case / 'ros_plan.tsv').write_text(self.traj.replace('A\t0', 'A\t1'))
