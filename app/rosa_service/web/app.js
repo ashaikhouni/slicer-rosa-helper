@@ -646,7 +646,7 @@ function renderReview(doc) {
       const row = el("div", { class: "contact" });
       row.dataset.label = c.name; row.dataset.shank = shank.name; row.dataset.cindex = c.index;
       row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
-      const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: "—" });
+      const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: c.region_stale ? "Relabel after edit" : "—" });
       region.onchange = () => {
         if (region.value.trim())
           patch([{ op: "relabel_contact", shank: shank.name, index: c.index, region: region.value.trim() }]);
@@ -677,7 +677,11 @@ async function _loadReviewAccuracy() {
   const jid = state.jobId;
   const acc = await jget(`${API}/jobs/${jid}/plan-accuracy`).catch(() => null);
   if (state.jobId !== jid) return;          // navigated to another case mid-fetch → don't paint A onto B
-  if (!acc || !acc.has_plan || !acc.rows) { head.hidden = true; return; }
+  if (!acc || !acc.has_plan || !acc.rows) {
+    head.hidden = !acc?.reason;
+    if (acc?.reason) head.textContent = acc.reason;
+    return;
+  }
   state.accuracy = acc;
   head.hidden = false;
   head.innerHTML = `accuracy vs plan · median tip <b class="${_accCls(acc.headline_tpe_mm)}">`
@@ -1020,6 +1024,11 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   setLabelBusy(false);
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
+    if (p.stale) {
+      $("labelmsg").textContent = "Contacts changed since labeling. Run the atlas again before applying labels.";
+      $("approvebtn").hidden = true;
+      return;
+    }
     // Already applied? Approval commits the proposed regions into the parent
     // ReviewDoc (state.doc), so if every proposed region is already committed
     // there, this atlas's labels were approved (survives reload). A different

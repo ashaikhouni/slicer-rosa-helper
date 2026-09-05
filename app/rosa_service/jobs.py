@@ -32,6 +32,9 @@ from pathlib import Path
 from .models import Artifact, JobSpec, JobState, JobStatus
 
 
+from .review import atomic_write_text, ReviewPersistenceError
+
+
 class JobNotFound(KeyError):
     pass
 
@@ -661,11 +664,7 @@ class _Job:
             "started_at": self.started_at, "ended_at": self.ended_at,
             "exit_code": self.exit_code, "error": self.error,
         }
-        try:
-            (self.workdir / "manifest.json").write_text(
-                json.dumps(manifest, indent=2), encoding="utf-8")
-        except Exception:  # noqa: BLE001 — manifest is best-effort audit
-            pass
+        atomic_write_text(self.workdir / "manifest.json", json.dumps(manifest, indent=2))
 
 
 class JobRunner:
@@ -697,6 +696,11 @@ class JobRunner:
                 job.ended_at = m.get("ended_at")
                 job.exit_code = m.get("exit_code")
                 job.error = m.get("error")
+                if not job.state.terminal:
+                    job.state = JobState.failed
+                    job.error = "Processing was interrupted. Start a new run to retry."
+                    job.ended_at = time.time()
+                    job._write_manifest()
                 job._finished = True   # completed → logs won't stream, routes read disk
                 self._jobs[jid] = job
             except Exception:  # noqa: BLE001 — skip an unreadable/partial manifest
@@ -737,6 +741,10 @@ class JobRunner:
         workdir.mkdir(parents=True, exist_ok=True)
         steps = build_command(spec, workdir)  # raises ValueError on bad spec
         job = _Job(job_id, spec, steps, workdir)
+        try:
+            job._write_manifest()
+        except OSError as exc:
+            raise ReviewPersistenceError("Could not save the new job. Check disk space and folder permissions, then retry.") from exc
         self._jobs[job_id] = job
         # Requires a running loop — create() is called from async endpoints.
         asyncio.create_task(self._run(job))
@@ -797,7 +805,11 @@ class JobRunner:
     async def _finish(self, job: _Job, state: JobState) -> None:
         job.state = state
         job.ended_at = time.time()
-        job._write_manifest()
+        try:
+            job._write_manifest()
+        except OSError:
+            job.state = JobState.failed
+            job.error = "Results could not be recorded. Check disk space and folder permissions before retrying."
         async with job._cond:
             job._finished = True
             job._cond.notify_all()

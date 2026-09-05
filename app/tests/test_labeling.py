@@ -89,6 +89,23 @@ class LabelingFlowTests(unittest.IsolatedAsyncioTestCase):
         lpc = next(s for s in doc["shanks"] if s["name"] == "LPC")
         self.assertTrue(all(c["region"] == "Left Hippocampus" for c in lpc["contacts"]))
 
+    async def test_geometry_change_invalidates_proposed_labels(self):
+        import hashlib
+        parent = await self._emit_parent()
+        label = (await self.client.post(
+            f"{API}/jobs",
+            json={"kind": "selftest-label", "params": {"parent": parent}})).json()["id"]
+        await self._wait_terminal(label)
+        contacts = self.app.state.runner.get(parent).workdir / "contacts.tsv"
+        job = self.app.state.runner.get(label)
+        job.params["contacts_sha256"] = hashlib.sha256(contacts.read_bytes()).hexdigest()
+        self.assertFalse((await self.client.get(f"{API}/jobs/{label}/labels")).json()["stale"])
+        contacts.write_text(contacts.read_text() + "\n")
+        self.assertTrue((await self.client.get(f"{API}/jobs/{label}/labels")).json()["stale"])
+        result = await self.client.post(f"{API}/jobs/{label}/labels/approve")
+        self.assertEqual(result.status_code, 409)
+        self.assertIn("Contacts changed", result.json()["detail"])
+
     async def test_label_requires_parent_contacts(self):
         # A parent with no contacts.tsv → 409.
         bare = (await self.client.post(f"{API}/jobs", json={"kind": "selftest"})).json()["id"]

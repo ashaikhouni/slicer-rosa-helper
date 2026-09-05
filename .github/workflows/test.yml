@@ -34,11 +34,27 @@ jobs:
       - name: Install package + test extras
         run: |
           python -m pip install --upgrade pip
-          pip install -e .[test]
+          pip install -e ".[test,mesh]" -e "./app[test]" matplotlib
 
       - name: Run pytest (rosa_core + rosa_agent + shank_core)
         # Excludes tests/deep_core (dataset-gated, needs ROSA_SEEG_DATASET) and
         # tests/rosa_scene (Slicer-coupled). Both run locally against a
         # configured environment, not in hosted CI.
         run: |
-          pytest tests/rosa_core tests/rosa_agent tests/shank_core -q
+          pytest tests/rosa_core tests/rosa_agent tests/shank_core app/tests -q
+
+  windows-service:
+    name: Windows service smoke tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install engine and app
+        run: python -m pip install -e ".[test]" -e "./app[test]"
+      - name: Check staging, job lifecycle, and review persistence
+        run: >-
+          python -m pytest tests/rosa_agent/test_stage_files_command.py
+          app/tests/test_service.py app/tests/test_jobs.py
+          app/tests/test_review_integrity.py -q

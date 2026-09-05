@@ -24,6 +24,20 @@ except Exception:  # noqa: BLE001
 
 @unittest.skipUnless(HAVE, "rosa_detect unavailable")
 class DeepbetStripTests(unittest.TestCase):
+    def setUp(self):
+        # These tests exercise external-interpreter discovery independently of
+        # the bundled ONNX fallback installed on the developer's machine.
+        fallback = mock.patch("rosa_detect.services.deepbet_onnx.deepbet_onnx_available", return_value=False)
+        fallback.start()
+        self.addCleanup(fallback.stop)
+
+    def test_bundled_fallback_runs_when_external_backend_is_missing(self):
+        with mock.patch.object(ds, "find_deepbet", return_value=None), \
+             mock.patch("rosa_detect.services.deepbet_onnx.deepbet_onnx_available", return_value=True), \
+             mock.patch("rosa_detect.services.deepbet_onnx.run_deepbet_onnx", return_value=Path("out.nii.gz")) as run:
+            self.assertEqual(ds.run_deepbet("in.nii.gz", "out.nii.gz"), Path("out.nii.gz"))
+            run.assert_called_once()
+
     def test_find_deepbet_none_when_nothing_imports(self):
         # Neutralise the env var (empty → skipped), make every probe "fail to
         # import" → no candidate qualifies → None.

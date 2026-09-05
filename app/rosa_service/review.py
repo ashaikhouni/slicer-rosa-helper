@@ -13,6 +13,9 @@ the engine's placement and are a follow-up.
 from __future__ import annotations
 
 from pathlib import Path
+import math
+import os
+import tempfile
 
 # App depends on the engine (never the reverse). Reuse its reader + columns.
 from rosa_agent.io.trajectory_io import (
@@ -117,6 +120,7 @@ def apply_edit(doc: ReviewDoc, edit: ReviewEdit) -> None:
         if edit.region is None:
             raise ValueError("relabel_contact requires 'region'")
         contact.region = edit.region
+        contact.region_stale = False
 
 
 def export_contacts(doc: ReviewDoc, out_path: str | Path) -> int:
@@ -139,6 +143,30 @@ def export_contacts(doc: ReviewDoc, out_path: str | Path) -> int:
     return len(rows)
 
 
+class ReviewPersistenceError(RuntimeError):
+    """A review could not be read or durably saved; never silently rebuild it."""
+
+
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Replace a UTF-8 file only after the complete new contents reach disk."""
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent,
+                                         prefix=f".{path.name}.", delete=False) as f:
+            tmp = Path(f.name)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    atomic_write_bytes(path, text.encode("utf-8"))
+
+
 class ReviewStore:
     """Per-job ReviewDoc registry, persisted to ``<job_dir>/review.json``."""
 
@@ -155,52 +183,63 @@ class ReviewStore:
                 try:
                     self._docs[job_id] = ReviewDoc.model_validate_json(saved.read_text(encoding="utf-8"))
                     return self._docs[job_id]
-                except Exception:  # noqa: BLE001 — fall back to a fresh build
-                    pass
-            self._docs[job_id] = build_review_doc(job_dir)
-            self._persist(job_id, job_dir)
+                except Exception as exc:
+                    raise ReviewPersistenceError("Saved review could not be read. Restore it from backup before continuing.") from exc
+            doc = build_review_doc(job_dir)
+            self._persist(job_id, job_dir, doc)
+            self._docs[job_id] = doc
         return self._docs[job_id]
 
     def apply(self, job_id: str, job_dir: str | Path, ops: list[ReviewEdit]) -> ReviewDoc:
-        doc = self.get_or_build(job_id, job_dir)
+        doc = self.get_or_build(job_id, job_dir).model_copy(deep=True)
         for op in ops:
             apply_edit(doc, op)
-        self._persist(job_id, job_dir)
+        self._persist(job_id, job_dir, doc)
+        self._docs[job_id] = doc
         return doc
 
     def rebuild_preserving_labels(self, job_id: str, job_dir: str | Path,
                                   renames: dict[str, str] | None = None) -> ReviewDoc:
-        """After a geometry edit rewrote contacts.tsv: rebuild the doc from the
-        new contacts, carrying over anatomical labels by (shank, contact_index).
-        ``renames`` maps new→old shank name so labels follow a rename. Removed
-        shanks / contacts drop out; added ones start unlabeled."""
+        """Carry inclusion decisions across edits; retain only geometrically valid labels.
+
+        A rename preserves identity through new→old names. Moved contacts keep
+        their inclusion decisions, but their anatomical labels need review again.
+        """
         job_dir = Path(job_dir)
         renames = renames or {}
         prev = self._docs.get(job_id)
         if prev is None and (job_dir / "review.json").is_file():
             try:
                 prev = ReviewDoc.model_validate_json((job_dir / "review.json").read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                prev = None
-        regions = {(s.name, c.index): c.region
-                   for s in (prev.shanks if prev else []) for c in s.contacts if c.region}
-        doc = build_review_doc(job_dir)                 # from the NEW contacts.tsv
+            except Exception as exc:
+                raise ReviewPersistenceError("Saved review could not be read; geometry edit was not accepted.") from exc
+        old_shanks = {s.name: s for s in (prev.shanks if prev else [])}
+        doc = build_review_doc(job_dir)
         for s in doc.shanks:
-            src = renames.get(s.name, s.name)           # follow a rename to old labels
+            old = old_shanks.get(renames.get(s.name, s.name))
+            if old is None:
+                continue
+            s.accepted = old.accepted
+            contacts = {c.index: c for c in old.contacts}
             for c in s.contacts:
-                r = regions.get((src, c.index))
-                if r:
-                    c.region = r
+                prior = contacts.get(c.index)
+                if prior is None:
+                    continue
+                c.accepted = prior.accepted
+                unchanged = c.model == prior.model and all(
+                    math.isclose(a, b, abs_tol=1e-5, rel_tol=0)
+                    for a, b in zip((c.x, c.y, c.z), (prior.x, prior.y, prior.z)))
+                c.region = prior.region if unchanged else None
+                c.region_stale = prior.region_stale or (not unchanged and bool(prior.region))
+        self._persist(job_id, job_dir, doc)
         self._docs[job_id] = doc
-        self._persist(job_id, job_dir)
         return doc
 
-    def _persist(self, job_id: str, job_dir: str | Path) -> None:
+    def _persist(self, job_id: str, job_dir: str | Path, doc: ReviewDoc) -> None:
         try:
-            (Path(job_dir) / "review.json").write_text(
-                self._docs[job_id].model_dump_json(indent=2), encoding="utf-8")
-        except Exception:  # noqa: BLE001 — persistence is best-effort audit
-            pass
+            atomic_write_text(Path(job_dir) / "review.json", doc.model_dump_json(indent=2))
+        except OSError as exc:
+            raise ReviewPersistenceError("Review could not be saved. Check disk space and folder permissions, then retry.") from exc
 
 
 __all__ = [

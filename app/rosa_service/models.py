@@ -96,6 +96,7 @@ class ReviewContact(BaseModel):
     z: float
     model: str | None = None         # electrode model
     region: str | None = None        # anatomical label (editable via relabel)
+    region_stale: bool = False       # geometry changed; relabel before reuse
     accepted: bool = True            # reject to drop from export
 
 

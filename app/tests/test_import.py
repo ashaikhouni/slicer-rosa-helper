@@ -100,11 +100,11 @@ class ImportKindTests(unittest.TestCase):
                 "trajectories": "/x/trajectories.tsv", "label": "case"})
             steps = build_command(spec, wd)
         flat = [" ".join(s) for s in steps]
-        self.assertIn("shutil", flat[0])                       # first: stage the TSVs
+        self.assertIn("stage-files", flat[0])                       # first: stage the TSVs
         self.assertTrue(any("view-results" in s for s in flat))
         self.assertFalse(any(" detect " in f" {s} " for s in flat))   # no re-detection
         self.assertFalse(any(s.strip().endswith("contacts") or " contacts " in s
-                             for s in flat if "view-results" not in s and "shutil" not in s))
+                             for s in flat if "view-results" not in s and "stage-files" not in s))
 
     def test_import_kind_requires_trajectories(self):
         from rosa_service.jobs import build_command
