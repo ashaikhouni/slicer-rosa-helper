@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import hashlib
+import base64
+import json
 import shutil
 import tempfile
 import uuid
@@ -34,7 +37,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import (
-    FileResponse, RedirectResponse, Response, StreamingResponse,
+    FileResponse, RedirectResponse, Response, StreamingResponse, JSONResponse,
 )
 from fastapi.staticfiles import StaticFiles
 
@@ -45,7 +48,7 @@ from .models import (
     LabelRequest, ReviewDoc, ReviewEdit, ReviewOp, ReviewPatch, RosMatchRequest,
     RosaCreateRequest, RosaPrepareRequest,
 )
-from .review import ReviewStore, export_contacts
+from .review import ReviewStore, ReviewPersistenceError, atomic_write_bytes, export_contacts
 
 API_VERSION = "v1"
 
@@ -172,6 +175,10 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
     app = FastAPI(title="ROSA app service", version=API_VERSION)
     app.state.runner = runner
     app.state.reviews = reviews
+
+    @app.exception_handler(ReviewPersistenceError)
+    async def review_storage_error(request, exc):
+        return JSONResponse(status_code=507, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def _no_store(request, call_next):
@@ -481,6 +488,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                                 detail="no MRI (T1): provide one, or create the case with an MRI")
         spec = JobSpec(kind="label", params={
             "parent": job_id, "contacts": str(contacts), "ct": ct,
+            "contacts_sha256": hashlib.sha256(contacts.read_bytes()).hexdigest(),
             "t1": t1, "atlas": req.atlas, "thomas_dir": thomas_dir,
             # Reuse the parent pipeline's surface backend so labeling meshes/loads
             # the SAME brain_surface_*.npz rather than a different one.
@@ -494,6 +502,19 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return job.status()
 
+    def labels_stale(job) -> bool:
+        parent_id = job.params.get("parent")
+        if not parent_id:
+            return True
+        contacts = _job_or_404(parent_id).workdir / "contacts.tsv"
+        if not contacts.is_file():
+            return True
+        fingerprint = job.params.get("contacts_sha256")
+        if fingerprint:
+            return hashlib.sha256(contacts.read_bytes()).hexdigest() != fingerprint
+        # Legacy jobs lack a fingerprint: a subsequent geometry write invalidates them.
+        return contacts.stat().st_mtime > job.created_at
+
     @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/labels")
     async def proposed_labels(job_id: str) -> dict:
         """Proposed labels from a finished label job (not yet applied)."""
@@ -505,6 +526,7 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         n_labeled = sum(1 for c in contacts if c["region"])
         return {
             "parent": job.params.get("parent"),
+            "stale": labels_stale(job),
             "atlas": job.params.get("atlas"),
             "n_contacts": len(contacts),
             "n_labeled": n_labeled,
@@ -523,6 +545,8 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         if not parent_id:
             raise HTTPException(status_code=409, detail="label job has no parent recorded")
         parent = _job_or_404(parent_id)
+        if labels_stale(job):
+            raise HTTPException(status_code=409, detail="Contacts changed since labeling. Run the atlas labeling again before applying labels.")
         try:
             contacts = _read_proposed_labels(job.workdir)
         except FileNotFoundError as exc:
@@ -742,11 +766,36 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         kick off a viewer rebuild so Review reflects the edit."""
         from .editor_writeback import write_plan
         job = _job_or_404(job_id)
+        # Preserve the last complete case state if geometry/review persistence fails.
+        files = [job.workdir / n for n in ("trajectories.tsv", "contacts.tsv", "review.json")]
+        previous = {p: p.read_bytes() if p.is_file() else None for p in files}
+        try:
+            # Keep one durable recovery snapshot before touching any case files.
+            recovery = {p.name: base64.b64encode(data).decode("ascii") if data is not None else None
+                        for p, data in previous.items()}
+            atomic_write_bytes(job.workdir / "geometry_previous.json", json.dumps(recovery).encode("utf-8"))
+        except OSError as exc:
+            raise ReviewPersistenceError("Could not save a recovery copy. Geometry was not changed; check disk space and retry.") from exc
         try:
             summary = write_plan(job.workdir, plan)
-        except (ValueError, KeyError) as exc:
+            reviews.rebuild_preserving_labels(job_id, job.workdir, renames=summary.get("renames"))
+        except (ValueError, KeyError, OSError, ReviewPersistenceError) as exc:
+            try:
+                for p, text in previous.items():
+                    if text is None:
+                        p.unlink(missing_ok=True)
+                    elif not p.is_file() or p.read_bytes() != text:
+                        atomic_write_bytes(p, text)
+            except OSError as restore_error:
+                reviews._docs.pop(job_id, None)
+                raise ReviewPersistenceError("Geometry save and recovery failed. The previous files are retained in geometry_previous.json; restore them before continuing.") from restore_error
+            reviews._docs.pop(job_id, None)
+            if isinstance(exc, (OSError, ReviewPersistenceError)):
+                raise ReviewPersistenceError("Geometry edit could not be saved. The previous case was restored; check disk space and retry.") from exc
             raise HTTPException(status_code=422, detail=f"bad plan: {exc}") from exc
-        reviews.rebuild_preserving_labels(job_id, job.workdir, renames=summary.get("renames"))
+        # Plan-vs-actual accuracy is now stale (the actual trajectories changed) —
+        # drop the cache so it recomputes against the edit on next read.
+        (job.workdir / "plan_accuracy.json").unlink(missing_ok=True)
         ct = job.params.get("ct")
         rebuild = None
         if ct:                              # rebuild the 3D scene from the new TSVs
@@ -780,6 +829,58 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             except ValueError:
                 rebuild = None
         return {**summary, "rebuild_job": rebuild}
+
+    def _independent_plan(job_dir: Path) -> bool:
+        """Require import provenance, never a transform fitted to implanted leads."""
+        plan = job_dir / "ros_plan.tsv"
+        if not plan.is_file():
+            return False
+        try:
+            params = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))["params"]
+            digest = hashlib.sha256(plan.read_bytes()).hexdigest()
+            if params.get("plan_source") == "rosa_import":
+                return digest == params.get("plan_sha256")
+            # Existing ROSA imports copied their CT-frame seeds verbatim. Keep
+            # their measurements only when that original can still be verified.
+            seeds = Path(params.get("seeds") or "")
+            return seeds.is_file() and seeds.read_bytes() == plan.read_bytes()
+        except (OSError, ValueError, KeyError):
+            return False
+
+    def _plan_accuracy(job_dir: Path):
+        """Compute-if-stale + cache the plan-vs-actual accuracy for a case.
+        None when the case has no ros_plan.tsv (no plan → no error)."""
+        from rosa_core.plan_accuracy import compute_plan_accuracy
+        if not _independent_plan(job_dir):
+            return None
+        cache, traj = job_dir / "plan_accuracy.json", job_dir / "trajectories.tsv"
+        # Fresh only if the cache is newer than EVERY input (the case files live in
+        # the user's Dropbox and may be hand-edited without touching trajectories.tsv).
+        newest_in = max((p.stat().st_mtime for p in
+                         (traj, job_dir / "ros_plan.tsv", job_dir / "contacts.tsv") if p.is_file()),
+                        default=0.0)
+        if cache.is_file() and cache.stat().st_mtime >= newest_in:
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                pass
+        res = compute_plan_accuracy(job_dir / "ros_plan.tsv", traj, job_dir / "contacts.tsv")
+        if res is not None:
+            try:
+                cache.write_text(json.dumps(res), encoding="utf-8")
+            except OSError:
+                pass
+        return res
+
+    @app.get(f"/api/{API_VERSION}/jobs/{{job_id}}/plan-accuracy")
+    async def plan_accuracy(job_id: str) -> dict:
+        """Per-shank + summary accuracy of the actual trajectories vs the ROSA
+        plan (``ros_plan.tsv``). ``has_plan: false`` when the case has no plan."""
+        job = _job_or_404(job_id)
+        res = _plan_accuracy(job.workdir)
+        reason = ("Plan coordinate provenance is unverified; accuracy is unavailable."
+                  if res is None and (job.workdir / "ros_plan.tsv").is_file() else None)
+        return {"has_plan": res is not None, "reason": reason, **(res or {})}
 
     # ---- uploads (browser drag-drop → a local path a job can consume) ----
 
@@ -883,7 +984,13 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                 continue
             if not rows:
                 continue
-            regions = _regions_from_review(case_dir)
+            doc = reviews.get_or_build(st.id, case_dir)
+            accepted = {(sh.name, str(c.index)): c for sh in doc.shanks if sh.accepted
+                        for c in sh.contacts if c.accepted}
+            rows = [r for r in rows if (r.get("trajectory"), str(r.get("contact_index"))) in accepted]
+            if not rows:
+                continue
+            regions = {c.name: c.region for c in accepted.values()}
             contacts = [[r["mni_x"], r["mni_y"], r["mni_z"],
                          regions.get(r.get("name", "")) or "", r.get("hemisphere", ""),
                          r.get("name", "")]
@@ -931,27 +1038,39 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post(f"/api/{API_VERSION}/jobs/{{job_id}}/match-ros")
-    async def match_ros(job_id: str, req: RosMatchRequest) -> dict:
+    def match_ros(job_id: str, req: RosMatchRequest) -> dict:      # sync → threadpool, never blocks the event loop
         """Match this case's detected trajectories against a ROSA surgical plan
         (pure line geometry — no image registration; handles entry↔target
         ambiguity). Returns the detected→plan name map + per-match confidence
         (axis angle°, perpendicular mm), for a batch rename in the editor."""
+        import sys
+        def _rlog(msg: str) -> None:              # → sidecar.log, so a failure is diagnosable
+            print(f"[match-ros] job={job_id[:8]} {msg}", file=sys.stderr, flush=True)
+
         job = _job_or_404(job_id)
         det = _read_traj_lines(job.workdir / "trajectories.tsv")
+        _rlog(f"detected={len(det)} shanks from trajectories.tsv; "
+              f"ros_text={len(req.ros_text or '')} chars")
         if len(det) < 3:
+            _rlog("ABORT: <3 detected trajectories")
             raise HTTPException(status_code=422, detail="need ≥3 detected trajectories to match")
         if req.ros_text.strip():
             try:
                 plan = _ros_plan_lines(req.ros_text)
             except Exception as exc:              # noqa: BLE001
+                _rlog(f"ABORT: .ros parse error: {exc}")
                 raise HTTPException(status_code=422, detail=f"could not parse .ros plan: {exc}") from exc
+            _rlog(f"parsed plan={len(plan)} trajectories from .ros text")
         else:                                     # ROSA-imported case → its stashed plan
             stash = job.workdir / "ros_plan.tsv"
             if not stash.is_file():
+                _rlog("ABORT: no ros_text and no stashed ros_plan.tsv")
                 raise HTTPException(status_code=422,
                                     detail="no .ros plan provided and none stashed for this case")
             plan = _read_traj_lines(stash)
+            _rlog(f"plan={len(plan)} from stashed ros_plan.tsv")
         if len(plan) < 3:
+            _rlog("ABORT: plan has <3 trajectories")
             raise HTTPException(status_code=422, detail="the .ros plan needs ≥3 trajectories")
         from rosa_core.cross_volume_match import cross_volume_match
         res = cross_volume_match(plan, det)
@@ -959,8 +1078,52 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
                     "angle_deg": round(a, 1) if a is not None else None,
                     "perp_mm": round(p, 1) if p is not None else None}
                    for (rn, dn, a, p) in res.pairs if dn]
-        return {"matched": matched,
+        # For each LEFTOVER detected shank, suggest the nearest LEFTOVER plan line
+        # under the recovered transform (even if beyond tolerance) so the UI can
+        # say WHY it was left unnamed + offer a likely name to apply by hand.
+        import numpy as np
+        from rosa_core.cross_volume_match import trajectories_to_lines, line_perp_distance
+        matched_det = {m["det"] for m in matched}
+        matched_plan = {m["plan"] for m in matched}
+        M = np.asarray(res.transform_4x4, dtype=float)
+        R, tvec = M[:3, :3], M[:3, 3]
+        left_plan = [pl for pl in trajectories_to_lines(plan) if pl.name not in matched_plan]
+        unmatched_det = []
+        for dl in trajectories_to_lines(det):
+            if dl.name in matched_det:
+                continue
+            mid_t = R @ np.asarray(dl.mid, float) + tvec
+            dir_t = R @ np.asarray(dl.direction, float)
+            best = {"plan": None, "angle_deg": None, "perp_mm": None}
+            for pl in left_plan:
+                ang = float(np.degrees(np.arccos(
+                    min(1.0, abs(float(np.dot(dir_t, pl.direction)))))))
+                if best["angle_deg"] is None or ang < best["angle_deg"]:
+                    best = {"plan": pl.name, "angle_deg": round(ang, 1),
+                            "perp_mm": round(line_perp_distance(
+                                mid_t, dir_t, np.asarray(pl.mid, float),
+                                np.asarray(pl.direction, float)), 1)}
+            unmatched_det.append({"det": dl.name, **best})
+
+        # Best-fit-for-ALL: apply the confident matches PLUS each leftover shank's
+        # nearest plan line; the client applies them all and flags the low-confidence
+        # ones (over-tolerance) so a forced/wrong name stands out.
+        assignments = [{**m, "confident": True} for m in matched] + [
+            {"det": s["det"], "plan": s["plan"], "angle_deg": s["angle_deg"],
+             "perp_mm": s["perp_mm"], "confident": False}
+            for s in unmatched_det if s.get("plan")]
+
+        # Geometry matching is for naming only. Even a near-identity fit can
+        # absorb systematic implantation error, so never derive an accuracy plan
+        # from it. ROSA-imported CT-frame plans remain untouched.
+        _rlog("Naming alignment only; no accuracy plan generated from detected trajectories")
+
+        _rlog(f"RESULT matched={len(matched)}/{len(det)} inliers={int(res.refined_inliers)} "
+              f"unmatched_det={[(s['det'], s['plan'], s['angle_deg']) for s in unmatched_det]} "
+              f"unused_plan={[rn for (rn, dn, _a, _p) in res.pairs if not dn]}")
+        return {"matched": matched, "assignments": assignments,
                 "unmatched_plan": [rn for (rn, dn, _a, _p) in res.pairs if not dn],
+                "unmatched_det": unmatched_det,
                 "n_plan": len(plan), "n_det": len(det), "inliers": int(res.refined_inliers)}
 
     # ---- import a ROSA robot case (a .ros plan + Analyze images) ----
@@ -1026,6 +1189,9 @@ def create_app(*, work_root: str | Path | None = None, max_concurrent: int = 1) 
         if req.seeds_path and Path(req.seeds_path).is_file():
             try:                              # also stash for editor "Label from ROS"
                 shutil.copyfile(req.seeds_path, job.workdir / "ros_plan.tsv")
+                job.params["plan_source"] = "rosa_import"
+                job.params["plan_sha256"] = hashlib.sha256((job.workdir / "ros_plan.tsv").read_bytes()).hexdigest()
+                job._write_manifest()
             except OSError:
                 pass
         return job.status().model_dump()

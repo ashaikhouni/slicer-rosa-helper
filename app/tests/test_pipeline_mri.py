@@ -47,6 +47,9 @@ class PipelineMriBuildTests(unittest.TestCase):
     def setUp(self):
         self.wd = Path("/tmp/case_xyz")   # not touched on disk — argv only
         self.regcache = self.wd / "regcache"
+        brainchop = mock.patch.object(J, "_brainchop_available", return_value=False)
+        brainchop.start()
+        self.addCleanup(brainchop.stop)
 
     # ---- pipeline WITHOUT an MRI: unchanged (CT MIP-only) ----------------
 
@@ -74,7 +77,8 @@ class PipelineMriBuildTests(unittest.TestCase):
              mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
         # brain-extract (deepbet + register) → detect → contacts → view-results
-        self.assertEqual(len(steps), 4)
+        self.assertEqual(len(steps), 5)
+        self.assertIn("stamp-mni", steps[-1])
         native = str(self.regcache / "brain_mask_native.nii.gz")
         in_ct = str(self.regcache / "brain_mask_in_ct.nii.gz")
         tfm = str(self.regcache / "t1_to_ct.tfm")
@@ -91,7 +95,7 @@ class PipelineMriBuildTests(unittest.TestCase):
         self.assertTrue(_sub(contacts, ["--brain-mask", in_ct]))
         # 3) view-results meshes the surface from the NATIVE mask and REUSES the
         #    saved transform (no redundant registration).
-        view = steps[-1]
+        view = next(s for s in steps if "view-results" in s)
         self.assertIn("view-results", view)
         self.assertTrue(_sub(view, ["--brain-native-volume", "/d/t1.nii.gz"]))
         self.assertTrue(_sub(view, ["--brain-mask-cache", native]))
@@ -122,7 +126,7 @@ class PipelineMriBuildTests(unittest.TestCase):
         with mock.patch.object(J, "_deepbet_available", return_value=False), \
              mock.patch.object(J, "_fastsurfer_available", return_value=True):
             steps = J.build_command(spec, self.wd)
-        view = steps[-1]
+        view = next(s for s in steps if "view-results" in s)
         # FastSurfer available → the FS surface cache name + a build flag.
         self.assertTrue(_sub(view, ["--brain-surface-cache",
                                     str(self.regcache / "brain_surface_fs.npz")]))
@@ -136,7 +140,7 @@ class PipelineMriBuildTests(unittest.TestCase):
              mock.patch.object(J, "_fastsurfer_available", return_value=True), \
              mock.patch.object(J, "_deepmriprep_available", return_value=True):
             steps = J.build_command(spec, self.wd)
-        view = steps[-1]
+        view = next(s for s in steps if "view-results" in s)
         self.assertTrue(_sub(view, ["--brain-surface-cache",
                                     str(self.regcache / "brain_surface_dm.npz")]))
         self.assertIn("--deepmriprep", view)
@@ -150,7 +154,7 @@ class PipelineMriBuildTests(unittest.TestCase):
              mock.patch.object(J, "_fastsurfer_available", return_value=True), \
              mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
-        view = steps[-1]
+        view = next(s for s in steps if "view-results" in s)
         self.assertTrue(_sub(view, ["--brain-surface-cache",
                                     str(self.regcache / "brain_surface_fs.npz")]))
         self.assertIn("--fastsurfer", view)
@@ -168,7 +172,7 @@ class PipelineMriBuildTests(unittest.TestCase):
              mock.patch.object(J, "_deepmriprep_available", return_value=False):
             steps = J.build_command(spec, self.wd)
         rc = Path("/cases/parent/regcache")
-        view = steps[-1]
+        view = next(s for s in steps if "view-results" in s)
         # Exact ordered surface block the label job produced before the refactor.
         expect = ["--brain-native-volume", "/d/t1.nii.gz",
                   "--brain-to-ct-transform", str(rc / "t1_to_ct.tfm"),

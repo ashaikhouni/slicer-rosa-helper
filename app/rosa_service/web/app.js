@@ -646,7 +646,7 @@ function renderReview(doc) {
       const row = el("div", { class: "contact" });
       row.dataset.label = c.name; row.dataset.shank = shank.name; row.dataset.cindex = c.index;
       row.onclick = (ev) => { if (!ev.target.closest("input")) selectInViewer(c.name, shank.name); };
-      const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: "—" });
+      const region = el("input", { type: "text", class: "region", value: c.region || "", placeholder: c.region_stale ? "Relabel after edit" : "—" });
       region.onchange = () => {
         if (region.value.trim())
           patch([{ op: "relabel_contact", shank: shank.name, index: c.index, region: region.value.trim() }]);
@@ -663,6 +663,41 @@ function renderReview(doc) {
     if (b) b.classList.add("open");
   }
   syncVisibility(doc);
+  _loadReviewAccuracy();
+}
+
+// Plan-vs-actual accuracy: shown only for a case with a co-framed plan
+// (ros_plan.tsv). Headline = median target error; per-shank badge = its tip error.
+const _accMm = (v) => (v == null ? "–" : v.toFixed(1) + " mm");
+const _accCls = (v) => (v == null ? "" : v <= 3 ? "acc-ok" : v <= 6 ? "acc-warn" : "acc-bad");
+async function _loadReviewAccuracy() {
+  const head = $("plan-acc-head");
+  if (!head || !state.jobId) return;
+  head.hidden = true;                       // hide now → no stale headline flash while the new case loads
+  const jid = state.jobId;
+  const acc = await jget(`${API}/jobs/${jid}/plan-accuracy`).catch(() => null);
+  if (state.jobId !== jid) return;          // navigated to another case mid-fetch → don't paint A onto B
+  if (!acc || !acc.has_plan || !acc.rows) {
+    head.hidden = !acc?.reason;
+    if (acc?.reason) head.textContent = acc.reason;
+    return;
+  }
+  state.accuracy = acc;
+  head.hidden = false;
+  head.innerHTML = `accuracy vs plan · median tip <b class="${_accCls(acc.headline_tpe_mm)}">`
+    + `${_accMm(acc.headline_tpe_mm)}</b> · ${acc.n_matched}/${acc.n_plan} shanks matched`;
+  const by = {}; for (const r of acc.rows) by[r.trajectory] = r;
+  for (const box of document.querySelectorAll("#reviewlist .shank")) {
+    const r = by[box.dataset.shank];
+    const meta = box.querySelector(".shank-meta");
+    if (!r || r.target_error_mm == null || !meta || meta.nextElementSibling?.classList.contains("acc-badge")) continue;
+    const b = el("span", { class: "acc-badge " + _accCls(r.target_error_mm),
+      title: `vs plan · entry ${_accMm(r.entry_error_mm)} · tip ${_accMm(r.target_error_mm)}`
+             + ` · axis ${r.angle_deg == null ? "–" : r.angle_deg.toFixed(1) + "°"}`
+             + ` · contact radial(max) ${_accMm(r.max_contact_radial_mm)}` },
+      "tip " + _accMm(r.target_error_mm));
+    meta.after(b);
+  }
 }
 
 // Accordion: one shank open at a time; opening one snaps the 3D view to it.
@@ -682,10 +717,11 @@ function _postViewer(msg) {
 // The embedded viewer reports which slice-display controls apply for this case
 // (has a warped atlas? has an MRI to fade to?). Host them in the top row and
 // reset to the viewer's defaults (atlas on, fade at CT) on each (re)load.
-function _onSliceCaps({ atlas, fade }) {
-  state.sliceCaps = { atlas: !!atlas, fade: !!fade };
+function _onSliceCaps({ atlas, fade, acpc }) {
+  state.sliceCaps = { atlas: !!atlas, fade: !!fade, acpc: !!acpc };
   $("app-atlas-ov").checked = true;
   $("app-slice-fade").value = 0;
+  $("app-acpc").checked = false;            // default to the native scanner grid
   _syncModeControls();
 }
 
@@ -700,7 +736,8 @@ function _syncModeControls() {
   $("probemodectl").hidden = !(is3d && probe.present);
   $("slicefade-item").hidden = !(is3d && caps.fade);
   $("atlasov-item").hidden = !(is3d && caps.atlas);
-  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas));
+  $("acpc-item").hidden = !(is3d && caps.acpc);
+  $("sliceovctl").hidden = !(is3d && (caps.fade || caps.atlas || caps.acpc));
   $("qctools").hidden = is3d;
 }
 
@@ -987,6 +1024,11 @@ async function showProposed(id, { reloadViewer = true, jumpToQc = true } = {}) {
   setLabelBusy(false);
   try {
     const p = await jget(`${API}/jobs/${id}/labels`);
+    if (p.stale) {
+      $("labelmsg").textContent = "Contacts changed since labeling. Run the atlas again before applying labels.";
+      $("approvebtn").hidden = true;
+      return;
+    }
     // Already applied? Approval commits the proposed regions into the parent
     // ReviewDoc (state.doc), so if every proposed region is already committed
     // there, this atlas's labels were approved (survives reload). A different
@@ -1514,6 +1556,7 @@ async function boot() {
   window.addEventListener("message", (ev) => {   // viewer/editor iframe → app
     const d = ev.data; if (!d) return;
     if (d.type === "rosa:edited") onEdited(d.rebuild);
+    else if (d.type === "rosa:editor-back") showWs("review");   // editor Back → Review (no iframe nav)
     else if (d.type === "rosa:slice-caps") _onSliceCaps(d);
     else if (d.type === "rosa:probe-avail") _onProbeAvail(d);
     else if (d.type === "rosa:selected") _onViewerSelected(d);
@@ -1565,6 +1608,8 @@ async function boot() {
     _postViewer({ type: "rosa:slice-fade", value: parseFloat(e.target.value) }));
   $("app-atlas-ov").addEventListener("change", (e) =>
     _postViewer({ type: "rosa:atlas-overlay", on: e.target.checked }));
+  $("app-acpc").addEventListener("change", (e) =>
+    _postViewer({ type: "rosa:slice-acpc", on: e.target.checked }));
   $("app-slice-mode").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-smode]"); if (!b || b.disabled) return;
     state.probePref = b.dataset.smode;   // remember the choice

@@ -269,6 +269,33 @@ def _write_ct_slice_volume(
     )
 
 
+def _write_ct_acpc_slice_volume(
+    ct_path: Path, out_path: Path, ct_to_mni_ras_4x4, window: tuple[float, float],
+) -> dict[str, Any]:
+    """Window the CT and reformat it along anatomical (AC-PC / MNI) axes **in
+    place** (same world, rotated grid). The head is rarely axis-aligned in the
+    scanner, so native cuts are oblique; reslicing along the cached CT→MNI
+    rotation makes the panels read as true axial/coronal/sagittal, while every
+    world-RAS overlay (contacts, atlas, cut planes) stays consistent — the
+    resliced volume carries the correct vox→RAS. Returns slice meta (id 'ct_acpc')."""
+    import SimpleITK as sitk
+    from rosa_core.anatomical_reslice import reslice_along_anatomical_axes
+
+    img = sitk.Cast(sitk.ReadImage(str(ct_path)), sitk.sitkFloat32)
+    lo, hi = float(window[0]), float(window[1])
+    if hi <= lo:
+        hi = lo + 1.0
+    scaled = sitk.Clamp((img - lo) * (255.0 / (hi - lo)), lowerBound=0.0, upperBound=255.0)
+    # Preserve the native in-plane resolution (don't downsample sub-mm CTs to 1 mm
+    # and blur contact separation), but floor at 0.5 mm so a 0.4 mm CT doesn't
+    # balloon the (lazily-fetched) AC-PC volume. A contact's 3.5 mm pitch is >=7
+    # voxels at 0.5 mm — cleanly separable.
+    sp = max(0.5, float(min(img.GetSpacing())))
+    acpc = reslice_along_anatomical_axes(sitk.Cast(scaled, sitk.sitkUInt8), ct_to_mni_ras_4x4,
+                                         spacing_mm=sp)
+    return _slice_volume_meta(acpc, out_path, vid="ct_acpc", label="CT (AC-PC)")
+
+
 def _write_atlas_slice_volume(atlas_labelmap_path, out_path: Path) -> dict[str, Any]:
     """Write the warped atlas labelmap as an int16 NIfTI so the 2D slice panels can
     tint each region by its atlas color. Shipped on its own grid; the viewer samples
@@ -2476,6 +2503,10 @@ window.addEventListener("message", (e) => {{
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); _renderProbe();
   }} else if (m.type === "rosa:slice-mode") {{
     _setSliceMode(m.mode === "probe" ? "probe" : "ortho");
+  }} else if (m.type === "rosa:slice-acpc") {{
+    const s = window.__acpcMetas || {{}};
+    const meta = m.on ? s.acpc : s.ct;
+    if (meta) loadMri(meta);          // re-renders + rebuilds cut planes; keeps the world crosshair
   }}
 }});
 
@@ -2819,6 +2850,10 @@ function onMeta(meta) {{
   const isCt = v => (v.id || "").toLowerCase() === "ct" || /(^|[^a-z])ct($|[^a-z])/i.test(v.label || "");
   const isBrain = v => /mri|brain|t1/i.test((v.id || "") + " " + (v.label || ""));
   const ctMeta = vols.find(isCt) || vols[vols.length - 1] || null;
+  // AC-PC-oriented CT (server-resliced along anatomical axes, same world) for the
+  // Native/AC-PC slice toggle; stashed so the message handler can swap the base.
+  const acpcMeta = vols.find(v => (v.id || "") === "ct_acpc") || null;
+  window.__acpcMetas = {{ acpc: acpcMeta, ct: ctMeta }};
   const brainMeta = vols.find(isBrain) || null;
   _mriAvailable = !!brainMeta;
   wireOverlayControls();
@@ -2843,7 +2878,8 @@ function onMeta(meta) {{
   // Tell an embedding app which slice-display controls apply, so it can host them
   // in its own toolbar (the viewer hides its own copies when embedded).
   _emit("rosa:slice-caps", {{ atlas: !!(meta.atlas_volume && meta.atlas_colors),
-                              fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)) }});
+                              fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)),
+                              acpc: !!acpcMeta }});
   // Show the Ortho/Probe toggle for any case with electrodes; Probe stays
   // disabled until an electrode with ≥2 contacts is selected.
   _emit("rosa:probe-avail", {{ present: (meta.contacts||[]).length > 0, available: false }});
@@ -3324,6 +3360,22 @@ def _assemble_viewer(
         f"{ct_slice_meta['size']})"
     )
 
+    # Anatomically-oriented (AC-PC) copy of the CT for the slice panels. Reuse the
+    # cached CT→MNI atlas-registration's RIGID rotation to reslice the CT in place
+    # (same world) along anatomical axes; a Native/AC-PC toggle in the viewer
+    # switches to it and every world-RAS overlay stays consistent. Skipped when no
+    # (affine) MNI transform is cached — e.g. an unlabeled case, or a nonlinear
+    # 'Refine'd registration (ct_to_mni_matrix raises).
+    ct_acpc_meta = None
+    try:
+        from rosa_core.cohort import ct_to_mni_matrix
+        ct_to_mni = ct_to_mni_matrix(out / "regcache")
+        ct_acpc_meta = _write_ct_acpc_slice_volume(
+            ct_path, out / "ct_in_view_acpc.nii.gz", ct_to_mni, ct_window)
+        _stderr(f"[view] wrote ct_in_view_acpc.nii.gz (AC-PC-oriented CT; {ct_acpc_meta['size']})")
+    except Exception as exc:  # noqa: BLE001 — AC-PC view is optional
+        _stderr(f"[view] AC-PC slice volume skipped ({exc})")
+
     # Volume list for the in-browser selector. T1 first when present (keeps the
     # existing FS-mode default), CT always available.
     volumes: list[dict[str, Any]] = []
@@ -3345,6 +3397,8 @@ def _assemble_viewer(
         except Exception as exc:  # noqa: BLE001
             _stderr(f"[view] DVR volume export failed ({exc})")
     volumes.append(ct_slice_meta)
+    if ct_acpc_meta is not None:
+        volumes.append(ct_acpc_meta)
 
     # Deep-structure meshes (THOMAS thalamic nuclei / subcortical labelmap warped
     # into the CT frame). Meshed here so the GLB carries them as solid colored

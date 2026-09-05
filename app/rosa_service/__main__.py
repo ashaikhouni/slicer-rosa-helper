@@ -7,6 +7,19 @@ up before opening the window.
 """
 from __future__ import annotations
 
+# Single-thread the numeric stack IN THE SERVICE PROCESS, before numpy loads.
+# The service does small numpy/scipy/LAPACK work — match-ros's Procrustes SVDs,
+# the editor reslice — across the event loop AND the request threadpool at once.
+# In the frozen macOS app, multiple OpenMP/BLAS runtimes (scipy's OpenBLAS, SITK)
+# double-init under that concurrency and SIGSEGV the whole sidecar mid-request
+# (crash → respawn → the UI hangs on the pending request). One thread each avoids
+# it and costs nothing here (these ops are tiny). The heavy compute/ML engine
+# runs as SEPARATE subprocesses that get full threading back (see jobs.py).
+import os as _os
+for _tvar in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+              "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    _os.environ.setdefault(_tvar, "1")
+
 import argparse
 import json
 import socket

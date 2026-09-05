@@ -1774,6 +1774,10 @@ window.addEventListener("message", (e) => {
     renderSlice("axial"); renderSlice("coronal"); renderSlice("sagittal"); _renderProbe();
   } else if (m.type === "rosa:slice-mode") {
     _setSliceMode(m.mode === "probe" ? "probe" : "ortho");
+  } else if (m.type === "rosa:slice-acpc") {
+    const s = window.__acpcMetas || {};
+    const meta = m.on ? s.acpc : s.ct;
+    if (meta) loadMri(meta);          // re-renders + rebuilds cut planes; keeps the world crosshair
   }
 });
 
@@ -2117,6 +2121,10 @@ function onMeta(meta) {
   const isCt = v => (v.id || "").toLowerCase() === "ct" || /(^|[^a-z])ct($|[^a-z])/i.test(v.label || "");
   const isBrain = v => /mri|brain|t1/i.test((v.id || "") + " " + (v.label || ""));
   const ctMeta = vols.find(isCt) || vols[vols.length - 1] || null;
+  // AC-PC-oriented CT (server-resliced along anatomical axes, same world) for the
+  // Native/AC-PC slice toggle; stashed so the message handler can swap the base.
+  const acpcMeta = vols.find(v => (v.id || "") === "ct_acpc") || null;
+  window.__acpcMetas = { acpc: acpcMeta, ct: ctMeta };
   const brainMeta = vols.find(isBrain) || null;
   _mriAvailable = !!brainMeta;
   wireOverlayControls();
@@ -2141,7 +2149,8 @@ function onMeta(meta) {
   // Tell an embedding app which slice-display controls apply, so it can host them
   // in its own toolbar (the viewer hides its own copies when embedded).
   _emit("rosa:slice-caps", { atlas: !!(meta.atlas_volume && meta.atlas_colors),
-                              fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)) });
+                              fade: !!(brainMeta && (!ctMeta || brainMeta.path !== ctMeta.path)),
+                              acpc: !!acpcMeta });
   // Show the Ortho/Probe toggle for any case with electrodes; Probe stays
   // disabled until an electrode with ≥2 contacts is selected.
   _emit("rosa:probe-avail", { present: (meta.contacts||[]).length > 0, available: false });

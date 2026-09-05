@@ -41,6 +41,8 @@
   .titem:hover{background:#111a22}.titem[aria-selected="true"]{background:#12222a;border-color:var(--accent)}
   .swatch{width:10px;height:10px;border-radius:3px}
   .tname{font-weight:650;font-size:12.5px}.tmeta{font-size:10.5px;color:var(--muted);margin-top:1px}
+  .accbadge{font-family:var(--mono);font-weight:600;padding:0 4px;border-radius:8px}
+  .accbadge.accg{color:var(--good)}.accbadge.accw{color:var(--warn)}.accbadge.accb{color:var(--bad)}
   .pill{font-size:9px;letter-spacing:.04em;text-transform:uppercase;font-weight:700;padding:2px 5px;border-radius:20px}
   .pill.high{color:var(--good);background:#122a1e}.pill.medium{color:var(--warn);background:#2a2413}.pill.low{color:var(--bad);background:#2a1414}
   .pill.added{color:var(--good);background:#122a1e}
@@ -89,6 +91,21 @@
     padding:9px 15px;border-radius:9px;font-size:12.5px;opacity:0;pointer-events:none;transition:.25s;z-index:50}
   .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}.toast .mono{color:var(--accent)}
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+  /* In-page text prompt: window.prompt() is unsupported in Electron, so the
+     rename used it and silently no-op'd in the packaged app. */
+  .pmodal{position:fixed;inset:0;background:#04070bcc;display:flex;align-items:center;justify-content:center;z-index:200}
+  .pmodal[hidden]{display:none}
+  .pmodal-card{background:var(--panel);border:1px solid var(--line2);border-radius:10px;padding:16px;min-width:300px;box-shadow:0 12px 44px #000b}
+  .pmodal-msg{font-size:12.5px;color:var(--ink);margin-bottom:9px}
+  .pmodal-input{width:100%;background:#0e161d;color:var(--ink);border:1px solid var(--line2);border-radius:7px;padding:8px 10px;font-family:inherit;font-size:13px;box-sizing:border-box}
+  .pmodal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+  /* Persistent ROS-labeling status/log line (survives, unlike the toast). */
+  .rosstatus{position:fixed;top:52px;right:12px;z-index:150;max-width:520px;
+    background:#0b1219f2;border:1px solid var(--line2);border-radius:8px;padding:8px 11px;
+    font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;
+    box-shadow:0 8px 30px #000a}
+  .rosstatus[hidden]{display:none}
+  .rosstatus .ok{color:var(--good)} .rosstatus .bad{color:var(--bad)} .rosstatus b{color:var(--ink)}
 </style>
 
 <div class="topbar">
@@ -104,10 +121,13 @@
     </div>
   </div>
   <button class="btn add" id="addBtn">+ Add electrode</button>
-  <button class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save">Label from ROS</button>
-  <input type="file" id="rosFile" accept=".ros,.txt" hidden>
+  <!-- A <label> wrapping the file input: clicking it opens the picker NATIVELY.
+       A hidden input + programmatic .click() is silently blocked inside Electron's
+       sandboxed editor iframe (no dialog, no error) — this avoids that entirely. -->
+  <label class="btn" id="rosBtn" title="Rename shanks from a ROSA .ros surgical plan — matched by trajectory geometry, then review + Save"><input type="file" id="rosFile" accept=".ros,.txt" hidden>Label from ROS</label>
   <button class="btn primary" id="save">Save plan</button>
 </div>
+<div id="rosStatus" class="rosstatus" hidden></div>
 
 <div class="console">
   <aside class="rail">
@@ -164,6 +184,16 @@
   </aside>
 </div>
 <div class="toast" id="toast"></div>
+<div id="pmodal" class="pmodal" hidden>
+  <div class="pmodal-card" role="dialog" aria-modal="true" aria-labelledby="pmodalMsg">
+    <div id="pmodalMsg" class="pmodal-msg"></div>
+    <input id="pmodalInput" class="pmodal-input" type="text" autocomplete="off" spellcheck="false">
+    <div class="pmodal-actions">
+      <button class="btn" id="pmodalCancel">Cancel</button>
+      <button class="btn primary" id="pmodalOk">OK</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -347,11 +377,26 @@ function drawMIP(draft){const cv=$("#mipCv"),G=mipGeom(cv,draft?150:280),g=cv.ge
     g.beginPath();g.moveTo(x-4,y);g.lineTo(x+4,y);g.moveTo(x,y-4);g.lineTo(x,y+4);g.stroke();});
   _mipG=G;
 }
+// Plan-vs-actual accuracy (only when the case has a co-framed plan). Populated by
+// boot() from /plan-accuracy; a per-shank tip-error badge in the trajectory list.
+let ACC={};
+const _accmm=v=>v==null?"–":v.toFixed(1)+"mm";
+function _accBadge(name){
+  const r=ACC[name]; if(!r||r.target_error_mm==null) return "";
+  const v=r.target_error_mm, cls=v<=3?"accg":v<=6?"accw":"accb";
+  return ` &middot; <span class="accbadge ${cls}" title="vs plan &middot; entry ${_accmm(r.entry_error_mm)} &middot; tip ${_accmm(r.target_error_mm)} &middot; axis ${r.angle_deg==null?"–":r.angle_deg.toFixed(1)+"°"}">tip ${_accmm(v)}</span>`;
+}
+function loadAccuracy(){
+  const base=location.pathname.replace(/\/+$/,"").replace(/\/editor$/,"");
+  fetch(base+"/plan-accuracy",{cache:"no-store"}).then(r=>r.json()).then(a=>{
+    if(a&&a.has_plan&&Array.isArray(a.rows)){ACC={};a.rows.forEach(r=>ACC[r.trajectory]=r);renderList();}
+  }).catch(()=>{});
+}
 function renderList(){const el=$("#tlist");el.innerHTML="";
   CASE.trajectories.forEach(t=>{const d=document.createElement("div");d.className="titem";
     d.setAttribute("role","option");d.setAttribute("aria-selected",t.name===activeId);d.tabIndex=0;
     d.innerHTML=`<span class="swatch" style="background:${t.color}"></span>
-      <div><div class="tname">${t.name}</div><div class="tmeta">${MODELS[t.model].n} contacts &middot; ${(t.length_mm||0).toFixed(0)} mm</div></div>
+      <div><div class="tname">${t.name}</div><div class="tmeta">${MODELS[t.model].n} contacts &middot; ${(t.length_mm||0).toFixed(0)} mm${_accBadge(t.name)}</div></div>
       <span class="pill ${t.confidence_label||'medium'}">${t.confidence_label||''}</span>`;
     d.onclick=()=>selectTraj(t.name);d.onkeydown=e=>{if(e.key==="Enter")selectTraj(t.name);};el.appendChild(d);});
   $("#tcount").textContent=CASE.trajectories.length+" shanks";}
@@ -379,6 +424,19 @@ let _depthRAF=0;
 function afterDepth(){if(_depthRAF)return;_depthRAF=requestAnimationFrame(()=>{_depthRAF=0;blitInline();drawProbe();renderQC();});}
 function selectTraj(id){activeId=id;panU=0;panV=0;renderList();syncInspector();resliceAll();}
 function toast(m){const el=$("#toast");el.innerHTML=m;el.classList.add("on");clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove("on"),2100);}
+// A promise-based text prompt that works in Electron (where window.prompt() is
+// unsupported) AND in a browser. Resolves to the entered string, or null on cancel.
+function promptText(message,initial=""){
+  return new Promise(resolve=>{
+    const m=$("#pmodal"),inp=$("#pmodalInput");
+    $("#pmodalMsg").textContent=message;inp.value=initial||"";m.hidden=false;
+    setTimeout(()=>{inp.focus();inp.select();},0);
+    const done=v=>{m.hidden=true;inp.onkeydown=null;$("#pmodalOk").onclick=null;$("#pmodalCancel").onclick=null;resolve(v);};
+    $("#pmodalOk").onclick=()=>done(inp.value);
+    $("#pmodalCancel").onclick=()=>done(null);
+    inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();done(inp.value);}else if(e.key==="Escape"){e.preventDefault();done(null);}};
+  });
+}
 function initModels(){const sel=$("#model");sel.innerHTML="";
   Object.entries(MODELS).forEach(([k,m])=>{const o=document.createElement("option");o.value=k;o.textContent=m.label;sel.appendChild(o);});}
 function setWin(wl,ww){winWL=wl;winWW=ww;$("#wl").value=wl;$("#ww").value=ww;$("#wlv").textContent=wl;$("#wwv").textContent=ww;}
@@ -421,7 +479,7 @@ $("#save").onclick=async()=>{
   }catch(e){toast("<span style='color:var(--bad)'>Save failed: "+e.message+"</span>");}
   btn.disabled=false;
 };
-$("#renameBtn").onclick=()=>{const t=active(),nm=(prompt("Rename electrode",t.name)||"").trim();
+$("#renameBtn").onclick=async()=>{const t=active(),nm=((await promptText("Rename electrode",t.name))||"").trim();
   if(!nm||nm===t.name)return;
   if(CASE.trajectories.some(x=>x!==t&&x.name===nm)){toast("<span style='color:var(--bad)'>Name already used</span>");return;}
   t.name=nm;activeId=nm;renderList();syncInspector();drawMIP();toast("Renamed &rarr; <span class='mono'>"+nm+"</span>");};
@@ -437,36 +495,74 @@ async function matchRos(body){
 }
 function applyRos(res){
   const act=active(),byName={};CASE.trajectories.forEach(t=>byName[t.name]=t);
-  let applied=0,skipped=0;
+  const allDet=CASE.trajectories.map(t=>t.name);      // detection names, before renaming
+  let applied=0,skipped=0;const renamed=new Set();
   for(const m of (res.matched||[])){
-    const t=byName[m.det];if(!t||!m.plan)continue;
-    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}
-    t.name=m.plan;applied++;
+    const t=byName[m.det];
+    if(!t||!m.plan)continue;
+    if(CASE.trajectories.some(x=>x!==t&&x.name===m.plan)){skipped++;continue;}   // plan name already used
+    t.name=m.plan;applied++;renamed.add(m.det);
   }
+  const unnamed=allDet.filter(d=>!renamed.has(d));     // shanks left with their detection name
+  console.log(`[ROS] applied=${applied} skipped=${skipped} unnamed=`,unnamed);
   if(act)activeId=act.name;                       // follow the rename
   renderList();syncInspector();drawMIP();
-  const un=(res.unmatched_plan||[]).length;
-  toast("ROS plan &middot; renamed <b>"+applied+"</b>/"+res.n_det+" shanks"+
-        (skipped?" &middot; "+skipped+" name-clash":"")+(un?" &middot; "+un+" plan unmatched":"")+
-        " &middot; "+res.inliers+" inliers &middot; <span class='mono'>review, then Save</span>");
+  return {applied,skipped,unnamed};
 }
-// Pick a .ros file to (re)label from. Must open the dialog SYNCHRONOUSLY inside
-// the click — a file input .click() after an await is blocked (lost user gesture).
-// ROSA-imported cases already get their names from the guided import; this is the
-// manual tool to (re)apply names from a chosen .ros.
-$("#rosBtn").onclick=()=>$("#rosFile").click();
+// ROS-labeling activity log: persistent panel (survives, unlike the 2 s toast)
+// + console, so a failure is never silent. The <label>-wrapped #rosFile opens
+// the picker natively — no programmatic .click() (Electron blocks that in the
+// sandboxed iframe: no dialog, no error). ROSA-imported cases already get names
+// from the guided import; this re-applies names from a chosen .ros.
+function rosLog(html,cls){
+  const el=$("#rosStatus");el.hidden=false;
+  el.innerHTML=(cls?`<span class="${cls}">`:"")+html+(cls?"</span>":"");
+  console[cls==="bad"?"error":"log"]("[ROS] "+el.textContent);
+}
 $("#rosFile").onchange=async(e)=>{
-  const f=e.target.files[0];if(!f)return;e.target.value="";
-  toast("Matching &middot; <span class='mono'>"+f.name+"</span>&hellip;");
-  try{ applyRos(await matchRos({ros_text:await f.text()})); }
-  catch(err){toast("<span style='color:var(--bad)'>ROS match failed: "+err.message+"</span>");}
+  const f=e.target.files[0];if(!f){rosLog("no file chosen","bad");return;}
+  e.target.value="";
+  rosLog(`reading <b>${f.name}</b> (${(f.size/1024).toFixed(0)} KB)&hellip;`);
+  try{
+    const text=await f.text();
+    rosLog(`matching <b>${f.name}</b> — ${text.length} chars &rarr; /match-ros&hellip;`);
+    const res=await matchRos({ros_text:text});
+    console.log("[ROS] /match-ros response:",res);
+    const {applied,skipped}=applyRos(res);
+    const sugg=res.unmatched_det||[];
+    let msg=`<b>${applied}</b>/${res.n_det} renamed · ${res.inliers} inliers`;
+    if(skipped)msg+=` · ${skipped} name-clash`;
+    if(res.unmatched_det&&res.unmatched_det.length){
+      // WHY each was left unnamed: its nearest UNUSED plan line + how far off it was.
+      const parts=sugg.map(s=>s.plan
+        ? `${s.det} ≈ <b>${s.plan}</b> (${s.angle_deg}°/${s.perp_mm}mm — over tol)`
+        : s.det);
+      msg+=`<br><span class="bad">not matched: ${parts.join("; ")}</span>`;
+    }
+    const up=res.unmatched_plan||[];
+    if(up.length)msg+=`<br>unused plan names: ${up.join(", ")}`;
+    msg+=applied
+      ? `<br><span class="ok">rename any leftover by hand (✎), then Save</span>`
+      : `<br><span class="bad">nothing applied — check the .ros matches this CT</span>`;
+    rosLog(msg,applied?null:"bad");
+  }catch(err){
+    console.error("[ROS] match failed:",err);
+    rosLog(`match failed: ${(err&&err.message)||err}`,"bad");
+  }
 };
 $("#removeBtn").onclick=()=>{const t=active();
   if(CASE.trajectories.length<=1){toast("<span style='color:var(--bad)'>Can&rsquo;t remove the last electrode</span>");return;}
   if(!confirm("Remove electrode "+t.name+"? It will be dropped when you Save."))return;
   CASE.trajectories=CASE.trajectories.filter(x=>x!==t);
   activeId=CASE.trajectories[0].name;renderList();syncInspector();resliceAll();drawMIP();toast("Removed "+t.name);};
-$("#backbtn").onclick=()=>{ if(window.opener&&!window.opener.closed)window.close(); else location.href="/"; };  // opened via window.open -> close the tab; direct -> app root
+// Embedded in the app's <iframe> → tell the PARENT to return to Review. Never
+// navigate THIS frame to "/", which loads the whole app inside the edit iframe
+// (nested frames). Standalone tab (window.open) → close; direct page → app root.
+$("#backbtn").onclick=()=>{
+  if(window.parent&&window.parent!==window){window.parent.postMessage({type:"rosa:editor-back"},"*");return;}
+  if(window.opener&&!window.opener.closed){window.close();return;}
+  location.href="/";
+};
 
 // in-line endpoint drag: freeze image, move handle, re-slice on release
 function hitInline(sx,sy){const t=active(),v=inlineCache?.view;if(!v)return null;
@@ -557,7 +653,7 @@ $("#mipCv").title="Drag: rotate (full orbit) · drag the E/T dots: edit endpoint
 function init(){
   $("#caseName").textContent=CASE.name;$("#caseDims").textContent=CASE.dims.join("×")+" · 1mm";
   setWin(700,2200);$$(".wbtn").forEach(b=>b.setAttribute("aria-pressed",b.dataset.win==="metal"));  // metal default (electrode-first)
-  initModels();renderList();syncInspector();resliceAll();
+  initModels();renderList();syncInspector();resliceAll();loadAccuracy();
   new ResizeObserver(()=>resliceAll()).observe(document.querySelector(".viewport"));
 }
 async function boot(){
