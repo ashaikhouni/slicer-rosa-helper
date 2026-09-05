@@ -36,8 +36,11 @@ let logStream = null;
 
 function frozenSidecarPath() {
   // Packaged: electron-builder places the PyInstaller one-dir under
-  // <resources>/rosa-sidecar/ with the launcher binary `rosa-sidecar`.
-  const p = path.join(process.resourcesPath || "", "rosa-sidecar", "rosa-sidecar");
+  // <resources>/rosa-sidecar/ with the launcher binary `rosa-sidecar`
+  // (`rosa-sidecar.exe` on Windows — without the extension fs.existsSync misses
+  // it and we'd wrongly fall through to dev-mode python).
+  const exe = process.platform === "win32" ? "rosa-sidecar.exe" : "rosa-sidecar";
+  const p = path.join(process.resourcesPath || "", "rosa-sidecar", exe);
   return fs.existsSync(p) ? p : null;
 }
 
@@ -55,7 +58,8 @@ function resolveSidecar() {
   }
   // Dev: run the service module from the repo. Requires a python with the
   // rosa_service + rosa_agent packages importable (repo app/ + CommonLib/cli).
-  const py = process.env.ROSA_SIDECAR_PYTHON || "python3";
+  // `python3` on unix; the `py` launcher (or `python`) on Windows.
+  const py = process.env.ROSA_SIDECAR_PYTHON || (process.platform === "win32" ? "py" : "python3");
   return {
     cmd: py,
     args: ["-m", "rosa_service"],
@@ -104,6 +108,10 @@ function startSidecar() {
       cwd: REPO_ROOT,
       env: { ...process.env, ...env, ROSA_APP_WORKDIR: wr },
       stdio: ["ignore", "pipe", "pipe"],
+      // Suppress the Windows console window of the (console-subsystem) frozen
+      // sidecar. We keep it a console build on purpose so its stdout JSON port
+      // line still reaches our pipe — a windowed build can null out sys.stdout.
+      windowsHide: true,
     });
 
     let settled = false;
@@ -265,21 +273,43 @@ function registerIpc() {
   });
 
   // One picker for either kind of image: a NIfTI file OR a DICOM series folder.
-  // macOS NSOpenPanel can offer both in a single dialog (canChooseFiles +
-  // canChooseDirectories); we stat the result so the renderer knows which it is
-  // (folder → convert DICOM, file → load directly). macOS-only app, so we don't
-  // handle the Windows case where these two properties can't combine.
+  // macOS NSOpenPanel offers both in a single dialog (canChooseFiles +
+  // canChooseDirectories); we stat the result so the renderer knows which it is.
+  // Windows/Linux CANNOT combine the two, so we first ask which kind, then open
+  // the matching dialog — the renderer's isDirectory-based routing (file → load
+  // directly, folder → convert DICOM) keeps working unchanged on every OS.
   ipcMain.handle("rosa:openImage", async (_e, opts = {}) => {
+    if (process.platform === "darwin") {
+      const r = await dialog.showOpenDialog(mainWindow, {
+        properties: ["openFile", "openDirectory"],
+        filters: opts.filters || NII_FILTERS,
+        title: opts.title || "Choose a NIfTI file or a DICOM folder",
+      });
+      if (r.canceled || !r.filePaths.length) return null;
+      const p = r.filePaths[0];
+      let isDirectory = false;
+      try { isDirectory = fs.statSync(p).isDirectory(); } catch (_e2) { /* stat race → treat as file */ }
+      return { path: p, name: path.basename(p), isDirectory };
+    }
+    // Windows/Linux: choose the kind first, then the matching dialog.
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: "question",
+      title: "Import image",
+      message: "What are you importing?",
+      buttons: ["NIfTI / NRRD file", "DICOM series folder", "Cancel"],
+      defaultId: 0,
+      cancelId: 2,
+    });
+    if (choice.response === 2) return null;
+    const wantDir = choice.response === 1;
     const r = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openFile", "openDirectory"],
-      filters: opts.filters || NII_FILTERS,
-      title: opts.title || "Choose a NIfTI file or a DICOM folder",
+      properties: wantDir ? ["openDirectory"] : ["openFile"],
+      filters: wantDir ? undefined : (opts.filters || NII_FILTERS),
+      title: wantDir ? "Choose a DICOM series folder" : "Choose a NIfTI / NRRD file",
     });
     if (r.canceled || !r.filePaths.length) return null;
     const p = r.filePaths[0];
-    let isDirectory = false;
-    try { isDirectory = fs.statSync(p).isDirectory(); } catch (_e2) { /* stat race → treat as file */ }
-    return { path: p, name: path.basename(p), isDirectory };
+    return { path: p, name: path.basename(p), isDirectory: wantDir };
   });
 
   ipcMain.handle("rosa:saveFile", async (_e, opts = {}) => {
@@ -306,9 +336,17 @@ function registerIpc() {
 // ---------------------------------------------------------------------------
 
 function stopSidecar() {
-  if (sidecar && !sidecar.killed) {
-    try { sidecar.kill("SIGTERM"); } catch (_e) { /* ignore */ }
-  }
+  if (!sidecar || sidecar.killed) return;
+  try {
+    if (process.platform === "win32" && sidecar.pid) {
+      // Node ignores POSIX signals on Windows and only kills the direct child,
+      // so the frozen sidecar's `engine` subprocess would be orphaned. Kill the
+      // whole tree with taskkill (/T) forcefully (/F).
+      spawn("taskkill", ["/pid", String(sidecar.pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      sidecar.kill("SIGTERM");
+    }
+  } catch (_e) { /* ignore */ }
 }
 
 if (!app.requestSingleInstanceLock()) {

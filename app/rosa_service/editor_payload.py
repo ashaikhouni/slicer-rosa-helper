@@ -39,12 +39,12 @@ PALETTE = ["#38d2e6", "#8b7be0", "#e08b5b", "#5bd08b", "#e3b23c", "#e86f9e",
 
 
 def _rows(path: Path) -> list[dict]:
-    with open(path) as f:
+    with open(path, encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f, delimiter="\t"))
 
 
 def _ct_path(job_dir: Path) -> Path:
-    manifest = json.loads((job_dir / "manifest.json").read_text())
+    manifest = json.loads((job_dir / "manifest.json").read_text(encoding="utf-8"))
     ct = manifest.get("params", {}).get("ct")
     if not ct or not Path(ct).is_file():
         raise FileNotFoundError(f"job {job_dir.name}: CT not found ({ct!r})")
@@ -55,7 +55,7 @@ def electrode_library() -> dict[str, dict]:
     """The canonical models (datasheet offsets) from rosa_core resources."""
     import rosa_core
     lib = json.loads((Path(rosa_core.__file__).parent / "resources" / "electrodes"
-                      / "electrode_models.json").read_text())["models"]
+                      / "electrode_models.json").read_text(encoding="utf-8"))["models"]
     lib = {m["id"]: m for m in lib} if isinstance(lib, list) else lib
     out = {}
     for mid, m in lib.items():
@@ -217,7 +217,7 @@ def ensure_cache(job_dir: str | Path) -> Path:
         # dims_x*dims_y*dims_z * 2 bytes (int16); a mismatch (e.g. an odd length →
         # the browser's `new Int16Array` throws) forces a rebuild.
         try:
-            dims = json.loads(plan_p.read_text()).get("dims") or []
+            dims = json.loads(plan_p.read_text(encoding="utf-8")).get("dims") or []
             expected = int(dims[0]) * int(dims[1]) * int(dims[2]) * 2 if len(dims) == 3 else -1
         except (ValueError, OSError, TypeError, IndexError):
             expected = -1

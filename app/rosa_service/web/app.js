@@ -149,7 +149,7 @@ async function pickImage(target) {
     title: `Choose the ${_role(target)} — NIfTI file or DICOM folder` });
   if (!r || !r.path) return;
   if (r.isDirectory) { importDicom(target, r.path); return; }
-  _setImage(target, { path: r.path, name: r.path.split("/").pop() });
+  _setImage(target, { path: r.path, name: r.name || r.path.split(/[\\/]/).pop() });
 }
 
 // A typed/pasted path: NIfTI extension → load live; otherwise it's a folder →
@@ -157,7 +157,7 @@ async function pickImage(target) {
 function typedPathInput(target, raw) {
   const p = (raw || "").trim();
   if (!p) { _setImage(target, null); return; }
-  if (NIFTI_RE.test(p)) _setImage(target, { path: p, name: p.split("/").pop() });
+  if (NIFTI_RE.test(p)) _setImage(target, { path: p, name: p.split(/[\\/]/).pop() });
   // non-NIfTI: hold until Enter (typedPathEnter) so we don't convert mid-type.
 }
 function typedPathEnter(target, raw) {
@@ -171,8 +171,8 @@ async function importDicom(target, dir) {
   info.textContent = "Converting DICOM → NIfTI (de-identifying)…";
   try {
     const r = await jsend(`${API}/dicom-to-nifti`, "POST", { dicom_dir: dir });
-    _setImage(target, { path: r.path, name: r.path.split("/").pop() });   // enables run
-    info.innerHTML = `${role}: <b>de-identified from DICOM</b> ✓ — <span class="muted">${r.path.split("/").pop()}</span>`;
+    _setImage(target, { path: r.path, name: r.path.split(/[\\/]/).pop() });   // enables run
+    info.innerHTML = `${role}: <b>de-identified from DICOM</b> ✓ — <span class="muted">${r.path.split(/[\\/]/).pop()}</span>`;
   } catch (e) {
     info.textContent = `DICOM import failed: ${e.message}`;
   }
