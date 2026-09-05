@@ -353,12 +353,13 @@ def build_command(spec: JobSpec, workdir: Path) -> list[list[str]]:
         regcache = workdir / "regcache"
         base = _engine_base()
         steps = []
-        # 1) stage the provided TSVs into the job dir (steps run cwd=workdir).
-        stage = ("import shutil, sys\n"
-                 "shutil.copyfile(sys.argv[1], 'contacts.tsv')\n"
-                 "shutil.copyfile(sys.argv[2], 'trajectories.tsv')\n"
-                 "print('staged import TSVs', flush=True)\n")
-        steps.append([py, "-u", "-c", stage, contacts_src, traj_src])
+        # 1) stage the provided TSVs into the job dir via the `stage-files` engine
+        #    subcommand. (A `python -c` copy would break in the frozen app — there
+        #    sys.executable is the sidecar exe, which only understands serve/engine
+        #    — and is not cross-platform.)
+        steps.append(base + ["stage-files", "--out-dir", str(workdir),
+                             "--copy", contacts_src, "contacts.tsv",
+                             "--copy", traj_src, "trajectories.tsv"])
         # 2) optional MRI brain-extract (surface + CT-frame mask), as in pipeline.
         use_mri_mask = bool(t1 and _deepbet_available())
         if use_mri_mask:

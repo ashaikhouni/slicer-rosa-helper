@@ -41,7 +41,7 @@ ONMETAL_GREEN = 0.70        # most contacts on metal -> trust the pairing
 def _contact_world_points(contacts_tsv: Path) -> np.ndarray:
     """(N,3) world (x,y,z) for every contact row; skips malformed rows."""
     pts: list[list[float]] = []
-    with open(contacts_tsv) as f:
+    with open(contacts_tsv, encoding="utf-8", newline="") as f:
         for row in csv.DictReader(f, delimiter="\t"):
             try:
                 pts.append([float(row["x"]), float(row["y"]), float(row["z"])])

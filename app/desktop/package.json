@@ -9,7 +9,8 @@
   "scripts": {
     "start": "electron .",
     "start:dev": "electron .",
-    "dist": "electron-builder --mac --config electron-builder.yml"
+    "dist": "electron-builder --mac --config electron-builder.yml",
+    "dist:win": "electron-builder --win --config electron-builder.yml"
   },
   "devDependencies": {
     "electron": "^32.2.0",

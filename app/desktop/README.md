@@ -89,3 +89,35 @@ needed). Research/internal build = **un-notarized**, so first launch is
 
 Packaged, the app spawns `rosa-sidecar serve` from resources and stores cases in
 `<userData>/cases`. Heavy backends (FastSurfer, …) stay BYO via `ROSA_*` env.
+
+## Build for Windows (NSIS installer)
+
+PyInstaller **cannot cross-compile**, so the sidecar must be frozen **on
+Windows** — a `windows-latest` GitHub Actions runner or a Windows VM. The same
+`rosa-sidecar.spec` works (its collectors pick up `.dll`/`.pyd` as they do
+`.dylib` on macOS); all bundled deps ship `win_amd64` wheels. On a Windows box
+with Python 3.10–3.12 + Node:
+
+```powershell
+# 1. freeze the torch-free sidecar → dist\rosa-sidecar\rosa-sidecar.exe
+python -m venv C:\rosa-freeze
+C:\rosa-freeze\Scripts\Activate.ps1
+# From the REPO ROOT — the spec collects rosa_core/rosa_agent/rosa_service/
+# rosa_detect/shank_core at build time, so they must be importable (an editable
+# install, exactly as the macOS steps do). Without this the freeze SUCCEEDS but
+# silently omits every engine subcommand + all rosa_core resources → a broken exe.
+pip install -e ".[mesh]" -e ./app matplotlib pyinstaller pyinstaller-hooks-contrib onnxruntime
+pyinstaller app\desktop\rosa-sidecar.spec --distpath C:\rosa-freeze\dist `
+  --workpath C:\rosa-freeze\build --clean
+# 2. stage it where electron-builder expects it (no code-signing needed)
+mkdir app\desktop\resources
+Copy-Item -Recurse C:\rosa-freeze\dist\rosa-sidecar app\desktop\resources\rosa-sidecar
+# 3. package → release\ROSA Setup <ver>.exe
+cd app\desktop; npm install; npm run dist:win
+```
+
+No ad-hoc sign step (that's macOS-only; `after-pack.js` no-ops off darwin).
+Un-signed → users get a **SmartScreen** prompt (analogous to the un-notarized
+macOS build); add an Authenticode cert to silence it. The core torch-free app is
+fully functional on Windows; the optional heavy backends (FastSurfer, THOMAS,
+SynthStrip) have no native Windows build and stay unavailable there.

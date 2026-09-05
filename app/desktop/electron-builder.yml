@@ -41,3 +41,19 @@ mac:
 
 dmg:
   title: ROSA ${version}
+
+# Windows: NSIS installer for x64. The frozen sidecar (rosa-sidecar.exe + DLLs)
+# must be built ON Windows into resources/rosa-sidecar/ first — PyInstaller does
+# not cross-compile (see README "Windows build"). after-pack.js is a no-op off
+# macOS. Authenticode signing is unconfigured (research/internal); users get a
+# SmartScreen prompt, analogous to the un-notarized macOS build.
+win:
+  icon: assets/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
